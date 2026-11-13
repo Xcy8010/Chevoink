@@ -4,5 +4,7 @@
         <!-- Isolated View geometry fixture: absent from signed release builds. -->
         <activity android:name=".InsetsGeometryTestActivity" android:exported="false"
             android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".EdgeToEdgeTestActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize" android:theme="@style/AppTheme.NoActionBarLaunch" />
     </application>
 </manifest>

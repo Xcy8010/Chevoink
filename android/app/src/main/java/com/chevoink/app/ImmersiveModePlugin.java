@@ -33,6 +33,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 @CapacitorPlugin(name = "ImmersiveMode")
 public class ImmersiveModePlugin extends Plugin {
     private WindowState normalState;
+    private WindowState fittedState;
     private View observedDecor;
     private String lastInsets;
     private Window appearanceWindow;
@@ -59,7 +60,7 @@ public class ImmersiveModePlugin extends Plugin {
             }
             try {
                 BarAppearance next = new BarAppearance(Color.parseColor(color), dark);
-                next.apply(window, webViewParent());
+                next.apply(window, webViewParent(), fittedState != null);
                 appearanceWindow = window;
                 desiredAppearance = next;
                 call.resolve();
@@ -85,8 +86,78 @@ public class ImmersiveModePlugin extends Plugin {
 
     private void reapplyAppearance(Window window) {
         if (appearanceWindow == window && desiredAppearance != null && canSetOpaqueBars(window)) {
-            desiredAppearance.apply(window, webViewParent());
+            desiredAppearance.apply(window, webViewParent(), fittedState != null);
+        } else if (fittedState != null) {
+            new BarAppearance(getActivity().getColor(R.color.splashBackground), false)
+                    .apply(window, webViewParent(), true);
         }
+    }
+
+    /** The current Web document owns normal edge-to-edge presentation. */
+    @PluginMethod
+    public void enableEdgeToEdge(PluginCall call) {
+        getActivity().runOnUiThread(() -> {
+            Window window = getActivity().getWindow();
+            try {
+                enableDocumentEdgeToEdge(window);
+                // Return the overlay bands immediately, before the fitted WebView rectangle expands.
+                call.resolve(readInsets(false, true));
+            } catch (RuntimeException error) {
+                call.reject("Edge-to-edge could not be enabled", "EDGE_TO_EDGE_FAILED", error);
+            }
+        });
+    }
+
+    private void enableDocumentEdgeToEdge(Window window) {
+        if (fittedState != null) return;
+        WindowState previous = new WindowState(window, webViewParent(), normalState == null);
+        fittedState = normalState == null ? previous : normalState;
+        try {
+            applyEdgeToEdge(window);
+        } catch (RuntimeException error) {
+            fittedState = null;
+            try {
+                edgeLayout().setPresentation(false, false);
+                previous.restore(window);
+                if (normalState != null) applyImmersive(window);
+            } catch (RuntimeException restoreError) {
+                error.addSuppressed(restoreError);
+            }
+            throw error;
+        }
+    }
+
+    void resetDocumentPresentation() {
+        if (fittedState == null && normalState == null) return;
+        Window window = getActivity().getWindow();
+        WindowState restore = fittedState != null ? fittedState : normalState;
+        try {
+            edgeLayout().setPresentation(false, false);
+            restore.restore(window);
+            fittedState = null;
+            normalState = null;
+            lastInsets = null;
+            reapplyAppearance(window);
+        } catch (RuntimeException error) {
+            Log.e("ImmersiveMode", "Failed to reset document presentation", error);
+        }
+    }
+
+    private EdgeToEdgeLayout edgeLayout() {
+        return getActivity().findViewById(R.id.edgeToEdgeLayout);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyEdgeToEdge(Window window) {
+        layoutAtWindowEdges(window);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) window.setNavigationBarDividerColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.setStatusBarContrastEnforced(false);
+            // Android keeps the contrast background for three-button navigation.
+            window.setNavigationBarContrastEnforced(true);
+        }
+        edgeLayout().setPresentation(true, normalState != null);
+        reapplyAppearance(window);
     }
 
     private View webViewParent() {
@@ -125,7 +196,7 @@ public class ImmersiveModePlugin extends Plugin {
             try {
                 Window window = getActivity().getWindow();
                 // Repeated enter must not overwrite the normal state with the hidden state.
-                if (normalState == null) normalState = new WindowState(window, webViewParent());
+                if (normalState == null) normalState = new WindowState(window, webViewParent(), fittedState == null);
                 applyImmersive(window);
                 // Preserve old Web clients that only consume enter's top/bottom once.
                 call.resolve(readInsets(true));
@@ -134,6 +205,7 @@ public class ImmersiveModePlugin extends Plugin {
                     try {
                         normalState.restore(getActivity().getWindow());
                         normalState = null;
+                        if (fittedState != null) applyEdgeToEdge(getActivity().getWindow());
                     } catch (Exception restoreError) {
                         // Retain the snapshot so exit can retry restoration after a partial failure.
                         e.addSuppressed(restoreError);
@@ -148,14 +220,16 @@ public class ImmersiveModePlugin extends Plugin {
     public void exit(PluginCall call) {
         getActivity().runOnUiThread(() -> {
             try {
+                Window window = getActivity().getWindow();
                 if (normalState != null) {
-                    normalState.restore(getActivity().getWindow());
+                    normalState.restore(window);
                     normalState = null;
                 }
-                reapplyAppearance(getActivity().getWindow());
+                if (fittedState != null) applyEdgeToEdge(window);
+                else reapplyAppearance(window);
                 // An immediate result may precede layout; insetsChanged supplies settled geometry.
-                ViewCompat.requestApplyInsets(getActivity().getWindow().getDecorView());
-                call.resolve(readInsets());
+                ViewCompat.requestApplyInsets(window.getDecorView());
+                call.resolve(readInsets(false, fittedState != null));
             } catch (Exception e) {
                 call.reject("exit immersive failed: " + e.getMessage());
             }
@@ -168,6 +242,15 @@ public class ImmersiveModePlugin extends Plugin {
     }
 
     private void applyImmersive(Window window) {
+        if (fittedState != null) edgeLayout().setPresentation(true, true);
+        layoutAtWindowEdges(window);
+        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
+        controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        controller.hide(WindowInsetsCompat.Type.systemBars());
+        ViewCompat.requestApplyInsets(window.getDecorView());
+    }
+
+    private static void layoutAtWindowEdges(Window window) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             WindowManager.LayoutParams attrs = window.getAttributes();
             attrs.layoutInDisplayCutoutMode =
@@ -175,10 +258,6 @@ public class ImmersiveModePlugin extends Plugin {
             window.setAttributes(attrs);
         }
         WindowCompat.setDecorFitsSystemWindows(window, false);
-        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
-        controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-        controller.hide(WindowInsetsCompat.Type.systemBars());
-        ViewCompat.requestApplyInsets(window.getDecorView());
     }
 
     private JSObject readInsets() {
@@ -186,30 +265,42 @@ public class ImmersiveModePlugin extends Plugin {
     }
 
     private JSObject readInsets(boolean stableMeasurement) {
+        return readInsets(stableMeasurement, false);
+    }
+
+    private JSObject readInsets(boolean stableMeasurement, boolean useTargetGeometry) {
         View decor = getActivity().getWindow().getDecorView();
         View webView = getBridge().getWebView();
         WindowInsetsCompat insets = ViewCompat.getRootWindowInsets(decor);
         boolean immersive = normalState != null;
         Insets safe = Insets.NONE;
         if (insets != null) {
-            int types = WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout();
             // Unlike visible insets, these stay valid after hiding bars and on repeated enter.
-            // Never include IME: the keyboard plugin retains ownership of resize/IME padding.
-            safe = immersive ? insets.getInsetsIgnoringVisibility(types) : insets.getInsets(types);
+            safe = immersive || useTargetGeometry ? insets.getInsetsIgnoringVisibility(EdgeToEdgeLayout.SYSTEM_SAFE_AREA)
+                    : insets.getInsets(EdgeToEdgeLayout.SYSTEM_SAFE_AREA);
         }
         int[] decorPosition = new int[2];
         int[] webPosition = new int[2];
         decor.getLocationInWindow(decorPosition);
         webView.getLocationInWindow(webPosition);
         float density = getActivity().getResources().getDisplayMetrics().density;
+        int rightSpace = decorPosition[0] + decor.getWidth() - webPosition[0] - webView.getWidth();
+        int bottomSpace = decorPosition[1] + decor.getHeight() - webPosition[1] - webView.getHeight();
+        int leftSpace = webPosition[0] - decorPosition[0];
+        int topSpace = webPosition[1] - decorPosition[1];
+        if (useTargetGeometry) {
+            topSpace = 0;
+            leftSpace = immersive ? 0 : safe.left;
+            rightSpace = immersive ? 0 : safe.right;
+            bottomSpace = insets == null ? 0 : insets.getInsets(WindowInsetsCompat.Type.ime()).bottom;
+        }
         JSObject result = new JSObject();
-        result.put("top", ImmersiveInsets.remaining(safe.top, webPosition[1] - decorPosition[1], density, stableMeasurement));
-        result.put("left", ImmersiveInsets.remaining(safe.left, webPosition[0] - decorPosition[0], density, stableMeasurement));
-        result.put("right", ImmersiveInsets.remaining(safe.right,
-                decorPosition[0] + decor.getWidth() - webPosition[0] - webView.getWidth(), density, stableMeasurement));
-        result.put("bottom", ImmersiveInsets.remaining(safe.bottom,
-                decorPosition[1] + decor.getHeight() - webPosition[1] - webView.getHeight(), density, stableMeasurement));
+        result.put("top", ImmersiveInsets.remaining(safe.top, topSpace, density, stableMeasurement));
+        result.put("left", ImmersiveInsets.remaining(safe.left, leftSpace, density, stableMeasurement));
+        result.put("right", ImmersiveInsets.remaining(safe.right, rightSpace, density, stableMeasurement));
+        result.put("bottom", ImmersiveInsets.remaining(safe.bottom, bottomSpace, density, stableMeasurement));
         result.put("immersive", immersive);
+        result.put("edgeToEdge", fittedState != null);
         result.put("measurement", stableMeasurement ? "stable" : "remaining");
         return result;
     }
@@ -230,7 +321,7 @@ public class ImmersiveModePlugin extends Plugin {
         // The core SystemBars fallback may retain raw bar padding from the
         // edge-to-edge reading layout after the window starts fitting again.
         // Observe settled geometry without replacing its insets/IME listener.
-        if (normalState == null && Build.VERSION.SDK_INT >= 35
+        if (fittedState == null && normalState == null && Build.VERSION.SDK_INT >= 35
                 && "css".equals(getBridge().getConfig().getPluginConfiguration("SystemBars")
                         .getString("insetsHandling", "css"))) {
             // Padding schedules another layout. Do not label the old WebView
@@ -304,10 +395,7 @@ public class ImmersiveModePlugin extends Plugin {
         observedDecor = null;
         desiredAppearance = null;
         appearanceWindow = null;
-        if (normalState != null) {
-            normalState.restore(getActivity().getWindow());
-            normalState = null;
-        }
+        resetDocumentPresentation();
     }
 
     @SuppressWarnings("deprecation")
@@ -316,8 +404,8 @@ public class ImmersiveModePlugin extends Plugin {
         final boolean dark;
         BarAppearance(int color, boolean dark) { this.color = color; this.dark = dark; }
 
-        void apply(Window window, View webViewParent) {
-            SystemBarAppearanceTransaction.apply(color, dark, new BarTarget(window),
+        void apply(Window window, View webViewParent, boolean edgeToEdge) {
+            SystemBarAppearanceTransaction.apply(color, dark, new BarTarget(window, edgeToEdge),
                     new CanvasTarget(window.getDecorView()), new CanvasTarget(webViewParent));
         }
     }
@@ -325,11 +413,14 @@ public class ImmersiveModePlugin extends Plugin {
     @SuppressWarnings("deprecation")
     private static final class BarTarget implements SystemBarAppearanceTransaction.Part {
         private final Window window;
-        BarTarget(Window window) { this.window = window; }
+        private final boolean edgeToEdge;
+        private static final int FITTED_BAR_FLAGS = WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
+                | WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS;
+        private static final int BAR_FLAGS = FITTED_BAR_FLAGS | WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION;
+
+        BarTarget(Window window, boolean edgeToEdge) { this.window = window; this.edgeToEdge = edgeToEdge; }
 
         @Override public Runnable snapshot() {
-            int mask = WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
-                    | WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS;
             int oldFlags = window.getAttributes().flags;
             int oldStatus = window.getStatusBarColor();
             int oldNavigation = window.getNavigationBarColor();
@@ -340,16 +431,18 @@ public class ImmersiveModePlugin extends Plugin {
                 Runnable[] restores = { () -> controller.setAppearanceLightNavigationBars(oldLightNavigation),
                         () -> controller.setAppearanceLightStatusBars(oldLightStatus),
                         () -> window.setNavigationBarColor(oldNavigation), () -> window.setStatusBarColor(oldStatus),
-                        () -> window.setFlags(oldFlags, mask) };
+                        () -> window.setFlags(oldFlags, BAR_FLAGS) };
                 SystemBarAppearanceTransaction.restore(restores, restores.length, null);
             };
         }
 
         @Override public void apply(int color, boolean dark) {
             window.setFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS,
-                    WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS | WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
-            window.setStatusBarColor(color);
-            window.setNavigationBarColor(color);
+                    edgeToEdge ? BAR_FLAGS : FITTED_BAR_FLAGS);
+            window.setStatusBarColor(edgeToEdge ? Color.TRANSPARENT : color);
+            // API 24–25 cannot use dark navigation buttons on a light surface.
+            int edgeNavigationColor = Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1 && !dark ? 0x99000000 : Color.TRANSPARENT;
+            window.setNavigationBarColor(edgeToEdge ? edgeNavigationColor : color);
             WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
             controller.setAppearanceLightStatusBars(!dark);
             controller.setAppearanceLightNavigationBars(!dark);
@@ -402,6 +495,8 @@ public class ImmersiveModePlugin extends Plugin {
         private static final int LEGACY_LAYOUT_FLAGS = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
         final int legacyLayoutFlags;
+        final boolean decorFits;
+        final int barFlags;
         final int cutoutMode;
         final int statusBarColor;
         final int navigationBarColor;
@@ -414,8 +509,10 @@ public class ImmersiveModePlugin extends Plugin {
         final Runnable restoreCanvas;
         final Window owner;
 
-        WindowState(Window window, View webViewParent) {
+        WindowState(Window window, View webViewParent, boolean decorFits) {
             owner = window;
+            this.decorFits = decorFits;
+            barFlags = window.getAttributes().flags & BarTarget.BAR_FLAGS;
             restoreCanvas = SystemBarAppearanceTransaction.snapshot(new CanvasTarget(window.getDecorView()), new CanvasTarget(webViewParent));
             legacyLayoutFlags = window.getDecorView().getSystemUiVisibility() & LEGACY_LAYOUT_FLAGS;
             cutoutMode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
@@ -435,14 +532,14 @@ public class ImmersiveModePlugin extends Plugin {
         void restore(Window window) {
             if (window != owner) return;
             Runnable restoreWindow = () -> {
-            // MainActivity explicitly establishes this normal layout on every creation.
-            WindowCompat.setDecorFitsSystemWindows(window, true);
+            WindowCompat.setDecorFitsSystemWindows(window, decorFits);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 WindowManager.LayoutParams attrs = window.getAttributes();
                 attrs.layoutInDisplayCutoutMode = cutoutMode;
                 window.setAttributes(attrs);
                 window.setNavigationBarDividerColor(navigationBarDividerColor);
             }
+            window.setFlags(barFlags, BarTarget.BAR_FLAGS);
             window.setStatusBarColor(statusBarColor);
             window.setNavigationBarColor(navigationBarColor);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

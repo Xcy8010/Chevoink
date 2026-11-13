@@ -30,8 +30,8 @@ powershell -File scripts/prepare-android-source.ps1 -InstallDependencies
 powershell -File scripts/build-android-release.ps1
 ```
 
-当前候选：`android/app/build/outputs/apk/release/chevoink-v1.0.11.apk`（code 14）；验证后复制为
-`artifacts/android/chevoink-v1.0.11-<sha256前12位>.apk`。这些脚本不会上传或发布。
+当前版本的构建文件：`android/app/build/outputs/apk/release/chevoink-v1.0.12.apk`（code 15）；验证后复制为
+`artifacts/android/chevoink-v1.0.12-<sha256前12位>.apk`。这些脚本不会上传或发布。
 旧 `app-release.apk` 是签名基线，不能覆盖。完整前置条件见 `release/ANDROID-HANDOFF.md`。
 
 1.0.8 修复阅读全屏切换的系统栏恢复，并按 WebView 实际剩余安全区处理挖孔、横竖屏及系统栏变化；
@@ -46,10 +46,13 @@ powershell -File scripts/build-android-release.ps1
 WebView 外露出的主题色区域。保存独立背景快照，恢复后重应用最新页面配色；外观事务失败时回滚所有已尝试的部分。
 不调整安全区、父容器 padding 策略、键盘或全屏规则。1.0.10 已发布，历史产物保留原样。
 
-1.0.11 本地候选修复退出阅读后普通页面重复预留系统栏空间：在布局稳定后，以实际父容器
+1.0.11 修复退出阅读后普通页面重复预留系统栏空间：在布局稳定后，以实际父容器
 相对 decor 的外部留边扣除可确认重复的系统栏 padding。仅处理 API35+ 的 core SystemBars
 CSS fallback，不改其 listener；保留自定义、IME 与相对方向 padding，不缓存机型或固定栏高。
-无设备运行不能推定所有 Android/OEM 已通过；本候选尚未获远程发布授权。
+
+1.0.12 支持新版网页在系统状态栏和手势栏下绘制背景，普通页面继续显示系统图标，阅读区保留沉浸模式。
+新版网页通过 `ImmersiveMode.enableEdgeToEdge()` 启用当前文档；旧网页继续使用系统预留空间，完整重载会重新协商。
+同一个文档中退出沉浸阅读时恢复该页面的布局。键盘占用的空间由原生窗口处理，安全区接口返回 CSS 像素。
 
 ## 签名配置（不入库）
 

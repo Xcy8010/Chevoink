@@ -46,7 +46,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ImmersiveModePlugin.class);
         registerPlugin(ChevoinkSpeechPlugin.class);
         super.onCreate(savedInstanceState);
-        // Normal pages reserve system-bar space; immersive reading temporarily opts out.
+        // Older documents start fitted. Updated documents explicitly opt in through the bridge.
         WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
         getBridge().getWebView().setWebChromeClient(new SpeechWebChromeClient(getBridge()));
 
@@ -66,7 +66,7 @@ public class MainActivity extends BridgeActivity {
         final WebView webView = getBridge().getWebView();
         if (webView == null) return;
 
-        // 离线覆盖层挂在 WebView 的父布局上（activity_main 的根是 CoordinatorLayout）
+        // 离线覆盖层挂在 WebView 的 CoordinatorLayout 父容器上。
         android.view.ViewGroup parent = (android.view.ViewGroup) webView.getParent();
         offlineOverlay = getLayoutInflater().inflate(R.layout.layout_offline, parent, false);
         parent.addView(offlineOverlay);
@@ -102,6 +102,8 @@ public class MainActivity extends BridgeActivity {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
+                ImmersiveModePlugin immersive = (ImmersiveModePlugin) getBridge().getPlugin("ImmersiveMode").getInstance();
+                immersive.resetDocumentPresentation();
                 // 新一轮加载开始（含重试/联网自动重载）：重置失败标记
                 mainFrameFailed = false;
             }
