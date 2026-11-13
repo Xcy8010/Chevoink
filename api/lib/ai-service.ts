@@ -460,6 +460,20 @@ async function readProviderHttpRejection(
   }
 }
 
+/** YunShu's model whitelist rejects before dispatch and names the requested model.
+ * The gateway has other 403s for account, IP and group policy. */
+function isYunshuModelAccessRejection(response: Response, payload: JsonProviderPayload, model: string): boolean {
+  if (response.status !== 403 || response.redirected || payload.usage != null) return false
+  if (Object.keys(payload).some(key => key !== 'error' && key !== 'usage')) return false
+  const upstream = URL.parse(response.url)
+  if (upstream?.origin !== 'https://yunshu.chevolink.com'
+    || !['/v1/chat/completions', '/v1/responses'].includes(upstream.pathname)) return false
+  const error = payload.error
+  if (error?.type !== 'new_api_error' || (error.code != null && error.code !== '') || typeof error.message !== 'string') return false
+  const message = error.message.replace(/ \(request id: [A-Za-z0-9]{1,128}\)$/, '')
+  return message === `该令牌无权访问模型 ${model}` || message === `This token has no access to model ${model}`
+}
+
 // ---------------------------------------------------------------------------
 // 原生工具调用通道（Agent Loop 专用，OpenAI 兼容 tools + stream）
 // ---------------------------------------------------------------------------
@@ -1196,9 +1210,11 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
         throw new ResponsesToolProtocolRequired()
       }
     }
-    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion, params.physicalRouteId)
+    const modelAccessDenied = !durable && tier === 'lite' && Boolean(params.physicalRouteId)
+      && isYunshuModelAccessRejection(response, payload, model)
+    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion, params.physicalRouteId, modelAccessDenied)
       && (durable || await hasKnownZeroProviderRejection(prepared?.id, params.usageLog.userId, response.status))) {
-      throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), undefined)
+      throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), undefined, modelAccessDenied)
     }
     throw new DataAccessError(
       502,

@@ -62,6 +62,86 @@ async function invoke(usages: Array<Record<string, unknown>>) {
   return chatWithTools({ messages: [{ role: 'user', content: 'test input' }], tools: [], providerApiKey: 'fixture-not-a-key', usageLog: { userId: 'test', action: 'test' } })
 }
 
+describe('lightweight YunShu model whitelist rejection', () => {
+  it.each([
+    { scenario: 'current model denied', switches: true },
+    { scenario: 'English gateway response', switches: true },
+    { scenario: 'all models denied', switches: false },
+    { scenario: 'a different model named', switches: false },
+    { scenario: 'unverified gateway', switches: false },
+    { scenario: 'redirected response', switches: false },
+    { scenario: 'billing still pending', switches: false },
+    { scenario: 'nonzero upstream usage', switches: false },
+    { scenario: 'response also contains output', switches: false },
+    { scenario: 'no alternate configured', switches: false },
+  ])('$scenario switches only after a proven zero-charge rejection', async ({ scenario, switches }) => {
+    const model = 'fixture/primary:free'
+    const alternate = 'fixture/alternate:free'
+    const provider = 'openrouter_YunShu'
+    const baseUrl = scenario === 'unverified gateway' ? 'https://yunshu.chevolink.com.invalid/v1' : 'https://yunshu.chevolink.com/v1'
+    const primaryKey = 'fixture-primary-key'
+    mocks.findModel.mockResolvedValue({ id: `lite-primary-${scenario}`, provider, modelName: model, baseUrl, apiKeyCiphertext: primaryKey,
+      metadata: { routes: scenario === 'no alternate configured' ? [] : [{
+        id: '00000000-0000-4000-8000-000000000089', label: '备用', provider, modelName: alternate, baseUrl,
+        apiKeyCiphertext: 'fixture-alternate-key', enabled: true,
+      }] } })
+    // Each physical call has its own reservation. Readback uses the original row.
+    const rows = new Map<string, Record<string, unknown>>()
+    mocks.create.mockImplementation(async ({ data }) => {
+      const row = { id: `lite-${rows.size + 1}`, reservedCreditMilli: 10, creditChargeMilli: 0,
+        requestTokens: null, responseTokens: null, ...data }
+      rows.set(row.id, row)
+      return row
+    })
+    mocks.updateMany.mockImplementation(async ({ where, data }) => {
+      const row = rows.get(where.id)
+      if (!row || (typeof where.billingStatus === 'string' && row.billingStatus !== where.billingStatus)
+        || (where.billingStatus?.in && !where.billingStatus.in.includes(row.billingStatus))) return { count: 0 }
+      if (scenario === 'billing still pending' && data.billingStatus === 'provider_rejected') return { count: 0 }
+      Object.assign(row, data)
+      return { count: 1 }
+    })
+    mocks.update.mockImplementation(async ({ where, data }) => {
+      const row = rows.get(where.id)!
+      Object.assign(row, data)
+      return row
+    })
+    mocks.findUsage.mockImplementation(async ({ where }) => rows.get(where.id) ?? null)
+    const fetcher = vi.fn(async (url: string, request: RequestInit) => {
+      const body = JSON.parse(String(request.body))
+      if (fetcher.mock.calls.length > 1) {
+        return new Response('data: {"choices":[{"delta":{"content":"备用回应"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4}}\n\ndata: [DONE]\n\n')
+      }
+      let message = `该令牌无权访问模型 ${body.model}`
+      if (scenario === 'all models denied') message = '该令牌无权访问任何模型'
+      if (scenario === 'a different model named') message = `该令牌无权访问模型 ${body.model === model ? alternate : model}`
+      if (scenario === 'English gateway response') message = `This token has no access to model ${body.model}`
+      const rejected = new Response(JSON.stringify({
+        error: { type: 'new_api_error', code: '', message: `${message} (request id: 202611132246325709477898268d9d6EcrAiXsd)` },
+        ...(scenario === 'nonzero upstream usage' ? { usage: { prompt_tokens: 5, completion_tokens: 0 } } : {}),
+        ...(scenario === 'response also contains output' ? { output: [{ type: 'message' }] } : {}),
+      }), { status: 403 })
+      Object.defineProperties(rejected, { url: { value: url }, redirected: { value: scenario === 'redirected response' } })
+      return rejected
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const result = chatWithTools({ messages: [{role: 'user', content: '继续写作'}], tools: [], model, provider, providerBaseUrl: baseUrl,
+      providerApiKey: primaryKey, usageLog: { userId: 'fixture-user', action: 'agentLoopTurn', modelTier: 'lite', multiplierBps: 10000 } })
+    if (switches) {
+      await expect(result).resolves.toMatchObject({ content: '备用回应' })
+      expect(fetcher).toHaveBeenCalledTimes(2)
+      const attempts = fetcher.mock.calls.map(([, request]) => JSON.parse(String(request.body)))
+      expect(attempts.map(body => body.model).sort()).toEqual([alternate, model])
+      expect(attempts[1].messages).toEqual(attempts[0].messages)
+      expect(rows.get('lite-1')).toMatchObject({ billingStatus: 'provider_rejected', reservedCreditMilli: 0, creditChargeMilli: 0 })
+      expect(mocks.charge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ usageLogId: 'lite-2', modelTier: 'lite' }))
+    } else {
+      await expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR' })
+      expect(fetcher).toHaveBeenCalledOnce()
+    }
+  })
+})
+
 type TextRuntime = NonNullable<Parameters<typeof generateTextCompletion>[2]['modelRuntime']>
 function qualityRuntime(overrides: Partial<TextRuntime> = {}): TextRuntime {
   return { tier: 'custom', provider: 'fixture', modelName: 'verified-model', baseUrl: 'https://verified.example/v1',

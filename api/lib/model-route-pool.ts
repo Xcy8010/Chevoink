@@ -33,7 +33,8 @@ export function saveModelRoutes(input: ModelRouteInput[], metadata: unknown, eff
 
 export class ModelRouteRejected extends DataAccessError {
   readonly cooldownMs: number
-  constructor(readonly upstreamStatus: number, retryAfter?: string | null, message = '模型服务暂时不可用。') {
+  constructor(readonly upstreamStatus: number, retryAfter?: string | null, message = '模型服务暂时不可用。',
+    readonly modelAccessDenied = false) {
     super(502, upstreamStatus === 504 ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR', upstreamStatus === 429
       ? '模型服务触发了每分钟请求或 Token 限制。系统将等待限流窗口后安全重试一次。'
       : message)
@@ -44,11 +45,13 @@ export class ModelRouteRejected extends DataAccessError {
     this.cooldownMs = Math.max(minimum, Math.min(300_000, Number.isFinite(delay) ? delay : 0))
   }
 }
-export const routeRetryableStatus = (status: number) => [404, 429, 500, 502, 503, 504].includes(status)
+const routeRetryableStatus = (status: number, modelAccessDenied = false) =>
+  [404, 429, 500, 502, 503, 504].includes(status) || (status === 403 && modelAccessDenied)
 // Preliminary response-shape filter only. Non-durable producers must also
 // verify the actual persisted zero-charge billing row before issuing rejection.
-export const routeRejectionMayRetry = (status: number, prompt: number | undefined, completion: number | undefined, physicalRouteId?: string) =>
-  routeRetryableStatus(status) && (status !== 404 || Boolean(physicalRouteId))
+export const routeRejectionMayRetry = (status: number, prompt: number | undefined, completion: number | undefined,
+  physicalRouteId?: string, modelAccessDenied = false) =>
+  routeRetryableStatus(status, modelAccessDenied) && (![403, 404].includes(status) || Boolean(physicalRouteId))
   && (prompt == null && completion == null || prompt === 0 && completion === 0)
 const cursors = new Map<string, number>()
 const cooldowns = new Map<string, number>()
@@ -149,7 +152,9 @@ export async function withModelRoutePool<T>(params: ChatWithToolsParams, invoke:
     try {
       return await invoke({ ...params, signal, provider: route.provider, model: route.modelName, providerBaseUrl: route.baseUrl, providerApiKey: route.apiKey, physicalRouteId: route.id })
     } catch (error) {
-      if (!(error instanceof ModelRouteRejected) || !routeRetryableStatus(error.upstreamStatus) || signal.aborted) throw error
+      if (!(error instanceof ModelRouteRejected)
+        || !routeRetryableStatus(error.upstreamStatus, tier === 'lite' && error.modelAccessDenied)
+        || signal.aborted) throw error
       failure = error
       if (cooldowns.size > 512) cooldowns.clear()
       cooldowns.set(route.id, Date.now() + error.cooldownMs)
