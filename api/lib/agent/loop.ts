@@ -1,5 +1,5 @@
 import { AGENT_TOOL_EXECUTION_POLICY } from './tool-execution-guidance.js'
-import { formatNovelSetupRecap, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
+import { formatNovelSetupRecap, getNovelSetupFollowup, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
 import { askUserTool, DIRECTION_PURPOSE_REQUIRED, formatUnansweredQuestionWrapUp, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
@@ -33,7 +33,7 @@ import type {
 } from '../../../shared/contracts/index.js'
 import { env } from '../../config/env.js'
 import { chatWithTools, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from '../ai-service.js'
-import { addNextPromptInstruction, allowsNextPrompt, readTaskResponseNextPrompt, selectCompletedNextPrompt } from './next-prompt.js'
+import { addNextPromptInstruction, allowsModelNextPrompt, allowsNextPrompt, DEFAULT_COMPLETED_NEXT_PROMPT, LIMITED_COMPLETED_NEXT_PROMPT, readTaskResponseNextPrompt, selectInteractiveNextPrompt } from './next-prompt.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { withGoalEffects, withGoalExecutionContext } from './goal-context.js'
 import { readGoalExecution } from './goal-fence.js'
@@ -1021,8 +1021,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   let initializationCompletionRequired = false
   let lastInitializationReminder: string | undefined
   let initializationAuthorityBlocked = false
+  let offerCompletedNextPrompt = false
   const finalizeRun = (...args: Parameters<typeof finalizeLegacyRun>) => {
     args[8] = checkpointSnapshot()
+    if (offerCompletedNextPrompt && args[2] === 'succeeded' && !args[9]
+      && !args[17] && !args[16] && !args[15]?.nextPrompt && !args[10]?.nextPrompt) {
+      args[16] = args[12] ? LIMITED_COMPLETED_NEXT_PROMPT : DEFAULT_COMPLETED_NEXT_PROMPT
+    }
     const explicitFence = args[14]
     args[14] = async tx => {
       await assertLegacyOwnerReceipt(tx, true)
@@ -1495,8 +1500,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     console.info('[agent-context-timing]', { runId, ...assembledContext.timings })
     console.info('[agent-context-input]', assembledContext.inputEstimates ?? {})
     const messages: ChatMessage[] = assembledContext.messages
-    const nextPromptMarker = params.predictNextPrompt && !ownedGoalExecution && (params.agentType ?? 'orchestrator') === 'orchestrator'
-      && !taskSpec.scope.writing?.titleAndBodyOnly && allowsNextPrompt(params.prompt)
+    offerCompletedNextPrompt = Boolean(params.predictNextPrompt && !ownedGoalExecution && (params.agentType ?? 'orchestrator') === 'orchestrator'
+      && allowsNextPrompt(params.prompt))
+    const nextPromptMarker = offerCompletedNextPrompt && !taskSpec.scope.writing?.titleAndBodyOnly && allowsModelNextPrompt(params.prompt)
       ? addNextPromptInstruction(messages) : undefined
     // The last assembled user message is the original goal input. Attach its
     // pixels before adding steering or orchestration messages to the tail.
@@ -2187,11 +2193,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (authorContent) {
         parts.push({ type: 'text', text: authorContent })
       }
-      const finishWithNotice = async (kind: LocalTerminalNoticeKind, text: string, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded') => {
+      const finishWithNotice = async (kind: LocalTerminalNoticeKind, text: string, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', nextPrompt?: string) => {
         controller.signal.throwIfAborted()
         bus.emit({ type: 'step.finish', turn, usage: result.usage })
         await finalizeRun(runId, bus, status, usage, turn, text, status === 'failed' ? text : undefined, false, undefined, undefined, undefined,
-          false, undefined, 'user_stop', undefined, undefined, undefined, { kind, text, messageId, sessionId: params.sessionId, parts, signal: controller.signal })
+          false, undefined, 'user_stop', undefined, undefined, nextPrompt, { kind, text, messageId, sessionId: params.sessionId, parts, signal: controller.signal })
       }
       if (completedWritingWrapUp.value && !todoItems.some(item => item.status === 'pending' || item.status === 'in_progress')) {
         if (await finishPersistedWritingIfComplete(async () => {
@@ -2200,7 +2206,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
           liveTurn = null
         }, { messageId, text: authorContent, parts, expected: completedWritingWrapUp.value,
-          nextPrompt: nextPromptReady ? selectCompletedNextPrompt(authorContent, result,
+          nextPrompt: offerCompletedNextPrompt ? selectInteractiveNextPrompt(authorContent, nextPromptReady ? result : {},
             { kind: 'chapter', title: completedWritingWrapUp.value.chapters.at(-1)?.title ?? '' }) : undefined })) return
         // A newer manuscript/report is not the source of this model reply.
         // Do not publish its old summary or purchase another closing turn.
@@ -2292,7 +2298,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             undefined, undefined, undefined, false, undefined, 'user_stop', undefined, {
               subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
               expected: ordinaryResponse, signal: controller.signal, messageId, parts,
-              nextPrompt: nextPromptReady ? selectCompletedNextPrompt(ordinaryResponse.answer, result) : undefined,
+              nextPrompt: offerCompletedNextPrompt ? selectInteractiveNextPrompt(ordinaryResponse.answer, nextPromptReady ? result : {}) : undefined,
               assertObligations: () => {
                 controller.signal.throwIfAborted()
                 if (pendingReviews.size || forceWrapUpReason
@@ -2425,8 +2431,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           : targetEvidenceMissing ? researchLimitation : creationIncomplete ? '本任务请求创建章节，但尚无本任务成功创建且仍属于作者的章节；说明已保存，任务未完成。' : undefined,
           true, undefined, undefined, savedCandidate ? { messageId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: savedCandidate,
             signal: controller.signal, parts, replaceCandidate: true, displayText: lastAssistantText } : undefined,
-          false, undefined, 'user_stop', undefined, undefined, nextPromptReady && !savedCandidate?.titleAndBodyOnly
-            ? selectCompletedNextPrompt(lastAssistantText, result, savedCandidate
+          false, undefined, 'user_stop', undefined, undefined, offerCompletedNextPrompt && !savedCandidate?.titleAndBodyOnly
+            ? selectInteractiveNextPrompt(lastAssistantText, nextPromptReady ? result : {}, savedCandidate
               ? { kind: 'chapter', title: savedCandidate.chapters.at(-1)?.title ?? '' }
               : { kind: 'plan', title: [...savedPlansForNextPrompt.values()].at(-1) ?? '' }) : undefined)
         return
@@ -2665,7 +2671,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
               expected: outcome.terminalResponse, signal: controller.signal, messageId, parts: responseParts,
               assertObligations: assertResponseObligations,
-              nextPrompt: nextPromptMarker ? selectCompletedNextPrompt(outcome.terminalResponse.answer, responseSuggestion?.proposal ?? {}) : undefined,
+              nextPrompt: offerCompletedNextPrompt ? selectInteractiveNextPrompt(outcome.terminalResponse.answer, nextPromptMarker ? responseSuggestion?.proposal ?? {} : {}) : undefined,
             })
           liveTurn = null
           return
@@ -2789,7 +2795,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (novelSetupSaved && !pendingReviews.size && !forceWrapUpReason) {
         const saved = await readNovelInitializationCompletion(prisma, { userId: params.userId, novelId: params.novelId, runId }, { includeRecap: true })
         if (saved.status === 'complete' && saved.recap) {
-          await finishWithNotice('novel_setup', formatNovelSetupRecap(saved.recap))
+          await finishWithNotice('novel_setup', formatNovelSetupRecap(saved.recap), 'succeeded',
+            offerCompletedNextPrompt ? getNovelSetupFollowup(saved.recap)?.options[0].label : undefined)
           return
         }
       }

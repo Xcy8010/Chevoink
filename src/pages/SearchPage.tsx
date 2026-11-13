@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { BookOpen, MessageSquareText, UserRound } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 
-import AppState from '@/components/ui/AppState'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import AppImage from '@/components/ui/AppImage'
 import {
   getAuthorName,
@@ -114,10 +114,9 @@ export default function SearchPage() {
   if (!keyword) {
     return (
       <AppState
-        tone="empty"
+        scene="search"
         title="输入关键词开始搜索"
-        description="可以搜索书名、作者昵称或社区讨论内容。"
-        primaryAction={{ label: '回到首页', href: '/' }}
+        description="可搜索书名、作者昵称或讨论。"
       />
     )
   }
@@ -126,24 +125,13 @@ export default function SearchPage() {
     return <AppState tone="loading" title="正在搜索..." description={`正在为你查找与「${keyword}」相关的内容。`} />
   }
 
-  if (query.isError) {
+  if (query.isError && !query.data) {
     return (
       <AppState
         tone="error"
         title="搜索失败"
-        description={query.error instanceof Error ? query.error.message : '请稍后再试。'}
-        primaryAction={{ label: '重新搜索', onClick: () => void query.refetch() }}
-      />
-    )
-  }
-
-  if (total === 0) {
-    return (
-      <AppState
-        tone="empty"
-        title={`没有找到与「${keyword}」相关的内容`}
-        description="换个关键词试试，或去发现页逛逛热门作品。"
-        primaryAction={{ label: '去发现页', href: '/discover' }}
+        description="请检查连接后重试。"
+        primaryAction={{ label: '重新搜索', onClick: () => query.refetch(), busy: query.isFetching }}
       />
     )
   }
@@ -151,14 +139,19 @@ export default function SearchPage() {
   const showNovels = (activeTab === 'all' || activeTab === 'novel') && novels.length > 0
   const showAuthors = (activeTab === 'all' || activeTab === 'author') && authors.length > 0
   const showPosts = (activeTab === 'all' || activeTab === 'post') && posts.length > 0
+  const showEmpty = !showNovels && !showAuthors && !showPosts
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div
+      data-app-state-layout={showEmpty ? '' : undefined}
+      className={cn('mx-auto w-full max-w-3xl space-y-6', showEmpty && 'flex min-h-0 flex-col')}
+    >
       <div className="flex flex-wrap items-center gap-2">
         {tabs.map((tab) => (
           <button
             key={tab.id}
             type="button"
+            aria-pressed={activeTab === tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={cn(
               'rounded-[var(--radius-pill)] px-4 py-1.5 text-sm transition-colors',
@@ -172,6 +165,16 @@ export default function SearchPage() {
           </button>
         ))}
       </div>
+      {query.isError ? <AppStateRefreshNotice retry={query.refetch} busy={query.isFetching} /> : null}
+      {showEmpty ? (
+        <AppState
+          scene="search"
+          title={total === 0 ? `未找到「${keyword}」的结果` : `此分类中未找到「${keyword}」`}
+          description={total === 0 ? '换个关键词试试。' : undefined}
+          primaryAction={total > 0 ? { label: '查看全部结果', onClick: () => setActiveTab('all') } : { label: '去发现', href: '/discover' }}
+          className="min-h-0 flex-1 md:min-h-0"
+        />
+      ) : null}
 
       {showNovels ? (
         <section>

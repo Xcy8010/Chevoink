@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { AlignLeft, Trash2, X } from 'lucide-react'
 
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import Button from '@/components/ui/Button'
 import { SkeletonText } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/toast-context'
@@ -229,26 +230,20 @@ export default function ReaderCommentsPanel({ state }: ReaderCommentsPanelProps)
     )
   }
 
-  if (commentsQuery.isError) {
+  if (commentsQuery.isError && !commentsQuery.data) {
     return (
-      <div className="space-y-3 p-4">
-        <p className="text-sm leading-7 text-[var(--text-secondary)]">
-          {commentsQuery.error instanceof Error ? commentsQuery.error.message : '评论暂时没有打开。'}
-        </p>
-        <Button variant="secondary" onClick={() => void commentsQuery.refetch()}>
-          重新加载评论
-        </Button>
-      </div>
+      <AppState compact tone="error" title="评论暂时没有加载" primaryAction={{ label: '重新加载评论', onClick: () => commentsQuery.refetch(), busy: commentsQuery.isFetching }} />
     )
   }
+
+  const refreshNotice = commentsQuery.isRefetchError ? <AppStateRefreshNotice retry={commentsQuery.refetch} busy={commentsQuery.isFetching} /> : null
 
   if (visibleRoots.length === 0) {
     return (
       <div className="px-1">
         {paragraphHeader}
-        <p className="py-10 text-center text-sm text-[var(--text-tertiary)]">
-          {isParagraphView ? '这一段还没有评论，抢个沙发。' : '还没有留言，说说你的看法吧。'}
-        </p>
+        {refreshNotice}
+        <AppState compact scene="welcome" title={isParagraphView ? '这段还没有评论' : '还没有评论'} />
         {composer}
       </div>
     )
@@ -257,6 +252,7 @@ export default function ReaderCommentsPanel({ state }: ReaderCommentsPanelProps)
   return (
     <div className="px-1">
       {paragraphHeader}
+      {refreshNotice}
       {/* 根评论分行，回复挂根评论下的浅色块内形成评论树 */}
       <div className="divide-y divide-[var(--border-subtle)]">
         {visibleRoots.map((root) => {

@@ -1,4 +1,4 @@
-import { assertNovelInitializationDirection, assertNovelMetadataIntent } from '../novel-initialization.js'
+import { assertNovelInitializationDirection, assertNovelMetadataIntent, readNovelSetupCover } from '../novel-initialization.js'
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
@@ -6,7 +6,7 @@ import type { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { recalculateNovelStats } from '../../data/internal.js'
 import { ALL_NOVEL_TAGS, MAX_NOVEL_TAGS } from '../../../../shared/contracts/novel-tags.js'
-import { BOOTSTRAP_NOVEL_SUMMARY, getMissingNovelPublishFields, novelPublishMetadataMessage } from '../../../../shared/contracts/novel-publish.js'
+import { BOOTSTRAP_NOVEL_SUMMARY, getMissingNovelPublishFields, NOVEL_PUBLISH_FIELDS, novelPublishMetadataMessage } from '../../../../shared/contracts/novel-publish.js'
 import { enforceCoverTitleInPrompt } from './cover-prompt.js'
 import { defineTool } from './types.js'
 
@@ -40,7 +40,7 @@ export const novelCreateTool = defineTool({
     const db = ctx.transaction ?? prisma
     const novel = await db.novel.findFirst({
       where: { id: ctx.novelId, authorId: ctx.userId },
-      select: { title: true, displayTitle: true, summary: true, chapterCount: true, wordCount: true },
+      select: { title: true, displayTitle: true, summary: true, chapterCount: true, wordCount: true, coverAssetId: true },
     })
     if (!novel) return { outcome: 'failed', output: '未找到当前作品。' }
 
@@ -55,7 +55,7 @@ export const novelCreateTool = defineTool({
       return { outcome: 'failed', output: '当前占位作品已有章节记录，不能覆盖为新作品。请先读取当前作品。' }
     }
 
-    await assertNovelInitializationDirection(db, ctx)
+    const setupPreferences = await assertNovelInitializationDirection(db, ctx)
     const dedupedTags = [...new Set(args.tags.map((tag) => tag.trim()).filter(Boolean))]
     const rejectedTags = dedupedTags.filter((tag) => !ALL_NOVEL_TAGS.includes(tag))
     if (rejectedTags.length > 0) {
@@ -64,6 +64,8 @@ export const novelCreateTool = defineTool({
 
     const title = args.title.trim()
     const summary = args.summary.trim(), tagNames = dedupedTags.slice(0, MAX_NOVEL_TAGS)
+    const novelSetupRecap = title && summary && tagNames.length
+      ? { title, summary, tagNames, cover: await readNovelSetupCover(db, ctx, novel.coverAssetId), ...setupPreferences } : undefined
     ctx.signal.throwIfAborted()
     await db.novel.update({
       where: { id: ctx.novelId },
@@ -72,7 +74,7 @@ export const novelCreateTool = defineTool({
     return {
       output: `已创建作品《${title}》，并写入简介与标签。`,
       summary: `创建作品《${title}》`,
-      ...(title && summary && tagNames.length ? { novelSetupRecap: { title, summary, tagNames } } : {}),
+      ...(novelSetupRecap ? { novelSetupRecap } : {}),
       snapshot: { target: 'novel', targetId: ctx.novelId, field: 'title', previousValue: novel.title },
     }
   },
@@ -123,16 +125,17 @@ export const novelUpdateMetaTool = defineTool({
   readOnly: false,
   async execute(ctx, args) {
     ctx.signal.throwIfAborted()
-    const novel = await (ctx.transaction ?? prisma).novel.findFirst({
+    const db = ctx.transaction ?? prisma
+    const novel = await db.novel.findFirst({
       where: { id: ctx.novelId, authorId: ctx.userId },
-      select: { title: true, displayTitle: true, summary: true, tagNames: true, chapterCount: true, wordCount: true },
+      select: { title: true, displayTitle: true, summary: true, tagNames: true, chapterCount: true, wordCount: true, coverAssetId: true },
     })
 
     if (!novel) {
       return { outcome: 'failed' as const, output: '未找到当前作品。' }
     }
 
-    const { completeInitialization, canOmitTitle } = await assertNovelMetadataIntent(ctx.transaction ?? prisma, ctx, novel)
+    const { completeInitialization, canOmitTitle, ...setupPreferences } = await assertNovelMetadataIntent(db, ctx, novel)
     if (completeInitialization && ((!canOmitTitle && !args.title?.trim()) || !args.summary?.trim() || !args.tags?.length)) {
       throw new DataAccessError(400, 'INVALID_ARGUMENTS', canOmitTitle
         ? '补全作品信息需要同时提供简介与标签，本次未修改。'
@@ -159,8 +162,11 @@ export const novelUpdateMetaTool = defineTool({
     }
 
     const summary = args.summary?.trim() || undefined
+    const novelSetupRecap = completeInitialization && summary && nextTags?.length
+      ? { title: args.title ?? novel.title, summary, tagNames: nextTags, cover: await readNovelSetupCover(db, ctx, novel.coverAssetId),
+        ...setupPreferences } : undefined
     ctx.signal.throwIfAborted()
-    await (ctx.transaction ?? prisma).novel.update({
+    await db.novel.update({
       where: { id: ctx.novelId },
       data: {
         ...(args.title !== undefined ? { title: args.title, displayTitle: args.title } : {}),
@@ -173,11 +179,15 @@ export const novelUpdateMetaTool = defineTool({
       .filter(Boolean)
       .join('、')
     const rejectedNote = rejectedTags.length > 0 ? `已忽略库外标签：${rejectedTags.join('、')}。` : ''
+    const missing = getMissingNovelPublishFields({ coverAssetId: novel.coverAssetId, summary: summary ?? novel.summary, tags: nextTags ?? novel.tagNames })
+      .filter(field => field !== 'cover' || !setupPreferences.skipCover)
+    const missingNote = !setupPreferences.skipFollowup && missing.length
+      ? `目前还缺作品${missing.map(field => NOVEL_PUBLISH_FIELDS[field]).join('、')}，可在本轮结尾询问作者是否补充。` : ''
 
     return {
-      output: `已更新作品${changed}。${rejectedNote}`,
+      output: `已更新作品${changed}。${rejectedNote}${missingNote}`,
       summary: `更新作品${args.summary !== undefined ? '简介' : ''}${args.summary !== undefined && nextTags !== undefined ? '与' : ''}${nextTags !== undefined ? '标签' : ''}`,
-      ...(completeInitialization && args.title && summary && nextTags?.length ? { novelSetupRecap: { title: args.title, summary, tagNames: nextTags } } : {}),
+      ...(novelSetupRecap ? { novelSetupRecap } : {}),
       snapshot: { target: 'novel', targetId: ctx.novelId, field: args.title !== undefined ? 'title' : 'summary', previousValue: args.title !== undefined ? novel.title : novel.summary },
     }
   },

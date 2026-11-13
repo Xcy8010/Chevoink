@@ -1,4 +1,5 @@
-import AppState from '@/components/ui/AppState'
+import { ApiClientError } from '@/app/api-client'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { ReaderSkeleton } from '@/components/ui/Skeleton'
 import { useDevice } from '@/components/layout/device-context'
 import ReaderDesktop from '@/features/reader/layouts/ReaderDesktop'
@@ -16,13 +17,16 @@ export default function ReaderPage() {
   const { device } = useDevice()
   const state = useReaderState()
 
-  if (!state.novelId || !state.chapterId) {
+  const error = state.readerQuery.error
+  const missing = error instanceof ApiClientError && error.status === 404
+  if (!state.novelId || !state.chapterId || missing) {
     return (
       <AppState
-        tone="error"
-        title="这一章暂时没找到"
-        description="换一章继续看看，或者回到详情页重新选择目录。"
-        primaryAction={{ label: '回到发现页', href: '/discover' }}
+        scene="search"
+        title="找不到这一章"
+        primaryAction={state.novelId
+          ? { label: '返回作品详情', href: `/novel/${state.novelId}` }
+          : { label: '去发现', href: '/discover' }}
       />
     )
   }
@@ -31,19 +35,17 @@ export default function ReaderPage() {
     return <ReaderSkeleton />
   }
 
-  if (state.readerQuery.isError) {
+  const accessDenied = error instanceof ApiClientError && (error.status === 401 || error.status === 403)
+  if (state.readerQuery.isError && (!state.reader || accessDenied)) {
     return (
       <AppState
         tone="error"
         title="这一章暂时没有打开"
-        description={
-          state.readerQuery.error instanceof Error
-            ? state.readerQuery.error.message
-            : '连接似乎中断了，请稍后再试。'
-        }
+        description={accessDenied ? error.message : '请检查连接后重试。'}
         primaryAction={{
-          label: state.readerQuery.isFetching ? '重新连接中...' : '重新连接',
-          onClick: () => void state.readerQuery.refetch(),
+          label: '重新加载',
+          onClick: () => state.readerQuery.refetch(),
+          busy: state.readerQuery.isFetching,
         }}
         secondaryAction={{ label: '回到详情页', href: `/novel/${state.novelId}` }}
       />
@@ -54,9 +56,13 @@ export default function ReaderPage() {
     return <ReaderMobile state={state} />
   }
 
+  const refreshNotice = state.readerQuery.isError
+    ? <AppStateRefreshNotice retry={state.readerQuery.refetch} busy={state.readerQuery.isFetching} />
+    : null
+
   if (device === 'tablet') {
-    return <ReaderTablet state={state} />
+    return <>{refreshNotice}<ReaderTablet state={state} /></>
   }
 
-  return <ReaderDesktop state={state} />
+  return <>{refreshNotice}<ReaderDesktop state={state} /></>
 }

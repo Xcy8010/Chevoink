@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronLeft, MessageSquareMore, Send, X } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 
 import type { Comment } from '../../shared/contracts/index.js'
-import AppState from '@/components/ui/AppState'
+import { ApiClientError } from '@/app/api-client'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { PostDetailSkeleton } from '@/components/ui/Skeleton'
 import Button from '@/components/ui/Button'
 import { createComment, getPostDetail, listPosts } from '@/features/community/api'
@@ -20,6 +21,10 @@ import { useDeviceType } from '@/hooks/useDeviceType'
 export default function PostDetailPage() {
   const queryClient = useQueryClient()
   const { postId } = useParams()
+  const { state } = useLocation()
+  const communitySearch = typeof state?.communitySearch === 'string' && state.communitySearch.startsWith('?')
+    ? state.communitySearch
+    : ''
   const [draftComment, setDraftComment] = useState('')
   // 手机端回复目标：非空时底部评论栏切换为「回复 @xx」模式（桌面端仍用评论列表内联回复框）
   const [replyTarget, setReplyTarget] = useState<{ id: string; nickname: string } | null>(null)
@@ -92,14 +97,14 @@ export default function PostDetailPage() {
     window.setTimeout(() => mobileComposerRef.current?.focus(), 250)
   }
 
-  if (!postId) {
+  const error = detailQuery.error
+  const missing = error instanceof ApiClientError && error.status === 404
+  if (!postId || missing) {
     return (
       <AppState
-        tone="empty"
-        title="这条讨论暂时没有找到"
-        description="回到社区广场，挑一条你感兴趣的话题继续浏览。"
-        primaryAction={{ label: '返回社区', href: '/community' }}
-        className="min-h-[360px]"
+        scene="search"
+        title="找不到这条讨论"
+        primaryAction={{ label: '返回社区', href: `/community${communitySearch}` }}
       />
     )
   }
@@ -108,15 +113,15 @@ export default function PostDetailPage() {
     return <PostDetailSkeleton />
   }
 
-  if (detailQuery.isError || !detailQuery.data) {
+  const accessDenied = error instanceof ApiClientError && (error.status === 401 || error.status === 403)
+  if (!detailQuery.data || accessDenied) {
     return (
       <AppState
         tone="error"
         title="这条讨论暂时没有打开"
-        description={detailQuery.error instanceof Error ? detailQuery.error.message : '请稍后再试。'}
-        primaryAction={{ label: '重新加载', onClick: () => void detailQuery.refetch() }}
-        secondaryAction={{ label: '返回社区', href: '/community' }}
-        className="min-h-[420px]"
+        description={accessDenied ? error.message : '请稍后重试。'}
+        primaryAction={{ label: '重新加载', onClick: () => detailQuery.refetch(), busy: detailQuery.isFetching }}
+        secondaryAction={{ label: '返回社区', href: `/community${communitySearch}` }}
       />
     )
   }
@@ -125,11 +130,12 @@ export default function PostDetailPage() {
 
   return (
     <div className="animate-fade-in-up mx-auto w-full max-w-[720px] xl:mx-0 xl:max-w-none">
+      {detailQuery.isError ? <AppStateRefreshNotice retry={detailQuery.refetch} busy={detailQuery.isFetching} /> : null}
       <div className="grid items-start gap-10 xl:grid-cols-[minmax(0,1fr)_300px]">
         {/* 主内容列：返回入口 + 帖子正文 + 评论线程，全部平铺 */}
         <div className="min-w-0">
           <Link
-            to="/community"
+            to={{ pathname: '/community', search: communitySearch }}
             className="press-feedback -ml-1 inline-flex items-center gap-1 rounded-[var(--radius-pill)] px-1.5 py-1 text-sm text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)]"
           >
             <ChevronLeft className="h-4 w-4" />
@@ -179,9 +185,7 @@ export default function PostDetailPage() {
                   onReply={isDesktop ? undefined : handleReplyComment}
                 />
               ) : (
-                <p className="py-12 text-center text-sm text-[var(--text-tertiary)]">
-                  评论区还很安静，先留下你的看法吧。
-                </p>
+                <AppState compact scene="welcome" title="还没有评论" />
               )}
             </div>
           </section>
@@ -191,8 +195,11 @@ export default function PostDetailPage() {
         <aside className="hidden xl:block">
           <div className="sticky top-[calc(var(--app-header-height,132px)+12px)]">
             <h2 className="text-base font-bold tracking-tight text-[var(--text-primary)]">相关讨论</h2>
-            {relatedPosts.length > 0 ? (
+            {postsQuery.isLoading ? null : postsQuery.isError && !postsQuery.data ? (
+              <AppState compact tone="error" title="相关讨论加载失败" primaryAction={{ label: '重试', onClick: () => postsQuery.refetch(), busy: postsQuery.isFetching }} />
+            ) : relatedPosts.length > 0 ? (
               <div className="mt-2 divide-y divide-[var(--border-subtle)]">
+                {postsQuery.isError ? <AppStateRefreshNotice retry={postsQuery.refetch} busy={postsQuery.isFetching} /> : null}
                 {relatedPosts.map((post) => (
                   <Link key={post.id} to={`/post/${post.id}`} className="group block py-3">
                     <p className="line-clamp-2 text-sm leading-6 text-[var(--text-primary)] transition-colors group-hover:text-[var(--color-brand)]">
@@ -207,9 +214,7 @@ export default function PostDetailPage() {
                 ))}
               </div>
             ) : (
-              <p className="mt-3 text-sm text-[var(--text-tertiary)]">
-                暂时没有更多相关讨论，去社区看看其他话题吧。
-              </p>
+              <p className="mt-3 text-sm text-[var(--text-tertiary)]">暂无相关讨论</p>
             )}
           </div>
         </aside>

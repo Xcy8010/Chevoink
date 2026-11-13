@@ -10,6 +10,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { plainChapterTitle } from '../../../shared/structure/chapter-title'
 
 import Surface from '@/components/ui/Surface'
+import { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
 import StudioOpenError from '@/features/studio/components/StudioOpenError'
@@ -3665,8 +3666,10 @@ export default function StudioWorkspace() {
     setChapterSaveMessage, syncStudioPayload, refreshWorkspaceAfterAgentWrite, handleChapterDraftChange, toast,
   })
 
-  if (studioQuery.isError) {
-    return <StudioOpenError error={studioQuery.error} retry={() => { void studioQuery.refetch() }} />
+  const workspaceError = studioQuery.error
+  const unavailableWorkspace = workspaceError instanceof ApiClientError && [401, 403, 404].includes(workspaceError.status)
+  if (studioQuery.isError && (studioQuery.data?.novel.id !== activeNovelId || unavailableWorkspace)) {
+    return <StudioOpenError error={studioQuery.error} retry={() => studioQuery.refetch()} />
   }
 
   if (studioQuery.isLoading || !novelForm || !projectNotes || !coverForm || !currentNovel) {
@@ -4043,6 +4046,7 @@ export default function StudioWorkspace() {
         data-platform={platformCapabilities.native ? 'app' : 'web'}
         data-visual-viewport={platformCapabilities.visualViewport ? 'supported' : 'fallback'}
       >
+        {studioQuery.isRefetchError ? <AppStateRefreshNotice retry={studioQuery.refetch} busy={studioQuery.isFetching} /> : null}
         <div className="flex min-h-0 flex-1 flex-col lg:hidden">
           <StudioMobileHeader
             view={mobileView}

@@ -6,6 +6,7 @@ import { isExplicitNovelMetadataRequest, isNovelDirectionSetup, requiresManuscri
 import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
 import { BOOTSTRAP_NOVEL_SUMMARY } from '../../../shared/contracts/novel-publish.js'
 import { runtimeJson } from './runtime-common.js'
+import { lexAuthorWritingRequest } from './author-writing-request.js'
 import type { ToolContext } from './tools/types.js'
 
 const declined = (answer: string) => /(?:不要|不用|不需要|无需|暂不|先别|禁止|不必).{0,8}(?:初始化|创建作品|建书)|只讨论|先讨论|都不满意|都不合适|没有满意/u.test(answer)
@@ -31,12 +32,41 @@ export function novelSetupNotice(title: string): string {
   return `已保存《${title}》的书名、简介和标签。要不要开始写大纲？`
 }
 
+const novelSetupCoverSchema = z.enum(['missing', 'candidate', 'applied'])
+type NovelSetupCover = z.infer<typeof novelSetupCoverSchema>
+
 export const novelSetupRecapSchema = z.object({ title: z.string().min(1), summary: z.string().min(1),
-  tagNames: z.array(z.string().min(1)).min(1) }).strict()
+  tagNames: z.array(z.string().min(1)).min(1), cover: novelSetupCoverSchema.optional(), skipCover: z.literal(true).optional(),
+  skipFollowup: z.literal(true).optional() }).strict()
 export type NovelSetupRecap = z.infer<typeof novelSetupRecapSchema>
 
-export function formatNovelSetupRecap({ title, summary, tagNames }: NovelSetupRecap): string {
-  return `已保存《${title}》的作品信息。\n\n**简介**\n\n${summary}\n\n**标签** ${tagNames.join('、')}\n\n要不要开始写大纲？`
+export function getNovelSetupFollowup(recap?: Pick<NovelSetupRecap, 'cover' | 'skipCover' | 'skipFollowup'>) {
+  if (recap?.skipFollowup) return null
+  if (!recap?.skipCover && recap?.cover === 'candidate') return {
+    question: '要不要先从候选中选一张作品封面，还是直接开始写大纲？',
+    options: [{ label: '先展示已有的封面候选，让我选择' }, { label: '开始写大纲' }],
+  }
+  if (!recap?.skipCover && recap?.cover === 'missing') return {
+    question: '要不要先设置一下作品封面，还是直接开始写大纲？',
+    options: [{ label: '先讨论并拟定作品封面方向' }, { label: '开始写大纲' }],
+  }
+  return {
+    question: '要不要开始写大纲？',
+    options: [{ label: '开始写大纲' }, { label: '先讨论大纲方向' }],
+  }
+}
+
+export function formatNovelSetupRecap(recap: NovelSetupRecap): string {
+  const { title, summary, tagNames } = recap
+  const followup = getNovelSetupFollowup(recap)
+  return `已保存《${title}》的作品信息。\n\n**简介**\n\n${summary}\n\n**标签** ${tagNames.join('、')}${followup ? '\n\n' + followup.question : ''}`
+}
+
+export async function readNovelSetupCover(db: Prisma.TransactionClient, ctx: Pick<Subject, 'novelId' | 'userId'>,
+  coverAssetId: string | null): Promise<NovelSetupCover> {
+  if (coverAssetId) return 'applied'
+  const candidate = await db.coverAsset.findFirst({ where: { novelId: ctx.novelId, ownerUserId: ctx.userId }, select: { id: true } })
+  return candidate ? 'candidate' : 'missing'
 }
 
 export const NOVEL_SETUP_BLOCKED_NOTICE = '本轮无法保存作品信息，自动执行已停止。已保存的内容会保留。'
@@ -49,6 +79,16 @@ function latestDirectionChoice(choices: DirectionChoice[], structured: boolean) 
   return choices.filter(choice => choice.answer.trim() && (choice.purpose === 'novel_direction'
     // Frozen version-one tasks can still use their already accepted answers.
     || !structured && (/初始化|创建.{0,8}作品|建立.{0,8}作品|书名.{0,30}简介.{0,30}标签/u.test(choice.question) || declined(choice.answer)))).at(-1)
+}
+
+/** Applies only to presentation. Tool authority still comes from the task and author answer. */
+function setupPreferences(prompt: string | null, choice?: DirectionChoice) {
+  const authorTexts = [prompt, choice?.answer].filter((text): text is string => Boolean(text?.trim()))
+  const skipCover = authorTexts.some(text => /(?:先别|不要|不用|无需|不需要|不必|暂不|暂时不|跳过|不做|不设|不选)\s*(?:先|再)?(?:生成|制作|创建|设置|选择|应用|设计|处理|做|设|选|换|补|加)?(?:作品|小说)?封面|封面(?:先|暂时)?(?:不做|不设|不选|跳过|留空|以后再说)|\b(?:skip|no|do not (?:make|set|choose))\s+(?:the\s+)?cover\b/iu
+    .test(lexAuthorWritingRequest(text).masked))
+  return { ...(skipCover ? { skipCover: true as const } : {}),
+    ...(authorTexts.some(text => /(?:别|不要|请勿)(?:再)?(?:引导|提示|催促)(?:我)?(?:再)?(?:继续|追问)|(?:别|不要|请勿)(?:再)?(?:追问|问我|提问)|\b(?:no (?:more |further )?questions?|(?:don't|do not) ask (?:me )?(?:again|anything else))\b/iu
+      .test(lexAuthorWritingRequest(text).masked)) ? { skipFollowup: true as const } : {}) }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -105,15 +145,16 @@ async function assertDirectionChoice(db: Prisma.TransactionClient, ctx: ToolCont
   if (!latest || declined(latest.answer)) {
     throw new DataAccessError(409, 'NOVEL_DIRECTION_REQUIRED', '先向作者提供故事方向，并说明回答后会完善当前空作品的书名、简介与标签；收到实际回答后再初始化，未回答不代选。')
   }
+  return latest
 }
 
 export async function assertNovelInitializationDirection(db: Prisma.TransactionClient, ctx: ToolContext) {
   const original = await readOriginalTaskRequest(db, ctx)
   assertFreshPlanSetup(ctx, original.spec)
   if (!original.prompt) throw new DataAccessError(409, 'NOVEL_SETUP_AUTHORITY_REQUIRED', '当前作品初始化缺少可核实的原作者请求。')
-  if (isNovelDirectionSetup(original.prompt)) return assertDirectionChoice(db, ctx, original)
-  const choice = await readDirectionChoice(db, ctx, original)
+  const choice = isNovelDirectionSetup(original.prompt) ? await assertDirectionChoice(db, ctx, original) : await readDirectionChoice(db, ctx, original)
   if (choice && declined(choice.answer)) throw new DataAccessError(409, 'NOVEL_DIRECTION_REQUIRED', '作者已选择暂不初始化，未保存作品信息。')
+  return setupPreferences(original.prompt, choice)
 }
 
 /** Current saved fields plus this task's real successful writes. */
@@ -121,7 +162,9 @@ export async function readNovelInitializationCompletion(db: Prisma.TransactionCl
   { status: 'complete'; title: string; missing: []; recap?: NovelSetupRecap } | { status: 'declined' | 'incomplete'; missing: string[] }> {
   const original = await readOriginalTaskRequest(db, ctx)
   const [novel, observations] = await Promise.all([
-    db.novel.findFirst({ where: { id: ctx.novelId, authorId: ctx.userId }, select: { title: true, displayTitle: true, summary: true, tagNames: true } }),
+    db.novel.findFirst({ where: { id: ctx.novelId, authorId: ctx.userId }, select: {
+      title: true, displayTitle: true, summary: true, tagNames: true, coverAssetId: true,
+    } }),
     readSetupObservations(db, ctx, original, [...metadataWrites, 'ask_user']),
   ])
   const choices = observations.filter(observation => observation.name === 'ask_user')
@@ -140,8 +183,10 @@ export async function readNovelInitializationCompletion(db: Prisma.TransactionCl
     !novel?.summary.trim() || typeof writes.summary !== 'string' || writes.summary.trim() !== novel.summary ? '简介' : '',
     !novel?.tagNames.length || !Array.isArray(writes.tags) || JSON.stringify([...new Set(writes.tags.map(String).map(tag => tag.trim()))]) !== JSON.stringify(novel.tagNames) ? '标签' : '',
   ].filter(Boolean)
-  return !novel || missing.length ? { status: 'incomplete', missing } : { status: 'complete', title: novel.title, missing: [],
-    ...(options?.includeRecap ? { recap: { title: novel.title, summary: novel.summary, tagNames: novel.tagNames } } : {}) }
+  if (!novel || missing.length) return { status: 'incomplete', missing }
+  const recap = options?.includeRecap ? { title: novel.title, summary: novel.summary, tagNames: novel.tagNames,
+    cover: await readNovelSetupCover(db, ctx, novel.coverAssetId), ...setupPreferences(original.prompt, choice) } : undefined
+  return { status: 'complete', title: novel.title, missing: [], ...(recap ? { recap } : {}) }
 }
 
 async function hasSameTaskPlaceholderRename(db: Prisma.TransactionClient, ctx: ToolContext, original: Original, novel: NovelMetadata) {
@@ -156,26 +201,27 @@ async function hasSameTaskPlaceholderRename(db: Prisma.TransactionClient, ctx: T
   })
 }
 
-export async function assertNovelMetadataIntent(db: Prisma.TransactionClient, ctx: ToolContext, novel: NovelMetadata) {
+export async function assertNovelMetadataIntent(db: Prisma.TransactionClient, ctx: ToolContext, novel: NovelMetadata):
+  Promise<{ completeInitialization: boolean; canOmitTitle?: boolean } & ReturnType<typeof setupPreferences>> {
   const original = await readOriginalTaskRequest(db, ctx)
   assertFreshPlanSetup(ctx, original.spec)
   const spec = taskSpecSchema.safeParse(original.spec).data
   // Historical build tasks keep their frozen tool grant and observed metadata
   // CAS. Fresh initialization semantics never retrofit those contracts.
-  if (spec && !spec.scope.novelInitializationProtocol) return { completeInitialization: false }
+  if (spec && !spec.scope.novelInitializationProtocol) return { completeInitialization: false, ...setupPreferences(original.prompt) }
   const completeInitialization = spec?.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') === true
   if (original.prompt && isExplicitNovelMetadataRequest(original.prompt)) {
     const choice = await readDirectionChoice(db, ctx, original)
     if (choice && declined(choice.answer)) throw new DataAccessError(409, 'NOVEL_DIRECTION_REQUIRED', '作者已选择暂不初始化，未覆盖作品信息。')
-    return { completeInitialization }
+    return { completeInitialization, ...setupPreferences(original.prompt, choice) }
   }
   if (original.prompt && isNovelDirectionSetup(original.prompt) && spec?.scope.novelInitializationTarget !== 'existing') {
     const empty = isEmptyNovelMetadata(novel)
     const titleAlreadySaved = !empty && spec?.scope.novelInitializationTarget === 'empty' && await hasSameTaskPlaceholderRename(db, ctx, original, novel)
     if (empty || titleAlreadySaved) {
-      await assertDirectionChoice(db, ctx, original)
+      const choice = await assertDirectionChoice(db, ctx, original)
       // The durable reducer requires all three fields in the current operation.
-      return { completeInitialization, canOmitTitle: titleAlreadySaved && ctx.legacyBatchRenames !== undefined }
+      return { completeInitialization, canOmitTitle: titleAlreadySaved && ctx.legacyBatchRenames !== undefined, ...setupPreferences(original.prompt, choice) }
     }
   }
   throw new DataAccessError(409, 'NOVEL_SETUP_AUTHORITY_REQUIRED', '修改已有内容或已设置元信息的作品，需要作者明确的修改意图；方向选择不等于覆盖现有作品。')

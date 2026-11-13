@@ -6,7 +6,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import Button from '@/components/ui/Button'
 import TextInput from '@/components/ui/TextInput'
 import { useToast } from '@/components/ui/toast-context'
-import { authError, authRedirectPath, emailAddress, mainlandPhone, postAuth, type CaptchaAnswer, type CodeReceipt } from '@/features/account/auth-api'
+import { authError, authSuccessMessage, emailAddress, mainlandPhone, postAuth, type CaptchaAnswer, type CodeReceipt } from '@/features/account/auth-api'
 import VerificationCodeField, { AccountDialog } from '@/features/account/VerificationCodeField'
 import { hydrateReadingSync } from '@/features/home/reading-sync'
 import { useRegistrationPolicies } from '@/features/site-content/public-api'
@@ -17,7 +17,7 @@ import type { AuthSessionPayload } from '../../../shared/contracts'
 type AuthMode = 'login' | 'register' | 'recovery'
 type LoginMethod = 'password' | 'code'
 
-export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClose: () => void }) {
+export default function EmailAuthPage({ mode, onClose, redirectPath }: { mode: AuthMode; onClose: () => void; redirectPath: string }) {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
@@ -28,6 +28,7 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
   const [method, setMethod] = useState<LoginMethod>('password')
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
+  const [passwordFocused, setPasswordFocused] = useState(false)
   const [passwordConfirm, setPasswordConfirm] = useState('')
   const [passwordVisible, setPasswordVisible] = useState(false)
   const [code, setCode] = useState('')
@@ -51,9 +52,8 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
   const legalConsent = consentKey && acceptedPolicy === consentKey && policy?.registrationAvailable && policy.terms && policy.privacy
     ? { termsVersionId: policy.terms.id, privacyVersionId: policy.privacy.id }
     : undefined
-  const redirect = authRedirectPath(searchParams.get('redirect'))
   const referralCode = searchParams.get('ref')?.trim().toUpperCase()
-  const authQuery = new URLSearchParams({ redirect })
+  const authQuery = new URLSearchParams({ redirect: redirectPath })
   if (referralCode) authQuery.set('ref', referralCode)
   const loginPath = '/login?' + authQuery.toString()
   const registerPath = '/register?' + authQuery.toString()
@@ -103,12 +103,11 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
       else if (email) result = await postAuth('/email/login', { email, code })
       else result = await postAuth('/sms/login', { phone, code })
       setAuthenticated({ user: result.user, tokens: result.tokens })
-      toast.success(isRegister ? '注册成功。' : '登录成功。')
+      toast.success(authSuccessMessage(isRegister))
       void queryClient.invalidateQueries()
       void hydrateReadingSync().then(changed => {
         if (changed) void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
       })
-      navigate(redirect, { replace: true })
     } catch (error) {
       const message = authError(error, '暂时无法完成，请稍后重试。')
       setError(message)
@@ -118,16 +117,12 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
     }
   }
 
-  if (isAuthenticated && !isRecovery) {
-    return (
-      <AccountDialog title="你已经登录" onClose={onClose}>
-        <Button variant="primary" className="w-full" onClick={() => navigate(redirect, { replace: true })}>继续前往</Button>
-      </AccountDialog>
-    )
-  }
-
   return (
-    <AccountDialog brand title={isRegister ? '创建账户' : isRecovery ? '找回密码' : '登录启创墨域'} onClose={() => { if (!submitting) onClose() }}>
+    <AccountDialog
+      title={isRegister ? '创建账户' : isRecovery ? '找回密码' : '登录启创墨域'}
+      mascotPose={usesPassword && passwordFocused ? 'privacy' : 'welcome'}
+      onClose={() => { if (!submitting) onClose() }}
+    >
       {mode === 'login' && <div className="mb-6 flex gap-5 border-b border-[var(--border-subtle)]" aria-label="登录方式">
         {(['password', 'code'] as const).map(item => (
           <button key={item} type="button" aria-pressed={item === method} disabled={submitting}
@@ -178,6 +173,8 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
             </button>}
             value={password}
             onChange={event => setPassword(event.target.value)}
+            onFocus={() => setPasswordFocused(true)}
+            onBlur={() => setPasswordFocused(false)}
             required
             disabled={submitting}
             minLength={isRecovery ? 6 : undefined}
@@ -187,7 +184,9 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
         </div>}
         {isRecovery && <label className="block space-y-1.5 text-sm font-medium">
           <span>再次输入新密码</span>
-          <TextInput wrapperAs="span" type="password" autoComplete="new-password" placeholder="请再次输入新密码" value={passwordConfirm} onChange={event => setPasswordConfirm(event.target.value)} required disabled={submitting} minLength={6} maxLength={128} />
+          <TextInput wrapperAs="span" type="password" autoComplete="new-password" placeholder="请再次输入新密码" value={passwordConfirm}
+            onChange={event => setPasswordConfirm(event.target.value)} onFocus={() => setPasswordFocused(true)} onBlur={() => setPasswordFocused(false)}
+            required disabled={submitting} minLength={6} maxLength={128} />
         </label>}
         {isRegister && (policy?.registrationAvailable && consentKey ? (
           <div className="flex items-start gap-2.5 text-left text-sm leading-6">

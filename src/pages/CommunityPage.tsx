@@ -1,18 +1,15 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BarChart3, Flame } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
-import { useDevice } from '@/components/layout/device-context'
-import AppState from '@/components/ui/AppState'
-import { PostListSkeleton } from '@/components/ui/Skeleton'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { useToast } from '@/components/ui/toast-context'
-import { createPost, getPostStats, listPosts, listTopics } from '@/features/community/api'
+import { createPost, listPosts, listTopics } from '@/features/community/api'
+import { CommunityFeedRows, CommunityFeedSkeleton, CommunityPageLayout } from '@/features/community/components/CommunityPageLayout'
 import PostCard from '@/features/community/components/PostCard'
 import PostComposer from '@/features/community/components/PostComposer'
 import TopicChannelBar, { type CommunityTopic } from '@/features/community/components/TopicChannelBar'
 import { readShareDraftFromState, type CommunityShareDraft } from '@/features/community/share'
-import { formatRelativeTime } from '@/features/community/utils'
 import { cn } from '@/lib/utils'
 
 const feedModes = [
@@ -20,21 +17,18 @@ const feedModes = [
   { id: 'latest', label: '最新' },
 ] as const
 
-/**
- * 社区页（方案 2.5.4 / 8.2）：
- * - 手机：横滑话题频道 + 发帖入口 + 单列帖子流，发帖为全屏编辑页
- * - 平板：左侧话题列表 200px + 双列帖子流
- * - 电脑：左话题 + 中单列(max 640px) + 右热门话题/社区数据三栏
- */
+type FeedMode = (typeof feedModes)[number]['id']
+
 export default function CommunityPage() {
-  const { isMobile, isTablet } = useDevice()
   const queryClient = useQueryClient()
   const toast = useToast()
   const location = useLocation()
   const navigate = useNavigate()
-  const [activeTopicId, setActiveTopicId] = useState('all')
-  const [activeFeedMode, setActiveFeedMode] = useState<(typeof feedModes)[number]['id']>('recommended')
-  // 从作品页/作者页带入的分享草稿：捕获后立即清掉 history state，避免刷新/返回重复弹出
+  const search = new URLSearchParams(location.search)
+  const activeTopicId = search.get('topic') || 'all'
+  const activeFeedMode: FeedMode = search.get('sort') === 'latest' ? 'latest' : 'recommended'
+  const feedRef = useRef<HTMLDivElement>(null)
+  const feedSentinelRef = useRef<HTMLDivElement>(null)
   const [shareDraft, setShareDraft] = useState<CommunityShareDraft | null>(() =>
     readShareDraftFromState(location.state),
   )
@@ -43,13 +37,23 @@ export default function CommunityPage() {
     const draft = readShareDraftFromState(location.state)
     if (draft) {
       setShareDraft(draft)
-      navigate(location.pathname, { replace: true, state: null })
+      navigate({ pathname: location.pathname, search: location.search }, { replace: true, state: null })
     }
-  }, [location.pathname, location.state, navigate])
+  }, [location.pathname, location.search, location.state, navigate])
 
-  // 话题筛选走后端 topicId 过滤 + hasMore 翻页（方案 6.2）；
-  // 排序服务端化（方案 18 §1）：推荐流用快照式游标，同一轮浏览榜单冻结不跳位，刷新重算
-  // 每页 10 条 + 上拉自动加载（参照 X 等社交媒体的无限流体验）
+  const selectFeed = (mode: FeedMode, topicId: string) => {
+    const nextSearch = new URLSearchParams(location.search)
+    if (topicId === 'all') nextSearch.delete('topic')
+    else nextSearch.set('topic', topicId)
+    if (mode === 'recommended') nextSearch.delete('sort')
+    else nextSearch.set('sort', mode)
+    if (mode !== activeFeedMode || topicId !== activeTopicId) {
+      navigate({ pathname: location.pathname, search: nextSearch.toString() }, { replace: true })
+    }
+    // AppShell owns the scrollable element and restores it when the user returns from a post.
+    feedRef.current?.closest<HTMLElement>('[data-app-main-scroll]')?.scrollTo({ top: 0 })
+  }
+
   const postsQuery = useInfiniteQuery({
     queryKey: ['community', 'posts', activeTopicId, activeFeedMode],
     queryFn: ({ pageParam }) =>
@@ -71,265 +75,130 @@ export default function CommunityPage() {
 
   const createPostMutation = useMutation({
     mutationFn: createPost,
-    onSuccess: async () => {
+    onSuccess: () => {
       toast.success('发布成功，你的讨论已上线')
-      setShareDraft(null)
-      // 发帖后切到「最新」并回顶：自己的新帖立刻可见，推荐流不做假置顶（方案 18 §1.4）
-      setActiveFeedMode('latest')
-      window.scrollTo({ top: 0, behavior: 'smooth' })
-      await queryClient.invalidateQueries({ queryKey: ['community', 'posts'] })
+      if (feedRef.current) {
+        setShareDraft(null)
+        // 显示最新的全部讨论，让不属于原筛选话题的新帖也能看到。
+        selectFeed('latest', 'all')
+      }
+      void queryClient.invalidateQueries({ queryKey: ['community', 'posts'] })
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : '发布失败，请稍后再试')
     },
   })
 
-  const rawPosts = useMemo(() => postsQuery.data?.pages.flatMap((page) => page.items) ?? [], [postsQuery.data])
+  const posts = useMemo(() => postsQuery.data?.pages.flatMap((page) => page.items) ?? [], [postsQuery.data])
 
-  // 社区面板与「全部」计数必须用未过滤的准确总数：独立 stats 接口（count 口径），
-  // 不随当前分页/频道筛选跳动；queryKey 以 ['community','posts'] 开头，发帖/删帖等现有 invalidate 会顺带刷新
-  const statsQuery = useQuery({
-    queryKey: ['community', 'posts', 'stats'],
-    queryFn: getPostStats,
-    staleTime: 60_000,
-  })
-  const totalPosts =
-    statsQuery.data?.totalPosts ?? postsQuery.data?.pages[0]?.pagination.total ?? rawPosts.length
-
-  const topics = useMemo<CommunityTopic[]>(() => {
-    const items = topicsQuery.data?.items ?? []
-
-    return [
-      // 「全部」用未过滤的帖子总数（allTotalQuery），不随当前频道筛选跳动
-      { id: 'all', name: '全部', slug: 'all', postCount: totalPosts },
-      ...items.map((topic) => ({ id: topic.id, name: topic.name, slug: topic.slug, postCount: topic.postCount })),
-    ]
-  }, [topicsQuery.data, totalPosts])
-
-  const hotTopics = useMemo(
-    () => topics.filter((topic) => topic.id !== 'all').sort((a, b) => b.postCount - a.postCount).slice(0, 5),
-    [topics],
-  )
-
-  // 排序已全部服务端化，前端直接按服务端顺序展示，不再二次重排
-  const posts = rawPosts
-
-  const communityStats = useMemo(
+  const topics = useMemo<CommunityTopic[]>(
     () => [
-      { id: 'total', label: '讨论总数', value: `${totalPosts}` },
-      { id: 'linked', label: '关联作品', value: `${statsQuery.data?.linkedNovelCount ?? 0}` },
-      {
-        id: 'recent',
-        label: '最近活跃',
-        value: statsQuery.data?.lastPostAt ? formatRelativeTime(statsQuery.data.lastPostAt) : '刚刚',
-      },
+      { id: 'all', name: '全部' },
+      ...(topicsQuery.data?.items ?? []),
     ],
-    [totalPosts, statsQuery.data],
+    [topicsQuery.data],
   )
 
-  // 上拉自动加载更多：哨兵进入视口（提前 240px）即翻下一页，按钮保留作兑底
-  const feedSentinelRef = useRef<HTMLDivElement | null>(null)
-  const { hasNextPage, isFetchingNextPage, fetchNextPage } = postsQuery
+  const { hasNextPage, isFetching, isFetchNextPageError, fetchNextPage } = postsQuery
   useEffect(() => {
     const element = feedSentinelRef.current
-    if (!element || !hasNextPage) {
+    if (!element || !hasNextPage || isFetching || isFetchNextPageError || typeof IntersectionObserver === 'undefined') {
       return
     }
+    const root = element.closest('[data-app-main-scroll]')
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting) && !isFetchingNextPage) {
-          void fetchNextPage()
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.unobserve(element)
+          void fetchNextPage({ cancelRefetch: false })
         }
       },
-      { rootMargin: '240px 0px' },
+      { root, rootMargin: '240px 0px' },
     )
     observer.observe(element)
     return () => observer.disconnect()
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage])
+  }, [activeFeedMode, activeTopicId, hasNextPage, isFetching, isFetchNextPageError, fetchNextPage])
 
-  if (postsQuery.isLoading) {
-    return <PostListSkeleton />
+  const selectTopic = (topicId: string) => {
+    if (topicId !== activeTopicId) selectFeed(activeFeedMode, topicId)
   }
 
-  if (postsQuery.isError) {
-    return (
-      <AppState
-        tone="error"
-        title="社区内容暂时没有打开"
-        description={postsQuery.error instanceof Error ? postsQuery.error.message : '社区内容暂时没有加载出来。'}
-        primaryAction={{ label: '重新加载', onClick: () => void postsQuery.refetch() }}
-        className="min-h-[360px]"
-      />
-    )
-  }
-
-  const sortTabs = (
-    <div className="inline-flex rounded-[var(--radius-pill)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1">
-      {feedModes.map((mode) => (
-        <button
-          key={mode.id}
-          type="button"
-          onClick={() => setActiveFeedMode(mode.id)}
-          className={cn(
-            'press-feedback rounded-[var(--radius-pill)] px-4 py-1.5 text-sm transition-colors',
-            activeFeedMode === mode.id
-              ? 'bg-[var(--color-brand)] font-medium text-white'
-              : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-          )}
-        >
-          {mode.label}
-        </button>
-      ))}
-    </div>
-  )
-
-  const loadMoreButton = postsQuery.hasNextPage ? (
-    <div className="flex justify-center pt-1">
-      <button
-        type="button"
-        disabled={postsQuery.isFetchingNextPage}
-        onClick={() => void postsQuery.fetchNextPage()}
-        className="press-feedback rounded-[var(--radius-pill)] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-6 py-2 text-sm text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-60"
-      >
-        {postsQuery.isFetchingNextPage ? '正在加载…' : '加载更多讨论'}
-      </button>
-    </div>
-  ) : null
-
-  const postFeed = (twoColumns = false) =>
-    posts.length > 0 ? (
-      <>
-        <div className={cn(twoColumns ? 'grid grid-cols-2 items-start gap-4' : 'space-y-4')}>
-          {posts.map((post) => (
-            <PostCard key={post.id} post={post} />
+  return (
+    <CommunityPageLayout
+      toolbar={(
+        <div className="grid w-full grid-cols-2 md:w-40" role="group" aria-label="讨论排序">
+          {feedModes.map((mode) => (
+            <button
+              key={mode.id}
+              type="button"
+              aria-pressed={activeFeedMode === mode.id}
+              onClick={() => {
+                if (mode.id !== activeFeedMode) selectFeed(mode.id, activeTopicId)
+              }}
+              className={cn(
+                'relative min-w-11 px-2 text-sm font-semibold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-[3px] after:rounded-full md:after:inset-x-4',
+                activeFeedMode === mode.id
+                  ? 'text-[var(--text-primary)] after:bg-[var(--color-brand)]'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+              )}
+            >
+              {mode.label}
+            </button>
           ))}
         </div>
-        {loadMoreButton}
-        {/* 无限流哨兵：进入视口即自动翻下一页 */}
-        {postsQuery.hasNextPage ? <div ref={feedSentinelRef} aria-hidden="true" className="h-1" /> : null}
-      </>
-    ) : (
-      <AppState
-        tone="empty"
-        title="这个话题下还没有新的讨论"
-        description="先看看其他话题，或者直接发出你的第一条想法。"
-        className="min-h-[260px]"
+      )}
+      topicRail={<TopicChannelBar topics={topics} activeTopicId={activeTopicId} onChange={selectTopic} />}
+    >
+      <PostComposer
+        isSubmitting={createPostMutation.isPending}
+        initialShare={shareDraft}
+        onSubmit={async (payload) => {
+          try {
+            await createPostMutation.mutateAsync(payload)
+            return true
+          } catch {
+            return false
+          }
+        }}
       />
-    )
-
-  const composer = (
-    <PostComposer
-      isSubmitting={createPostMutation.isPending}
-      initialShare={shareDraft}
-      onSubmit={(payload) => createPostMutation.mutate(payload)}
-    />
-  )
-
-  // 手机端：横滑频道 + 发帖入口 + 单列流
-  if (isMobile) {
-    return (
-      <div className="space-y-4">
-        <TopicChannelBar topics={topics} activeTopicId={activeTopicId} onChange={setActiveTopicId} variant="rail" />
-        {composer}
-        <div className="flex items-center justify-between">
-          {sortTabs}
-          <span className="text-xs text-[var(--text-tertiary)]">{totalPosts} 条讨论</span>
-        </div>
-        {postFeed()}
+      <div ref={feedRef} data-community-feed>
+        {postsQuery.isRefetchError ? <AppStateRefreshNotice retry={postsQuery.refetch} busy={isFetching} /> : null}
+        {postsQuery.isPending ? (
+          <CommunityFeedSkeleton />
+        ) : postsQuery.isError && !postsQuery.data ? (
+          <AppState
+            compact
+            tone="error"
+            title="社区内容暂时没有打开"
+            description="请检查连接后重试。"
+            primaryAction={{ label: '重新加载', onClick: () => postsQuery.refetch(), busy: isFetching }}
+          />
+        ) : posts.length > 0 ? (
+          <CommunityFeedRows>
+            {posts.map((post) => <PostCard key={post.id} post={post} timeline />)}
+          </CommunityFeedRows>
+        ) : (
+          <AppState
+            compact
+            scene="welcome"
+            title={activeTopicId === 'all' ? '还没有讨论' : '这个话题还没有讨论'}
+            description="可以在上方发起讨论。"
+          />
+        )}
+        {hasNextPage ? (
+          <div className="border-t border-[var(--border-subtle)] px-3 py-3 text-center">
+            <button
+              type="button"
+              disabled={isFetching}
+              onClick={() => void fetchNextPage({ cancelRefetch: false })}
+              className="press-feedback min-h-10 rounded-full px-4 text-sm text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-60"
+            >
+              {postsQuery.isFetchingNextPage ? '正在加载…' : isFetchNextPageError ? '重试加载更多' : '加载更多讨论'}
+            </button>
+            <div ref={feedSentinelRef} aria-hidden className="h-px" />
+          </div>
+        ) : null}
       </div>
-    )
-  }
-
-  // 平板端：左话题 200px + 右双列帖子流
-  if (isTablet) {
-    return (
-      <div className="grid grid-cols-[200px_minmax(0,1fr)] gap-5">
-        <aside className="sticky top-[calc(var(--app-header-height)+8px)] self-start rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-2 shadow-[var(--shadow-card)]">
-          <p className="px-3 pb-2 pt-2 text-xs font-medium text-[var(--text-tertiary)]">话题频道</p>
-          <TopicChannelBar topics={topics} activeTopicId={activeTopicId} onChange={setActiveTopicId} variant="sidebar" />
-        </aside>
-        <div className="space-y-4">
-          {composer}
-          <div className="flex items-center justify-between">
-            {sortTabs}
-            <span className="text-xs text-[var(--text-tertiary)]">{totalPosts} 条讨论</span>
-          </div>
-          {postFeed(true)}
-        </div>
-      </div>
-    )
-  }
-
-  // 电脑端：左话题 + 中单列(640px) + 右推荐面板
-  return (
-    <div className="grid grid-cols-[200px_minmax(0,1fr)_300px] gap-6">
-      <aside className="sticky top-[calc(var(--app-header-height)+8px)] self-start rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-2 shadow-[var(--shadow-card)]">
-        <p className="px-3 pb-2 pt-2 text-xs font-medium text-[var(--text-tertiary)]">话题频道</p>
-        <TopicChannelBar topics={topics} activeTopicId={activeTopicId} onChange={setActiveTopicId} variant="sidebar" />
-      </aside>
-      
-      <div className="mx-auto w-full max-w-[640px] space-y-4">
-        {composer}
-        <div className="flex items-center justify-between">
-          {sortTabs}
-          <span className="text-xs text-[var(--text-tertiary)]">{totalPosts} 条讨论</span>
-        </div>
-        {postFeed()}
-      </div>
-
-      <aside className="sticky top-[calc(var(--app-header-height)+8px)] space-y-4 self-start">
-        <section className="rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-4 shadow-[var(--shadow-card)]">
-          <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
-            <Flame className="h-4 w-4 text-[var(--color-brand)]" />
-            热门话题 Top 5
-          </div>
-          <div className="mt-3 space-y-1">
-            {hotTopics.length > 0 ? (
-              hotTopics.map((topic, index) => (
-                <button
-                  key={topic.id}
-                  type="button"
-                  onClick={() => setActiveTopicId(topic.id)}
-                  className={cn(
-                    'press-feedback flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2.5 py-2 text-left text-sm transition-colors',
-                    activeTopicId === topic.id
-                      ? 'bg-[var(--color-brand-soft)] text-[var(--color-brand)]'
-                      : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]',
-                  )}
-                >
-                  <span
-                    className={cn(
-                      'w-4 text-center text-xs font-semibold',
-                      index < 3 ? 'text-[var(--color-brand)]' : 'text-[var(--text-tertiary)]',
-                    )}
-                  >
-                    {index + 1}
-                  </span>
-                  <span className="min-w-0 flex-1 line-clamp-1">{topic.name}</span>
-                  <span className="text-xs text-[var(--text-tertiary)]">{topic.postCount}</span>
-                </button>
-              ))
-            ) : (
-              <p className="px-2 py-3 text-xs text-[var(--text-tertiary)]">话题正在聚集中。</p>
-            )}
-          </div>
-        </section>
-
-        <section className="rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-4 shadow-[var(--shadow-card)]">
-          <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
-            <BarChart3 className="h-4 w-4 text-[var(--color-brand)]" />
-            社区数据
-          </div>
-          <div className="mt-3 grid grid-cols-3 gap-2">
-            {communityStats.map((item) => (
-              <div key={item.id} className="rounded-[var(--radius-md)] bg-[var(--surface-muted)] px-2 py-3 text-center">
-                <p className="truncate text-sm font-semibold text-[var(--text-primary)]">{item.value}</p>
-                <p className="mt-1 text-[11px] text-[var(--text-tertiary)]">{item.label}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-      </aside>
-    </div>
+    </CommunityPageLayout>
   )
 }

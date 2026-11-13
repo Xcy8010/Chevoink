@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import AuthPage from '../../src/app/routes/AuthPage'
 import AppRouter from '../../src/app/AppRouter'
+import AuthPromptDialog from '../../src/components/ui/AuthPromptDialog'
 import { useShellStore } from '../../src/store/useShellStore'
 import type { AuthSessionPayload, User } from '../../shared/contracts'
 
@@ -202,15 +203,81 @@ it.each([
   expect(screen.queryByRole('dialog')).toBeNull()
 })
 
-it.each(['/login', '/register'])('shows the normal signed-in dialog at %s', async path => {
-  mocks.requestJson.mockImplementation(async request => request === '/api/auth/options' ? { emailAuthEnabled: true } : { legal: published })
+it.each(['/login', '/register'])('redirects a signed-in session at %s and still requires email binding', async path => {
   mountApp(path, phoneOnlyUser)
-  const notice = await screen.findByRole('dialog', { name: '你已经登录' })
-  expect(screen.getAllByRole('dialog')).toEqual([notice])
-  expect(screen.getByText('首页内容')).toBeTruthy()
-  fireEvent.click(within(notice).getByRole('button', { name: '继续前往' }))
-  expect(screen.getByText('个人中心内容')).toBeTruthy()
-  expect(screen.getByRole('dialog', { name: '请先绑定邮箱' })).toBeTruthy()
+  expect(await screen.findByText('个人中心内容')).toBeTruthy()
+  expect(window.location.pathname).toBe('/me')
+  expect(window.history.state.idx).toBe(0)
+  expect(screen.getAllByRole('dialog')).toEqual([screen.getByRole('dialog', { name: '请先绑定邮箱' })])
+  expect(mocks.requestJson).not.toHaveBeenCalled()
+  expect(mocks.toastSuccess).not.toHaveBeenCalled()
+})
+
+it('returns a restored session to its full destination and still requires studio phone verification', async () => {
+  const target = '/studio/novel/n1?panel=draft#chapter-2'
+  act(() => useShellStore.setState({ authStatus: 'checking' }))
+  mountApp('/login?redirect=' + encodeURIComponent(target))
+  expect(mocks.requestJson).not.toHaveBeenCalled()
+  expect(screen.queryByRole('dialog')).toBeNull()
+  act(() => useShellStore.getState().syncSessionUser({ user: { ...legacyUser, emailVerified: true, studioPhoneVerificationRequired: true } }))
+  expect(await screen.findByRole('dialog', { name: '验证手机号' })).toBeTruthy()
+  expect(window.location.pathname + window.location.search + window.location.hash).toBe(target)
+  expect(screen.queryByText('创作内容')).toBeNull()
+  expect(mocks.toastSuccess).not.toHaveBeenCalled()
+})
+
+it.each([
+  'https://external.invalid/path',
+  '//external.invalid/path',
+  String.raw`/\external.invalid/path`,
+  '/.//external.invalid/path',
+  '/login',
+  '/REGISTER///?redirect=%2Fme#login',
+  '/community/../login',
+  '/%6cogin',
+])('falls back to the personal center for the return target %s', async target => {
+  mountApp('/login?redirect=' + encodeURIComponent(target), { ...legacyUser, emailVerified: true })
+  expect(await screen.findByText('个人中心内容')).toBeTruthy()
+  expect(window.location.pathname + window.location.search + window.location.hash).toBe('/me')
+  expect(screen.queryByRole('dialog')).toBeNull()
+})
+
+it.each([
+  { emailAuthEnabled: true, registered: false, endpoint: '/api/auth/login' },
+  { emailAuthEnabled: false, registered: false, endpoint: '/api/auth/login' },
+  { emailAuthEnabled: true, registered: true, endpoint: '/api/auth/email/register' },
+  { emailAuthEnabled: false, registered: true, endpoint: '/api/auth/sms/register' },
+])('returns after $endpoint with one success toast and no confirmation dialog (email auth $emailAuthEnabled)', async ({
+  emailAuthEnabled, registered, endpoint,
+}) => {
+  const target = '/administrator?tab=recent#latest'
+  mocks.requestJson.mockImplementation(async path => {
+    if (path === '/api/auth/options') return { emailAuthEnabled }
+    if (path === '/api/auth/legal-policies') return { legal: published }
+    if (path === endpoint) return {
+      user: { ...legacyUser, emailAuthEnabled, emailVerified: true },
+      tokens: { accessToken: 'access', refreshToken: 'refresh', expiresInSeconds: 3600 },
+    }
+    throw new Error('unexpected auth operation')
+  })
+  mountApp((registered ? '/register' : '/login') + '?redirect=' + encodeURIComponent(target))
+  const form = await screen.findByRole('dialog', { name: registered ? '创建账户' : '登录启创墨域' })
+  const fields = within(form)
+  const identifier = emailAuthEnabled
+    ? fields.getByLabelText(registered ? '邮箱' : '邮箱或手机号')
+    : fields.getByPlaceholderText('手机号')
+  fireEvent.change(identifier, { target: { value: emailAuthEnabled ? 'reader@example.com' : '13800000000' } })
+  const credential = registered ? fields.getByPlaceholderText('6 位验证码')
+    : emailAuthEnabled ? fields.getByLabelText('登录密码') : fields.getByPlaceholderText('密码')
+  fireEvent.change(credential, { target: { value: '123456' } })
+  if (registered || !emailAuthEnabled) fireEvent.click(await fields.findByRole('checkbox', { name: /我已阅读并同意/ }))
+  fireEvent.click(fields.getByRole('button', { name: registered ? emailAuthEnabled ? '注册' : '完成注册' : '登录', exact: true }))
+
+  expect(await screen.findByText('普通页面内容')).toBeTruthy()
+  expect(window.location.pathname + window.location.search + window.location.hash).toBe(target)
+  expect(window.history.state.idx).toBe(0)
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(mocks.toastSuccess).toHaveBeenCalledExactlyOnceWith(registered ? '注册成功。你可以稍后完善个人资料。' : '登录成功。')
 })
 
 it.each([['登录', '登录启创墨域'], ['注册', '创建账户']])('opens %s over the page that launched it', async (linkName, title) => {
@@ -224,6 +291,24 @@ it.each([['登录', '登录启创墨域'], ['注册', '创建账户']])('opens %
   expect(window.location.pathname).toBe('/me')
   expect(screen.getByText('个人中心内容')).toBe(background)
   expect(screen.queryByRole('dialog')).toBeNull()
+})
+
+it('forwards the current route including its fragment from the login prompt', () => {
+  const close = vi.fn()
+  function Destination() {
+    const location = useLocation()
+    return <output>{location.pathname + location.search}</output>
+  }
+  const target = '/reader/story?mode=scroll#paragraph-3'
+  render(<MemoryRouter initialEntries={[target]}>
+    <Destination />
+    <AuthPromptDialog open onClose={close} />
+  </MemoryRouter>)
+  const prompt = screen.getByRole('dialog', { name: '登录后继续' })
+  expect(prompt.getAttribute('aria-describedby')).toBe(within(prompt).getByText(/登录或注册后/).id)
+  fireEvent.click(within(prompt).getByRole('button', { name: '去登录' }))
+  expect(screen.getByText('/login?redirect=' + encodeURIComponent(target))).toBeTruthy()
+  expect(close).toHaveBeenCalledTimes(1)
 })
 
 it('restores reading progress after an existing user without email logs in', async () => {

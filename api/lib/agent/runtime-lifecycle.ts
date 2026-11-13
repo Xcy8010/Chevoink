@@ -15,9 +15,10 @@ import { readSavedWritingPresentation, shouldUseSavedWritingPresentation, savedC
 import { assertLimitedWritingDelivery, limitedWritingDeliverySchema } from './writing-delivery-limitations.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { originalPrompt } from './original-request.js'
-import { allowsNextPrompt, selectCompletedNextPrompt } from './next-prompt.js'
+import { allowsNextPrompt, LIMITED_COMPLETED_NEXT_PROMPT, selectInteractiveNextPrompt } from './next-prompt.js'
 import { QUESTION_CLOSING_ROOT_STATUS, QUESTION_WAITING_ROOT_STATUS } from './run-slots.js'
-import { novelSetupFollowup, recordCompletedQuestionOffer } from './runtime-question-followup.js'
+import { recordCompletedQuestionOffer } from './runtime-question-followup.js'
+import { getNovelSetupFollowup, novelSetupRecapSchema } from './novel-initialization.js'
 
 const liveStatuses = ['queued', 'running', 'awaiting_approval'] as const
 const maxEpoch = 9223372036854775807n
@@ -49,7 +50,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     await assertPinnedChildCompletion(tx, root.id)
     const facts = z.object({ blockers: z.array(z.unknown()), candidateHash: z.string(), limitedWritingDelivery: limitedWritingDeliverySchema.optional(),
       postconditionChecks: z.array(z.object({ code: z.string(), status: z.string(), evidence: z.unknown() })),
-      effects: z.array(z.object({ operationId: z.string(), action: z.string(), outcome: z.string() })),
+      effects: z.array(z.object({ operationId: z.string(), action: z.string(), outcome: z.string(), resultHash: z.string() })),
       terminalReason: z.enum(['question_timeout', 'question_cancelled', 'question_unanswered']).optional() }).parse(evidence.snapshot)
     const { frame, configuration, originalRequest, originalSpec } = await readExecutionStateInTransaction(tx, root.id)
     const candidate = frame.state.messages.at(-1)
@@ -73,12 +74,18 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     const setup = candidate.localCompletion?.kind === 'novel_setup' ? candidate.localCompletion : null
     const metadataSaved = facts.postconditionChecks.some(check => check.code === 'NOVEL_METADATA_INITIALIZED' && check.status === 'passed'
       && z.object({ status: z.literal('complete') }).safeParse(check.evidence).success)
-    const questionFollowup = setup && !goal && !parent && !limited && spec.data?.scope.agentQuestionProtocol === 2 && metadataSaved
-      && facts.effects.some(effect => effect.operationId === setup.operationId && effect.outcome === 'succeeded'
-        && (effect.action === 'novel_create' || effect.action === 'novel_update_meta')) ? novelSetupFollowup : null
+    const setupEffect = setup && metadataSaved && facts.effects.find(effect => effect.operationId === setup.operationId && effect.outcome === 'succeeded'
+      && (effect.action === 'novel_create' || effect.action === 'novel_update_meta'))
+    const setupReceipt = setupEffect && await tx.agentEffectReceipt.findUnique({ where: { operationId: setupEffect.operationId }, select: { result: true } })
+    const setupProof = z.object({ toolResult: z.object({ novelSetupRecap: novelSetupRecapSchema.optional() }) }).safeParse(setupReceipt && setupReceipt.result)
+    const setupRecap = setupEffect && setupReceipt && runtimeJson(setupReceipt.result).hash === setupEffect.resultHash && setupProof.success
+      ? setupProof.data.toolResult.novelSetupRecap : null
+    const setupFollowup = setupRecap !== null ? getNovelSetupFollowup(setupRecap) : null
+    const questionFollowup = !goal && !parent && !limited && spec.data?.scope.agentQuestionProtocol === 2 ? setupFollowup : null
     let nextPrompt: string | undefined
-    if (configuration.nextPromptMarker && !candidate.localCompletion && !goal && !parent && !limited && allowsNextPrompt(originalPrompt(originalRequest))) {
-      if (spec.success && !spec.data.scope.writing?.titleAndBodyOnly) {
+    const offersNextPrompt = configuration.nextPromptOnCompletion || configuration.nextPromptMarker
+    if (offersNextPrompt && !facts.terminalReason && !goal && !parent && !setupRecap?.skipFollowup && allowsNextPrompt(originalPrompt(originalRequest))) {
+      if (spec.success) {
         const saved = z.object({
           deliverables: z.array(z.object({ kind: z.enum(['plan', 'chapter']), title: z.string(), status: z.string(), characters: z.number(), sourceOperationId: z.string() })),
           effects: z.array(z.object({ operationId: z.string(), action: z.string(), outcome: z.string() })),
@@ -90,7 +97,9 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
           return item.status === 'current' && item.characters > 0 && (item.kind === 'plan' ? action === 'plan_save'
             : action === 'chapter_create' || action === 'chapter_write' || action === 'chapter_append' || action === 'chapter_edit_range')
         }) : undefined
-        nextPrompt = selectCompletedNextPrompt(candidate.content, candidate, deliverable)
+        nextPrompt = setupFollowup?.options[0].label ?? (limited
+          ? LIMITED_COMPLETED_NEXT_PROMPT
+          : selectInteractiveNextPrompt(candidate.content, candidate, deliverable))
       }
     }
     const operation = await prepareOperationInTransaction(tx, lease, {
@@ -103,7 +112,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
       async () => runtimeJson({ version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash,
         candidateHash: facts.candidateHash, evidenceHash: evidence.snapshotHash, evidence: evidence.snapshot,
         ...(questionFollowup ? { questionFollowup } : {}),
-        ...(configuration.nextPromptMarker ? { nextPrompt: nextPrompt ?? null } : {}),
+        ...(offersNextPrompt ? { nextPrompt: nextPrompt ?? null } : {}),
         ...(limited ? { limitedWritingDelivery: limited, outcome: limited.outcome } : {}),
         ...(chapterPresentation ? { chapterPresentation } : {}) }).value)
     const next = await saveExecutionStateInTransaction(tx, lease, { ...expected,

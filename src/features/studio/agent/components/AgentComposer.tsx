@@ -441,8 +441,10 @@ export function AgentComposer({
   const showContinue = !submitting && Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
   const canContinue = showContinue && !running && !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0
   const showPlaceholder = !composing && (submitting || (isComposerBlank(prompt) && references.length === 0))
-  const offeredNextPrompt = showPlaceholder && !running && !stopping && !disabled && !sending && !voiceActive &&
-    !pendingVoice && !showContinue && !goalMode && !goalActive && uploading === 0 && attachments.length === 0 ? nextPrompt : undefined
+  const offeredNextPrompt = !composing && !running && !stopping && !disabled && !sending && !voiceActive &&
+    !pendingVoice && !showContinue && !goalMode && !goalActive && uploading === 0 && nextPrompt &&
+    prompt !== nextPrompt && !prompt.endsWith('\n' + nextPrompt) ? nextPrompt : undefined
+  const showNextPromptInPlaceholder = Boolean(offeredNextPrompt && showPlaceholder && attachments.length === 0)
   const sendLock = useRef(new Set<string>())
   const currentScope = useRef(scope)
   const focusAfterSend = useRef<string | null>(null)
@@ -735,16 +737,20 @@ export function AgentComposer({
   }
 
   function acceptNextPrompt() {
-    if (!offeredNextPrompt || composingRef.current) return
-    caretAfterDraft.current = offeredNextPrompt.length
-    setComposerContent(offeredNextPrompt, [])
+    const editor = editorRef.current
+    if (!offeredNextPrompt || composingRef.current || !editor) return
+    const current = readComposerContent(editor, references)
+    const hasDraft = !isComposerBlank(current.draft) || current.references.length > 0
+    const draft = hasDraft ? `${current.draft}\n${offeredNextPrompt}` : offeredNextPrompt
+    caretAfterDraft.current = draft.length
+    setComposerContent(draft, current.references)
     onAcceptNextPrompt?.()
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (voiceActive) { event.preventDefault(); return }
     if (event.nativeEvent.isComposing || composingRef.current || event.keyCode === 229) return
-    if (offeredNextPrompt && event.key === 'Tab' && !event.repeat && !event.defaultPrevented &&
+    if (showNextPromptInPlaceholder && event.key === 'Tab' && !event.repeat && !event.defaultPrevented &&
       !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && document.activeElement === event.currentTarget) {
       event.preventDefault()
       acceptNextPrompt()
@@ -1114,7 +1120,7 @@ export function AgentComposer({
         <p className="mb-1.5 px-1 text-[11px] text-red-500">{attachError}</p>
       )}
       <div className="relative min-h-12">
-        {showPlaceholder && !offeredNextPrompt ? (
+        {showPlaceholder && !showNextPromptInPlaceholder ? (
           <span className="pointer-events-none absolute left-1.5 top-1 text-sm leading-6 text-[var(--text-secondary)]">
             告诉我要做什么，我会自主完成…
           </span>
@@ -1125,7 +1131,7 @@ export function AgentComposer({
           role="textbox"
           aria-label="Agent 提示词"
           aria-describedby={offeredNextPrompt ? nextPromptId : undefined}
-          aria-keyshortcuts={offeredNextPrompt ? 'Tab' : undefined}
+          aria-keyshortcuts={showNextPromptInPlaceholder ? 'Tab' : undefined}
           aria-multiline="true"
           aria-haspopup="listbox"
           aria-expanded={slashVisible}
@@ -1148,14 +1154,17 @@ export function AgentComposer({
           <button
             type="button"
             id={nextPromptId}
-            aria-label={'补全建议：' + offeredNextPrompt}
+            aria-label={(showNextPromptInPlaceholder ? '补全建议：' : '插入建议到草稿末尾：') + offeredNextPrompt}
             title={offeredNextPrompt}
             onMouseDown={event => event.preventDefault()}
             onClick={acceptNextPrompt}
-            className="absolute left-1.5 top-1 inline-flex h-7 max-w-[calc(100%-0.75rem)] items-center gap-2 rounded text-left text-sm leading-7 text-[var(--text-tertiary)] pointer-events-none [@media(pointer:coarse)]:pointer-events-auto hover:text-[var(--text-secondary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+            className={cn('inline-flex min-h-7 max-w-[calc(100%-0.75rem)] items-center gap-2 rounded text-left text-sm leading-7 text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2',
+              showNextPromptInPlaceholder ? 'absolute left-1.5 top-1 pointer-events-none [@media(pointer:coarse)]:pointer-events-auto' : 'mx-1.5 mobile:min-h-10')}
           >
             <span className="truncate">{offeredNextPrompt}</span>
-            <kbd aria-hidden="true" className="pointer-events-auto shrink-0 rounded border border-[var(--border-strong)] px-1.5 font-sans text-[10px] leading-4">Tab</kbd>
+            {showNextPromptInPlaceholder
+              ? <kbd aria-hidden="true" className="pointer-events-auto shrink-0 rounded border border-[var(--border-strong)] px-1.5 font-sans text-[10px] leading-4">Tab</kbd>
+              : <span aria-hidden="true" className="shrink-0 text-xs">插入</span>}
           </button>
         ) : null}
       </div>

@@ -1,7 +1,7 @@
 import { SiteAnnouncements, SiteInformation } from '@/features/site-content/public'
 import { useState } from 'react'
 
-import AppState from '@/components/ui/AppState'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { HomeSkeleton } from '@/components/ui/Skeleton'
 import { useDevice } from '@/components/layout/device-context'
 import HomeDesktopLayout from '@/features/home/layouts/HomeDesktopLayout'
@@ -21,7 +21,7 @@ export default function Home() {
 
 function HomeContent() {
   const { device } = useDevice()
-  const { data, isLoading, isError, error, isFetching, refetch } = useHomeData()
+  const { data, isLoading, isError, isFetching, refetch } = useHomeData()
   // 分类筛选：点击导航标签后在首页底部展示同标签作品，不跳发现页
   const [activeCategory, setActiveCategory] = useState('')
 
@@ -29,41 +29,44 @@ function HomeContent() {
     return <HomeSkeleton />
   }
 
-  if (isError) {
+  if (isError && !data) {
     return (
       <AppState
         tone="error"
         title="首页暂时没有打开"
-        description={error instanceof Error ? error.message : '连接似乎中断了，请稍后再试。'}
+        description="请检查连接后重试。"
         primaryAction={{
-          label: isFetching ? '重新连接中...' : '重新连接',
-          onClick: () => void refetch(),
+          label: '重新连接',
+          onClick: () => refetch(),
+          busy: isFetching,
         }}
       />
     )
   }
 
+  const refreshNotice = isError && data ? <AppStateRefreshNotice retry={refetch} busy={isFetching} /> : null
+
   if (!data || (data.bannerNovels.length === 0 && data.featuredNovels.length === 0)) {
     return (
-      <AppState
+      <><AppState
         tone="empty"
-        title="还没有找到可阅读的内容"
-        description="换个时间再来看看，新作品和更新内容会在这里出现。"
+        scene="reading"
+        title="还没有可阅读的作品"
         primaryAction={{
           label: '去分类发现',
           href: '/discover',
         }}
-      />
+      />{refreshNotice}</>
     )
   }
 
   if (device === 'mobile') {
-    return <HomeMobileLayout data={data} activeCategory={activeCategory} onSelectCategory={setActiveCategory} />
+    return <>{refreshNotice}<HomeMobileLayout data={data} activeCategory={activeCategory} onSelectCategory={setActiveCategory} /></>
   }
 
   if (device === 'tablet') {
-    return <HomeTabletLayout data={data} activeCategory={activeCategory} onSelectCategory={setActiveCategory} />
+    return <>{refreshNotice}<HomeTabletLayout data={data} activeCategory={activeCategory} onSelectCategory={setActiveCategory} /></>
   }
 
-  return <HomeDesktopLayout data={data} activeCategory={activeCategory} onSelectCategory={setActiveCategory} />
+  return <>{refreshNotice}<HomeDesktopLayout data={data} activeCategory={activeCategory} onSelectCategory={setActiveCategory} /></>
 }

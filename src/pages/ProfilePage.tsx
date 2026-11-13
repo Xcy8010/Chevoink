@@ -1,11 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { BookOpen, Bookmark, FileText, PenLine } from 'lucide-react'
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { ChangeEvent, FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
-import AppState from '@/components/ui/AppState'
-import { ProfileSkeleton } from '@/components/ui/Skeleton'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
+import { PostListSkeleton } from '@/components/ui/Skeleton'
 import Button from '@/components/ui/Button'
 import ImageCropperDialog from '@/components/ui/ImageCropperDialog'
 import TextInput from '@/components/ui/TextInput'
@@ -14,15 +14,34 @@ import { getMe, listFavoriteNovels, listPosts } from '@/features/community/api'
 import Avatar from '@/features/community/components/Avatar'
 import { getCoverUrl, listNovelCardsByIds } from '@/features/discover/api'
 import { getAllReadingProgress } from '@/features/home/reading-progress'
-import { getLocalShelf, subscribeShelfChange, updateShelfCover } from '@/features/home/local-shelf'
+import { getLocalShelf, subscribeShelfChange, updateShelfCovers } from '@/features/home/local-shelf'
 import { getProfileImageUploadError, prepareAvatarImage, readFileAsDataUrl } from '@/lib/image-compress'
 import { PROFILE_IMAGE_MAX_MB } from '../../shared/contracts/api.js'
 import CreationPanel from '@/features/profile/components/CreationPanel'
 import ProfileHeader from '@/features/profile/components/ProfileHeader'
+import { ProfileRouteSkeleton } from '@/features/profile/components/ProfileLoading'
 import ShelfPanel, { type ShelfBook } from '@/features/profile/components/ShelfPanel'
-import { BookmarkedPostsPanel, LikedPostsPanel, RepliesPanel } from '@/features/profile/components/UserContentPanels'
 import { useShellStore } from '@/store/useShellStore'
 import type { UpdateMyAvatarRequest, UpdateMyCoverRequest, UpdateMyProfileRequest, User } from '../../shared/contracts'
+
+const ProfileActivityPanel = lazy(() => import('@/features/profile/components/ProfileActivityPanel').catch(() => ({
+  default: () => (
+    <AppState
+      compact
+      tone="error"
+      title="暂时无法打开这里"
+      primaryAction={{ label: '重新加载', onClick: () => window.location.reload() }}
+    />
+  ),
+})))
+
+function ProfileActivity({ panel, userId }: { panel: 'bookmarks' | 'liked' | 'replies'; userId: string }) {
+  return (
+    <Suspense fallback={<PostListSkeleton count={2} />}>
+      <ProfileActivityPanel panel={panel} userId={userId} />
+    </Suspense>
+  )
+}
 
 const panels = [
   { id: 'shelf', label: '书架' },
@@ -33,10 +52,6 @@ const panels = [
 ] as const
 
 type ProfilePanel = (typeof panels)[number]['id']
-
-type ProfileRouteState = {
-  showPostRegisterPrompt?: boolean
-}
 
 // 新建默认名已改为「未命名作品」；保留旧名识别，兼容存量引导作品
 const BOOTSTRAP_NOVEL_TITLES = new Set(['未命名作品', '我的第一部作品'])
@@ -60,16 +75,15 @@ function isBootstrapNovel(novel: {
 
 export default function ProfilePage() {
   const navigate = useNavigate()
-  const location = useLocation()
   const toast = useToast()
   const syncSessionUser = useShellStore((state) => state.syncSessionUser)
+  const sessionUserId = useShellStore((state) => state.sessionUser?.id)
   const unreadMessageCount = useShellStore((state) => state.unreadMessageCount)
   const unreadNotificationCount = useShellStore((state) => state.unreadNotificationCount)
 
   const [activePanel, setActivePanel] = useState<ProfilePanel>('shelf')
   // 收藏面板子栏：收藏的作品 / 收藏的帖子
   const [favoritesTab, setFavoritesTab] = useState<'novels' | 'posts'>('novels')
-  const [postRegisterPromptVisible, setPostRegisterPromptVisible] = useState(false)
   const [editDialogVisible, setEditDialogVisible] = useState(false)
   const [nicknameDraft, setNicknameDraft] = useState('')
   const [bioDraft, setBioDraft] = useState('')
@@ -83,32 +97,24 @@ export default function ProfilePage() {
   const coverInputRef = useRef<HTMLInputElement | null>(null)
   const panelsSectionRef = useRef<HTMLElement | null>(null)
 
-  useEffect(() => {
-    const routeState = location.state as ProfileRouteState | null
-
-    if (!routeState?.showPostRegisterPrompt) {
-      return
-    }
-
-    setPostRegisterPromptVisible(true)
-    navigate(location.pathname, { replace: true, state: {} })
-  }, [location.pathname, location.state, navigate])
-
   const meQuery = useQuery({
     queryKey: ['community', 'me'],
     queryFn: getMe,
   })
+  const mePayload = meQuery.data?.user?.id === sessionUserId ? meQuery.data : undefined
+  const currentUser = mePayload?.user ?? null
 
   const postsQuery = useQuery({
-    queryKey: ['community', 'posts'],
+    queryKey: ['community', 'posts', 'profile', currentUser?.id],
     queryFn: () => listPosts(40),
+    enabled: Boolean(currentUser),
   })
 
   /** 我收藏的作品：只在切到收藏面板时拉取 */
   const favoriteNovelsQuery = useQuery({
-    queryKey: ['profile', 'favorite-novels'],
+    queryKey: ['profile', 'favorite-novels', currentUser?.id],
     queryFn: listFavoriteNovels,
-    enabled: activePanel === 'favorites',
+    enabled: Boolean(currentUser) && activePanel === 'favorites' && favoritesTab === 'novels',
   })
   const favoriteItems = useMemo<ShelfBook[]>(
     () =>
@@ -121,18 +127,6 @@ export default function ProfilePage() {
       })),
     [favoriteNovelsQuery.data?.items],
   )
-
-  const currentUser = meQuery.data?.user ?? null
-  const mePayload = meQuery.data ?? null
-
-  useEffect(() => {
-    if (!currentUser) {
-      return
-    }
-
-    setNicknameDraft(currentUser.nickname)
-    setBioDraft(currentUser.bio ?? '')
-  }, [currentUser])
 
   const authoredNovels = useMemo(() => {
     return mePayload?.authoredNovels ?? []
@@ -147,14 +141,6 @@ export default function ProfilePage() {
     () => new Set(authoredNovels.filter((novel) => isBootstrapNovel(novel)).map((novel) => novel.id)),
     [authoredNovels],
   )
-
-  const authoredPosts = useMemo(() => {
-    if (!currentUser) {
-      return []
-    }
-
-    return (postsQuery.data?.items ?? []).filter((post) => post.author.id === currentUser.id)
-  }, [currentUser, postsQuery.data?.items])
 
   const draftItems = useMemo(
     () => (mePayload?.drafts ?? []).filter((draft) => !hiddenBootstrapNovelIds.has(draft.novelId)),
@@ -236,25 +222,25 @@ export default function ProfilePage() {
   )
   const coverBackfillQuery = useQuery({
     queryKey: ['profile', 'shelf-cover-sync', shelfCoverSyncIds],
-    enabled: shelfCoverSyncIds.length > 0,
+    enabled: Boolean(currentUser) && activePanel === 'shelf' && shelfCoverSyncIds.length > 0,
     staleTime: 5 * 60 * 1000,
     queryFn: async () => {
       const cards = await listNovelCardsByIds(shelfCoverSyncIds)
-      const covers: Record<string, string> = {}
-      cards.forEach((card) => {
+      const covers = new Map<string, string>()
+      for (const card of cards) {
         const cover = getCoverUrl(card.coverUrl)
-        if (!cover) return
-        covers[card.id] = cover
-        // 与本地快照不一致（缺失或换过封面）即回写，下次进页无需再同步
-        updateShelfCover(card.id, cover)
-      })
+        if (cover) covers.set(card.id, cover)
+      }
+      updateShelfCovers(covers)
       return covers
     },
   })
   const shelfItems = useMemo<ShelfBook[]>(() => {
-    const covers = coverBackfillQuery.data ?? {}
+    const covers = coverBackfillQuery.data
+    if (!covers?.size) return mergedShelf
+
     return mergedShelf.map((item) => {
-      const synced = item.novelId ? covers[item.novelId] : undefined
+      const synced = item.novelId ? covers.get(item.novelId) : undefined
       // 服务端封面与本地快照不同时以服务端为准（含旧封面刷新），否则保持原样
       return synced && synced !== item.coverUrl ? { ...item, coverUrl: synced } : item
     })
@@ -265,8 +251,11 @@ export default function ProfilePage() {
 
   const readingCount = mergedShelf.length
   const likesCount = useMemo(
-    () => authoredPosts.reduce((total, post) => total + post.favoriteCount + post.likeCount, 0),
-    [authoredPosts],
+    () => postsQuery.data?.items.reduce(
+      (total, post) => post.author.id === currentUser?.id ? total + post.favoriteCount + post.likeCount : total,
+      0,
+    ) ?? null,
+    [currentUser?.id, postsQuery.data?.items],
   )
 
   /** 头部数据行点击：阅读→书架列表，关注/粉丝/获赞→对应列表页面 */
@@ -283,10 +272,6 @@ export default function ProfilePage() {
     }
 
     navigate('/me/likes')
-  }
-
-  function closePostRegisterPrompt() {
-    setPostRegisterPromptVisible(false)
   }
 
   function openEditDialog() {
@@ -445,21 +430,24 @@ export default function ProfilePage() {
     }
   }
 
-  if (meQuery.isLoading || postsQuery.isLoading) {
-    return <ProfileSkeleton />
+  if (!currentUser && meQuery.isLoading) {
+    return <ProfileRouteSkeleton />
   }
 
-  if (meQuery.isError || !currentUser) {
+  const meAccessDenied = meQuery.error instanceof ApiClientError && [401, 403, 404].includes(meQuery.error.status)
+  if (!currentUser || meAccessDenied) {
     return (
       <AppState
         tone="error"
         title="个人中心暂时没有打开"
-        description={meQuery.error instanceof Error ? meQuery.error.message : '请稍后再试。'}
-        primaryAction={{ label: '重新加载', onClick: () => void meQuery.refetch() }}
-        className="min-h-[420px]"
+        description="请重新加载页面。"
+        primaryAction={{ label: '重新加载', onClick: () => meQuery.refetch(), busy: meQuery.isFetching }}
       />
     )
   }
+
+  const favoritesAccessDenied = favoriteNovelsQuery.error instanceof ApiClientError
+    && [401, 403, 404].includes(favoriteNovelsQuery.error.status)
 
   const statsCards = [
     { icon: BookOpen, label: '在读', value: Object.keys(progressMap).length, unit: '本' },
@@ -471,6 +459,7 @@ export default function ProfilePage() {
   return (
     <>
       <div className="space-y-5 md:space-y-6">
+        {meQuery.isRefetchError ? <AppStateRefreshNotice retry={meQuery.refetch} busy={meQuery.isFetching} /> : null}
         <ProfileHeader
           user={currentUser}
           coverUrl={recentCoverUrl}
@@ -592,8 +581,18 @@ export default function ProfilePage() {
 
               {favoritesTab === 'novels' ? (
                 <div className="mt-4">
+                  {favoriteNovelsQuery.isRefetchError && !favoritesAccessDenied
+                    ? <AppStateRefreshNotice retry={favoriteNovelsQuery.refetch} busy={favoriteNovelsQuery.isFetching} />
+                    : null}
                   {favoriteNovelsQuery.isLoading ? (
                     <AppState tone="loading" title="正在加载收藏" className="min-h-[280px]" />
+                  ) : favoriteNovelsQuery.isError && (!favoriteNovelsQuery.data || favoritesAccessDenied) ? (
+                    <AppState
+                      compact
+                      tone="error"
+                      title="收藏作品加载失败"
+                      primaryAction={{ label: '重新加载', onClick: () => favoriteNovelsQuery.refetch(), busy: favoriteNovelsQuery.isFetching }}
+                    />
                   ) : favoriteItems.length > 0 ? (
                     <ShelfPanel
                       items={favoriteItems}
@@ -603,17 +602,16 @@ export default function ProfilePage() {
                     />
                   ) : (
                     <AppState
-                      tone="empty"
-                      title="你还没有收藏内容"
-                      description="看到喜欢的作品后，把它们收进收藏，这里会慢慢变成你的私人精选。"
-                      primaryAction={{ label: '去发现', onClick: () => navigate('/discover') }}
-                      className="min-h-[280px]"
+                      compact
+                      scene="reading"
+                      title="还没有收藏作品"
+                      primaryAction={{ label: '去发现', href: '/discover' }}
                     />
                   )}
                 </div>
               ) : (
                 <div className="mt-1">
-                  <BookmarkedPostsPanel userId={currentUser.id} />
+                  <ProfileActivity panel="bookmarks" userId={currentUser.id} />
                 </div>
               )}
             </div>
@@ -621,13 +619,13 @@ export default function ProfilePage() {
 
           {activePanel === 'liked' ? (
             <div className="mt-5">
-              <LikedPostsPanel userId={currentUser.id} isSelf />
+              <ProfileActivity panel="liked" userId={currentUser.id} />
             </div>
           ) : null}
 
           {activePanel === 'replies' ? (
             <div className="mt-5">
-              <RepliesPanel userId={currentUser.id} isSelf />
+              <ProfileActivity panel="replies" userId={currentUser.id} />
             </div>
           ) : null}
         </section>
@@ -750,43 +748,16 @@ export default function ProfilePage() {
         </div>
       ) : null}
 
-      {postRegisterPromptVisible ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]">
-          <div className="w-full max-w-[420px] rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-6 shadow-[var(--shadow-modal)]">
-            <div className="space-y-2">
-              <h3 className="text-xl font-semibold text-[var(--text-primary)]">注册成功</h3>
-              <p className="text-sm leading-7 text-[var(--text-secondary)]">
-                你已经登录成功。现在可以去完善个人信息，也可以先继续看看你的个人中心。
-              </p>
-            </div>
-
-            <div className="mt-6 flex gap-3">
-              <Button type="button" variant="secondary" onClick={closePostRegisterPrompt}>
-                稍后完善
-              </Button>
-              <Button
-                type="button"
-                variant="primary"
-                onClick={() => {
-                  closePostRegisterPrompt()
-                  navigate('/settings', { replace: true })
-                }}
-              >
-                去完善资料
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      <ImageCropperDialog
-        open={coverDraft !== null}
-        imageDataUrl={coverDraft}
-        aspect={3}
-        submitting={coverSubmitting}
-        onCancel={() => setCoverDraft(null)}
-        onConfirm={(croppedDataUrl) => void handleCoverCropConfirm(croppedDataUrl)}
-      />
+      {coverDraft !== null && (
+        <ImageCropperDialog
+          open
+          imageDataUrl={coverDraft}
+          aspect={3}
+          submitting={coverSubmitting}
+          onCancel={() => setCoverDraft(null)}
+          onConfirm={(croppedDataUrl) => void handleCoverCropConfirm(croppedDataUrl)}
+        />
+      )}
     </>
   )
 }

@@ -87,7 +87,7 @@ import { withUserRunLock } from './run-lock.js'
 import { admitGoalRun, bindGoalRun, type GoalRunAdmission } from './goal-run-admission.js'
 import { assertGoalFence, readGoalExecution } from './goal-fence.js'
 import { readHumanAdmission, withHumanAdmission } from './goal-activation-authority.js'
-import { addNextPromptInstruction, allowsNextPrompt } from './next-prompt.js'
+import { addNextPromptInstruction, allowsModelNextPrompt, allowsNextPrompt } from './next-prompt.js'
 import { freezeModelAssignments, resolveAssignedModel } from './model-assignments.js'
 import { getWindowConfiguration } from './window-configuration.js'
 import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
@@ -223,15 +223,16 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     const catalog = await (await import('./productivity.js')).renderSubagentCatalog(userId, run.novelId, input.pinnedSubagentId)
     insertSubagentCatalog(assembled.messages, catalog, 'system')
   }
-  const nextPromptMarker = !goalBinding && !session.spawnedFromRunId && agent.type === 'orchestrator'
-    && readHumanAdmission(run.startRequest)?.request.predictNextPrompt
-    && !spec.scope.writing?.titleAndBodyOnly && allowsNextPrompt(input.prompt)
+  const nextPromptOnCompletion = !goalBinding && !session.spawnedFromRunId && agent.type === 'orchestrator'
+    && readHumanAdmission(run.startRequest)?.request.predictNextPrompt && allowsNextPrompt(input.prompt)
+  const nextPromptMarker = nextPromptOnCompletion && !spec.scope.writing?.titleAndBodyOnly && allowsModelNextPrompt(input.prompt)
     ? addNextPromptInstruction(assembled.messages) : undefined
   await initializeDurableTask({ userId, runId, sourceMessageId: original.id, tokenBudget: input.tokenBudget })
   const lease = await acquireRunLease({ userId, runId, ownerId: durableProcessOwner, claimId: randomUUID() })
   try {
     return await initializeExecutionState(lease, { ...(run.modelConfigId && run.modelConfigRevision ? { admittedModel: { modelConfigId: run.modelConfigId, modelConfigRevision: run.modelConfigRevision } } : {}), configuration: { version: 1, mode: input.mode, agentType: agent.type,
       creativeFreedom: spec.creativeFreedom, qualityMode: spec.qualityMode,
+      ...(nextPromptOnCompletion ? { nextPromptOnCompletion: true as const } : {}),
       ...(nextPromptMarker ? { nextPromptMarker } : {}),
       ...(input.modelAssignments ? { modelAssignments: input.modelAssignments } : {}),
       ...(input.pinnedSubagentId ? { pinnedSubagentId: input.pinnedSubagentId } : {}),
@@ -930,7 +931,7 @@ export async function resolveLoopRunQuestion(
         const next = await startLoopRunLocked(userId, { sessionId: run.sessionId, novelId: run.novelId, prompt: completed.prompt,
           mode: run.mode === 'act' ? 'build' : run.mode,
           modelTier: run.modelTier as CreditModelTier, customModelId: run.customModelId ?? undefined,
-          reasoningEffort: run.reasoningEffort as ModelReasoningEffort, modelSelectionExplicit: true, agentQuestionProtocol: 2,
+          reasoningEffort: run.reasoningEffort as ModelReasoningEffort, modelSelectionExplicit: true, agentQuestionProtocol: 2, predictNextPrompt: true,
           ...(admitted?.agentProfile ? { agentProfile: admitted.agentProfile } : {}),
           ...(admitted?.qualityMode ? { qualityMode: admitted.qualityMode } : {}),
           ...(admitted?.creativeFreedom !== undefined ? { creativeFreedom: admitted.creativeFreedom } : {}),

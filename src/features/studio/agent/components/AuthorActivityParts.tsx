@@ -281,8 +281,8 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   </div>
 })
 
-export function AuthorActivitySummary({ timing, active, open, onToggle, actions }: {
-  timing: AgentRunTiming; active: boolean; open: boolean; onToggle?: () => void; actions?: ReactNode
+export function AuthorActivitySummary({ timing, active, open, onToggle }: {
+  timing: AgentRunTiming; active: boolean; open: boolean; onToggle?: () => void
 }) {
   const label = active || timing.elapsedMs !== null
     ? <ProcessDuration timing={timing} active={active} />
@@ -293,7 +293,6 @@ export function AuthorActivitySummary({ timing, active, open, onToggle, actions 
       {label}
       <ChevronDown aria-hidden className={cn('h-3.5 w-3.5 shrink-0 motion-safe:transition-transform', !open && '-rotate-90')} />
     </button> : <div className="flex min-h-7 shrink-0 items-center">{label}</div>}
-    {actions}
   </div>
 }
 

@@ -113,8 +113,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000,
       periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     const answer = source === 'footer' ? '你好。' : '渡桥放在第一卷收尾。\n下一步建议：把渡桥段落分成三个场景。'
-    const nextPrompt = source === 'footer' ? '帮我想一个短篇故事的开头'
-      : source === 'visible-offer' ? '帮我把渡桥段落分成三个场景。' : undefined
+    const nextPrompt = source === 'footer' ? '帮我想一个短篇故事的开头' : '帮我把渡桥段落分成三个场景。'
     const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
       const request = JSON.parse(String(init.body))
       const system = (terra ? request.input : request.messages).find((item: { role?: string }) => item.role === 'system')
@@ -143,11 +142,10 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     const events = await loadDurableEvents(f.userId, run.runId, 0)
     expect(events.filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
     expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
-    if (nextPrompt) expect(events.at(-1)).toMatchObject({ nextPrompt })
-    else expect(events.at(-1)).not.toHaveProperty('nextPrompt')
+    expect(events.at(-1)).toMatchObject({ nextPrompt })
     const saved = await prisma.agentMessage.findFirstOrThrow({ where: { runId: run.runId, role: 'assistant' } })
     expect(saved.parts).toEqual([{ type: 'text', text: answer }])
-    expect(history.nextPrompt).toEqual(nextPrompt ? { runId: run.runId, text: nextPrompt } : undefined)
+    expect(history.nextPrompt).toEqual({ runId: run.runId, text: nextPrompt })
     expect(history.messages.find(message => message.id === saved.id)?.parts).toEqual(saved.parts)
     expect(fetcher).toHaveBeenCalledExactlyOnceWith(terra ? 'https://yunshu.chevolink.com/v1/responses' : 'https://provider.invalid/v1/chat/completions', expect.any(Object))
   }))

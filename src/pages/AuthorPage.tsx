@@ -4,7 +4,8 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import AppImage from '@/components/ui/AppImage'
-import AppState from '@/components/ui/AppState'
+import { ApiClientError } from '@/app/api-client'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import Button from '@/components/ui/Button'
 import { PostListSkeleton, Skeleton } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/toast-context'
@@ -37,10 +38,12 @@ function PageChrome({
   onBack,
   headerContent,
   children,
+  centered = false,
 }: {
   onBack: () => void
   headerContent?: ReactNode
   children: ReactNode
+  centered?: boolean
 }) {
   return (
     <div className="app-main-scroll relative h-dvh overflow-y-auto">
@@ -53,7 +56,7 @@ function PageChrome({
       >
         <ChevronLeft className="h-5 w-5" />
       </button>
-      <div className={cn('mx-auto w-full px-4 pb-16', CONTENT_MAX_WIDTH)}>
+      <div className={cn('mx-auto w-full px-4', centered ? 'flex min-h-full flex-col py-12' : 'pb-16', CONTENT_MAX_WIDTH)}>
         {headerContent}
         {children}
       </div>
@@ -109,7 +112,7 @@ export default function AuthorPage() {
 
   const conversationsQuery = useQuery({
     queryKey: ['community', 'conversations'],
-    queryFn: () => listConversations(30),
+    queryFn: () => listConversations(),
     // 未登录时不请求会话列表，避免无意义的接口开销
     enabled: Boolean(meQuery.data?.user),
   })
@@ -212,15 +215,16 @@ export default function AuthorPage() {
     }
   }
 
-  if (!authorId) {
+  const error = authorQuery.error
+  const missing = error instanceof ApiClientError && error.status === 404
+  if (!authorId || missing) {
     return (
-      <PageChrome onBack={handleBack}>
+      <PageChrome onBack={handleBack} centered>
         <AppState
-          tone="empty"
-          title="这位作者暂时没有找到"
-          description="你可以先去社区广场或作品详情里继续寻找感兴趣的作者。"
+          scene="search"
+          title="找不到这位作者"
           primaryAction={{ label: '返回社区', href: '/community' }}
-          className="mt-4 min-h-[360px] border-0 shadow-none"
+          className="flex-1"
         />
       </PageChrome>
     )
@@ -241,16 +245,17 @@ export default function AuthorPage() {
     )
   }
 
-  if (authorQuery.isError || !authorQuery.data) {
+  const accessDenied = error instanceof ApiClientError && (error.status === 401 || error.status === 403)
+  if (!authorQuery.data || accessDenied) {
     return (
-      <PageChrome onBack={handleBack}>
+      <PageChrome onBack={handleBack} centered>
         <AppState
           tone="error"
           title="作者主页暂时没有打开"
-          description={authorQuery.error instanceof Error ? authorQuery.error.message : '请稍后再试。'}
-          primaryAction={{ label: '重新加载', onClick: () => void authorQuery.refetch() }}
+          description={accessDenied ? error.message : '请稍后重试。'}
+          primaryAction={{ label: '重新加载', onClick: () => authorQuery.refetch(), busy: authorQuery.isFetching }}
           secondaryAction={{ label: '返回社区', href: '/community' }}
-          className="mt-4 min-h-[420px] border-0 shadow-none"
+          className="flex-1"
         />
       </PageChrome>
     )
@@ -422,13 +427,18 @@ export default function AuthorPage() {
 
   return (
     <PageChrome onBack={handleBack} headerContent={headerContent}>
+      {authorQuery.isError ? <AppStateRefreshNotice retry={authorQuery.refetch} busy={authorQuery.isFetching} /> : null}
       <div className="pt-2">
+        {activeTab === 'novels' && novelsQuery.isRefetchError ? <AppStateRefreshNotice retry={novelsQuery.refetch} busy={novelsQuery.isFetching} /> : null}
+        {activeTab === 'posts' && postsQuery.isRefetchError ? <AppStateRefreshNotice retry={postsQuery.refetch} busy={postsQuery.isFetching} /> : null}
         {activeTab === 'novels' ? (
           novelsQuery.isLoading ? (
             <div className="space-y-3 px-1 pt-3 sm:px-2">
               <Skeleton className="h-24 w-full rounded-[var(--radius-lg)]" />
               <Skeleton className="h-24 w-full rounded-[var(--radius-lg)]" />
             </div>
+          ) : novelsQuery.isError && !novelsQuery.data ? (
+            <AppState compact tone="error" title="作品加载失败" primaryAction={{ label: '重试', onClick: () => novelsQuery.refetch(), busy: novelsQuery.isFetching }} />
           ) : authorNovels.length > 0 ? (
             <div className="divide-y divide-[var(--border-subtle)] md:grid md:grid-cols-2 md:gap-x-4 md:divide-y-0">
               {authorNovels.map((novel) => {
@@ -468,10 +478,9 @@ export default function AuthorPage() {
             </div>
           ) : (
             <AppState
-              tone="empty"
-              title="这位作者还没有公开作品"
-              description="切到动态看看这位作者最近在聊什么。"
-              className="min-h-[240px] border-0 shadow-none"
+              compact
+              scene="writing"
+              title="还没有公开作品"
             />
           )
         ) : activeTab === 'posts' ? (
@@ -479,6 +488,8 @@ export default function AuthorPage() {
             <div className="pt-3">
               <PostListSkeleton count={2} />
             </div>
+          ) : postsQuery.isError && !postsQuery.data ? (
+            <AppState compact tone="error" title="动态加载失败" primaryAction={{ label: '重试', onClick: () => postsQuery.refetch(), busy: postsQuery.isFetching }} />
           ) : authorPosts.length > 0 ? (
             <div className="divide-y divide-[var(--border-subtle)]">
               {authorPosts.map((post) => (
@@ -489,10 +500,9 @@ export default function AuthorPage() {
             </div>
           ) : (
             <AppState
-              tone="empty"
-              title="这位作者还没有公开讨论"
-              description="等作者开始发帖后，这里会更新最近的互动内容。"
-              className="min-h-[240px] border-0 shadow-none"
+              compact
+              scene="message"
+              title="还没有公开讨论"
             />
           )
         ) : activeTab === 'liked' ? (

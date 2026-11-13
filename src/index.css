@@ -2,6 +2,18 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 全页状态自带短标题；不再叠加路由的说明性页头。 */
+.app-main-content:has(> [data-app-state]:not([data-compact='true'])) > .app-route-heading { display: none; }
+.app-main-content:has(> [data-app-state]:not([data-compact='true'])) { min-height: 100%; display: flex; flex-direction: column; }
+.app-main-content > [data-app-state]:not([data-compact='true']) { flex: 1; min-height: 0; margin-top: 0 !important; }
+
+.app-bottom-nav .app-bottom-link, .app-bottom-nav .app-bottom-create { color: #77818d; transition: color 180ms ease; }
+.app-bottom-nav .app-bottom-link.is-selected { color: #15212d; }
+.app-bottom-link.is-selected svg { stroke-width: 2.4; }
+html.dark .app-bottom-nav .app-bottom-link, html.dark .app-bottom-nav .app-bottom-create { color: #88909c; }
+html.dark .app-bottom-nav .app-bottom-link.is-selected { color: #fff; }
+@media (prefers-reduced-motion: reduce) { .app-bottom-nav .app-bottom-link, .app-bottom-nav .app-bottom-create { transition: none; } }
+
 :root {
   color-scheme: light;
   /* 安全区统一变量：默认取浏览器上报的 env 值；部分安卓内置 WebView（如 QQ）
@@ -603,7 +615,12 @@ html.dark .studio-workspace :is(
   [data-studio-region='desktop-activity'] { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .studio-workspace .skeleton-shimmer { animation: none; }
+  .skeleton-shimmer { animation: none; }
+}
+
+@media (max-width: 767px) {
+  [data-app-shell]:has([data-message-pending-chat]) .app-bottom-nav { display: none; }
+  .app-messages-main:has([data-message-pending-chat]) { padding-bottom: var(--safe-bottom); }
 }
 
 @keyframes agent-fade-out {
@@ -1119,4 +1136,123 @@ body.autohide-scrollbars .agent-activity-scroll::-webkit-scrollbar-thumb { backg
 @media (prefers-reduced-motion: reduce) {
   .agent-process-region { transition: none; }
   .agent-tool-enter, .agent-tool-phase { animation: none; }
+}
+
+/* Keep scrolling on the content layer; only translate the community header. */
+.community-reveal-header {
+  position: sticky;
+  top: var(--safe-top);
+  z-index: 30;
+  background: var(--app-bg);
+  transform: translateY(0);
+  transition: transform 220ms cubic-bezier(.22, 1, .36, 1);
+}
+.community-reveal-header[data-hidden='true'] { transform: translateY(calc(-100% - var(--safe-top))); }
+.site-header-actions .site-announcement-bell { width: 44px; height: 44px; border: 0; background: transparent; }
+.site-navigation-menu > summary::-webkit-details-marker { display: none; }
+@media (min-width: 768px) {
+  .community-reveal-header { top: var(--app-header-visible-height, var(--app-header-height)); }
+  .community-reveal-header[data-hidden='true'] { transform: translateY(-100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .community-reveal-header { transition: none; }
+}
+
+.site-reveal-header { transform: translateY(0); transition: transform 220ms cubic-bezier(.22, 1, .36, 1); }
+.site-reveal-header[data-hidden='true'] { transform: translateY(-100%); }
+@media (prefers-reduced-motion: reduce) { .site-reveal-header { transition: none; } }
+@media (max-width: 767px) {
+  .site-reveal-header { transition: background-color 220ms ease, border-color 220ms ease; }
+  .site-reveal-header[data-hidden='true'] { transform: none; background: transparent; border-color: transparent; }
+  .site-header-row { transition: gap 260ms cubic-bezier(.22, 1, .36, 1); }
+  .site-header-identity { width: 40px; }
+  .site-header-actions { width: 44px; }
+  .site-navigation-menu { width: 36px; }
+  .site-header-identity, .site-header-actions, .site-navigation-menu {
+    transition: width 260ms cubic-bezier(.22, 1, .36, 1), opacity 180ms ease, transform 260ms cubic-bezier(.22, 1, .36, 1);
+  }
+  .site-reveal-header[data-hidden='true'] .site-header-row { gap: 0; }
+  .site-reveal-header[data-hidden='true'] :is(.site-header-identity, .site-header-actions, .site-navigation-menu) {
+    width: 0; opacity: 0; transform: translateY(-8px); pointer-events: none;
+  }
+  .site-header-search [data-global-search-field] {
+    height: 44px;
+    transition: background-color 220ms ease, box-shadow 220ms ease, border-color 220ms ease;
+  }
+  .site-reveal-header[data-hidden='true'] .site-header-search [data-global-search-field] {
+    background: var(--surface-default);
+    border-color: var(--border-subtle);
+    box-shadow: 0 3px 16px #0000000a;
+  }
+  @supports (backdrop-filter: blur(16px)) or (-webkit-backdrop-filter: blur(16px)) {
+    .site-reveal-header[data-hidden='true'] .site-header-search [data-global-search-field] {
+      background: color-mix(in srgb, var(--surface-default) 74%, transparent);
+      backdrop-filter: blur(16px) saturate(130%);
+      -webkit-backdrop-filter: blur(16px) saturate(130%);
+    }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .site-reveal-header, .site-header-row, .site-header-identity, .site-header-actions, .site-navigation-menu, .site-header-search [data-global-search-field] { transition: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .site-reveal-header[data-hidden='true'] .site-header-search [data-global-search-field] { background: var(--surface-default); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+/* Community search replaces the mobile canvas, with an opaque, edge-to-edge field. */
+.compact-search-surface {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - var(--safe-top) - var(--keyboard-inset, 0px));
+  background: var(--app-bg);
+  animation: community-search-in 200ms ease-out both;
+}
+.compact-search-field { flex-shrink: 0; animation: community-search-field-in 260ms cubic-bezier(.22, 1, .36, 1) both; }
+.compact-search-surface[data-search-open='false'] { animation: community-search-out 180ms ease-in both; pointer-events: none; }
+.compact-search-results { animation: community-search-results-in 200ms ease-out both; }
+[data-community-search-chrome], [data-community-feed-content] { transition: opacity 180ms ease, visibility 0s; }
+[data-community-layout][data-search-open='true'] :is([data-community-search-chrome], [data-community-feed-content]) {
+  opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 180ms ease, visibility 0s 180ms;
+}
+.app-bottom-nav { transition: opacity 180ms ease, visibility 0s; }
+[data-app-shell]:has([data-community-layout][data-search-open='true']) .app-bottom-nav {
+  opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 180ms ease, visibility 0s 180ms;
+}
+@keyframes community-search-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes community-search-out { to { opacity: 0; } }
+@keyframes community-search-field-in { from { clip-path: inset(0 0 0 85%); } to { clip-path: inset(0); } }
+@keyframes community-search-results-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) {
+  .compact-search-surface, .compact-search-field, .compact-search-results { animation: none; }
+  [data-community-search-chrome], [data-community-feed-content], .app-bottom-nav { transition: none !important; }
+}
+.post-composer-dialog {
+  position: fixed;
+  inset: var(--safe-top) 0 calc(var(--keyboard-inset, 0px) + var(--safe-bottom));
+  margin: auto;
+  width: min(520px, calc(100vw - 24px));
+  max-width: none;
+  max-height: min(720px, calc(100dvh - var(--keyboard-inset, 0px) - var(--safe-top) - var(--safe-bottom) - 32px));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  box-shadow: 0 12px 48px #00000026;
+}
+.post-composer-frame { display: flex; flex-direction: column; max-height: inherit; }
+.post-composer-dialog[open] { animation: post-composer-enter 240ms cubic-bezier(.22, 1, .36, 1) both; }
+.post-composer-dialog::backdrop { background: rgb(244 245 247 / .78); animation: post-composer-backdrop-in 180ms ease-out both; }
+html.dark .post-composer-dialog::backdrop { background: rgb(0 0 0 / .65); }
+.post-composer-dialog[data-state='closing'] { pointer-events: none; animation: post-composer-exit 180ms ease-in both; }
+.post-composer-dialog[data-state='closing']::backdrop { animation: post-composer-backdrop-out 180ms ease-in both; }
+@keyframes post-composer-enter { from { opacity: 0; transform: translateY(12px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes post-composer-exit { to { opacity: 0; transform: translateY(8px) scale(.98); } }
+@keyframes post-composer-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes post-composer-backdrop-out { to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .post-composer-dialog, .post-composer-dialog::backdrop { animation: none !important; }
 }

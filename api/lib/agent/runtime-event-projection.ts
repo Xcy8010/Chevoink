@@ -204,8 +204,9 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const promptTokens = usage._sum.promptTokens ?? 0, completionTokens = usage._sum.completionTokens ?? 0
         const presentation = validProof && proof.success ? proof.data.chapterPresentation : null
         const receiptSuggestion = z.object({ nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).nullable() }).safeParse(receipt.result)
-        const nextPrompt = !cancelled && validProof && proof.success && !proof.data.limitedWritingDelivery
-          ? receiptSuggestion.success ? receiptSuggestion.data.nextPrompt : candidate.nextPrompt : undefined
+        const nextPrompt = !cancelled && validProof && proof.success
+          ? receiptSuggestion.success ? receiptSuggestion.data.nextPrompt : !proof.data.limitedWritingDelivery ? candidate.nextPrompt : undefined
+          : undefined
         bodies = [...(presentation ? [{ type: 'text.final' as const, messageId: durableMessageId(root.id, before.state.turn), text: presentation.text, asReasoning: false }] : []),
           { type: 'run.finished', status: cancelled ? 'cancelled' : 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
             ...(validProof && proof.success && proof.data.limitedWritingDelivery ? { outcome: proof.data.limitedWritingDelivery.outcome } : {}),

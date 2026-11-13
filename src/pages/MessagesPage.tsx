@@ -1,14 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, UserRoundPlus } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { UserRoundPlus } from 'lucide-react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
 
+import { ApiClientError } from '@/app/api-client'
 import { useDevice } from '@/components/layout/device-context'
-import AppState from '@/components/ui/AppState'
-import { ConversationSkeleton, Skeleton } from '@/components/ui/Skeleton'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { useToast } from '@/components/ui/toast-context'
 import { useKeyboardPushScroll } from '@/hooks/useKeyboardPushScroll'
 import {
+  CONVERSATION_PAGE_SIZE,
   createDirectConversation,
   getInteractionBadges,
   getMe,
@@ -24,7 +25,18 @@ import Avatar from '@/features/community/components/Avatar'
 import ChatComposer from '@/features/messages/components/ChatComposer'
 import ConversationList from '@/features/messages/components/ConversationList'
 import MessageBubbleList, { type PendingMessage } from '@/features/messages/components/MessageBubbleList'
-import type { Conversation, Message } from '../../shared/contracts/index.js'
+import {
+  ChatInputSkeleton,
+  ConversationBackButton,
+  ConversationBubblesSkeleton,
+  PendingConversationHeader,
+  conversationHeaderClass,
+  conversationListPaneClass,
+  conversationPaneClass,
+  messagePanelClass,
+} from '@/features/messages/components/MessagesLoading'
+import { preloadMessageDetailPages } from '@/features/messages/load-detail-pages'
+import type { Conversation, FollowUserItem, Message } from '../../shared/contracts/index.js'
 
 /**
  * 消息中心（TikTok/Messenger 式重设计）：
@@ -37,17 +49,35 @@ export default function MessagesPage() {
   const isSplitLayout = !isMobile
   const queryClient = useQueryClient()
   const toast = useToast()
+  const { key: locationKey } = useLocation()
   const [searchParams, setSearchParams] = useSearchParams()
   // 选中会话直接从 URL 派生，URL 是唯一数据源：
   // 之前用本地 state + effect 与路由参数双向同步，但 react-router v7 的 setSearchParams
   // 走 startTransition 延迟提交，本地 state 先行提交会产生「列表↔聊天」来回翻转的中间帧，
   // 手机端表现为进入/退出聊天时各闪一下；派生后页面切换与壳层底栏隐藏在同一次提交内完成
   const routeConversationId = searchParams.get('conversationId') ?? ''
-  const [openingFriendId, setOpeningFriendId] = useState<string | null>(null)
+  const [friendOpen, setFriendOpen] = useState<{ person: FollowUserItem; locationKey: string } | null>(null)
+  const friendOpenRequest = useRef<symbol | null>(null)
+  const openingConversations = useRef(new Map<string, Promise<Conversation>>())
+  const pendingFriend = friendOpen?.locationKey === locationKey ? friendOpen.person : undefined
+  const [openedConversation, setOpenedConversation] = useState<Conversation | null>(null)
   const [draftByConversationId, setDraftByConversationId] = useState<Record<string, string>>({})
   const [pendingByConversation, setPendingByConversation] = useState<Record<string, PendingMessage[]>>({})
   const [followBackSubmitting, setFollowBackSubmitting] = useState(false)
   const messageScrollRef = useRef<HTMLDivElement | null>(null)
+  useLayoutEffect(() => () => { friendOpenRequest.current = null }, [locationKey])
+  useEffect(() => {
+    setFriendOpen(current => current?.locationKey === locationKey ? current : null)
+  }, [locationKey])
+
+  useEffect(() => {
+    if (window.requestIdleCallback) {
+      const id = window.requestIdleCallback(preloadMessageDetailPages, { timeout: 3000 })
+      return () => window.cancelIdleCallback(id)
+    }
+    const timer = window.setTimeout(preloadMessageDetailPages, 1000)
+    return () => window.clearTimeout(timer)
+  }, [])
 
   // 会话列表分页：15s 轮询只刷第 1 页（query 缓存），翻出来的更早页放独立 state 渲染时去重合并，
   // 避免轮询把用户已加载的分页冲掉
@@ -63,7 +93,7 @@ export default function MessagesPage() {
 
   const conversationsQuery = useQuery({
     queryKey: ['community', 'conversations'],
-    queryFn: () => listConversations(20, 1),
+    queryFn: () => listConversations(),
     // 方案 6.1：15s 轻轮询，保持会话列表/未读数新鲜
     refetchInterval: 15_000,
   })
@@ -79,7 +109,7 @@ export default function MessagesPage() {
     conversationLoadingRef.current = true
     setLoadingMoreConversations(true)
     const nextPage = Object.keys(conversationPages).length + 2
-    listConversations(20, nextPage)
+    listConversations(CONVERSATION_PAGE_SIZE, nextPage)
       .then((data) => {
         setConversationPages((current) => ({ ...current, [nextPage]: data.items }))
         setConversationHasMore(data.pagination?.hasMore ?? false)
@@ -138,8 +168,9 @@ export default function MessagesPage() {
   // 直接信任路由参数：新建会话可能还不在缓存列表里（staleTime 内不会重拉），
   // 聊天区已有 messagesQuery.data.conversation 兑底，选中不依赖列表包含该会话；
   // 平板/桌面分栏无参数时兜底选中第一条会话，手机端无参数即回到列表
-  const selectedConversationId =
-    routeConversationId || (isSplitLayout ? (allConversations[0]?.id ?? '') : '')
+  const selectedConversationId = pendingFriend
+    ? ''
+    : routeConversationId || (isSplitLayout ? (allConversations[0]?.id ?? '') : '')
 
   const messagesQuery = useQuery({
     queryKey: ['community', 'messages', selectedConversationId],
@@ -299,6 +330,7 @@ export default function MessagesPage() {
   const selectedConversation =
     allConversations.find((item) => item.id === selectedConversationId) ??
     messagesQuery.data?.conversation ??
+    (openedConversation?.id === selectedConversationId ? openedConversation : null) ??
     null
   // 更早历史页（时间正序）拼在第 1 页前面，按 id 去重
   const activeMessages = useMemo(() => {
@@ -317,8 +349,9 @@ export default function MessagesPage() {
     return members.find((member) => member.id && String(member.id) !== currentUserId)?.lastReadAt ?? null
   }, [messagesQuery.data, currentUserId])
   const totalUnread = allConversations.reduce((sum, item) => sum + item.unreadCount, 0)
-  const shouldShowListPane = isSplitLayout || !selectedConversation
-  const shouldShowConversationPane = isSplitLayout || Boolean(selectedConversation)
+  const showMobileChat = Boolean(routeConversationId || pendingFriend)
+  const shouldShowListPane = isSplitLayout || !showMobileChat
+  const shouldShowConversationPane = isSplitLayout || showMobileChat
 
   // 回关横幅：对方关注了我而我还没回关时展示
   const showFollowBackBanner =
@@ -427,11 +460,15 @@ export default function MessagesPage() {
   }
 
   const handleSelectConversation = (conversationId: string) => {
+    friendOpenRequest.current = null
+    setFriendOpen(null)
     setSearchParams({ conversationId })
   }
 
   const handleBackToList = () => {
-    setSearchParams({})
+    friendOpenRequest.current = null
+    setFriendOpen(null)
+    if (routeConversationId) setSearchParams({})
   }
 
   // 回关对方：成功后刷新会话/消息/粉丝数据，横幅与陌生限额随之解除
@@ -457,7 +494,7 @@ export default function MessagesPage() {
 
   // 点互关好友头像：复用已有直聊会话，否则创建后选中
   const handleOpenFriend = async (userId: string) => {
-    if (openingFriendId) return
+    if (pendingFriend?.id === userId) return
 
     const existing = allConversations.find(
       (item) => item.type === 'direct' && item.counterpart?.id === userId,
@@ -467,39 +504,57 @@ export default function MessagesPage() {
       return
     }
 
-    setOpeningFriendId(userId)
+    const person = mutualFriends.find((item) => item.id === userId)
+    if (!person) return
+    const request = Symbol()
+    friendOpenRequest.current = request
+    setFriendOpen({ person, locationKey })
     try {
-      const conversation = await createDirectConversation(userId)
-      await queryClient.invalidateQueries({ queryKey: ['community', 'conversations'] })
-      handleSelectConversation(conversation.id)
+      const pending = openingConversations.current
+      let opening = pending.get(userId)
+      if (!opening) {
+        opening = createDirectConversation(userId).finally(() => { pending.delete(userId) })
+        pending.set(userId, opening)
+      }
+      const conversation = await opening
+      if (friendOpenRequest.current !== request) return
+      setOpenedConversation(conversation)
+      setSearchParams({ conversationId: conversation.id })
+      void queryClient.invalidateQueries({ queryKey: ['community', 'conversations'] })
     } catch (error) {
+      if (friendOpenRequest.current !== request) return
+      friendOpenRequest.current = null
+      setFriendOpen(null)
       toast.error(error instanceof Error ? error.message : '暂时无法打开会话，请稍后再试。')
-    } finally {
-      setOpeningFriendId(null)
     }
   }
 
-  if (conversationsQuery.isLoading) {
-    return <ConversationSkeleton />
-  }
-
-  if (conversationsQuery.isError) {
-    return (
-      <AppState
-        tone="error"
-        title="消息中心暂时没有打开"
-        description={conversationsQuery.error instanceof Error ? conversationsQuery.error.message : '请稍后再试。'}
-        primaryAction={{ label: '重新加载', onClick: () => void conversationsQuery.refetch() }}
-        className="min-h-[360px]"
-      />
-    )
-  }
+  const conversationError = conversationsQuery.isError && !conversationsQuery.data ? (
+    <AppState
+      compact
+      tone="error"
+      title="会话列表暂时没有打开"
+      primaryAction={{ label: '重新加载', onClick: () => conversationsQuery.refetch(), busy: conversationsQuery.isFetching }}
+    />
+  ) : null
+  const messagesError = (
+    <AppState
+      compact
+      tone="error"
+      title="消息暂时没有加载"
+      primaryAction={{ label: '重试', onClick: () => messagesQuery.refetch(), busy: messagesQuery.isFetching }}
+      className="min-h-0 flex-1"
+    />
+  )
+  const messageError = messagesQuery.error
+  const messagesUnavailable = messagesQuery.isError && (!messagesQuery.data
+    || (messageError instanceof ApiClientError && [401, 403, 404].includes(messageError.status)))
 
   return (
     // 单一分栏面：桌面/平板用一张卡片包住两栏中间分隔线，手机端全出血去掉卡片壳；壳层已改 overflow-hidden 固定布局，直接 flex-1 铺满剩余高度，不再估算 dvh 减值
-    <div className="flex min-h-0 flex-1 overflow-hidden md:rounded-[var(--radius-lg)] md:border md:border-[var(--border-subtle)] md:bg-[var(--surface-default)] md:shadow-[var(--shadow-card)]">
+    <div className={messagePanelClass}>
       {shouldShowListPane ? (
-        <aside className="h-full w-full shrink-0 overflow-hidden md:w-[300px] md:border-r md:border-[var(--border-subtle)] xl:w-[360px]">
+        <aside className={conversationListPaneClass}>
           <ConversationList
             conversations={allConversations}
             selectedId={selectedConversationId || null}
@@ -511,30 +566,27 @@ export default function MessagesPage() {
             interactionsUnseen={interactionsUnseen}
             followersUnseen={followersUnseen}
             onOpenFriend={(userId) => void handleOpenFriend(userId)}
-            openingFriendId={openingFriendId}
+            openingFriendId={pendingFriend?.id ?? null}
             hasMoreConversations={conversationHasMore}
             loadingMoreConversations={loadingMoreConversations}
             onLoadMoreConversations={loadMoreConversations}
+            loadingConversations={conversationsQuery.isLoading}
+            loadingFriends={followersQuery.isLoading}
+            conversationError={conversationError}
+            refreshNotice={conversationsQuery.isRefetchError
+              ? <AppStateRefreshNotice retry={conversationsQuery.refetch} busy={conversationsQuery.isFetching} />
+              : null}
           />
         </aside>
       ) : null}
 
       {shouldShowConversationPane ? (
-        <section className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+        <section className={conversationPaneClass} data-message-pending-chat={pendingFriend ? '' : undefined}>
           {selectedConversation ? (
             <>
               {/* 聊天头部：手机端收紧左边距与间距，让返回键+头像+昵称整体靠左 */}
-              <div className="flex items-center gap-3 border-b border-[var(--border-subtle)] px-3 py-3 mobile:gap-2 mobile:px-1.5">
-                {!isSplitLayout ? (
-                  <button
-                    type="button"
-                    onClick={handleBackToList}
-                    aria-label="返回会话列表"
-                    className="touch-target press-feedback inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-pill)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]"
-                  >
-                    <ChevronLeft className="h-5 w-5" />
-                  </button>
-                ) : null}
+              <div className={conversationHeaderClass}>
+                {!isSplitLayout && <ConversationBackButton onBack={handleBackToList} />}
                 {/* 直聊会话：头像与昵称可点进入对方主页 */}
                 {selectedConversation.type === 'direct' && selectedConversation.counterpart ? (
                   <Link
@@ -595,22 +647,12 @@ export default function MessagesPage() {
 
               {/* 消息区 */}
               {messagesQuery.isLoading ? (
-                <div className="min-h-0 flex-1 space-y-4 overflow-hidden px-4 py-5" aria-busy="true" aria-label="会话加载中">
-                  <Skeleton className="h-10 w-3/5 rounded-[16px]" />
-                  <Skeleton className="ml-auto h-10 w-1/2 rounded-[16px]" />
-                  <Skeleton className="h-16 w-2/3 rounded-[16px]" />
-                  <Skeleton className="ml-auto h-10 w-2/5 rounded-[16px]" />
-                </div>
-              ) : messagesQuery.isError ? (
-                <AppState
-                  tone="error"
-                  title="这段会话暂时没有打开"
-                  description={messagesQuery.error instanceof Error ? messagesQuery.error.message : '请稍后再试。'}
-                  primaryAction={{ label: '重试', onClick: () => void messagesQuery.refetch() }}
-                  className="min-h-0 flex-1 border-0 shadow-none"
-                />
+                <ConversationBubblesSkeleton />
+              ) : messagesUnavailable ? (
+                messagesError
               ) : (
                 <div ref={messageScrollRef} className="min-h-0 flex-1 overflow-y-auto" onScroll={handleMessageScroll}>
+                  {messagesQuery.isRefetchError ? <AppStateRefreshNotice retry={messagesQuery.refetch} busy={messagesQuery.isFetching} /> : null}
                   {/* 历史消息分页：触顶自动加载，也保留手动按钮兑底 */}
                   {hasMoreMessages ? (
                     <div className="flex justify-center pt-3">
@@ -624,13 +666,17 @@ export default function MessagesPage() {
                       </button>
                     </div>
                   ) : null}
-                  <MessageBubbleList
-                    messages={activeMessages}
-                    pendingMessages={activePending}
-                    currentUserId={currentUserId}
-                    counterpartLastReadAt={counterpartLastReadAt}
-                    onRetryPending={handleRetryPending}
-                  />
+                  {activeMessages.length === 0 && activePending.length === 0 ? (
+                    <AppState compact scene="message" title="还没有消息" />
+                  ) : (
+                    <MessageBubbleList
+                      messages={activeMessages}
+                      pendingMessages={activePending}
+                      currentUserId={currentUserId}
+                      counterpartLastReadAt={counterpartLastReadAt}
+                      onRetryPending={handleRetryPending}
+                    />
+                  )}
                 </div>
               )}
 
@@ -670,11 +716,25 @@ export default function MessagesPage() {
                 </>
               )}
             </>
+          ) : pendingFriend || selectedConversationId || conversationsQuery.isLoading ? (
+            <>
+              <PendingConversationHeader onBack={isSplitLayout ? undefined : handleBackToList} person={pendingFriend} />
+              {!pendingFriend && messagesQuery.isError ? (
+                messagesError
+              ) : (
+                <>
+                  <ConversationBubblesSkeleton />
+                  <ChatInputSkeleton />
+                </>
+              )}
+            </>
+          ) : conversationError ? (
+            conversationError
           ) : (
             <AppState
-              tone="empty"
+              scene="message"
               title="选一个会话开始聊天"
-              className="min-h-0 flex-1 border-0 shadow-none"
+              className="min-h-0 flex-1"
             />
           )}
         </section>

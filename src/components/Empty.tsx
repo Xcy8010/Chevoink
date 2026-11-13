@@ -1,17 +1,20 @@
 import type { ReactNode } from 'react'
 
 import AppState from '@/components/ui/AppState'
+import type { ChevoinkMascotPose } from '@/components/ui/ChevoinkMascot'
 
 type EmptyProps = {
   title?: string
   description?: string
   details?: ReactNode
+  scene?: ChevoinkMascotPose
 }
 
 export default function Empty({
   title = '这里暂时还没有内容',
-  description = '换个入口看看，或者稍后再回来继续浏览。',
+  description,
   details,
+  scene = 'reading',
 }: EmptyProps) {
-  return <AppState tone="empty" title={title} description={description} details={details} />
+  return <AppState compact scene={scene} title={title} description={description} details={details} />
 }

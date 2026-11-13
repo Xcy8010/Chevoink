@@ -430,7 +430,7 @@ function novelDirectionGuidance(spec: TaskSpec) {
     return '\n创作阶段：当前作品已有元信息或正文。先询问作者想要的方向，保留已有设置和正文，简述方向后结束本轮，不以缺少保存记录反复尝试。'
   }
   const purpose = spec.scope.novelInitializationProtocol === 2 ? '（purpose=novel_direction）' : '，并明确当前空作品的初始化'
-  return `\n创作阶段：先通过向作者提问工具${purpose}给出2–4个故事方向，收到真实回答后一次保存书名、简介和标签。保存后简述结果，在结束回复里问「要不要开始写大纲？」；不用提问工具等待下一步，不自动制作封面、写大纲或正文。`
+  return `\n创作阶段：先通过向作者提问工具${purpose}给出2–4个故事方向，收到真实回答后一次保存书名、简介和标签。保存后简述结果；有作者尚未明确跳过的封面等作品信息缺项时，在结束回复里问要先补缺项还是开始写大纲。作品信息已齐时可问「要不要开始写大纲？」。不用提问工具等待下一步，不自动制作封面、写大纲或正文。`
 }
 
 export function renderTaskSpec(spec: TaskSpec): string {
@@ -463,7 +463,7 @@ function renderTaskSpecBody(spec: TaskSpec): string {
     ? '\n本轮是普通对话：直接回应当前任务的原始问候或问题；作品上下文只作背景，不代表写作授权，不继续其他窗口的创作、待办或历史计划。任务中止后仍回应该原始问题，不能将“继续”解释为继续写作品。'
     : spec.writingPacing === 'proposal_only'
     ? novelDirectionGuidance(spec) || (spec.scope.novelInitializationProtocol && isExplicitNovelMetadataRequest(spec.goals.join('\n'))
-      ? '\n创作阶段：作者已明确要求初始化或修改当前作品信息；按已授权的选择完成书名、简介与标签保存，不因宽泛题材重复询问。封面缺项如实说明并问是否补做，再简短问是否开始大纲，结束本轮，不自动写大纲或正文。'
+      ? '\n创作阶段：作者已明确要求初始化或修改当前作品信息；按已授权的选择保存指定字段，不因宽泛题材重复询问。按实际保存结果回顾改动，把作品封面、简介、标签等仍缺且作者未明确跳过的字段合并为一次询问。当前作品正准备写大纲时，可把补齐信息和直接写大纲作为两个选择。结束本轮，不自动制作封面、写大纲或正文。'
       : '\n创作阶段：本轮仅规划。宽泛整书目标不等于授权连续写正文。先利用已给条件形成可审阅的大纲（人物目标、核心冲突、主要转折、结局方向、卷章节奏），可用 plan_save 保存；说明假设和建议的首批章节范围，交付后收尾等待作者下一条明确写作指令。不要把调研完成、旧作品大纲、历史写作授权、普通继续或你自己的待办当作本轮正文授权；不能通过子任务或其它工具绕过。关键方向缺失可集中提问，但不必为每个细节重复确认。')
     : '\n创作节奏：写作严格限于本任务原始请求。面对宽泛整书目标先交可审阅的大纲并确认首批范围，再进入正文；用户明确授权自主整书创作时先保存大纲、按计划分批推进，每批回报真实进度与重大偏差。用户明确指定章节/续写范围时直接执行该范围，不反复确认，不擅自向后无限续章。调研结果和历史任务不是新的写作授权。'
   const clarificationRule = spec.scope.writingClarificationProtocol === 2 && (spec.scope.writing?.kind === 'needs_input' || spec.scope.localEditBoundary?.kind === 'needs_input')

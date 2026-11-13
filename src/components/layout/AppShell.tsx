@@ -5,7 +5,7 @@ import SiteSupportLink from '@/features/site-content/SiteSupportLink'
 import { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, UIEvent, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, ChevronRight, ChevronUp, Compass, FileText, Home, LoaderCircle, LogOut, MessageSquareMore, MoonStar, PenSquare, Plus, Settings, SunMedium, UserRound, Users, WifiOff } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Compass, FileText, Home, LoaderCircle, LogOut, MessageSquareMore, MoonStar, PenSquare, Settings, SunMedium, UserRound, Users, WifiOff } from 'lucide-react'
 
 import { requestJson } from '@/app/api-client'
 import { useToast } from '@/components/ui/toast-context'
@@ -16,12 +16,13 @@ import QuickCreateSheet from '@/components/layout/QuickCreateSheet'
 import Avatar from '@/features/community/components/Avatar'
 import { getInteractionBadges, listConversations } from '@/features/community/api'
 import GlobalSearchBox from '@/features/search/GlobalSearchBox'
-import { brandMeta } from '@/lib/theme/tokens'
 import { enterImmersiveFullscreen } from '@/lib/immersive-fullscreen'
 import { isNativeApp } from '@/lib/native-app'
 import { isWindowsDesktopApp } from '@/lib/desktop-app'
 import { cn } from '@/lib/utils'
 import { useOnlineStatus } from '@/hooks/useOnlineStatus'
+import { useRevealHeader } from '@/hooks/useRevealHeader'
+import { preloadProfilePage } from '@/features/profile/load-profile-page'
 import { useShellStore } from '@/store/useShellStore'
 import { mobileNavItems, workspaceLinks } from '@/types/app'
 
@@ -51,7 +52,6 @@ export default function AppShell({ title, description, children }: AppShellProps
   const effectiveSettings = effectiveSiteSettings(siteSettings)
   const headerNavItems = effectiveSettings.navigation.map(item => ({href:item.url,label:item.label}))
   const quickCreateOpen = useShellStore((state) => state.quickCreateOpen)
-  const openQuickCreate = useShellStore((state) => state.openQuickCreate)
   const closeQuickCreate = useShellStore((state) => state.closeQuickCreate)
   const toggleTheme = useShellStore((state) => state.toggleTheme)
   const theme = useShellStore((state) => state.theme)
@@ -96,19 +96,15 @@ export default function AppShell({ title, description, children }: AppShellProps
   // 底栏重复点击刷新：按路由记录上次刷新时间戳 + 顶部 spinner 展示态
   const navRefreshAtRef = useRef(new Map<string, number>())
   const [bottomNavRefreshing, setBottomNavRefreshing] = useState(false)
-  const headerRef = useRef<HTMLElement | null>(null)
+  const [headerSearchOpen, setHeaderSearchOpen] = useState(false)
+  const [headerFocused, setHeaderFocused] = useState(false)
+  const { ref: headerRef, hidden: headerHidden } = useRevealHeader(headerSearchOpen || headerFocused, mainScrollRef, location.pathname)
   const desktopAccountMenuRef = useRef<HTMLDivElement | null>(null)
-  const [isScrolled, setIsScrolled] = useState(false)
-  // 滚动态同步到 ref：折叠动画进行中冻结 header 高度测量，避免内容 padding 跟着跳动
-  const isScrolledRef = useRef(false)
-  // 展开动画期间的测量冻结截止时间 + 测量函数引用：动画结束后一次性对齐，避免逐帧回写 padding 造成展开卡顿
-  const measureFreezeUntilRef = useRef(0)
-  const measureHeaderRef = useRef<() => void>(() => {})
   // 默认折叠，保证内容区最大宽度；展开状态仅影响桌面端(lg)，平板端常驻收起导航轨
   const [sidebarExpanded, setSidebarExpanded] = useState(false)
   const [desktopAccountMenuOpen, setDesktopAccountMenuOpen] = useState(false)
   const [inlineAccountExpanded, setInlineAccountExpanded] = useState(false)
-  const [headerHeight, setHeaderHeight] = useState(160)
+  const [headerHeight, setHeaderHeight] = useState(64)
 
   // 全局未读汇总（私信 + 互动 + 新粉丝）：驱动底部导航/侧边栏的消息红点；
   // queryKey 与消息页共用，避免重复请求，30s 轻轮询保持新鲜
@@ -120,7 +116,7 @@ export default function AppShell({ title, description, children }: AppShellProps
   })
   const shellConversationsQuery = useQuery({
     queryKey: ['community', 'conversations'],
-    queryFn: () => listConversations(30),
+    queryFn: () => listConversations(),
     enabled: isAuthenticated,
     refetchInterval: 30_000,
   })
@@ -160,13 +156,9 @@ export default function AppShell({ title, description, children }: AppShellProps
     }
 
     const updateHeaderHeight = () => {
-      // 折叠（滚动）期间 header 是 fixed 浮层，高度变化不回写内容 padding；展开动画进行中同样冻结，
-      // 由 handleMainScroll 排的一次性测量在动画结束后对齐，避免 ResizeObserver 逐帧触发整页重排
-      if (isScrolledRef.current || Date.now() < measureFreezeUntilRef.current) return
       setHeaderHeight(Math.ceil(headerEl.getBoundingClientRect().height))
     }
 
-    measureHeaderRef.current = updateHeaderHeight
     updateHeaderHeight()
 
     const observer = new ResizeObserver(updateHeaderHeight)
@@ -177,7 +169,7 @@ export default function AppShell({ title, description, children }: AppShellProps
       observer.disconnect()
       window.removeEventListener('resize', updateHeaderHeight)
     }
-  }, [])
+  }, [headerRef])
 
   useEffect(() => {
     const nextScrollRoot = mainScrollRef.current
@@ -198,9 +190,6 @@ export default function AppShell({ title, description, children }: AppShellProps
       }
     }
 
-    const scrolled = savedTop > 12
-    isScrolledRef.current = scrolled
-    setIsScrolled(scrolled)
     setDesktopAccountMenuOpen(false)
   }, [location.pathname])
 
@@ -233,14 +222,6 @@ export default function AppShell({ title, description, children }: AppShellProps
   const handleMainScroll = (event: UIEvent<HTMLDivElement>) => {
     // 持续记录当前路由的滚动位置，供社区页返回时恢复
     scrollPositionsRef.current.set(location.pathname, event.currentTarget.scrollTop)
-    const next = event.currentTarget.scrollTop > 12
-    if (!next && isScrolledRef.current) {
-      // 折叠转向展开：动画期间继续冻结 header 高度测量，结束后一次性对齐，展开过程不再逐帧重排
-      measureFreezeUntilRef.current = Date.now() + 360
-      window.setTimeout(() => measureHeaderRef.current(), 380)
-    }
-    isScrolledRef.current = next
-    setIsScrolled(next)
   }
 
   // 底栏重复点击当前路由：回顶 + 清滚动记忆；配置了刷新 key 的路由（发现/社区）再触发数据刷新
@@ -270,9 +251,6 @@ export default function AppShell({ title, description, children }: AppShellProps
       .catch((): undefined => undefined)
       .finally(() => setBottomNavRefreshing(false))
   }
-
-  // 手机端 header 折叠态（只剩搜索框）：首页/发现页滚动时挤压，搜索页常驻折叠
-  const mobileHeaderCollapsed = isScrolled || isSearchRoute
 
   async function handleLogout() {
     try {
@@ -485,10 +463,10 @@ export default function AppShell({ title, description, children }: AppShellProps
 
   const topNavClass = ({ isActive }: { isActive: boolean }) =>
     cn(
-      'rounded-[var(--radius-pill)] px-4 py-2 text-sm font-medium transition-colors',
+      'flex h-16 shrink-0 items-center border-b-2 px-4 text-sm font-medium transition-colors',
       isActive
-        ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)]'
-        : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]',
+        ? 'border-[var(--color-brand)] text-[var(--text-primary)]'
+        : 'border-transparent text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]',
     )
 
   const railNavClass = ({ isActive }: { isActive: boolean }) =>
@@ -501,17 +479,19 @@ export default function AppShell({ title, description, children }: AppShellProps
 
   const bottomNavClass = ({ isActive }: { isActive: boolean }) =>
     cn(
-      'flex min-w-0 items-center justify-center rounded-[var(--radius-pill)] px-3 py-2 text-sm font-medium transition-colors',
+      'app-bottom-link flex min-h-11 min-w-0 items-center justify-center rounded-[var(--radius-pill)] px-3 py-2 text-sm font-medium transition-colors',
       isActive
-        ? 'bg-transparent text-[var(--text-primary)]'
-        : 'text-[var(--text-secondary)] hover:bg-transparent hover:text-[var(--text-primary)]',
+        ? 'is-selected bg-transparent'
+        : 'hover:bg-transparent',
     )
 
   return (
     <div
+      data-app-shell
       // 壳高随软键盘收缩（iOS 等不缩小布局视口的浏览器），消息输入栏、评论框等随之被顶到键盘上方
       className="flex h-[calc(100dvh-var(--keyboard-inset,0px))] flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]"
-      style={{ ['--app-header-height' as string]: `${headerHeight}px` }}
+      data-site-header-hidden={headerHidden}
+      style={{ '--app-header-height': `${headerHeight}px`, '--app-header-visible-height': headerHidden ? '0px' : `${headerHeight}px` } as CSSProperties}
     >
       {online ? null : (
         <div className="flex shrink-0 items-center justify-center gap-1.5 bg-[var(--surface-muted)] px-3 pb-1.5 pt-[calc(var(--safe-top)+4px)] text-xs text-[var(--text-secondary)]">
@@ -524,6 +504,7 @@ export default function AppShell({ title, description, children }: AppShellProps
         <aside
           className={cn(
             'hidden shrink-0 md:flex md:h-full md:flex-col md:overflow-y-auto md:transition-[width] md:duration-200',
+            !isReaderRoute && 'md:pt-[var(--app-header-height)]',
             isAuthRoute && 'md:hidden',
             isStudioRoute && 'md:hidden',
             'md:w-[64px]',
@@ -587,7 +568,7 @@ export default function AppShell({ title, description, children }: AppShellProps
                 type="button"
                 onClick={() => setSidebarExpanded(true)}
                 aria-label="展开侧边栏"
-                className="inline-flex h-11 w-11 items-center justify-center rounded-[16px] border border-[var(--border-subtle)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
+                className="inline-flex h-11 w-11 items-center justify-center rounded-[16px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
               >
                 <ChevronRight className="h-4 w-4" />
               </button>
@@ -603,6 +584,9 @@ export default function AppShell({ title, description, children }: AppShellProps
                       type="button"
                       title={sessionUser.nickname}
                       onClick={() => navigate('/me')}
+                      onPointerEnter={preloadProfilePage}
+                      onFocus={preloadProfilePage}
+                      onPointerDown={preloadProfilePage}
                       className="inline-flex h-11 w-11 items-center justify-center overflow-hidden rounded-full border border-[var(--border-subtle)] bg-[var(--surface-default)] transition-colors hover:bg-[var(--surface-muted)]"
                     >
                       <Avatar name={sessionUser.nickname} src={sessionUser.avatarUrl} size="md" className="h-11 w-11 border-0 bg-transparent" />
@@ -661,133 +645,67 @@ export default function AppShell({ title, description, children }: AppShellProps
           <div
             className={cn(
               'mx-auto flex h-full max-w-[var(--shell-max-width)] flex-col px-4 md:px-6 xl:px-8',
-              isMessagesChatRoute && 'mobile:px-0',
+              (isMessagesChatRoute || isCommunityRoute) && 'mobile:px-0',
               isStudioRoute && 'max-w-none px-0 md:px-0 xl:px-0',
             )}
           >
             <header
               ref={headerRef}
+              data-site-header
               className={cn(
-                'pointer-events-none fixed left-0 right-0 top-0 z-40 px-4 pt-[calc(var(--safe-top)+8px)] transition-[left] duration-200 md:px-6 md:pt-4 xl:px-8',
-                !isAuthRoute && 'md:left-[64px]',
-                !isAuthRoute && sidebarExpanded && 'lg:left-[284px]',
+                'site-reveal-header fixed left-0 right-0 top-0 z-40 border-b border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 pt-[var(--safe-top)] md:px-5',
                 isStudioRoute && 'hidden lg:hidden',
-                // 阅读区以正文为中心，电脑端也去掉壳层顶部导航栏，让阅读区顶到最上
                 isReaderRoute && 'hidden md:hidden',
-                // 手机端仅首页/发现/搜索显示顶部导航栏（studio 已有自己的隐藏规则，不叠加）
                 hideMobileHeader && !isStudioRoute && !isReaderRoute && 'hidden md:block',
               )}
+              data-hidden={headerHidden}
+              onFocusCapture={event => setHeaderFocused(event.target.matches(':focus-visible'))}
+              onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) setHeaderFocused(false) }}
             >
-          <div className="mx-auto max-w-[var(--shell-max-width)]">
-            <div
-              className={cn(
-                'pointer-events-auto relative rounded-[28px] border transition-[background-color,border-color,box-shadow,padding,transform] duration-300 ease-out',
-                'border-[var(--border-subtle)] bg-[color:var(--surface-default)]/96 shadow-[0_10px_28px_rgba(17,24,39,0.06)] backdrop-blur',
-                isScrolled
-                  ? 'px-3 py-3 shadow-[0_14px_32px_rgba(17,24,39,0.08)]'
-                  : 'px-3 py-3 md:px-4',
-                // 手机端折叠后外层卡片壳退场：只剩搜索框自身的胶囊，不再一层套一层
-                mobileHeaderCollapsed &&
-                  'mobile:border-transparent mobile:bg-transparent mobile:p-0 mobile:shadow-none mobile:backdrop-blur-none',
-              )}
-            >
-              <div className="relative">
-            <div
-              className={cn(
-                // 手机端挤压动画：折叠时 logo 行用 max-height+透明度+上移自然收起，只留搜索框；
-                // overflow-hidden 常驻手机端，展开起步瞬间内容不会先溢出再被裁切
-                'flex items-center gap-3 transition-[max-height,opacity,transform] duration-300 ease-out mobile:overflow-hidden md:gap-4',
-                mobileHeaderCollapsed
-                  ? 'mobile:max-h-0 mobile:-translate-y-2 mobile:opacity-0'
-                  : 'mobile:max-h-14 mobile:translate-y-0 mobile:opacity-100',
-              )}
-            >
-                  <Link to="/" className="flex min-w-0 items-center gap-3">
-                    <span className="inline-flex h-10 w-10 items-center justify-center overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[color:var(--surface-default)]/96 md:h-11 md:w-11">
-                      <AppImage
-                        src={effectiveSettings.logoUrl ?? defaultSiteSettings.logoUrl}
-                        alt={`${effectiveSettings.name} Logo`}
-                        className="h-full w-full"
-                        priority
-                      />
+              <div className="site-header-row relative flex h-14 items-center gap-2 md:h-16 md:gap-5">
+                <Link to="/" className="site-header-identity flex shrink-0 items-center gap-2" aria-label={effectiveSettings.name + '首页'}>
+                  <AppImage src={!effectiveSettings.logoUrl || effectiveSettings.logoUrl === defaultSiteSettings.logoUrl ? '/chevoink-agent.png' : effectiveSettings.logoUrl} alt={effectiveSettings.name + ' Logo'} className="h-10 w-10 shrink-0 md:h-11 md:w-11" priority />
+                  <span className="hidden text-base font-semibold md:block">{effectiveSettings.name}</span>
+                </Link>
+                <GlobalSearchBox onOpenChange={setHeaderSearchOpen} className="site-header-search min-w-0 flex-1 md:max-w-[360px]" />
+                <nav aria-label="站点导航" className="hidden min-w-0 flex-1 items-center justify-center overflow-x-auto md:flex">
+                  {headerNavItems.map((item) => item.href.startsWith('/') ? (
+                    <NavLink key={item.href} to={item.href} className={topNavClass}>{item.label}</NavLink>
+                  ) : (
+                    <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer" className={topNavClass({isActive:false})}>{item.label}</a>
+                  ))}
+                </nav>
+                {siteSettings?.navigation.length ? (
+                  <details className="site-navigation-menu relative md:hidden">
+                    <summary aria-label="站点导航菜单" className="grid h-11 w-9 cursor-pointer list-none place-items-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"><ChevronDown className="h-5 w-5" /></summary>
+                    <nav aria-label="站点导航" className="absolute right-0 top-full mt-2 min-w-40 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-[var(--shadow-elevated)]" onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}>
+                      {headerNavItems.map(item => item.href.startsWith('/') ? (
+                        <NavLink key={item.href} to={item.href} className="block rounded-lg px-3 py-3 text-sm hover:bg-[var(--surface-muted)]">{item.label}</NavLink>
+                      ) : (
+                        <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer" className="block rounded-lg px-3 py-3 text-sm hover:bg-[var(--surface-muted)]">{item.label}</a>
+                      ))}
+                    </nav>
+                  </details>
+                ) : null}
+                <div className="site-header-actions ml-auto flex shrink-0 items-center gap-0.5 md:gap-1">
+                  {!isStudioRoute && !isReaderRoute && <AnnouncementBell placement="site" />}
+                  <Button onClick={toggleTheme} variant="ghost" className="hidden h-11 w-11 px-0 md:inline-flex" aria-label="切换主题">
+                    {theme === 'light' ? <MoonStar className="h-5 w-5" /> : <SunMedium className="h-5 w-5" />}
+                  </Button>
+                  <NavLink to="/messages" aria-label="消息" className="hidden h-11 w-11 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] md:flex">
+                    <span className="relative inline-flex">
+                      <MessageSquareMore className="h-5 w-5" />
+                      {totalUnread > 0 ? <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-rose-500" /> : null}
                     </span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-[11px] font-semibold uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-                        {siteSettings ? null : brandMeta.productNameEn}
-                      </span>
-                      <span className="block truncate text-base font-semibold text-[var(--text-primary)]">{effectiveSettings.name}</span>
-                    </span>
-                  </Link>
-
-                  <nav aria-label="站点导航" className="ml-2 hidden items-center gap-1 lg:flex">
-                    {headerNavItems.map((item) => item.href.startsWith('/') ? (
-                      <NavLink key={item.href} to={item.href} className={topNavClass}>{item.label}</NavLink>
-                    ) : (
-                      <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer" className={topNavClass({isActive:false})}>{item.label}</a>
-                    ))}
-                  </nav>
-
-                  <div className="ml-auto flex items-center gap-1 md:gap-2">
-                    {!isStudioRoute && !isReaderRoute && <AnnouncementBell placement="site" />}
-                    <Button
-                      onClick={toggleTheme}
-                      variant="ghost"
-                      className="h-10 w-10 border border-[var(--border-subtle)] bg-[color:var(--surface-default)]/96 px-0 hover:bg-[color:var(--surface-default)] md:h-11 md:w-11"
-                      aria-label="切换主题"
-                    >
-                      {theme === 'light' ? <MoonStar className="h-4 w-4" /> : <SunMedium className="h-4 w-4" />}
-                    </Button>
-                    <NavLink to="/messages" className="hidden md:flex">
-                      {({ isActive }) => (
-                        <span
-                          className={cn(
-                            'inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-pill)] transition-colors',
-                            isActive
-                              ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)]'
-                              : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]',
-                          )}
-                        >
-                          <span className="relative inline-flex">
-                            <MessageSquareMore className="h-4 w-4" />
-                            {totalUnread > 0 ? (
-                              <span className="absolute -right-1.5 -top-1.5 h-2 w-2 rounded-full bg-rose-500" />
-                            ) : null}
-                          </span>
-                        </span>
-                      )}
-                    </NavLink>
-                    <Button onClick={openQuickCreate} variant="primary" className="hidden md:inline-flex lg:hidden">
-                      <Plus className="h-4 w-4" />
-                      开始创作
-                    </Button>
-                  </div>
-                </div>
-
-                <div
-                  className={cn(
-                    'grid gap-2 transition-[margin,transform,opacity] duration-300 ease-out md:grid-cols-[minmax(0,1fr)_auto] md:items-center',
-                    isScrolled ? 'mt-2' : 'mt-3',
-                    // 折叠后搜索框顶格，与 logo 行的收起动画同步过渡
-                    mobileHeaderCollapsed && 'mobile:mt-0',
-                  )}
-                >
-                  <GlobalSearchBox />
-                  <nav aria-label="站点导航" className={cn('items-center gap-1 overflow-x-auto', siteSettings?.navigation.length ? 'flex lg:hidden' : 'hidden md:flex lg:hidden')}>
-                    {headerNavItems.map((item) => item.href.startsWith('/') ? (
-                      <NavLink key={item.href} to={item.href} className={topNavClass}>{item.label}</NavLink>
-                    ) : (
-                      <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer" className={topNavClass({isActive:false})}>{item.label}</a>
-                    ))}
-                  </nav>
+                  </NavLink>
                 </div>
               </div>
-            </div>
-          </div>
-        </header>
+            </header>
 
         <div className="flex min-h-0 flex-1 flex-col">
           <main
             ref={mainScrollRef}
+            data-app-main-scroll
             onScroll={handleMainScroll}
             className={cn(
               'app-main-scroll min-h-0 flex-1 overscroll-contain lg:self-stretch',
@@ -799,9 +717,10 @@ export default function AppShell({ title, description, children }: AppShellProps
           >
             <div
               className={cn(
-                'space-y-4 pb-[calc(88px+var(--safe-bottom))] pr-0.5 pt-[calc(var(--app-header-height)+12px)] md:space-y-6 md:pb-8',
+                'app-main-content space-y-4 pb-[calc(88px+var(--safe-bottom))] pr-0.5 pt-[calc(var(--app-header-height)+12px)] md:space-y-6 md:pb-8',
                 // 手机端隐藏顶部导航栏的页面：内容顶上去，只留安全区间距（studio 保持原行为）
                 hideMobileHeader && !isStudioRoute && 'mobile:pt-[calc(var(--safe-top)+12px)]',
+                isCommunityRoute && 'space-y-0 md:space-y-0 mobile:pr-0 mobile:pt-[var(--safe-top)]',
                 isReaderRoute && 'flex h-full min-h-0 flex-col space-y-4 pb-0 md:pb-0 md:pt-0',
                 // 创作区手机端由自己的底部导航接管，不再为全局底栏留白
                 isStudioRoute && 'flex h-full min-h-0 flex-col space-y-4 md:space-y-4 pb-0 md:pb-0',
@@ -820,7 +739,8 @@ export default function AppShell({ title, description, children }: AppShellProps
               {!isHome ? (
                 <section
                   className={cn(
-                    'space-y-2 px-0.5 pt-1 md:space-y-3 md:pt-2',
+                    'app-route-heading space-y-2 px-0.5 pt-1 md:space-y-3 md:pt-2',
+                    (isDiscoverRoute || location.pathname === '/rankings') && 'hidden',
                     isStudioRoute && 'hidden',
                     isReaderRoute && 'hidden',
                     isNovelDetailRoute && 'hidden',
@@ -868,16 +788,24 @@ export default function AppShell({ title, description, children }: AppShellProps
           isMeListRoute && 'hidden',
         )}
       >
-        <div className="mx-auto grid max-w-lg grid-cols-[1fr_1fr_auto_1fr_1fr] items-center gap-2">
+        <div className="mx-auto grid max-w-lg grid-cols-5 items-center gap-2">
           {mobileNavItems.slice(0, 2).map((item) => (
             <NavLink
               key={item.href}
               to={item.href === '/me' ? accountRoute : item.href}
               onClick={(event) => handleBottomNavClick(event, item.href === '/me' ? accountRoute : item.href)}
-              className={bottomNavClass}
+              onPointerEnter={item.href === '/me' ? preloadProfilePage : undefined}
+              onFocus={item.href === '/me' ? preloadProfilePage : undefined}
+              onPointerDown={item.href === '/me' ? preloadProfilePage : undefined}
+              className={({ isActive }) => bottomNavClass({ isActive: isActive || (item.href === '/' && (isDiscoverRoute || isSearchRoute || location.pathname === '/rankings')) })}
             >
               <span className="relative">
-                {item.label}
+                {(
+                  <>
+                    <span className="sr-only">{item.label}</span>
+                    {item.href === '/messages' ? <MessageSquareMore className="h-[22px] w-[22px]" aria-hidden /> : <Compass className="h-[22px] w-[22px]" aria-hidden />}
+                  </>
+                )}
                 {item.href === '/messages' && totalUnread > 0 ? (
                   <span className="absolute -right-3 -top-2 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-center text-[10px] font-semibold leading-none tabular-nums text-white">
                     {unreadBadgeText}
@@ -886,17 +814,25 @@ export default function AppShell({ title, description, children }: AppShellProps
               </span>
             </NavLink>
           ))}
-          <Button onClick={() => navigate('/studio')} variant="primary" className="h-11 w-11 px-0" aria-label="进入创作区">
-            <Plus className="h-4 w-4" />
+          <Button onClick={() => navigate('/studio')} variant="ghost" className="app-bottom-create h-11 w-11 justify-self-center px-0" aria-label="进入创作区">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-7 w-7"><rect x="2.5" y="3.5" width="19" height="17" rx="5" /><path d="M12 8v8m-4-4h8" /></svg>
           </Button>
           {mobileNavItems.slice(2).map((item) => (
             <NavLink
               key={item.href}
               to={item.href === '/me' ? accountRoute : item.href}
               onClick={(event) => handleBottomNavClick(event, item.href === '/me' ? accountRoute : item.href)}
-              className={bottomNavClass}
+              onPointerEnter={item.href === '/me' ? preloadProfilePage : undefined}
+              onFocus={item.href === '/me' ? preloadProfilePage : undefined}
+              onPointerDown={item.href === '/me' ? preloadProfilePage : undefined}
+              className={({ isActive }) => bottomNavClass({ isActive: isActive || (item.href === '/' && (isDiscoverRoute || isSearchRoute || location.pathname === '/rankings')) })}
             >
-              {item.label}
+              {(
+                <>
+                  <span className="sr-only">{item.label}</span>
+                  {item.href === '/community' ? <Users className="h-[22px] w-[22px]" aria-hidden /> : <UserRound className="h-[22px] w-[22px]" aria-hidden />}
+                </>
+              )}
             </NavLink>
           ))}
         </div>

@@ -1738,11 +1738,9 @@ export function AgentPanel({
                   {message.delivery?.status === 'failed' ? <div className="flex max-w-full items-center gap-2 text-xs text-[var(--text-secondary)]">
                     <span role="alert">发送未确认：{message.delivery.error}</span>
                     <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button>
-                  </div> : !showSummary ? messageActions : null}
-                  {/* Acknowledging the request adds controls to this row without moving the timer. */}
+                  </div> : messageActions ?? (showSummary ? <div aria-hidden className="h-7 mobile:h-10" /> : null)}
                   {showSummary ? <div className="agent-reading-column pt-3">
                     <AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
-                      actions={<div className="flex min-w-0 items-center mobile:min-h-10">{messageActions}</div>}
                       onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} />
                   </div> : null}
                 </div>

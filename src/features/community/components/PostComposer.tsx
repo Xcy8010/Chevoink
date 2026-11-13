@@ -1,8 +1,7 @@
-import { BookOpen, ImagePlus, PenSquare, X } from 'lucide-react'
+import { BookOpen, Globe2, Hash, ImagePlus, PenSquare, Plus, Sparkles, X } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useId, useRef, useState, type ChangeEvent } from 'react'
 
-import BottomSheet from '@/components/layout/BottomSheet'
 import { useDevice } from '@/components/layout/device-context'
 import AuthPromptDialog from '@/components/ui/AuthPromptDialog'
 import Button from '@/components/ui/Button'
@@ -22,7 +21,7 @@ type PostComposerProps = {
     imageDataUrls?: string[]
     relatedNovelId?: string
     sharedUserId?: string
-  }) => void
+  }) => Promise<boolean>
   isSubmitting: boolean
   /** 从作品页/作者页带入的分享草稿：自动展开编辑器并预览卡片 */
   initialShare?: CommunityShareDraft | null
@@ -30,16 +29,19 @@ type PostComposerProps = {
 
 /**
  * 发帖入口（方案 8.3.2 / 18 §3.5）：
- * - 默认收起为"头像 + 占位提示"假输入框
- * - 手机端点击展开全屏编辑页（避免键盘遮挡）
- * - 平板/电脑端点击展开居中模态
+ * - 从社区工具栏打开发布编辑器
+ * - 实色居中模态，两端共享编辑区与工具栏，键盘弹起时收紧可视高度
  * - 话题改用 X 式 # 语法：正文内 #话题 由服务端解析，不再选话题按钮
  */
 export default function PostComposer({ onSubmit, isSubmitting, initialShare }: PostComposerProps) {
   const { isMobile } = useDevice()
   const toast = useToast()
   const authStatus = useShellStore((state) => state.authStatus)
-  const sessionUser = useShellStore((state) => state.sessionUser)
+  const user = useShellStore(state => state.sessionUser)
+  const titleId = useId()
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const [closing, setClosing] = useState(false)
+  const [helper, setHelper] = useState<'topics' | 'prompts' | null>(null)
   const [open, setOpen] = useState(false)
   const [authPromptOpen, setAuthPromptOpen] = useState(false)
   const [content, setContent] = useState('')
@@ -69,6 +71,32 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
     }
   }, [initialShare, authStatus])
 
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    if (open) {
+      setClosing(false)
+      if (!dialog.open) dialog.showModal()
+      return
+    }
+    if (!dialog.open) return
+    setClosing(true)
+    const timer = window.setTimeout(() => {
+      dialog.close()
+      setClosing(false)
+    }, 180)
+    return () => window.clearTimeout(timer)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const root = dialogRef.current?.closest<HTMLElement>('[data-app-main-scroll]')
+    if (!root) return
+    const previousOverflow = root.style.overflowY
+    root.style.overflowY = 'hidden'
+    return () => { root.style.overflowY = previousOverflow }
+  }, [open])
+
   const handleOpen = () => {
     if (authStatus !== 'authenticated') {
       // 未登录不再生硬跳页，弹窗引导去登录/注册，关掉后留在社区继续浏览
@@ -78,7 +106,9 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
     setOpen(true)
   }
 
-  const handleClose = () => setOpen(false)
+  const handleClose = () => {
+    if (!isSubmitting) setOpen(false)
+  }
 
   /** textarea 滚动时镜像层同步位移，保证 #话题 高亮与正文逐字对齐 */
   const handleEditorScroll = () => {
@@ -146,15 +176,16 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
     setImages((value) => value.filter((_, itemIndex) => itemIndex !== index))
   }
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     const trimmed = content.trim()
     if (!trimmed || isSubmitting || imageProcessing) return
-    onSubmit({
+    const published = await onSubmit({
       content: trimmed,
       imageDataUrls: images,
       relatedNovelId: share?.kind === 'novel' ? share.novel.id : undefined,
       sharedUserId: share?.kind === 'author' ? share.author.id : undefined,
     })
+    if (!published) return
     setContent('')
     setImages([])
     setShare(null)
@@ -162,14 +193,14 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
   }
 
   const editor = (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-col">
       {/* 高亮镜像结构：镜像层垫底渲染彩色正文（#话题 品牌蓝），textarea 叠在上层、
           文字透明只留光标，滚动时同步镜像层位移，两端指标一致保证逐行对齐 */}
-      <div className="relative min-h-40 flex-1">
+      <div className="relative h-44 shrink-0 md:h-52">
         <div
           ref={highlightLayerRef}
           aria-hidden
-          className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-4 py-4 text-[15px] leading-7 text-[var(--text-primary)] md:px-5"
+          className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-4 py-4 text-lg leading-7 text-[var(--text-primary)] md:px-5"
         >
           {splitContentByTopics(content).map((segment, index) =>
             segment.type === 'topic' ? (
@@ -185,14 +216,16 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
         </div>
         <textarea
           ref={textareaRef}
-          // 全屏编辑页打开即输入
-          autoFocus={isMobile}
+          // 手机先居中展示弹窗，用户点正文后再唤起键盘。
+          autoFocus={!isMobile}
+          readOnly={isSubmitting}
           value={content}
           onChange={(event) => setContent(event.target.value)}
           onScroll={handleEditorScroll}
-          placeholder={share ? '说说你的推荐理由，让更多人看到它。' : '把你的观察、追更感受或写作心得发出来。'}
+          aria-label="帖子内容"
+          placeholder={share ? '说说你的推荐理由，让更多人看到它。' : '分享你的新鲜事吧…'}
           // 绝对定位铺满容器，与镜像层同尺寸同内边距，逐行对齐
-          className="absolute inset-0 h-full w-full resize-none border-0 bg-transparent whitespace-pre-wrap break-words px-4 py-4 text-[15px] leading-7 text-transparent caret-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] md:px-5"
+          className="absolute inset-0 h-full w-full resize-none border-0 bg-transparent whitespace-pre-wrap break-words px-4 py-4 text-lg leading-7 text-transparent caret-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] md:px-5"
         />
       </div>
 
@@ -238,6 +271,7 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
               type="button"
               onClick={() => setShare(null)}
               aria-label="移除分享卡片"
+              disabled={isSubmitting}
               className="press-feedback absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)]"
             >
               <X className="h-3.5 w-3.5" />
@@ -259,6 +293,7 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
                 type="button"
                 onClick={() => handleRemoveImage(index)}
                 aria-label={`移除第 ${index + 1} 张配图`}
+                disabled={isSubmitting}
                 className="press-feedback absolute right-0.5 top-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-black/55 text-white"
               >
                 <X className="h-3 w-3" />
@@ -273,98 +308,37 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
         </div>
       ) : null}
 
-      <div className="border-t border-[var(--border-subtle)] px-4 py-3 md:px-5">
-        {/* X 式话题引导：纯文本两行，无卡片无胶囊无边框（方案 18 §3.5）；话题名上限 9 字 */}
-        <p className="text-xs leading-6 text-[var(--text-tertiary)]">
-          使用 <span className="font-medium text-[var(--color-brand)]">#</span> 可以引用或创建一个话题（话题名最多 9 个字）
-        </p>
-        {recommendedTopics.length > 0 ? (
-          <p className="mt-0.5 text-xs leading-6 text-[var(--text-tertiary)]">
-            推荐话题
-            {recommendedTopics.map((topic) => (
-              <button
-                key={topic.id}
-                type="button"
-                onClick={() => handleInsertTopic(topic.name)}
-                className="press-feedback ml-2.5 font-medium text-[var(--color-brand)] transition-opacity hover:opacity-80"
-              >
-                #{topic.name}
-              </button>
-            ))}
-          </p>
-        ) : null}
-
-        {!content ? (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {communityPrompts.map((prompt) => (
-              <button
-                key={prompt}
-                type="button"
-                onClick={() => setContent(prompt)}
-                className="press-feedback rounded-[var(--radius-pill)] border border-dashed border-[var(--border-subtle)] px-3 py-1.5 text-xs text-[var(--text-tertiary)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--text-secondary)]"
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
-        ) : null}
-
-        <div className="mt-4 flex items-center justify-between gap-3 pb-[var(--safe-bottom)]">
-          <button
-            type="button"
-            onClick={() => imageInputRef.current?.click()}
-            disabled={imageProcessing || images.length >= MAX_POST_IMAGE_COUNT}
-            className={cn(
-              'press-feedback inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-pill)] border border-[var(--border-subtle)] px-3 text-xs transition-colors',
-              imageProcessing || images.length >= MAX_POST_IMAGE_COUNT
-                ? 'cursor-not-allowed text-[var(--text-tertiary)] opacity-60'
-                : 'text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]',
-            )}
-          >
-            <ImagePlus className="h-4 w-4" />
-            图片
-            <span className="tabular-nums text-[var(--text-tertiary)]">
-              {images.length}/{MAX_POST_IMAGE_COUNT}
-            </span>
-          </button>
-          <input
-            ref={imageInputRef}
-            type="file"
-            accept="image/png,image/jpeg,image/webp"
-            multiple
-            className="hidden"
-            onChange={(event) => void handlePickImages(event)}
-          />
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-[var(--text-tertiary)]">{content.trim().length} 字</span>
-            <Button
-              variant="primary"
-              onClick={handleSubmit}
-              disabled={!content.trim() || isSubmitting || imageProcessing}
-            >
-              {isSubmitting ? '发布中' : '发布讨论'}
-            </Button>
-          </div>
+      {helper ? (
+        <div className="px-4 pb-4 md:px-5">
+          {helper === 'topics' ? (
+            <div className="space-y-2">
+              <p className="text-xs text-[var(--text-tertiary)]">使用 # 引用或创建话题，话题名最多 9 个字</p>
+              <div className="flex flex-wrap gap-2">
+                {recommendedTopics.map(topic => <button key={topic.id} type="button" disabled={isSubmitting} onClick={() => handleInsertTopic(topic.name)} className="rounded-lg bg-[var(--surface-muted)] px-3 py-2 text-sm text-[var(--color-brand)] hover:opacity-80">#{topic.name}</button>)}
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-1">
+              {communityPrompts.map(prompt => <button key={prompt} type="button" disabled={isSubmitting} onClick={() => { setContent(value => value ? value + '\n' + prompt : prompt); setHelper(null); textareaRef.current?.focus() }} className="rounded-lg px-2 py-2 text-left text-sm text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]">{prompt}</button>)}
+            </div>
+          )}
         </div>
-      </div>
+      ) : null}
     </div>
   )
 
   return (
     <>
-      {/* 收起态：假输入框 */}
       <button
         type="button"
         onClick={handleOpen}
-        className="hover-lift flex w-full items-center gap-3 rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-4 py-3 text-left shadow-[var(--shadow-card)] transition-shadow"
+        aria-label="发帖"
+        title="发帖"
+        data-community-compose
+        className="press-feedback touch-target fixed bottom-[calc(var(--safe-bottom)+82px)] right-[calc(env(safe-area-inset-right,0px)+16px)] z-[41] grid h-14 w-14 place-items-center rounded-full bg-[var(--color-brand)] text-[var(--text-contrast)] shadow-[0_4px_18px_rgba(0,0,0,0.18)] transition-colors hover:bg-[var(--color-brand-hover)] md:bottom-[calc(var(--safe-bottom)+24px)] md:right-[calc(env(safe-area-inset-right,0px)+24px)] md:border md:border-[var(--border-subtle)] md:bg-[var(--surface-default)] md:text-[var(--text-primary)] md:hover:bg-[var(--surface-muted)]"
       >
-        <Avatar name={sessionUser?.nickname ?? '游客'} src={sessionUser?.avatarUrl} size="sm" />
-        <span className="min-w-0 flex-1 truncate text-sm text-[var(--text-tertiary)]">
-          分享你的想法...
-        </span>
-        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-pill)] bg-[var(--color-brand)] text-white">
-          <PenSquare className="h-4 w-4" />
-        </span>
+        <Plus className="h-7 w-7 md:hidden" aria-hidden />
+        <PenSquare className="hidden h-6 w-6 md:block" aria-hidden />
       </button>
 
       {/* 未登录发帖拦截弹窗 */}
@@ -374,31 +348,44 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
         onClose={() => setAuthPromptOpen(false)}
       />
 
-      {/* 手机端：全屏编辑页（底边随软键盘上移，操作栏始终在键盘上方） */}
-      {open && isMobile ? (
-        <div className="fixed inset-x-0 top-0 bottom-[var(--keyboard-inset,0px)] z-[70] flex flex-col bg-[var(--surface-default)]">
-          <header className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-2 py-2 pt-[calc(var(--safe-top)+8px)]">
-            <button
-              type="button"
-              onClick={handleClose}
-              aria-label="取消"
-              className="touch-target inline-flex h-10 w-10 items-center justify-center rounded-[var(--radius-pill)] text-[var(--text-secondary)] press-feedback"
-            >
-              <X className="h-5 w-5" />
-            </button>
-            <span className="text-sm font-medium text-[var(--text-primary)]">发讨论</span>
-            <span className="w-10" />
+      <dialog
+        ref={dialogRef}
+        aria-labelledby={titleId}
+        data-state={closing ? 'closing' : 'open'}
+        className="post-composer-dialog"
+        onCancel={event => { event.preventDefault(); handleClose() }}
+        onClick={event => { if (event.target === event.currentTarget) handleClose() }}
+      >
+        <div className="post-composer-frame">
+          <header className="relative flex h-16 shrink-0 items-center justify-center border-b border-[var(--border-subtle)] px-16">
+            <h2 id={titleId} className="text-lg font-semibold">发帖</h2>
+            <button type="button" onClick={handleClose} aria-label="关闭发帖" disabled={isSubmitting} className="absolute right-3 grid h-10 w-10 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"><X className="h-5 w-5" /></button>
           </header>
-          {editor}
+          <div className="min-h-0 overflow-y-auto overscroll-contain">
+            <div className="flex items-center gap-3 px-4 pt-4 md:px-5">
+              <Avatar name={user?.nickname ?? '我'} src={user?.avatarUrl} size="md" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold">{user?.nickname ?? '我'}</p>
+                <span className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]"><Globe2 className="h-3 w-3" />公开</span>
+              </div>
+            </div>
+            {editor}
+          </div>
+          <footer className="shrink-0 space-y-3 px-4 pb-4 pt-2 md:px-5 md:pb-5">
+            <div className="flex min-h-16 items-center justify-between gap-2 rounded-xl border border-[var(--border-strong)] px-3">
+              <span className="shrink-0 text-sm font-medium">添加到帖子</span>
+              <div className="flex items-center gap-1">
+                <button type="button" title="添加图片" aria-label="添加图片" onClick={() => imageInputRef.current?.click()} disabled={isSubmitting || imageProcessing || images.length >= MAX_POST_IMAGE_COUNT} className="grid h-11 w-11 place-items-center rounded-full text-[var(--color-success)] hover:bg-[var(--surface-muted)] disabled:opacity-40"><ImagePlus className="h-6 w-6" /></button>
+                <button type="button" title="添加话题" aria-label="添加话题" aria-expanded={helper === 'topics'} onClick={() => setHelper(value => value === 'topics' ? null : 'topics')} disabled={isSubmitting} className={cn('grid h-11 w-11 place-items-center rounded-full text-[var(--color-info)] hover:bg-[var(--surface-muted)]', helper === 'topics' && 'bg-[var(--surface-muted)]')}><Hash className="h-6 w-6" /></button>
+                <button type="button" title="写作灵感" aria-label="写作灵感" aria-expanded={helper === 'prompts'} onClick={() => setHelper(value => value === 'prompts' ? null : 'prompts')} disabled={isSubmitting} className={cn('grid h-11 w-11 place-items-center rounded-full text-[var(--color-warning)] hover:bg-[var(--surface-muted)]', helper === 'prompts' && 'bg-[var(--surface-muted)]')}><Sparkles className="h-6 w-6" /></button>
+              </div>
+            </div>
+            <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple className="hidden" onChange={event => void handlePickImages(event)} />
+            {images.length || imageProcessing ? <p className="text-xs text-[var(--text-tertiary)]">{imageProcessing ? '正在处理图片…' : images.length + ' / ' + MAX_POST_IMAGE_COUNT + ' 张图片'}</p> : null}
+            <Button variant="primary" className="h-11 w-full rounded-lg bg-[var(--color-brand)] text-[var(--text-contrast)] hover:bg-[var(--color-brand-hover)] disabled:bg-[var(--surface-muted)] disabled:text-[var(--text-tertiary)] disabled:opacity-100" onClick={() => void handleSubmit()} disabled={!content.trim() || isSubmitting || imageProcessing}>{isSubmitting ? '发布中' : '发布讨论'}</Button>
+          </footer>
         </div>
-      ) : null}
-
-      {/* 平板/电脑端：居中模态（BottomSheet 自动降级） */}
-      {!isMobile ? (
-        <BottomSheet open={open} onClose={handleClose} title="发讨论" maxHeight="80dvh">
-          <div className="flex h-full min-h-[320px] flex-col">{editor}</div>
-        </BottomSheet>
-      ) : null}
+      </dialog>
     </>
   )
 }

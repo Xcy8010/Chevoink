@@ -3,12 +3,13 @@ import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
-import AppState from '@/components/ui/AppState'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import Button from '@/components/ui/Button'
 import { useToast } from '@/components/ui/toast-context'
 import { createDirectConversation, getInteractionBadges, getMe, getUser, listUserFollowers, listUserFollowing, markInteractionSeen, setUserFollow } from '@/features/community/api'
 import Avatar from '@/features/community/components/Avatar'
 import { formatRelativeTime } from '@/features/community/utils'
+import { MessageDetailRowsSkeleton, detailLayoutClass, detailRowClass } from '@/features/messages/components/MessagesLoading'
 import { cn } from '@/lib/utils'
 import type { FollowUserItem } from '../../shared/contracts'
 
@@ -88,10 +89,12 @@ export default function FollowListPage() {
   const followingQuery = useQuery({
     queryKey: ['community', 'following', targetId],
     queryFn: () => listUserFollowing(targetId),
+    enabled: activeTab === 'following',
   })
   const followersQuery = useQuery({
     queryKey: ['community', 'followers', targetId],
     queryFn: () => listUserFollowers(targetId),
+    enabled: activeTab === 'followers',
   })
 
   const activeQuery = activeTab === 'following' ? followingQuery : followersQuery
@@ -229,24 +232,20 @@ export default function FollowListPage() {
       </div>
 
       <div className="mt-4">
+        {activeQuery.isRefetchError ? <AppStateRefreshNotice retry={activeQuery.refetch} busy={activeQuery.isFetching} /> : null}
         {activeQuery.isLoading ? (
+          <MessageDetailRowsSkeleton variant="follows" />
+        ) : activeQuery.isError && !activeQuery.data ? (
           <AppState
-            tone="loading"
-            title="列表正在载入"
-            description="稍等一下，很快就会出现。"
-            className="min-h-[280px] border-0 shadow-none"
-          />
-        ) : activeQuery.isError ? (
-          <AppState
+            compact
             tone="error"
-            title="列表暂时没有加载出来"
-            description="请稍后再试。"
-            primaryAction={{ label: '重新加载', onClick: () => void activeQuery.refetch() }}
-            className="min-h-[280px] border-0 shadow-none"
+            title="关注列表暂时没有加载"
+            primaryAction={{ label: '重新加载', onClick: () => activeQuery.refetch(), busy: activeQuery.isFetching }}
           />
         ) : items.length === 0 ? (
           <AppState
-            tone="empty"
+            compact
+            scene="message"
             title={
               activeTab === 'following'
                 ? isViewingSelf
@@ -256,21 +255,11 @@ export default function FollowListPage() {
                   ? '还没有人关注你'
                   : '还没有人关注 TA'
             }
-            description={
-              activeTab === 'following'
-                ? isViewingSelf
-                  ? '去发现页或社区看看，遇到喜欢的作者就关注一下。'
-                  : '等 TA 开始关注别人后，这里会展示关注列表。'
-                : isViewingSelf
-                  ? '多发布作品和动态，读者就会慢慢聚过来。'
-                  : '成为第一个关注 TA 的人吧。'
-            }
             primaryAction={
               activeTab === 'following' && isViewingSelf
-                ? { label: '去发现', onClick: () => navigate('/discover') }
+                ? { label: '去发现', href: '/discover' }
                 : undefined
             }
-            className="min-h-[280px] border-0 shadow-none"
           />
         ) : (
           <div className="divide-y divide-[var(--border-subtle)]">
@@ -297,7 +286,8 @@ export default function FollowListPage() {
                     }
                   }}
                   className={cn(
-                    'flex cursor-pointer items-center gap-3 px-1 py-3.5 transition-colors hover:bg-[var(--surface-muted)] sm:rounded-[var(--radius-lg)] sm:px-3',
+                    detailRowClass,
+                    'cursor-pointer items-center transition-colors hover:bg-[var(--surface-muted)]',
                     isNewFollower ? 'animate-unseen-flash' : null,
                   )}
                 >
@@ -372,7 +362,7 @@ export default function FollowListPage() {
 
   return (
     // 壳层大标题已隐藏；lg 起双栏：左侧 sticky 返回/标题栏 + 右侧列表，避免大屏左右留白
-    <div className="animate-fade-in-up mx-auto w-full max-w-[640px] lg:grid lg:max-w-[1020px] lg:grid-cols-[240px_minmax(0,1fr)] lg:items-start lg:gap-12">
+    <div className={detailLayoutClass}>
       <div className="lg:sticky lg:top-24 lg:self-start">
         <button
           type="button"
@@ -384,7 +374,6 @@ export default function FollowListPage() {
         </button>
 
         <h1 className="mt-3 text-xl font-bold tracking-tight text-[var(--text-primary)]">关注与粉丝</h1>
-        <p className="mt-1 hidden text-sm text-[var(--text-tertiary)] lg:block">随时回访、回关或取消关注。</p>
       </div>
 
       <div className="min-w-0">{listContent}</div>

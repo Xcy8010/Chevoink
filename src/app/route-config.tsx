@@ -6,16 +6,20 @@ import RequireAuthRoute from '@/app/routes/RequireAuthRoute'
 import AdminLayout from '@/features/admin/AdminLayout'
 import {
   AuthorSkeleton,
-  ConversationSkeleton,
   DiscoverSkeleton,
+  RankingsSkeleton,
   PostDetailSkeleton,
   PostListSkeleton,
-  ProfileSkeleton,
   ReaderSkeleton,
   SettingsSkeleton,
   StudioSkeleton,
 } from '@/components/ui/Skeleton'
 import Home from '@/pages/Home'
+import { CommunityPageSkeleton } from '@/features/community/components/CommunityPageLayout'
+import { MessageDetailRouteSkeleton, MessagesRouteSkeleton } from '@/features/messages/components/MessagesLoading'
+import { loadFollowListPage, loadLikesListPage } from '@/features/messages/load-detail-pages'
+import { loadProfilePage } from '@/features/profile/load-profile-page'
+import { ProfileRouteSkeleton } from '@/features/profile/components/ProfileLoading'
 
 const CHUNK_RELOAD_KEY = 'chevoink:chunk-reload-at'
 
@@ -47,12 +51,12 @@ const AccountDocsPage = lazyPage(() => import('@/features/account/AccountDocsPag
 const AuthorPage = lazyPage(() => import('@/pages/AuthorPage'))
 const CommunityPage = lazyPage(() => import('@/pages/CommunityPage'))
 const DiscoverPage = lazyPage(() => import('@/pages/DiscoverPage'))
-const FollowListPage = lazyPage(() => import('@/pages/FollowListPage'))
-const LikesListPage = lazyPage(() => import('@/pages/LikesListPage'))
+const FollowListPage = lazyPage(loadFollowListPage)
+const LikesListPage = lazyPage(loadLikesListPage)
 const MessagesPage = lazyPage(() => import('@/pages/MessagesPage'))
 const NovelDetailPage = lazyPage(() => import('@/pages/NovelDetailPage'))
 const PostDetailPage = lazyPage(() => import('@/pages/PostDetailPage'))
-const ProfilePage = lazyPage(() => import('@/pages/ProfilePage'))
+const ProfilePage = lazyPage(loadProfilePage)
 const RankingsPage = lazyPage(() => import('@/pages/RankingsPage'))
 const ReaderPage = lazyPage(() => import('@/pages/ReaderPage'))
 const SearchPage = lazyPage(() => import('@/pages/SearchPage'))
@@ -113,17 +117,17 @@ export const appRoutes: AppRouteDefinition[] = [
   },
   {
     path: '/discover',
-    title: '按题材、节奏和口味找到下一本想读的书',
-    description: '从分类、榜单和书单里快速缩小范围，把更多时间留给正文。',
+    title: '发现',
+    description: '',
     element: <DiscoverPage />,
     fallback: <DiscoverSkeleton />,
   },
   {
     path: '/rankings',
-    title: '完整榜单：看看大家都在读什么',
-    description: '热读、人气、新书、更新、长篇、完结六大榜单，再加玄幻、科幻等分类榜，按排名挑下一本想读的书。',
+    title: '榜单',
+    description: '',
     element: <RankingsPage />,
-    fallback: <DiscoverSkeleton />,
+    fallback: <RankingsSkeleton />,
   },
   {
     path: '/search',
@@ -179,7 +183,7 @@ export const appRoutes: AppRouteDefinition[] = [
     title: '看看大家正在聊什么，也把你的想法发出来',
     description: '创作动态、读后讨论和作品话题都集中在这里，让交流更自然发生。',
     element: <CommunityPage />,
-    fallback: <PostListSkeleton />,
+    fallback: <CommunityPageSkeleton />,
   },
   {
     path: '/community/topic/:topicKey',
@@ -197,7 +201,7 @@ export const appRoutes: AppRouteDefinition[] = [
         <MessagesPage />
       </RequireAuthRoute>
     ),
-    fallback: <ConversationSkeleton />,
+    fallback: <MessagesRouteSkeleton />,
   },
   {
     path: '/me',
@@ -205,13 +209,14 @@ export const appRoutes: AppRouteDefinition[] = [
     description: '把常看的作品、最近的动态和个人信息收进同一个账户中心。',
     element: (
       <RequireAuthRoute
+        checkingFallback={<ProfileRouteSkeleton />}
         title="登录后即可查看你的个人中心"
         description="登录后，你的书架、草稿和最近互动都会继续保留。"
       >
         <ProfilePage />
       </RequireAuthRoute>
     ),
-    fallback: <ProfileSkeleton />,
+    fallback: <ProfileRouteSkeleton />,
   },
   {
     path: '/me/follows',
@@ -225,6 +230,7 @@ export const appRoutes: AppRouteDefinition[] = [
         <FollowListPage />
       </RequireAuthRoute>
     ),
+    fallback: <MessageDetailRouteSkeleton variant="follows" />,
   },
   {
     path: '/me/likes',
@@ -238,6 +244,7 @@ export const appRoutes: AppRouteDefinition[] = [
         <LikesListPage />
       </RequireAuthRoute>
     ),
+    fallback: <MessageDetailRouteSkeleton variant="interactions" />,
   },
   {
     path: '/author/:authorId',

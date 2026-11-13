@@ -1,0 +1,47 @@
+.chevoink-mascot {
+  object-fit: contain;
+}
+
+.app-main-content:has(> [data-app-state-layout]) {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+
+.app-main-content:has(> [data-app-state-layout]) > .app-route-heading {
+  display: none;
+}
+
+.app-main-content > [data-app-state-layout] {
+  flex: 1;
+  margin-top: 0 !important;
+}
+
+html.dark .chevoink-mascot {
+  filter: drop-shadow(0 0 1px rgb(198 244 232 / 65%)) drop-shadow(0 4px 12px rgb(90 180 157 / 16%));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chevoink-mascot--animated {
+    animation: chevoink-mascot-enter 280ms ease-out both;
+    transition: transform 180ms ease-out;
+  }
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .chevoink-mascot--animated:hover {
+    transform: rotate(-4deg);
+  }
+}
+
+@keyframes chevoink-mascot-enter {
+  from {
+    opacity: 0;
+    translate: 0 5px;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}

@@ -13,6 +13,7 @@ import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 
 import BottomSheet from '@/components/layout/BottomSheet'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import AuthPromptDialog from '@/components/ui/AuthPromptDialog'
 import { useToast } from '@/components/ui/toast-context'
 import { splitReaderParagraphs } from '@/features/discover/api'
@@ -630,6 +631,11 @@ export default function ReaderMobile({ state }: ReaderMobileProps) {
       className="fixed inset-0 z-[70] flex flex-col"
       style={{ background: tone.background, color: tone.text }}
     >
+      {state.reader && state.readerQuery.isError ? (
+        <div className="absolute inset-x-0 top-[var(--safe-top)] z-[61] bg-[var(--surface-default)]">
+          <AppStateRefreshNotice retry={state.readerQuery.refetch} busy={state.readerQuery.isFetching} />
+        </div>
+      ) : null}
       {/* 断网兜底读到的是本地缓存章节：顶部一条轻量徽标说明状态，不阻断阅读 */}
       {state.isOfflineCache ? (
         <div
@@ -726,21 +732,15 @@ export default function ReaderMobile({ state }: ReaderMobileProps) {
           fallback={
             state.readerQuery.isLoading ? (
               <p className="text-sm opacity-55">正在载入章节…</p>
-            ) : state.readerQuery.isError ? (
-              // 断网且无本地缓存：番茄式网络异常页（明确原因 + 可重试）
-              <div className="flex flex-col items-center gap-4 pt-20 text-center">
-                <p className="text-sm opacity-70">网络连接失败，请检查网络后重试</p>
-                <button
-                  type="button"
-                  onClick={() => void state.readerQuery.refetch()}
-                  className="press-feedback rounded-full border px-5 py-2 text-sm"
-                  style={{ borderColor: 'color-mix(in srgb, currentColor 25%, transparent)', color: tone.text }}
-                >
-                  重新加载
-                </button>
-              </div>
+            ) : state.readerQuery.isError && !state.reader ? (
+              <AppState
+                tone="error"
+                title="章节暂时没有打开"
+                description="请检查连接后重试。"
+                primaryAction={{ label: '重新加载', onClick: () => state.readerQuery.refetch(), busy: state.readerQuery.isFetching }}
+              />
             ) : (
-              <p className="text-sm opacity-55">本章暂无内容。</p>
+              <AppState compact scene="reading" title="本章暂无正文" />
             )
           }
         />

@@ -40,7 +40,7 @@ function RelatedCover({ novel, className }: { novel: NovelCard; className?: stri
 /** 相关推荐：grid 变体用于主区，list 变体用于桌面右栏 */
 export default function RelatedNovelsPanel({ novels, variant = 'grid' }: RelatedNovelsPanelProps) {
   if (novels.length === 0) {
-    return <Empty title="暂时还没有更多推荐" description="把这本先读完，也许下一本很快就会出现。" />
+    return <Empty title="暂无相关推荐" />
   }
 
   if (variant === 'list') {

@@ -1,5 +1,6 @@
 import { BookPlus, Compass, Layers3, Sparkles, UsersRound } from 'lucide-react'
 import { useMemo } from 'react'
+import ChevoinkMascot from '@/components/ui/ChevoinkMascot'
 import { cn } from '@/lib/utils'
 
 import { useAgentStore } from '../agentStore'
@@ -70,18 +71,14 @@ export default function AgentEmptyWelcome({ novelName, initializingNovel = false
 
   return (
     <div data-agent-welcome={mobile ? 'mobile' : 'desktop'} className={cn('mx-auto flex w-full flex-col items-center px-1 text-center', mobile ? 'max-w-[440px] shrink-0 py-5' : 'h-full max-w-[760px] justify-center py-6 sm:px-4')}>
-      <img
-        src="/chevoink-agent.png"
-        alt="Chevoink Agent"
-        className={cn('rounded-[14px] object-contain', mobile ? 'h-10 w-10' : 'h-12 w-12 sm:h-14 sm:w-14')}
-      />
+      <ChevoinkMascot pose="writing" className={mobile ? 'size-20' : 'size-24'} />
       <h2 className={cn('text-balance font-semibold tracking-[-0.02em] text-[var(--text-primary)]', mobile ? 'mt-4 text-lg' : 'mt-5 text-lg sm:text-[22px]')}>
         {initializingNovel
           ? '你可以让 Chevoink Agent 帮你做些什么？'
           : `你想让我们在《${novelName}》构建什么？`}
       </h2>
       <p className="mt-2 max-w-[560px] text-xs leading-5 text-[var(--text-secondary)] sm:text-sm">
-        {showSuggestions ? '选择一个方向作为起点，内容只会填入输入框，你可以继续修改后再发送。' : '在下方输入任务，Agent 会结合当前作品和已打开的章节继续工作。'}
+        {showSuggestions ? '选择一项填入输入框，编辑后再发送。' : '在下方输入你的任务。'}
       </p>
       {showSuggestions ? <div className={cn('grid w-full', mobile ? 'mt-5 grid-cols-1 gap-2.5' : 'mt-6 grid-cols-1 gap-2.5 sm:grid-cols-2')}>
         {(mobile ? suggestions.slice(0, 3) : suggestions).map((suggestion, index) => {

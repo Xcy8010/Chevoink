@@ -755,7 +755,7 @@ describe.runIf(available)('durable question lifecycle', () => {
         : scenario === 'timeout' ? QUESTION_TIMEOUT_NOTICE : scenario === 'cancelled' ? '已取消提问，作品方向还没确认，已保存的内容会保留。你想采用哪个方向？可以在下一条消息里告诉我。'
           : scenario === 'historical-cancelled' ? QUESTION_CANCELLED_NOTICE
           : scenario === 'historical-answered' ? '已保存《漫长的停电》的书名、简介和标签。要不要开始写大纲？'
-            : '已保存《漫长的停电》的作品信息。\n\n**简介**\n\n旧城区的幸存者互助求生。\n\n**标签** 都市\n\n要不要开始写大纲？'
+            : '已保存《漫长的停电》的作品信息。\n\n**简介**\n\n旧城区的幸存者互助求生。\n\n**标签** 都市\n\n要不要先设置一下作品封面，还是直接开始写大纲？'
       const events = await publishDurableEvents(f.userId, f.runId, 200)
       const recapEvents = events.filter(event => event.type === 'text.final' && event.text === terminalText)
       expect(recapEvents).toHaveLength(1)

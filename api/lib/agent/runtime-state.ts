@@ -46,6 +46,7 @@ const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['pla
   skillRouterVersion: z.string().min(1).optional(),
   modelAssignments: frozenModelAssignmentsSchema.optional(),
   pinnedSubagentId: id.optional(),
+  nextPromptOnCompletion: z.literal(true).optional(),
   nextPromptMarker: z.string().regex(/^\[\[CHEVOINK_NEXT_PROMPT_[a-f0-9]{8}\]\]$/u).optional(),
 }).strict().refine(value => new Set(value.tools.map(tool => tool.function.name)).size === value.tools.length
   && new Set(value.toolAuthority.map(tool => tool.name)).size === value.toolAuthority.length

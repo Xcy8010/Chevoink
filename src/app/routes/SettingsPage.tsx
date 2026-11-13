@@ -750,9 +750,9 @@ export default function SettingsPage() {
       <AppState
         tone="error"
         title="暂时无法打开账户设置"
-        description="账户状态还没有准备好，请稍后再试，或先回到首页继续浏览。"
-        primaryAction={{ label: '返回首页', href: '/' }}
-        secondaryAction={{ label: '重新加载', onClick: () => window.location.reload() }}
+        description="请重新加载页面。"
+        primaryAction={{ label: '重新加载', onClick: () => window.location.reload() }}
+        secondaryAction={{ label: '返回首页', href: '/' }}
       />
     )
   }
@@ -761,11 +761,11 @@ export default function SettingsPage() {
     return (
       <SettingsLayout backButton={backButton} sections={[{ id: 'settings-display', label: '显示' }, ...generalSections]}>
         <AppState
-          icon={<UserRound aria-hidden="true" className="h-5 w-5 text-[var(--text-secondary)]" />}
+          compact
+          scene="welcome"
           title="登录后可管理账户设置"
           primaryAction={{ label: '去登录', href: '/login?redirect=%2Fsettings' }}
           secondaryAction={{ label: '创建账户', href: '/register?redirect=%2Fsettings' }}
-          className="min-h-0 rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-solid)] py-5 md:min-h-0"
         />
 
         {appearanceSection}

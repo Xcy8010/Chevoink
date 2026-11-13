@@ -3,7 +3,8 @@ import { ArrowLeft } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
-import AppState from '@/components/ui/AppState'
+import { ApiClientError } from '@/app/api-client'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { PostListSkeleton } from '@/components/ui/Skeleton'
 import { listPosts, resolveTopic } from '@/features/community/api'
 import PostCard from '@/features/community/components/PostCard'
@@ -63,20 +64,32 @@ export default function TopicPage() {
     return <PostListSkeleton />
   }
 
-  if (topicQuery.isError || !topic) {
+  const missing = !topicKey || (topicQuery.error instanceof ApiClientError && topicQuery.error.status === 404)
+  if (missing) {
     return (
       <AppState
-        tone="empty"
-        title="这个话题还没有被创建"
-        description="它可能已被移除，或者还没有人用 # 发起过这个话题。"
-        primaryAction={{ label: '回社区看看', onClick: () => navigate('/community') }}
-        className="min-h-[360px]"
+        scene="search"
+        title="找不到这个话题"
+        primaryAction={{ label: '返回社区', href: '/community' }}
+      />
+    )
+  }
+
+  if (!topic) {
+    return (
+      <AppState
+        tone="error"
+        title="话题暂时没有打开"
+        description="请稍后重试。"
+        primaryAction={{ label: '重新加载', onClick: () => topicQuery.refetch(), busy: topicQuery.isFetching }}
+        secondaryAction={{ label: '返回社区', href: '/community' }}
       />
     )
   }
 
   return (
     <div className="mx-auto w-full max-w-[640px]">
+      {topicQuery.isError ? <AppStateRefreshNotice retry={topicQuery.refetch} busy={topicQuery.isFetching} /> : null}
       {/* 话题头部：返回 + 话题名 + 讨论数 */}
       <div className="flex items-center gap-3">
         <button
@@ -123,15 +136,16 @@ export default function TopicPage() {
 
       {/* 帖子流 */}
       <div className="mt-4">
+        {postsQuery.isRefetchError ? <AppStateRefreshNotice retry={postsQuery.refetch} busy={postsQuery.isFetching} /> : null}
         {postsQuery.isLoading ? (
           <PostListSkeleton />
-        ) : postsQuery.isError ? (
+        ) : postsQuery.isError && !postsQuery.data ? (
           <AppState
+            compact
             tone="error"
             title="话题内容暂时没有打开"
-            description={postsQuery.error instanceof Error ? postsQuery.error.message : '话题内容暂时没有加载出来。'}
-            primaryAction={{ label: '重新加载', onClick: () => void postsQuery.refetch() }}
-            className="min-h-[260px]"
+            description="请稍后重试。"
+            primaryAction={{ label: '重新加载', onClick: () => postsQuery.refetch(), busy: postsQuery.isFetching }}
           />
         ) : posts.length > 0 ? (
           <>
@@ -144,22 +158,21 @@ export default function TopicPage() {
               <div className="flex justify-center pt-4">
                 <button
                   type="button"
-                  disabled={postsQuery.isFetchingNextPage}
-                  onClick={() => void postsQuery.fetchNextPage()}
+                  disabled={postsQuery.isFetching}
+                  onClick={() => void postsQuery.fetchNextPage({ cancelRefetch: false })}
                   className="press-feedback rounded-[var(--radius-pill)] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-6 py-2 text-sm text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-60"
                 >
-                  {postsQuery.isFetchingNextPage ? '正在加载…' : '加载更多讨论'}
+                  {postsQuery.isFetchingNextPage ? '正在加载…' : postsQuery.isFetchNextPageError ? '重试加载更多' : '加载更多讨论'}
                 </button>
               </div>
             ) : null}
           </>
         ) : (
           <AppState
-            tone="empty"
-            title="这个话题下还没有讨论"
-            description={`去社区发一条带 #${topic.name} 的帖子，成为第一个发起讨论的人。`}
-            primaryAction={{ label: '去发帖', onClick: () => navigate('/community') }}
-            className="min-h-[260px]"
+            compact
+            scene="welcome"
+            title="这个话题还没有讨论"
+            primaryAction={{ label: '去社区发帖', href: '/community' }}
           />
         )}
       </div>

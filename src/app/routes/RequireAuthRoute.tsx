@@ -10,13 +10,15 @@ type RequireAuthRouteProps = {
   title?: string
   description?: string
   centered?: boolean
+  checkingFallback?: ReactNode
 }
 
 export default function RequireAuthRoute({
   children,
-  title = '登录后即可继续查看这里的内容',
-  description = '登录后，你的书架、草稿和个人记录都会继续保留。',
+  title = '登录后继续',
+  description,
   centered = false,
+  checkingFallback,
 }: RequireAuthRouteProps) {
   const location = useLocation()
   const authStatus = useShellStore((state) => state.authStatus)
@@ -27,7 +29,7 @@ export default function RequireAuthRoute({
     : state
 
   if (authStatus === 'checking') {
-    return renderState(<LoadingMark className="grid min-h-40 flex-1 place-items-center" />)
+    return renderState(checkingFallback ?? <LoadingMark className="grid min-h-40 flex-1 place-items-center" />)
   }
 
   if (authStatus === 'unavailable') {
@@ -35,21 +37,21 @@ export default function RequireAuthRoute({
       <AppState
         className={stateClassName}
         tone="error"
-        title="暂时无法打开这里"
-        description="账户状态还没有准备好，请稍后再试，或先回到首页继续浏览。"
-        primaryAction={{ label: '返回首页', href: '/' }}
-        secondaryAction={{ label: '重新加载', onClick: () => window.location.reload() }}
+        title="账户状态暂时无法确认"
+        description="请重新加载页面。"
+        primaryAction={{ label: '重新加载', onClick: () => window.location.reload() }}
+        secondaryAction={{ label: '返回首页', href: '/' }}
       />
     )
   }
 
   if (!isAuthenticated) {
-    const redirect = encodeURIComponent(`${location.pathname}${location.search}`)
+    const redirect = encodeURIComponent(`${location.pathname}${location.search}${location.hash}`)
 
     return renderState(
       <AppState
         className={stateClassName}
-        icon={centered ? <img src="/favicon.png" alt="Chevoink" width={72} height={72} className="h-[72px] w-[72px] rounded-2xl object-contain" /> : undefined}
+        scene="welcome"
         title={title}
         description={description}
         primaryAction={{ label: '去登录', href: `/login?redirect=${redirect}` }}

@@ -8,11 +8,6 @@ import { runtimeError, runtimeJsonHash, type RuntimeTx } from './runtime-common.
 import { readExecutionFrame } from './runtime-state.js'
 import { readHumanAdmission } from './goal-activation-authority.js'
 
-export const novelSetupFollowup = {
-  question: '要不要开始写大纲？',
-  options: [{ label: '开始写大纲' }, { label: '先讨论大纲方向' }],
-} satisfies AgentQuestionPrompt
-
 const offerType = 'question.followup.offered'
 const offerSchema = z.object({
   version: z.literal(1), completionId: z.string(), completionHash: z.string(), question: agentQuestionPromptSchema,

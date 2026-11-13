@@ -195,6 +195,7 @@ vi.mock('../../api/lib/prisma.js', () => {
   },
   novel: { findFirst: vi.fn(async (input: Query) => matches({ id: 'novel', authorId: 'user', manuscriptRevision: 1 }, input.where) ? { id: 'novel', authorId: 'user', manuscriptRevision: 1 } : null),
     update: vi.fn() },
+  coverAsset: { findFirst: vi.fn(async () => null) },
   chapter: {
     findMany: vi.fn(async (input: Query) => mocks.chapters.filter(row => matches(row, input.where))),
     findFirst: vi.fn(async (input: Query) => mocks.chapters.find(row => matches(row, input.where)) ?? null),
@@ -4385,9 +4386,10 @@ describe('author-directed task ending in the real execution loop', () => {
   })
   it.each([
     { prompt: '第一卷要写多少章？', nextPrompt: '帮我分配这二十章的节奏', published: true },
-    { prompt: '第一卷要写多少章？只回答数字。', nextPrompt: '帮我分配这二十章的节奏', published: false },
+    { prompt: '第一卷要写多少章？只回答数字。', nextPrompt: '帮我分配这二十章的节奏', published: true },
     { prompt: '第一卷要写多少章？别再在结尾给我补全提示。', nextPrompt: '帮我分配这二十章的节奏', published: false },
-    { prompt: '第一卷要写多少章？', nextPrompt: { invalid: 'model metadata' }, published: false },
+    { prompt: '第一卷要写多少章？回答完就结束，别引导我继续。', nextPrompt: '帮我分配这二十章的节奏', published: false },
+    { prompt: '第一卷要写多少章？', nextPrompt: { invalid: 'model metadata' }, published: true },
   ])('keeps the native answer exact and handles advisory metadata from the same call ($published, $prompt)', async ({ prompt, nextPrompt, published }) => {
     await responseTask(prompt)
     const { taskRespondTool } = await import('../../api/lib/agent/tools/task-response-tool.js')
@@ -4398,10 +4400,12 @@ describe('author-directed task ending in the real execution loop', () => {
       prompt, predictNextPrompt: true })
     expect(mocks.chat).toHaveBeenCalledOnce()
     const request = mocks.chat.mock.calls[0][0] as Parameters<typeof chatType>[0]
-    expect(Boolean(request.nextPromptMarker)).toBe(!prompt.includes('只回答') && !prompt.includes('补全提示'))
+    expect(Boolean(request.nextPromptMarker)).toBe(!prompt.includes('只回答') && !prompt.includes('补全提示') && !prompt.includes('别引导'))
     expect(events().filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
-    if (published) expect(events().at(-1)).toMatchObject({ nextPrompt })
+    if (published) expect(events().at(-1)).toMatchObject({
+      nextPrompt: typeof nextPrompt === 'string' && !prompt.includes('只回答') ? nextPrompt : '根据刚才的结果，帮我拟一个具体的下一步。',
+    })
     else expect(events().at(-1)).not.toHaveProperty('nextPrompt')
     expect(JSON.stringify(mocks.persist.mock.calls)).not.toContain('nextPrompt')
     expect(JSON.stringify(events().filter(event => event.type === 'tool.call' || event.type === 'tool.result'))).not.toContain('nextPrompt')
@@ -4409,9 +4413,9 @@ describe('author-directed task ending in the real execution loop', () => {
   it.each([
     { answer: '渡桥段落放在第一卷收尾。\n下一步建议：把渡桥段落分成三个场景。', suppressed: false, nextPrompt: '帮我把渡桥段落分成三个场景。' },
     { answer: '渡桥段落放在第一卷收尾。\n\n如果你愿意，我可以接着帮你核对伏笔。', suppressed: false, nextPrompt: '帮我核对伏笔。' },
-    { answer: '渡桥段落放在第一卷收尾。\n下一步建议：把渡桥段落分成三个场景。', suppressed: true, nextPrompt: undefined },
-    { answer: '渡桥段落放在第一卷收尾。', suppressed: false, nextPrompt: undefined },
-  ])('reuses an explicit conversational follow-up only when appropriate ($suppressed, $nextPrompt)', async ({ answer, suppressed, nextPrompt }) => {
+    { answer: '渡桥段落放在第一卷收尾。\n下一步建议：把渡桥段落分成三个场景。', suppressed: true, nextPrompt: '帮我把渡桥段落分成三个场景。' },
+    { answer: '渡桥段落放在第一卷收尾。', suppressed: false, nextPrompt: '根据刚才的结果，帮我拟一个具体的下一步。' },
+  ])('always completes with a safe conversational follow-up ($suppressed, $nextPrompt)', async ({ answer, suppressed, nextPrompt }) => {
     const prompt = '渡桥段落放在哪一卷合适？'
     await responseTask(prompt)
     queue({ ...response(answer), ...(suppressed ? { nextPromptSuppressed: true as const } : {}) })
@@ -4419,8 +4423,7 @@ describe('author-directed task ending in the real execution loop', () => {
       prompt, predictNextPrompt: true })
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
-    if (nextPrompt) expect(events().at(-1)).toMatchObject({ nextPrompt })
-    else expect(events().at(-1)).not.toHaveProperty('nextPrompt')
+    expect(events().at(-1)).toMatchObject({ nextPrompt })
   })
   it('reuses the title of an actual saved plan when the ordinary wrap-up omits the footer', async () => {
     const prompt = '保存渡桥计划。'
@@ -4962,7 +4965,7 @@ describe('author-directed task ending in the real execution loop', () => {
       expect(events().find(event => event.type === 'tool.call' && event.callId === 'guessed-save')).toBeUndefined()
       expect(events().filter(event => event.type === 'text.final')).toEqual([
         expect.objectContaining({ type: 'text.final', afterTools: true,
-          text: `已保存《${title}》的作品信息。\n\n**简介**\n\n${fields.summary}\n\n**标签** 都市\n\n要不要开始写大纲？` }),
+          text: `已保存《${title}》的作品信息。\n\n**简介**\n\n${fields.summary}\n\n**标签** 都市\n\n要不要先设置一下作品封面，还是直接开始写大纲？` }),
       ])
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     } finally {
@@ -5004,7 +5007,7 @@ describe('author-directed task ending in the real execution loop', () => {
     })
     vi.mocked(waitForQuestionAnswer).mockResolvedValueOnce({ answer: '长期断电', timedOut: false })
     const progress = '我会先整理已经确认的方向。'
-    const recap = `已保存《${title}》的作品信息。\n\n**简介**\n\n${summary}\n\n**标签** 都市\n\n要不要开始写大纲？`
+    const recap = `已保存《${title}》的作品信息。\n\n**简介**\n\n${summary}\n\n**标签** 都市\n\n要不要先设置一下作品封面，还是直接开始写大纲？`
     try {
       queue(response('', [call('invalid-save', 'novel_update_meta', JSON.stringify({ title: '', summary, tags })),
         call('save-before-direction', 'novel_update_meta', JSON.stringify({ title, summary, tags })),

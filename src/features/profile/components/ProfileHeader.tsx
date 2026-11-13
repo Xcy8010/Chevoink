@@ -10,7 +10,7 @@ type ProfileHeaderProps = {
   user: User
   coverUrl: string | null
   readingCount: number
-  likesCount: number
+  likesCount: number | null
   onEditProfile: () => void
   onSetCover: () => void
   onGoSettings: () => void
@@ -31,7 +31,7 @@ export default function ProfileHeader({
   onGoSettings,
   onStatClick,
 }: ProfileHeaderProps) {
-  const stats: Array<{ key: ProfileStatKey; label: string; value: number }> = [
+  const stats: Array<{ key: ProfileStatKey; label: string; value: number | null }> = [
     { key: 'reading', label: '阅读', value: readingCount },
     { key: 'following', label: '关注', value: user.followingCount },
     { key: 'followers', label: '粉丝', value: user.followerCount },
@@ -105,7 +105,7 @@ export default function ProfileHeader({
               onClick={() => onStatClick(stat.key)}
               className="press-feedback whitespace-nowrap transition-colors hover:text-[var(--text-secondary)] hover:underline hover:underline-offset-4"
             >
-              <span className="font-semibold tabular-nums text-[var(--text-primary)]">{stat.value}</span>{' '}
+              <span className="font-semibold tabular-nums text-[var(--text-primary)]">{stat.value ?? '—'}</span>{' '}
               {stat.label}
             </button>
           ))}

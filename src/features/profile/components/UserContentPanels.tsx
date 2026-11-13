@@ -2,7 +2,8 @@ import { useQuery } from '@tanstack/react-query'
 import { Heart, Star } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 
-import AppState from '@/components/ui/AppState'
+import { ApiClientError } from '@/app/api-client'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { PostListSkeleton } from '@/components/ui/Skeleton'
 import { listUserBookmarkedPosts, listUserLikedPosts, listUserReplies } from '@/features/community/api'
 import PostCard from '@/features/community/components/PostCard'
@@ -17,12 +18,15 @@ import type { UserReplyItem } from '../../../../shared/contracts'
 function RestrictedState({ label }: { label: string }) {
   return (
     <AppState
-      tone="empty"
+      compact
+      scene="privacy"
       title={`${label}未公开`}
-      description="对方设置了隐私权限，这部分内容暂时不可见。"
-      className="min-h-[240px] border-0 shadow-none"
     />
   )
+}
+
+function canShowCachedPanel(error: Error | null) {
+  return !(error instanceof ApiClientError && [401, 403, 404].includes(error.status))
 }
 
 export function LikedPostsPanel({ userId, isSelf = false }: { userId: string; isSelf?: boolean }) {
@@ -40,14 +44,13 @@ export function LikedPostsPanel({ userId, isSelf = false }: { userId: string; is
     )
   }
 
-  if (query.isError) {
+  if (query.isError && (!query.data || !canShowCachedPanel(query.error))) {
     return (
       <AppState
+        compact
         tone="error"
-        title="喜欢列表暂时没有打开"
-        description={query.error instanceof Error ? query.error.message : '请稍后再试。'}
-        primaryAction={{ label: '重新加载', onClick: () => void query.refetch() }}
-        className="min-h-[240px] border-0 shadow-none"
+        title="喜欢列表加载失败"
+        primaryAction={{ label: '重新加载', onClick: () => query.refetch(), busy: query.isFetching }}
       />
     )
   }
@@ -57,22 +60,25 @@ export function LikedPostsPanel({ userId, isSelf = false }: { userId: string; is
   }
 
   const items = query.data?.items ?? []
+  const refreshNotice = query.isRefetchError ? <AppStateRefreshNotice retry={query.refetch} busy={query.isFetching} /> : null
 
   if (items.length === 0) {
     return (
-      <AppState
-        tone="empty"
-        title={isSelf ? '你还没有喜欢的内容' : 'TA 还没有喜欢的内容'}
-        description={
-          isSelf ? '在社区里给打动你的帖子点个赞，它们会被收进这里。' : '等 TA 开始点赞后，这里会展示喜欢过的帖子。'
-        }
-        className="min-h-[240px] border-0 shadow-none"
-      />
+      <>
+        {refreshNotice}
+        <AppState
+          compact
+          scene="message"
+          title={isSelf ? '你还没有喜欢的内容' : 'TA 还没有喜欢的内容'}
+          primaryAction={isSelf ? { label: '去社区', href: '/community' } : undefined}
+        />
+      </>
     )
   }
 
   return (
     <div className="space-y-3 pt-3">
+      {refreshNotice}
       {items.map((post) => (
         <PostCard key={post.id} post={post} />
       ))}
@@ -96,14 +102,13 @@ export function BookmarkedPostsPanel({ userId }: { userId: string }) {
     )
   }
 
-  if (query.isError) {
+  if (query.isError && (!query.data || !canShowCachedPanel(query.error))) {
     return (
       <AppState
+        compact
         tone="error"
-        title="收藏的帖子暂时没有打开"
-        description={query.error instanceof Error ? query.error.message : '请稍后再试。'}
-        primaryAction={{ label: '重新加载', onClick: () => void query.refetch() }}
-        className="min-h-[240px] border-0 shadow-none"
+        title="收藏的帖子加载失败"
+        primaryAction={{ label: '重新加载', onClick: () => query.refetch(), busy: query.isFetching }}
       />
     )
   }
@@ -113,20 +118,20 @@ export function BookmarkedPostsPanel({ userId }: { userId: string }) {
   }
 
   const items = query.data?.items ?? []
+  const refreshNotice = query.isRefetchError ? <AppStateRefreshNotice retry={query.refetch} busy={query.isFetching} /> : null
 
   if (items.length === 0) {
     return (
-      <AppState
-        tone="empty"
-        title="你还没有收藏帖子"
-        description="在社区里点亮帖子下方的星标，它们会被收进这里。"
-        className="min-h-[240px] border-0 shadow-none"
-      />
+      <>
+        {refreshNotice}
+        <AppState compact scene="reading" title="还没有收藏帖子" primaryAction={{ label: '去社区', href: '/community' }} />
+      </>
     )
   }
 
   return (
     <div className="space-y-3 pt-3">
+      {refreshNotice}
       {items.map((post) => (
         <PostCard key={post.id} post={post} />
       ))}
@@ -173,14 +178,13 @@ export function RepliesPanel({ userId, isSelf = false }: { userId: string; isSel
     )
   }
 
-  if (query.isError) {
+  if (query.isError && (!query.data || !canShowCachedPanel(query.error))) {
     return (
       <AppState
+        compact
         tone="error"
-        title="已回复列表暂时没有打开"
-        description={query.error instanceof Error ? query.error.message : '请稍后再试。'}
-        primaryAction={{ label: '重新加载', onClick: () => void query.refetch() }}
-        className="min-h-[240px] border-0 shadow-none"
+        title="回复列表加载失败"
+        primaryAction={{ label: '重新加载', onClick: () => query.refetch(), busy: query.isFetching }}
       />
     )
   }
@@ -190,19 +194,19 @@ export function RepliesPanel({ userId, isSelf = false }: { userId: string; isSel
   }
 
   const items = query.data?.items ?? []
+  const refreshNotice = query.isRefetchError ? <AppStateRefreshNotice retry={query.refetch} busy={query.isFetching} /> : null
 
   if (items.length === 0) {
     return (
-      <AppState
-        tone="empty"
-        title={isSelf ? '你还没有回复过内容' : 'TA 还没有回复过内容'}
-        description={
-          isSelf
-            ? '去帖子或作品下面留下你的第一条评论，它们会被收进这里。'
-            : '等 TA 开始参与讨论后，这里会展示发出的评论。'
-        }
-        className="min-h-[240px] border-0 shadow-none"
-      />
+      <>
+        {refreshNotice}
+        <AppState
+          compact
+          scene="message"
+          title={isSelf ? '你还没有回复过内容' : 'TA 还没有回复过内容'}
+          primaryAction={isSelf ? { label: '去社区', href: '/community' } : undefined}
+        />
+      </>
     )
   }
 
@@ -218,6 +222,7 @@ export function RepliesPanel({ userId, isSelf = false }: { userId: string; isSel
 
   return (
     <div className="divide-y divide-[var(--border-subtle)]">
+      {refreshNotice}
       {items.map((item) => {
         const targetLabel = replyTargetLabel(item)
 

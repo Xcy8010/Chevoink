@@ -2,6 +2,7 @@ import { CornerDownRight, Heart, LoaderCircle, MessageSquare, Pencil, Send, Star
 import { useState } from 'react'
 
 import Empty from '@/components/Empty'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { useToast } from '@/components/ui/toast-context'
 import { setCommentLike } from '@/features/community/api'
 import Avatar from '@/features/community/components/Avatar'
@@ -191,27 +192,17 @@ export default function NovelComments({ state }: NovelCommentsProps) {
         </div>
       </div>
 
+      {commentsQuery.isRefetchError ? <AppStateRefreshNotice retry={commentsQuery.refetch} busy={commentsQuery.isFetching} /> : null}
       {commentsQuery.isLoading ? (
         <div className="mt-6 flex items-center gap-3 text-sm text-[var(--text-secondary)]">
           <LoaderCircle className="h-4 w-4 animate-spin" />
           正在加载评论...
         </div>
-      ) : commentsQuery.isError ? (
-        <div className="mt-6 space-y-3">
-          <p className="text-sm leading-7 text-[var(--text-secondary)]">
-            {commentsQuery.error instanceof Error ? commentsQuery.error.message : '评论暂时没有打开。'}
-          </p>
-          <button
-            type="button"
-            onClick={() => void commentsQuery.refetch()}
-            className="inline-flex h-9 items-center rounded-[var(--radius-pill)] border border-[var(--border-subtle)] px-4 text-sm text-[var(--text-secondary)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"
-          >
-            重新加载
-          </button>
-        </div>
+      ) : commentsQuery.isError && !commentsQuery.data ? (
+        <AppState compact tone="error" title="评论暂时没有加载" primaryAction={{ label: '重新加载', onClick: () => commentsQuery.refetch(), busy: commentsQuery.isFetching }} />
       ) : novelComments.length === 0 ? (
         <div className="mt-4">
-          <Empty title="还没有读者留言" description="看完第一章后，来写下这本书的第一条评论吧。" />
+          <Empty scene="welcome" title="还没有评论" />
         </div>
       ) : (
         <div className="mt-4 space-y-3">

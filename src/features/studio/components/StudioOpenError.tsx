@@ -7,7 +7,7 @@ import { useShellStore } from '@/store/useShellStore'
 
 export default function StudioOpenError({ error, retry, title = '创作中心暂时无法打开', retryLabel = '重新连接' }: {
   error: unknown
-  retry: () => void
+  retry: () => void | Promise<unknown>
   title?: string
   retryLabel?: string
 }) {
@@ -25,9 +25,10 @@ export default function StudioOpenError({ error, retry, title = '创作中心暂
   return (
     <AppState
       tone="error"
+      scene={sessionExpired ? 'welcome' : error instanceof ApiClientError && error.status === 404 ? 'search' : 'connection'}
       className="min-h-0 flex-1 overflow-y-auto px-6 py-8 md:min-h-0"
       title={sessionExpired ? '请重新登录' : title}
-      description={sessionExpired ? '登录已过期，重新登录后可以继续创作。' : error instanceof ApiClientError ? error.message : '请稍后重试。'}
+      description={sessionExpired ? '登录已过期。' : error instanceof ApiClientError && error.status < 500 ? error.message : '请稍后重试。'}
       primaryAction={sessionExpired ? { label: '重新登录', onClick: signInAgain } : { label: retryLabel, onClick: retry }}
       secondaryAction={{ label: '返回首页', onClick: () => navigate('/') }}
     />

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { BookOpen, Clock3, Flame, MessageSquareText, Search, TrendingUp, UserRound, X } from 'lucide-react'
+import { ArrowLeft, BookOpen, Clock3, Flame, MessageSquareText, Search, TrendingUp, UserRound, X } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 
 import AppImage from '@/components/ui/AppImage'
@@ -40,14 +40,41 @@ function suggestHref(item: SearchSuggestItem): string {
 }
 
 /** 全局搜索框：联想提示 + 搜索历史 + 热搜榜，支持键盘上下选择 */
-export default function GlobalSearchBox({ className }: { className?: string }) {
+export default function GlobalSearchBox({ className, compact = false, onOpenChange }: {
+  className?: string
+  compact?: boolean
+  onOpenChange?: (open: boolean) => void
+}) {
   const navigate = useNavigate()
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
   const [keyword, setKeyword] = useState('')
   const [open, setOpen] = useState(false)
+  const [leaving, setLeaving] = useState(false)
   const [activeIndex, setActiveIndex] = useState(-1)
   const [history, setHistory] = useState<string[]>(() => getSearchHistory())
+
+  useEffect(() => {
+    onOpenChange?.(open)
+    if (compact && open) inputRef.current?.focus()
+  }, [compact, open, onOpenChange])
+
+  useEffect(() => {
+    if (open || !leaving) return
+    const timer = window.setTimeout(() => setLeaving(false), 200)
+    return () => window.clearTimeout(timer)
+  }, [open, leaving])
+
+  function dismissSearch() {
+    if (compact) setLeaving(true)
+    setOpen(false)
+  }
+
+  function closeSearch() {
+    dismissSearch()
+    if (compact) triggerRef.current?.focus()
+  }
 
   const debouncedKeyword = useDebouncedValue(keyword.trim(), SUGGEST_DEBOUNCE_MS)
 
@@ -85,6 +112,7 @@ export default function GlobalSearchBox({ className }: { className?: string }) {
 
     function handlePointerDown(event: MouseEvent | TouchEvent) {
       if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        if (compact) setLeaving(true)
         setOpen(false)
       }
     }
@@ -95,28 +123,28 @@ export default function GlobalSearchBox({ className }: { className?: string }) {
       document.removeEventListener('mousedown', handlePointerDown)
       document.removeEventListener('touchstart', handlePointerDown)
     }
-  }, [open])
+  }, [compact, open])
 
   function submitSearch(raw: string) {
     const normalized = raw.trim()
     if (!normalized) return
 
     setHistory(addSearchHistory(normalized))
-    setOpen(false)
+    dismissSearch()
     inputRef.current?.blur()
     navigate(`/search?q=${encodeURIComponent(normalized)}`)
   }
 
   function openSuggestItem(item: SearchSuggestItem) {
     setHistory(addSearchHistory(item.type === 'post' ? keyword.trim() || item.text : item.text))
-    setOpen(false)
+    dismissSearch()
     inputRef.current?.blur()
     navigate(suggestHref(item))
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === 'Escape') {
-      setOpen(false)
+      closeSearch()
       return
     }
 
@@ -145,14 +173,27 @@ export default function GlobalSearchBox({ className }: { className?: string }) {
   }
 
   return (
-    <div ref={containerRef} className={cn('relative', className)}>
+    <div ref={containerRef} className={cn(compact ? 'static' : 'relative', className)}>
+      {compact ? (
+        <button ref={triggerRef} type="button" aria-label="搜索" aria-expanded={open} onClick={() => setOpen(true)} className="press-feedback grid h-11 w-11 place-items-center rounded-full text-[var(--text-primary)] hover:bg-[var(--surface-muted)]">
+          <Search className="h-5 w-5" />
+        </button>
+      ) : null}
+      {!compact || open || leaving ? <div
+        data-search-open={open}
+        aria-hidden={compact && !open ? true : undefined}
+        ref={node => { if (node) node.inert = compact && !open }}
+        className={cn(compact && 'compact-search-surface')}
+      >
       <label
+        data-global-search-field
         className={cn(
-          'flex h-10 w-full items-center gap-3 rounded-[var(--radius-pill)] border border-[var(--border-subtle)] bg-[color:var(--surface-default)]/96 px-4 text-sm backdrop-blur transition-colors md:h-11',
+          'flex h-10 w-full items-center gap-2 rounded-[var(--radius-pill)] border border-transparent bg-[var(--surface-muted)] px-3 text-sm transition-colors md:h-11',
           'focus-within:border-[var(--accent-border)] focus-within:ring-2 focus-within:ring-[var(--focus-ring)]',
+          compact && 'compact-search-field h-14 rounded-none border-0 border-b border-[var(--border-subtle)] bg-[var(--app-bg)] px-3 focus-within:ring-0 md:h-14',
         )}
       >
-        <Search className="h-4 w-4 shrink-0 text-[var(--text-tertiary)]" />
+        {compact ? <button type="button" aria-label="关闭搜索" onClick={closeSearch} className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"><ArrowLeft className="h-5 w-5" /></button> : <Search className="h-4 w-4 shrink-0 text-[var(--text-tertiary)]" />}
         <input
           ref={inputRef}
           value={keyword}
@@ -186,10 +227,10 @@ export default function GlobalSearchBox({ className }: { className?: string }) {
         ) : null}
       </label>
 
-      {open ? (
-        <div className="absolute inset-x-0 top-[calc(100%+8px)] z-50 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[var(--shadow-elevated)]">
+      {open || (compact && leaving) ? (
+        <div className={cn('absolute inset-x-0 top-[calc(100%+8px)] z-50 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[var(--shadow-elevated)]', compact && 'compact-search-results static min-h-0 flex-1 rounded-none border-0 bg-[var(--app-bg)] shadow-none')}>
           {showSuggest ? (
-            <div className="max-h-[420px] overflow-y-auto py-2">
+            <div className={cn('max-h-[420px] overflow-y-auto py-2', compact && 'h-full max-h-none')}>
               {suggestions.map((item, index) => (
                 <button
                   key={`${item.type}-${item.id}`}
@@ -240,7 +281,7 @@ export default function GlobalSearchBox({ className }: { className?: string }) {
               </button>
             </div>
           ) : (
-            <div className="max-h-[420px] space-y-4 overflow-y-auto p-4">
+            <div className={cn('max-h-[420px] space-y-4 overflow-y-auto p-4', compact && 'h-full max-h-none')}>
               {history.length > 0 ? (
                 <section>
                   <div className="flex items-center justify-between">
@@ -326,6 +367,7 @@ export default function GlobalSearchBox({ className }: { className?: string }) {
           )}
         </div>
       ) : null}
+      </div> : null}
     </div>
   )
 }

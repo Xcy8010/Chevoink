@@ -1,4 +1,5 @@
-import AppState from '@/components/ui/AppState'
+import { ApiClientError } from '@/app/api-client'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { Skeleton, SkeletonCover, SkeletonText } from '@/components/ui/Skeleton'
 import { useDevice } from '@/components/layout/device-context'
 import EditNovelDialog from '@/features/novel-detail/components/EditNovelDialog'
@@ -40,12 +41,12 @@ export default function NovelDetailPage() {
   const { device } = useDevice()
   const state = useNovelDetailState()
 
-  if (!state.novelId) {
+  const missing = state.detailQuery.error instanceof ApiClientError && state.detailQuery.error.status === 404
+  if (!state.novelId || missing) {
     return (
       <AppState
-        tone="error"
-        title="这本书暂时没有找到"
-        description="换一本继续看看，或者回到发现页重新挑选。"
+        scene="search"
+        title="找不到这本书"
         primaryAction={{
           label: '去分类发现',
           href: '/discover',
@@ -58,17 +59,18 @@ export default function NovelDetailPage() {
     return <NovelDetailSkeleton />
   }
 
-  if (state.detailQuery.isError) {
+  const accessDenied = state.detailQuery.error instanceof ApiClientError
+    && (state.detailQuery.error.status === 401 || state.detailQuery.error.status === 403)
+  if (state.detailQuery.isError && (!state.detail || accessDenied)) {
     return (
       <AppState
         tone="error"
         title="作品详情暂时没有打开"
-        description={
-          state.detailQuery.error instanceof Error ? state.detailQuery.error.message : '连接似乎中断了，请稍后再试。'
-        }
+        description={accessDenied ? state.detailQuery.error?.message : '请稍后重试。'}
         primaryAction={{
-          label: state.detailQuery.isFetching ? '重新连接中...' : '重新连接',
-          onClick: () => void state.detailQuery.refetch(),
+          label: '重新加载',
+          onClick: () => state.detailQuery.refetch(),
+          busy: state.detailQuery.isFetching,
         }}
         secondaryAction={{
           label: '回到发现页',
@@ -84,6 +86,7 @@ export default function NovelDetailPage() {
 
   return (
     <>
+      {state.detailQuery.isError ? <AppStateRefreshNotice retry={state.detailQuery.refetch} busy={state.detailQuery.isFetching} /> : null}
       <input
         ref={state.coverInputRef}
         type="file"

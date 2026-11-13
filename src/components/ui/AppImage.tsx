@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ImageOff } from 'lucide-react'
 
 import { isImageLoaded, markImageLoaded } from '@/lib/image-cache'
@@ -23,6 +23,7 @@ type AppImageProps = {
   /** natural 模式加载中/失败时的占位尺寸类 */
   placeholderClassName?: string
   draggable?: boolean
+  fallback?: ReactNode
 }
 
 /**
@@ -39,6 +40,7 @@ export default function AppImage({
   natural = false,
   placeholderClassName,
   draggable,
+  fallback,
 }: AppImageProps) {
   // 本次会话已加载过的图直接以完成态渲染（SPA 重新挂载不再重复播放骨架与淡入）
   const cachedOnMount = isImageLoaded(src)
@@ -113,7 +115,7 @@ export default function AppImage({
               placeholderClassName ?? 'aspect-[4/3] w-[240px] max-w-full',
             )}
           >
-            {status === 'error' ? <ImageOff className="h-5 w-5 text-[var(--text-tertiary)]" /> : null}
+            {status === 'error' ? fallback ?? <ImageOff className="h-5 w-5 text-[var(--text-tertiary)]" /> : null}
           </span>
         ) : null}
         {imgElement}
@@ -133,7 +135,7 @@ export default function AppImage({
               : 'skeleton-shimmer',
           )}
         >
-          {status === 'error' ? <ImageOff className="h-5 w-5 text-[var(--text-tertiary)]" /> : null}
+          {status === 'error' ? fallback ?? <ImageOff className="h-5 w-5 text-[var(--text-tertiary)]" /> : null}
         </span>
       ) : null}
       {imgElement}

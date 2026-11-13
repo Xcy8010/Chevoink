@@ -78,12 +78,20 @@ export function removeFromShelf(novelId: string) {
 
 /** 回填书架条目封面（收藏时还没封面、之后作品补了封面的场景） */
 export function updateShelfCover(novelId: string, coverUrl: string) {
-  if (typeof window === 'undefined') return
+  updateShelfCovers(new Map([[novelId, coverUrl]]))
+}
+
+export function updateShelfCovers(covers: ReadonlyMap<string, string>) {
+  if (typeof window === 'undefined' || covers.size === 0) return
   const entries = readStore()
-  const target = entries.find((entry) => entry.novelId === novelId)
-  if (!target || target.coverUrl === coverUrl) return
-  target.coverUrl = coverUrl
-  writeStore(entries)
+  let changed = false
+  for (const entry of entries) {
+    const cover = covers.get(entry.novelId)
+    if (cover === undefined || entry.coverUrl === cover) continue
+    entry.coverUrl = cover
+    changed = true
+  }
+  if (changed) writeStore(entries)
 }
 
 /** 切换书架状态，返回切换后是否在书架中 */

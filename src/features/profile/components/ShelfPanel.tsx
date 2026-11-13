@@ -23,9 +23,9 @@ export default function ShelfPanel({ items, progressMap, onOpenNovel, onDiscover
   if (items.length === 0) {
     return (
       <AppState
-        tone="empty"
-        title="你的书架还是空的"
-        description="先去发现页找一本感兴趣的书，之后这里会自动出现你的阅读记录。"
+        scene="reading"
+        title="书架还空着"
+        description="去发现页挑一本书。"
         primaryAction={{ label: '去发现', onClick: onDiscover }}
         className="min-h-[280px]"
       />
@@ -50,6 +50,8 @@ export default function ShelfPanel({ items, progressMap, onOpenNovel, onDiscover
                 <img
                   src={item.coverUrl}
                   alt={item.title}
+                  loading="lazy"
+                  decoding="async"
                   className="aspect-[3/4] w-full rounded-[var(--radius-lg)] object-cover"
                 />
               ) : (

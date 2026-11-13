@@ -3,7 +3,7 @@ import { volumeCreateTool } from '../../api/lib/agent/tools/structure-tools.js'
 import { beforeEach, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import { novelCreateTool, novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
-import { assertNovelMetadataIntent, isEmptyNovelMetadata, readNovelInitializationCompletion } from '../../api/lib/agent/novel-initialization.js'
+import { assertNovelMetadataIntent, formatNovelSetupRecap, getNovelSetupFollowup, isEmptyNovelMetadata, readNovelInitializationCompletion, readNovelSetupCover } from '../../api/lib/agent/novel-initialization.js'
 import { enableAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
 import { BOOTSTRAP_NOVEL_SUMMARY } from '../../shared/contracts/novel-publish.js'
 import { toOpenAIToolPresentation } from '../../api/lib/agent/tool-schema.js'
@@ -16,6 +16,7 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 const mocks = vi.hoisted(() => ({ original: vi.fn(), runIds: vi.fn(), db: {
   novel: { findFirst: vi.fn(), update: vi.fn() }, chapter: { count: vi.fn() },
+  coverAsset: { findFirst: vi.fn() },
   agentMessage: { findMany: vi.fn() }, agentEffectReceipt: { findMany: vi.fn() },
 } }))
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object>(), prisma: mocks.db }))
@@ -35,8 +36,26 @@ beforeEach(() => {
   mocks.runIds.mockResolvedValue(['r'])
   mocks.db.novel.findFirst.mockResolvedValue(empty)
   mocks.db.chapter.count.mockResolvedValue(0)
+  mocks.db.coverAsset.findFirst.mockResolvedValue(null)
   mocks.db.agentMessage.findMany.mockResolvedValue([])
   mocks.db.agentEffectReceipt.findMany.mockResolvedValue([])
+})
+
+it('uses the owned cover state for the same follow-up in the recap and the question', async () => {
+  const db = mocks.db as unknown as Prisma.TransactionClient
+  const legacyRecap = { title: fields.title, summary: fields.summary, tagNames: fields.tags }
+  expect(await readNovelSetupCover(db, who, 'applied-id')).toBe('applied')
+  expect(mocks.db.coverAsset.findFirst).not.toHaveBeenCalled()
+  expect(await readNovelSetupCover(db, who, null)).toBe('missing')
+  expect(mocks.db.coverAsset.findFirst).toHaveBeenCalledExactlyOnceWith({ where: { novelId: who.novelId, ownerUserId: who.userId }, select: { id: true } })
+  mocks.db.coverAsset.findFirst.mockResolvedValueOnce({ id: 'candidate-id' })
+  const cover = await readNovelSetupCover(db, who, null)
+  expect(cover).toBe('candidate')
+  expect(formatNovelSetupRecap({ ...legacyRecap, cover })).toContain(getNovelSetupFollowup({ cover })?.question)
+  expect(formatNovelSetupRecap({ ...legacyRecap, cover: 'missing' })).toContain('要不要先设置一下作品封面，还是直接开始写大纲？')
+  expect(formatNovelSetupRecap({ ...legacyRecap, cover: 'applied' })).toBe(formatNovelSetupRecap(legacyRecap))
+  expect(formatNovelSetupRecap(legacyRecap).split('\n').at(-1)).toBe('要不要开始写大纲？')
+  expect(formatNovelSetupRecap({ ...legacyRecap, cover: 'candidate', skipCover: true })).toBe(formatNovelSetupRecap(legacyRecap))
 })
 it('fresh vague book intent asks direction first and exposes only the protected initialization path, without outline or prose writes', () => {
   const spec = fresh(directionPrompt)
@@ -57,6 +76,23 @@ it.each(['首部占位', '普通新空作品'])('saves the actual approved title
   const tool = kind === '首部占位' ? novelCreateTool : novelUpdateMetaTool
   expect((await tool.execute(context('选择第一种方向，同意初始化。'), fields)).outcome).not.toBe('failed')
   expect(mocks.db.novel.update).toHaveBeenCalledExactlyOnceWith({ where: { id: 'n' }, data: { title: fields.title, displayTitle: fields.title, summary: fields.summary, tagNames: fields.tags } })
+})
+
+it.each([
+  [directionPrompt + '，先别生成封面。', '选择第一种方向，同意初始化。'],
+  [directionPrompt, '选择第一种方向，同意初始化。封面先不做。'],
+])('freezes the author’s explicit cover deferral from the request or selected direction', async (prompt, answer) => {
+  mocks.original.mockResolvedValue({ prompt, spec: fresh(prompt), sourceRunId: 'r', taskId: 'task' })
+  const result = await novelUpdateMetaTool.execute(context(answer), fields)
+  expect(result.novelSetupRecap).toMatchObject({ cover: 'missing', skipCover: true })
+  expect(getNovelSetupFollowup(result.novelSetupRecap)?.options[0].label).toBe('开始写大纲')
+})
+
+it('omits optional completed follow-up when the actual direction answer opts out', async () => {
+  const result = await novelUpdateMetaTool.execute(context('选择第一种方向，同意初始化。回答完就结束，别引导我继续。'), fields)
+  expect(result.novelSetupRecap).toMatchObject({ skipFollowup: true })
+  expect(getNovelSetupFollowup(result.novelSetupRecap)).toBeNull()
+  expect(formatNovelSetupRecap(result.novelSetupRecap!)).not.toContain('要不要')
 })
 
 it('recognizes an authenticated direction choice independent of question phrasing and saves the placeholder in one write', async () => {
@@ -247,11 +283,16 @@ it('rejects partial initialization without effects, then the real metadata tool 
   expect((await novelUpdateMetaTool.execute(ctx, fields)).outcome).not.toBe('failed')
   expect(mocks.db.novel.update).toHaveBeenCalledExactlyOnceWith({ where: { id: 'n' }, data: { title: fields.title, displayTitle: fields.title, summary: fields.summary, tagNames: fields.tags } })
 })
-it('retains a real partial metadata update for an author request to edit synopsis only on an existing edited work', async () => {
-  mocks.db.novel.findFirst.mockResolvedValue({ ...empty, title: '作者原题', summary: '作者原简介', tagNames: ['玄幻'], chapterCount: 2, wordCount: 1200 })
+it.each([
+  [['玄幻'], '目前还缺作品封面，'],
+  [[], '目前还缺作品封面、标签'],
+] as const)('reports only the remaining gaps after a real synopsis-only edit', async (tagNames, missingNote) => {
+  mocks.db.novel.findFirst.mockResolvedValue({ ...empty, title: '作者原题', summary: '作者原简介', tagNames, chapterCount: 2, wordCount: 1200 })
   const prompt = '只更新当前作品简介。'
   mocks.original.mockResolvedValue({ prompt, spec: fresh(prompt) })
-  expect((await novelUpdateMetaTool.execute(context(), { summary: fields.summary })).outcome).not.toBe('failed')
+  const result = await novelUpdateMetaTool.execute(context(), { summary: fields.summary })
+  expect(result.outcome).not.toBe('failed')
+  expect(result.output).toContain(missingNote)
   expect(mocks.db.novel.update).toHaveBeenCalledExactlyOnceWith({ where: { id: 'n' }, data: { summary: fields.summary, tagNames: undefined } })
 })
 
@@ -285,7 +326,7 @@ it.each([
   expect(restrictToolsToTask([novelUpdateMetaTool], spec, 'plan').map(tool => tool.name)).toContain('novel_update_meta')
   mocks.original.mockResolvedValue({ prompt, spec })
   await expect(assertNovelMetadataIntent(mocks.db as unknown as Prisma.TransactionClient, context(), { ...empty, summary: '作者已有简介' }))
-    .resolves.toEqual({ completeInitialization: true })
+    .resolves.toMatchObject({ completeInitialization: true })
 })
 
 it('keeps the frozen legacy build metadata grant without retrofitting fresh initialization semantics', async () => {

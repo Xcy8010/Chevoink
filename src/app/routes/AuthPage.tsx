@@ -2,11 +2,10 @@ import { useRegistrationPolicies } from '@/features/site-content/public-api'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff, Lock, MessageSquareText, Smartphone, UserRound } from 'lucide-react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
-import AppImage from '@/components/ui/AppImage'
 import LoadingMark from '@/components/ui/LoadingMark'
 import TextInput from '@/components/ui/TextInput'
 import { hydrateReadingSync } from '@/features/home/reading-sync'
@@ -14,6 +13,7 @@ import { brandMeta } from '@/lib/theme/tokens'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
 import { useToast } from '@/components/ui/toast-context'
+import { authRedirectPath, authSuccessMessage } from '@/features/account/auth-api'
 import { AccountDialog } from '@/features/account/VerificationCodeField'
 import EmailAuthPage from './EmailAuthPage'
 import type {
@@ -29,6 +29,7 @@ type AuthPageMode = 'login' | 'register'
 
 type AuthPageProps = {
   mode: AuthPageMode
+  onClose: () => void
 }
 
 type LoginMethod = 'password' | 'sms'
@@ -75,32 +76,19 @@ function buildPhoneSubmitValue(input: string): string {
   return normalizedPhone ? `${DEFAULT_CN_PHONE_PREFIX}${normalizedPhone}` : ''
 }
 
-function normalizeRedirectPath(input: string | null): string {
-  if (!input || !input.startsWith('/')) {
-    return '/me'
-  }
-
-  if (input.startsWith('//')) {
-    return '/me'
-  }
-
-  return input
-}
-
-/**
- * 登录/注册页（未登录的「个人中心」入口）：
- * - 手机端全出血单列，顶部品牌头像 +「点击登录/注册」式问候，参考主流阅读/社交 App
- * - 平板/电脑端居中卡片（max-w 420px），同一套表单自适应
- * - 密码框带眼睛按钮切换明文，默认隐藏
- */
-export default function AuthPage({ mode, onClose }: AuthPageProps & { onClose: () => void }) {
+export default function AuthPage({ mode, onClose }: AuthPageProps) {
   const [params] = useSearchParams()
+  const isAuthenticated = useShellStore(state => state.authStatus === 'authenticated' && Boolean(state.sessionUser))
+  const isRecovery = mode === 'login' && params.get('recovery') === '1'
+  const redirectPath = authRedirectPath(params.get('redirect'))
   const options = useQuery({
     queryKey: ['auth', 'options'],
     queryFn: () => requestJson<{ emailAuthEnabled: boolean }>('/api/auth/options'),
+    enabled: !isAuthenticated || isRecovery,
     retry: false,
     staleTime: 0,
   })
+  if (isAuthenticated && !isRecovery) return <Navigate to={redirectPath} replace />
   if (options.isPending) return <LoadingMark className="boot-splash" />
   if (options.isError && !(options.error instanceof ApiClientError && options.error.status === 404)) {
     return <AccountDialog title="暂时无法读取登录方式" onClose={onClose}>
@@ -108,17 +96,14 @@ export default function AuthPage({ mode, onClose }: AuthPageProps & { onClose: (
     </AccountDialog>
   }
   if (options.data?.emailAuthEnabled) {
-    const nextMode = mode === 'login' && params.get('recovery') === '1' ? 'recovery' : mode
-    return <EmailAuthPage key={nextMode} mode={nextMode} onClose={onClose} />
+    const nextMode = isRecovery ? 'recovery' : mode
+    return <EmailAuthPage key={nextMode} mode={nextMode} onClose={onClose} redirectPath={redirectPath} />
   }
-  return (
-    <AccountDialog title={mode === 'login' ? '登录启创墨域' : '创建账户'} onClose={onClose}>
-      <LegacyAuthPage key={mode} mode={mode} />
-    </AccountDialog>
-  )
+  if (isAuthenticated) return <Navigate to={redirectPath} replace />
+  return <LegacyAuthPage key={mode} mode={mode} onClose={onClose} redirectPath={redirectPath} />
 }
 
-function LegacyAuthPage({ mode }: AuthPageProps) {
+function LegacyAuthPage({ mode, onClose, redirectPath }: AuthPageProps & { redirectPath: string }) {
   const legalQuery = useRegistrationPolicies()
   const [acceptedPolicies, setAcceptedPolicies] = useState('')
   const legal = legalQuery.data?.legal
@@ -127,16 +112,15 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
   const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const setAuthenticated = useShellStore((state) => state.setAuthenticated)
-  const isAuthenticated = useShellStore((state) => state.authStatus === 'authenticated' && !!state.sessionUser)
   const toast = useToast()
 
-  const redirectPath = useMemo(() => normalizeRedirectPath(searchParams.get('redirect')), [searchParams])
   const referralCode = useMemo(() => searchParams.get('ref')?.trim().toUpperCase() || undefined, [searchParams])
   const isRegisterPage = mode === 'register'
 
   const [loginMethod, setLoginMethod] = useState<LoginMethod>(isRegisterPage ? 'sms' : 'password')
   const [account, setAccount] = useState('')
   const [password, setPassword] = useState('')
+  const [passwordFocused, setPasswordFocused] = useState(false)
   const [passwordVisible, setPasswordVisible] = useState(false)
   const [phone, setPhone] = useState('')
   const [code, setCode] = useState('')
@@ -299,7 +283,7 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
         unreadMessageCount: payload.user.unreadMessageCount,
         unreadNotificationCount: payload.user.unreadNotificationCount,
       })
-      toast.success(isSmsFlow && shouldCollectProfile ? '注册成功。' : '登录成功。')
+      toast.success(authSuccessMessage(isSmsFlow && shouldCollectProfile))
 
       // 重新登录后：游客期的 /me 等缓存全部作废，并立即水合云端书架/阅读进度，
       // 避免个人中心的书架短暂为空（启动时的水合在游客态下已静默失败过）
@@ -309,18 +293,6 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
           void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
         }
       })
-
-      if (isSmsFlow && shouldCollectProfile) {
-        navigate('/me', {
-          replace: true,
-          state: {
-            showPostRegisterPrompt: true,
-          },
-        })
-        return
-      }
-
-      navigate(redirectPath, { replace: true })
     } catch (error) {
       const message = error instanceof ApiClientError ? error.message : '暂时无法完成提交，请稍后再试。'
       setErrorMessage(message)
@@ -330,28 +302,6 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
     }
   }
 
-  if (isAuthenticated) {
-    return (
-      <section className="flex w-full flex-col items-center text-center">
-        <span className="inline-flex h-16 w-16 items-center justify-center overflow-hidden rounded-full border border-[var(--border-subtle)] bg-[var(--surface-default)]">
-          <AppImage src="/favicon.png" alt={`${brandMeta.productName} Logo`} className="h-full w-full" priority />
-        </span>
-        <h1 className="mt-5 text-xl font-semibold tracking-tight text-[var(--text-primary)]">你已经登录</h1>
-        <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
-          可以直接回到个人中心，继续查看书架、草稿和互动记录。
-        </p>
-        <div className="mt-6 w-full space-y-3">
-          <Button variant="primary" className="h-11 w-full" onClick={() => navigate(redirectPath, { replace: true })}>
-            继续前往
-          </Button>
-          <Button variant="secondary" className="h-11 w-full" onClick={() => navigate('/settings')}>
-            打开设置
-          </Button>
-        </div>
-      </section>
-    )
-  }
-
   const segTabClass = (active: boolean) =>
     cn(
       'press-feedback relative flex-1 pb-2.5 text-center text-sm font-medium transition-colors',
@@ -359,7 +309,11 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
     )
 
   return (
-    <div className="flex justify-center">
+    <AccountDialog
+      title={isRegisterPage ? '创建账户' : '登录启创墨域'}
+      mascotPose={!isSmsFlow && passwordFocused ? 'privacy' : 'welcome'}
+      onClose={() => { if (!submitting) onClose() }}
+    >
       <section className="w-full">
         {/* 登录方式切换：X 风格文字 Tab + 下划线，注册页固定验证码流程 */}
         {!isRegisterPage ? (
@@ -414,6 +368,8 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
                 type={passwordVisible ? 'text' : 'password'}
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
+                onFocus={() => setPasswordFocused(true)}
+                onBlur={() => setPasswordFocused(false)}
                 placeholder="密码"
                 autoComplete="current-password"
                 required
@@ -592,6 +548,6 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
             </div>
         </AccountDialog>
       ) : null}
-    </div>
+    </AccountDialog>
   )
 }

@@ -51,6 +51,7 @@ async function fetchReaderPayload(
       cacheReaderPayload(novelId, chapterId, payload)
       return payload
     } catch (error) {
+      if (error instanceof ApiClientError && [401, 403, 404].includes(error.status)) throw error
       // 网络失败/服务异常：回落本地缓存，命中则带离线标记供 UI 提示
       const cached = getCachedReaderPayload(novelId, chapterId)
       if (cached) return { ...cached, fromOfflineCache: true }
@@ -166,8 +167,8 @@ export function useReaderState() {
     },
     enabled: Boolean(novelId && chapterId),
     // 断网时 fetch 直接失败：不空转重试，立刻落错误态（缓存兜底已在 queryFn 内做）；
-    // 服务端返回的结构化错误才少量重试
-    retry: (failureCount, error) => error instanceof ApiClientError && failureCount < 2,
+    // 创作预览的结构化错误才少量重试
+    retry: (failureCount, error) => fromStudio && error instanceof ApiClientError && failureCount < 2,
     // 预取未命中时旧章数据作占位：换章等待期间不闪骨架屏、不重挂阅读器，
     // 布局层以 reader.currentChapter.id === chapterId 判断数据新鲜度后再动页码
     placeholderData: keepPreviousData,

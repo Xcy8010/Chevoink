@@ -7,6 +7,7 @@ import { readSessionPendingQuestion, resolveLoopRunQuestion } from '../../api/li
 import { runReviewedDurableExecution } from '../../api/lib/agent/runtime-executor.js'
 import { parkDurableQuestion, resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
 import { novelCreateTool } from '../../api/lib/agent/tools/novel-tools.js'
@@ -34,6 +35,7 @@ async function completeNovelSetup(f: Parameters<Parameters<typeof fixture>[0]>[0
   const tools = [askUserTool, novelCreateTool]
   await initializeExecutionState(lease, { configuration: {
     version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+    nextPromptMarker: '[[CHEVOINK_NEXT_PROMPT_91a5ed28]]',
     model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
     tools: toOpenAITools(tools, f.spec.scope),
     toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })),
@@ -69,8 +71,11 @@ describe.runIf(available)('completed durable question followup', () => {
         expect(question).toBeNull()
         return
       }
-      expect(question).toMatchObject({ runId: f.runId, state: 'completed', question: '要不要开始写大纲？',
-        options: [{ label: '开始写大纲' }, { label: '先讨论大纲方向' }] })
+      expect(question).toMatchObject({ runId: f.runId, state: 'completed', question: '要不要先设置一下作品封面，还是直接开始写大纲？',
+        options: [{ label: '先讨论并拟定作品封面方向' }, { label: '开始写大纲' }] })
+      expect((await publishDurableEvents(f.userId, f.runId, 200)).at(-1)).toMatchObject({
+        type: 'run.finished', status: 'succeeded', nextPrompt: '先讨论并拟定作品封面方向',
+      })
       if (!question) throw new Error('Expected completed followup question')
       const { requestId, callId } = question
       const offer = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: requestId } })
@@ -101,7 +106,7 @@ describe.runIf(available)('completed durable question followup', () => {
         expect(replay).toEqual(first)
         if (!first.runId) throw new Error('Expected a new continuation run')
         const target = await prisma.agentRun.findUniqueOrThrow({ where: { id: first.runId } })
-        expect(target).toMatchObject({ sessionId: f.sessionId, userId: f.userId, novelId: f.novelId, startRequest: { prompt: answer } })
+        expect(target).toMatchObject({ sessionId: f.sessionId, userId: f.userId, novelId: f.novelId, startRequest: { prompt: answer, predictNextPrompt: true } })
         expect(target.taskRootId).not.toBe(f.rootId)
         await expect(submit({ answer: '先讨论大纲方向' })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
         expect(await countRuns()).toBe(before + 1)

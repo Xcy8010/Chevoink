@@ -22,12 +22,18 @@ export function mainlandPhone(value: string): string {
 }
 
 export function authRedirectPath(value: string | null): string {
-  if (!value?.startsWith('/')) return '/me'
+  if (!value?.startsWith('/') || value.startsWith('//')) return '/me'
   const base = 'https://chevoink.invalid'
   try {
     const target = new URL(value, base)
-    return target.origin === base ? target.pathname + target.search + target.hash : '/me'
+    const path = decodeURIComponent(target.pathname)
+    if (target.origin !== base || path.startsWith('//') || /^\/(?:login|register)\/*$/i.test(path)) return '/me'
+    return target.pathname + target.search + target.hash
   } catch {
     return '/me'
   }
+}
+
+export function authSuccessMessage(registered: boolean): string {
+  return registered ? '注册成功。你可以稍后完善个人资料。' : '登录成功。'
 }

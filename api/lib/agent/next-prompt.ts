@@ -14,14 +14,22 @@ export function readNextPromptDecision(value: unknown): NextPromptDecision {
   return text && text.length <= NEXT_PROMPT_MAX_LENGTH && !/[\r\n\p{Cc}]/u.test(text) ? { nextPrompt: text } : {}
 }
 
-/** Presentation opt-outs only. Never use these phrases to decide tool authority or task completion. */
-export function allowsNextPrompt(prompt: string | null): boolean {
-  if (!prompt?.trim()) return false
+function suggestionPreferences(prompt: string) {
   const text = prompt.replace(/```[\s\S]*?```|`[^`\n]*`|^>[^\n]*|“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"/gmu, '〈引用〉')
-  const noTip = /(?:不要|不必|无需|不用|不需要|别|请勿|禁止|免去)[^。！!？?\r\n；;]{0,18}(?:建议|推荐|下一步|后续提示|补全提示|提示词)|不(?:加|附|给|提供|输出)(?:任何|额外|后续)?(?:建议|下一步|后续提示|补全提示)/u
+  const noTip = /(?:不要|不必|无需|不用|不需要|别|请勿|禁止|免去)[^。！!？?\r\n；;]{0,18}(?:建议|推荐|下一步|后续提示|补全提示|提示词)|不(?:加|附|给|提供|输出)(?:任何|额外|后续)?(?:建议|下一步|后续提示|补全提示)|(?:别|不要|请勿)(?:再)?(?:引导|提示|催促)(?:我)?(?:再)?(?:继续|追问)/u
   const exactOutput = /(?:只|仅)(?:需(?:要)?|要|能|可)?\s*(?:回复|回答|答复|输出|返回|给(?:我|出)?|交付|提供)|(?:只|仅)\s*(?:要|需)\s*(?:标题|正文|答案|结果|JSON|〈引用〉)/iu
-  const english = /\b(?:no (?:suggestions?|follow[- ]?ups?|next steps?)|(?:don't|do not|never) [^.!?\r\n]{0,32}(?:suggestions?|follow[- ]?ups?|next steps?)|(?:only|just) (?:respond|reply|output|return|the (?:answer|text|result)|json))\b/iu
-  return !noTip.test(text) && !exactOutput.test(text) && !english.test(text)
+  const noTipEnglish = /\b(?:no (?:suggestions?|follow[- ]?ups?|next steps?)|(?:don't|do not|never) [^.!?\r\n]{0,32}(?:suggestions?|follow[- ]?ups?|next steps?))\b/iu
+  const exactEnglish = /\b(?:only|just) (?:respond|reply|output|return|the (?:answer|text|result)|json)\b/iu
+  return { optedOut: noTip.test(text) || noTipEnglish.test(text), exact: exactOutput.test(text) || exactEnglish.test(text) }
+}
+
+/** Presentation opt-outs only. They do not decide tool authority or task completion. */
+export function allowsNextPrompt(prompt: string | null): boolean {
+  return Boolean(prompt?.trim() && !suggestionPreferences(prompt).optedOut)
+}
+
+export function allowsModelNextPrompt(prompt: string): boolean {
+  return !suggestionPreferences(prompt).exact
 }
 
 /** Only reuse a concrete follow-up explicitly offered by the closing reply. */
@@ -48,6 +56,13 @@ export function selectCompletedNextPrompt(answer: string, proposal: NextPromptDe
     : `帮我核对《${name}》与前文的衔接和人物动机。`).nextPrompt
 }
 
+export const DEFAULT_COMPLETED_NEXT_PROMPT = '根据刚才的结果，帮我拟一个具体的下一步。'
+export const LIMITED_COMPLETED_NEXT_PROMPT = '帮我核对这次交付里仍需确认的事项。'
+
+export function selectInteractiveNextPrompt(answer: string, proposal: NextPromptDecision, deliverable?: NextPromptDeliverable): string {
+  return selectCompletedNextPrompt(answer, proposal.nextPromptSuppressed ? {} : proposal, deliverable) ?? DEFAULT_COMPLETED_NEXT_PROMPT
+}
+
 /** Remove private metadata before the terminal tool validates or journals its exact answer. */
 export function readTaskResponseNextPrompt(raw: string): { args: string; proposal: NextPromptDecision } {
   try {
@@ -61,7 +76,7 @@ export function readTaskResponseNextPrompt(raw: string): { args: string; proposa
 }
 
 export function addNextPromptInstruction(messages: ChatMessage[]): string {
-  const instruction = `【输入框建议】当前请求已完整交付时，同时准备一条贴合作者目标、可直接发送的下一步作者指令。用作者当前的语言和口吻，限 ${NEXT_PROMPT_MAX_LENGTH} 字。普通答复后另起一行写 ${marker} 和建议。如果本来就用 task_respond 收尾，把建议放入独立的 nextPrompt 参数，answer 保持原样。作者明确要求只输出指定内容、明确不要建议，或没有合适的下一步时，建议位置填 ${skip}。任务未完成时不输出建议。建议单独显示在输入框，不属于正文，不改变当前任务、权限或交付要求，也不为它补读资料或调用工具。`
+  const instruction = `【输入框建议】当前请求已完整交付时，同时准备一条贴合作者目标、可直接发送的下一步作者指令。用作者当前的语言和口吻，限 ${NEXT_PROMPT_MAX_LENGTH} 字。普通答复后另起一行写 ${marker} 和建议。如果本来就用 task_respond 收尾，把建议放入独立的 nextPrompt 参数，answer 保持原样。没有合适的模型建议时，建议位置填 ${skip}。输入框是否显示建议由应用按作者偏好和任务状态决定。任务未完成时不输出建议。建议单独显示在输入框，不属于正文，不改变当前任务、权限或交付要求，也不为它补读资料或调用工具。`
   const system = messages.find(message => message.role === 'system')
   if (system) system.content += `\n\n${instruction}`
   else messages.unshift({ role: 'system', content: instruction })

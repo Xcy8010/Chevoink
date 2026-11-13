@@ -52,6 +52,7 @@ import type {
   User,
 } from '../../../shared/contracts/index.js'
 import { buildApiUrl } from '@/app/api-base'
+import { ApiClientError } from '@/app/api-client'
 import { buildAuthHeader } from '@/lib/auth-token'
 
 type RequestDataOptions = RequestInit & {
@@ -87,14 +88,19 @@ async function requestData<T>(path: string, options?: RequestDataOptions): Promi
     })
 
     const rawText = await response.text()
-    const result = rawText ? (JSON.parse(rawText) as ApiResponse<T>) : null
+    let result: ApiResponse<T> | null = null
+    try {
+      result = rawText ? (JSON.parse(rawText) as ApiResponse<T>) : null
+    } catch (error) {
+      if (response.ok) throw error
+    }
 
     if (!response.ok) {
       const message =
         result && typeof result === 'object' && 'error' in result
           ? result.error.message
-          : rawText || '请求失败，请稍后再试。'
-      throw new Error(message)
+          : '请求失败，请稍后再试。'
+      throw new ApiClientError(message, response.status)
     }
 
     if (!result || !result.success) {
@@ -107,6 +113,7 @@ async function requestData<T>(path: string, options?: RequestDataOptions): Promi
 
     return result.data
   } catch (error) {
+    if (error instanceof ApiClientError) throw error
     throw new Error(normalizeFetchError(error))
   } finally {
     window.clearTimeout(timeoutId)
@@ -385,7 +392,9 @@ export function deleteComment(commentId: string) {
   })
 }
 
-export function listConversations(pageSize = 20, page = 1) {
+export const CONVERSATION_PAGE_SIZE = 30
+
+export function listConversations(pageSize = CONVERSATION_PAGE_SIZE, page = 1) {
   return requestData<ListConversationsResponse['data']>(`/api/conversations?page=${page}&pageSize=${pageSize}`)
 }
 

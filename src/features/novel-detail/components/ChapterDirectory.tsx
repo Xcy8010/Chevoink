@@ -77,7 +77,7 @@ export default function ChapterDirectory({
 
       {chapters.length === 0 ? (
         <div className="mt-4">
-          <Empty title="目录还在整理中" description="公开章节准备好后，会直接出现在这里。" />
+          <Empty title="还没有公开章节" />
         </div>
       ) : (
         <div

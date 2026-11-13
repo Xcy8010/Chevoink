@@ -3,11 +3,11 @@ import { ChevronLeft, Heart, MessageCircle, Star } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import AppState from '@/components/ui/AppState'
-import { ConversationSkeleton } from '@/components/ui/Skeleton'
+import AppState, { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { getInteractionBadges, listInteractions, markInteractionSeen } from '@/features/community/api'
 import Avatar from '@/features/community/components/Avatar'
 import { formatRelativeTime } from '@/features/community/utils'
+import { MessageDetailRowsSkeleton, detailLayoutClass, detailRowClass } from '@/features/messages/components/MessagesLoading'
 import { cn } from '@/lib/utils'
 import type { InteractionItem } from '../../shared/contracts'
 
@@ -99,7 +99,7 @@ export default function LikesListPage() {
 
   return (
     // 壳层大标题已隐藏；lg 起双栏：左侧 sticky 返回/标题栏 + 右侧明细列表，避免大屏左右留白
-    <div className="animate-fade-in-up mx-auto w-full max-w-[640px] lg:grid lg:max-w-[1020px] lg:grid-cols-[240px_minmax(0,1fr)] lg:items-start lg:gap-12">
+    <div className={detailLayoutClass}>
       <div className="lg:sticky lg:top-24 lg:self-start">
         <button
           type="button"
@@ -113,29 +113,27 @@ export default function LikesListPage() {
         <h1 className="mt-3 flex items-baseline gap-2 text-xl font-bold tracking-tight text-[var(--text-primary)]">
           <Heart className="h-4 w-4 self-center text-[var(--color-brand)]" />
           互动消息
-          <span className="text-sm font-normal tabular-nums text-[var(--text-tertiary)]">{items.length}</span>
+          {interactionsQuery.data && <span className="text-sm font-normal tabular-nums text-[var(--text-tertiary)]">{items.length}</span>}
         </h1>
-        <p className="mt-1 text-sm text-[var(--text-tertiary)]">谁赞了、收藏了、评论了你的内容，都在这里。</p>
       </div>
 
       <div className="mt-4 min-w-0 lg:mt-0">
+        {interactionsQuery.isRefetchError ? <AppStateRefreshNotice retry={interactionsQuery.refetch} busy={interactionsQuery.isFetching} /> : null}
         {interactionsQuery.isLoading ? (
-          <ConversationSkeleton count={6} />
-        ) : interactionsQuery.isError ? (
+          <MessageDetailRowsSkeleton variant="interactions" />
+        ) : interactionsQuery.isError && !interactionsQuery.data ? (
           <AppState
+            compact
             tone="error"
-            title="互动消息暂时没有加载出来"
-            description={interactionsQuery.error instanceof Error ? interactionsQuery.error.message : '请稍后再试。'}
-            primaryAction={{ label: '重新加载', onClick: () => void interactionsQuery.refetch() }}
-            className="min-h-[280px] border-0 shadow-none"
+            title="互动消息暂时没有加载"
+            primaryAction={{ label: '重新加载', onClick: () => interactionsQuery.refetch(), busy: interactionsQuery.isFetching }}
           />
         ) : items.length === 0 ? (
           <AppState
-            tone="empty"
+            compact
+            scene="message"
             title="还没有收到互动"
-            description="发布作品、去社区发帖聊聊创作，读者的赞和评论就会出现在这里。"
-            primaryAction={{ label: '去社区', onClick: () => navigate('/community') }}
-            className="min-h-[280px] border-0 shadow-none"
+            primaryAction={{ label: '去社区', href: '/community' }}
           />
         ) : (
           <div className="divide-y divide-[var(--border-subtle)]">
@@ -164,7 +162,8 @@ export default function LikesListPage() {
                       : undefined
                   }
                   className={cn(
-                    'flex items-start gap-3 px-1 py-3.5 sm:rounded-[var(--radius-lg)] sm:px-3',
+                    detailRowClass,
+                    'items-start',
                     targetPath ? 'cursor-pointer transition-colors hover:bg-[var(--surface-muted)]' : null,
                     isNew ? 'animate-unseen-flash' : null,
                   )}

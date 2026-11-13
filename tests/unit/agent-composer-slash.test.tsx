@@ -505,6 +505,7 @@ describe('composer next-prompt completion', () => {
   const suggestion = '按刚才的风格再写一章'
   const defaultPlaceholder = '告诉我要做什么，我会自主完成…'
   const offer = () => screen.queryByRole('button', { name: '补全建议：' + suggestion })
+  const insert = () => screen.queryByRole('button', { name: '插入建议到草稿末尾：' + suggestion })
 
   it('keeps the preview out of the draft and accepts only a plain focused Tab', async () => {
     const input = { ...props(), nextPrompt: suggestion, onAcceptNextPrompt: vi.fn() }
@@ -544,14 +545,19 @@ describe('composer next-prompt completion', () => {
     view.rerender(<AgentComposer {...input} />)
     typeDraft('我想换个写法')
     expect(offer()).toBeNull()
+    expect(insert()?.textContent).toContain(suggestion)
     expect(fireEvent.keyDown(editor(), { key: 'Tab' })).toBe(true)
     expect(useAgentStore.getState().composerDraft).toBe('我想换个写法')
+    fireEvent.click(insert()!)
+    expect(useAgentStore.getState().composerDraft).toBe('我想换个写法\n' + suggestion)
+    expect(input.onAcceptNextPrompt).toHaveBeenCalledOnce()
+    expect(input.onSend).not.toHaveBeenCalled()
 
     editor().textContent = ''
     fireEvent.input(editor())
     fireEvent.click(offer()!)
     expect(editor().textContent).toBe(suggestion)
-    expect(input.onAcceptNextPrompt).toHaveBeenCalledOnce()
+    expect(input.onAcceptNextPrompt).toHaveBeenCalledTimes(2)
     expect(input.onSend).not.toHaveBeenCalled()
   })
 })

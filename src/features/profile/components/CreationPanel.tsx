@@ -107,9 +107,8 @@ export default function CreationPanel({
         </div>
       ) : (
         <AppState
-          tone="empty"
-          title="你还没有创作内容"
-          description="从创作中心开始第一部作品，这里会同步展示你的作品和草稿。"
+          scene="writing"
+          title="还没有创作内容"
           primaryAction={{ label: '开始创作', onClick: onOpenStudio }}
           className="min-h-[280px]"
         />

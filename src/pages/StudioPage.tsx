@@ -115,7 +115,7 @@ export default function StudioPage() {
 
   if (meQuery.isError) {
     return (
-      <StudioOpenError error={meQuery.error} retry={() => { void meQuery.refetch() }} />
+      <StudioOpenError error={meQuery.error} retry={() => meQuery.refetch()} />
     )
   }
 
@@ -127,7 +127,7 @@ export default function StudioPage() {
         retryLabel="重新创建"
         retry={() => {
           createNovelMutation.reset()
-          createNovelMutation.mutate()
+          return createNovelMutation.mutateAsync()
         }}
       />
     )

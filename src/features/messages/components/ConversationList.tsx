@@ -1,10 +1,12 @@
 import { BellRing, ChevronLeft, ChevronRight, Heart, User, UserPlus } from 'lucide-react'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 
+import AppState from '@/components/ui/AppState'
 import Avatar from '@/features/community/components/Avatar'
 import { formatRelativeTime } from '@/features/community/utils'
 import { cn } from '@/lib/utils'
+import { ConversationRowsSkeleton, MutualFriendsSkeleton, conversationListHeaderClass } from './MessagesLoading'
 import type { Conversation, FollowUserItem, InteractionItem } from '../../../../shared/contracts/index.js'
 
 type ConversationListProps = {
@@ -30,6 +32,10 @@ type ConversationListProps = {
   loadingMoreConversations: boolean
   /** 会话分页：滚动触底时加载下一页 */
   onLoadMoreConversations: () => void
+  loadingConversations: boolean
+  loadingFriends: boolean
+  conversationError: ReactNode
+  refreshNotice?: ReactNode
 }
 
 function formatUnreadBadge(count: number) {
@@ -79,6 +85,10 @@ export default function ConversationList({
   hasMoreConversations,
   loadingMoreConversations,
   onLoadMoreConversations,
+  loadingConversations,
+  loadingFriends,
+  conversationError,
+  refreshNotice,
 }: ConversationListProps) {
   const navigate = useNavigate()
   // 陌生消息子列表视图：主列表 ↔ 陌生会话列表
@@ -198,7 +208,7 @@ export default function ConversationList({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-4 pb-3 pt-2">
+      <div className={conversationListHeaderClass}>
         <p className="text-base font-semibold text-[var(--text-primary)]">消息</p>
         {totalUnread > 0 ? (
           <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-[var(--text-tertiary)]">
@@ -210,7 +220,7 @@ export default function ConversationList({
 
       <div className="min-h-0 flex-1 overflow-y-auto" onScroll={handleListScroll}>
         {/* 互关好友横向栏：点击头像直接发起/进入私聊 */}
-        {mutualFriends.length > 0 ? (
+        {loadingFriends ? <MutualFriendsSkeleton /> : mutualFriends.length > 0 ? (
           <div className="border-b border-[var(--border-subtle)] py-2">
             <p className="px-4 text-xs font-medium text-[var(--text-tertiary)]">互关好友</p>
             <div className="rail-scroll mt-1.5 flex gap-2.5 overflow-x-auto px-4 pb-1">
@@ -219,7 +229,7 @@ export default function ConversationList({
                   key={friend.id}
                   type="button"
                   onClick={() => onOpenFriend(friend.id)}
-                  disabled={openingFriendId !== null}
+                  aria-busy={openingFriendId === friend.id}
                   className={cn(
                     'press-feedback flex w-12 shrink-0 flex-col items-center gap-1',
                     openingFriendId === friend.id ? 'opacity-60' : null,
@@ -375,13 +385,12 @@ export default function ConversationList({
 
         {/* 互关私聊会话 */}
         <div className="space-y-1 px-2 pb-2">
-          {friendConversations.length === 0 ? (
-            <p className="px-2 py-6 text-center text-xs text-[var(--text-tertiary)]">
-              {mutualFriends.length > 0 ? '点上面的好友头像，开始第一段对话吧。' : '互相关注后就可以在这里私聊了。'}
-            </p>
+          {refreshNotice}
+          {loadingConversations ? <ConversationRowsSkeleton /> : conversationError || (friendConversations.length === 0 ? (
+            <AppState compact scene="message" title="还没有私聊" description={mutualFriends.length > 0 ? '选择好友开始聊天。' : undefined} />
           ) : (
             friendConversations.map(renderDirectRow)
-          )}
+          ))}
 
           {/* 会话分页：加载中提示（触底自动加载下一页） */}
           {loadingMoreConversations ? (

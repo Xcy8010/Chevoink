@@ -1,5 +1,9 @@
+import type { CSSProperties } from 'react'
+
 import { cn } from '@/lib/utils'
 import { useNativeSystemSurface } from '@/lib/useNativeSystemSurface'
+import '@/features/discover/discover-gallery.css'
+import '@/features/discover/rankings.css'
 
 /** 骨架需匹配最终布局：从地址栏解析当前作品，读取其工作区视角（work/ide），SSR 无 window 时按 work 处理 */
 function resolveStudioPerspective(): 'work' | 'ide' {
@@ -12,11 +16,12 @@ function resolveStudioPerspective(): 'work' | 'ide' {
 
 type SkeletonProps = {
   className?: string
+  style?: CSSProperties
 }
 
 /** 基础骨架块 */
-export function Skeleton({ className }: SkeletonProps) {
-  return <div className={cn('skeleton-shimmer rounded-[var(--radius-sm)]', className)} />
+export function Skeleton({ className, style }: SkeletonProps) {
+  return <div className={cn('skeleton-shimmer rounded-[var(--radius-sm)]', className)} style={style} />
 }
 
 /** 文字条骨架 */
@@ -37,7 +42,7 @@ export function SkeletonText({ lines = 3, className }: { lines?: number; classNa
 
 /** 头像骨架 */
 export function SkeletonAvatar({ size = 40 }: { size?: number }) {
-  return <Skeleton className="shrink-0 rounded-full" {...{ style: { width: size, height: size } }} />
+  return <Skeleton className="shrink-0 rounded-full" style={{ width: size, height: size }} />
 }
 
 /** 封面骨架（3:4 书籍封面比例） */
@@ -122,56 +127,6 @@ export function PostListSkeleton({ count = 3 }: { count?: number }) {
           <SkeletonText lines={3} />
         </div>
       ))}
-    </div>
-  )
-}
-
-/** 消息会话列表骨架 */
-export function ConversationSkeleton({ count = 5 }: { count?: number }) {
-  return (
-    <div className="space-y-1" aria-busy="true" aria-label="会话加载中">
-      {Array.from({ length: count }).map((_, index) => (
-        <div key={index} className="flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-3">
-          <SkeletonAvatar />
-          <div className="min-w-0 flex-1 space-y-2">
-            <Skeleton className="h-3.5 w-24" />
-            <Skeleton className="h-3 w-4/5" />
-          </div>
-          <Skeleton className="h-3 w-8" />
-        </div>
-      ))}
-    </div>
-  )
-}
-
-/** 个人中心骨架屏：封面条 + 头像 + 统计卡 + tab 条 + 卡片栅格 */
-export function ProfileSkeleton() {
-  return (
-    <div className="space-y-4 md:space-y-6" aria-busy="true" aria-label="个人中心加载中">
-      <Skeleton className="h-[160px] w-full rounded-[var(--radius-xl)] md:h-[200px]" />
-      <div className="flex items-center gap-4 px-2">
-        <SkeletonAvatar size={72} />
-        <div className="flex-1 space-y-2">
-          <Skeleton className="h-5 w-36" />
-          <Skeleton className="h-3.5 w-56" />
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, index) => (
-          <Skeleton key={index} className="h-20 rounded-[var(--radius-lg)]" />
-        ))}
-      </div>
-      <div className="flex gap-3">
-        {Array.from({ length: 4 }).map((_, index) => (
-          <Skeleton key={index} className="h-9 w-20 rounded-[var(--radius-pill)]" />
-        ))}
-      </div>
-      <div className="grid gap-3 md:grid-cols-2">
-        <SkeletonNovelCard />
-        <SkeletonNovelCard />
-        <SkeletonNovelCard />
-        <SkeletonNovelCard />
-      </div>
     </div>
   )
 }
@@ -517,61 +472,25 @@ export function AuthorSkeleton() {
   )
 }
 
-/** 发现页骨架屏：标题区 + 筛选 chips + 精选双卡 + 右侧榜单列 */
+/** 与榜单的排名、封面和文字行对齐。 */
+export function RankingsSkeleton() {
+  return <div className="rankings-page" aria-busy="true" aria-label="榜单加载中">
+    <div className="rankings-controls"><div className="rankings-boards">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-10 w-16 shrink-0 rounded-md" />)}</div><Skeleton className="h-9 w-32 shrink-0" /></div>
+    <div className="rankings-list">{Array.from({ length: 5 }, (_, index) => <div className="rankings-row" key={index}>
+      <Skeleton className="h-8 w-6 self-start" /><Skeleton className="rankings-cover aspect-[3/4] rounded-md" />
+      <div className="rankings-copy space-y-3"><Skeleton className="h-5 w-2/3 max-w-xs" /><Skeleton className="h-3 w-24" /><SkeletonText lines={2} className="max-w-lg" /></div>
+      <Skeleton className="h-9 w-24 max-[640px]:hidden" />
+    </div>)}</div>
+  </div>
+}
+
+/** 与发现页封面画廊保持相同尺寸和错落节奏。 */
 export function DiscoverSkeleton() {
-  return (
-    <div className="space-y-4 md:space-y-6" aria-busy="true" aria-label="分类发现加载中">
-      <section className="rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-4 sm:p-5 lg:p-6">
-        <div className="grid items-start gap-5 md:grid-cols-[minmax(0,1.08fr)_272px] xl:grid-cols-[minmax(0,1.18fr)_320px]">
-          <div className="space-y-5">
-            <div className="space-y-3">
-              <Skeleton className="h-3 w-16" />
-              <Skeleton className="h-8 w-4/5 max-w-md" />
-              <SkeletonText lines={2} className="max-w-2xl" />
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {Array.from({ length: 4 }).map((_, index) => (
-                <Skeleton key={index} className="h-9 w-20 rounded-[var(--radius-pill)]" />
-              ))}
-            </div>
-            <div className="grid gap-4 lg:grid-cols-2">
-              {Array.from({ length: 2 }).map((_, index) => (
-                <div
-                  key={index}
-                  className="grid gap-4 rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-4 sm:grid-cols-[88px_minmax(0,1fr)]"
-                >
-                  <Skeleton className="aspect-[3/4] w-full rounded-[var(--radius-lg)]" />
-                  <div className="space-y-3 py-1">
-                    <Skeleton className="h-4 w-3/5" />
-                    <SkeletonText lines={3} />
-                    <div className="flex gap-2 pt-1">
-                      <Skeleton className="h-10 w-24 rounded-[var(--radius-pill)]" />
-                      <Skeleton className="h-10 w-16 rounded-[var(--radius-pill)]" />
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="grid gap-4">
-            {Array.from({ length: 2 }).map((_, index) => (
-              <div key={index} className="space-y-3 rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-4">
-                <Skeleton className="h-4 w-20" />
-                <div className="flex flex-wrap gap-2">
-                  {Array.from({ length: 5 }).map((_, chipIndex) => (
-                    <Skeleton key={chipIndex} className="h-8 w-16 rounded-[var(--radius-pill)]" />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: 6 }).map((_, index) => (
-          <SkeletonNovelCard key={index} />
-        ))}
-      </div>
-    </div>
-  )
+  return <div className="discover-gallery-page" aria-busy="true" aria-label="书库加载中">
+    <div className="discover-controls"><div className="discover-categories">{Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="h-9 w-16 shrink-0 rounded-full" />)}</div><Skeleton className="h-8 w-24 shrink-0" /></div>
+    <div className="discover-gallery"><div className="discover-gallery-books">{Array.from({ length: 6 }, (_, index) => <div className="discover-gallery-book" key={index}>
+      <Skeleton className="aspect-[3/4] w-full rounded-md" /><div className="discover-book-caption"><Skeleton className="h-5 w-4/5" /><Skeleton className="mt-2 h-3 w-1/2" /></div><div className="h-[76px] max-[1100px]:h-10" />
+    </div>)}</div></div>
+    <div className="discover-section"><div className="discover-section-heading"><Skeleton className="h-6 w-24" /></div><div className="discover-recommendations">{Array.from({ length: 2 }, (_, index) => <div className="discover-recommendation" key={index}><Skeleton className="discover-recommendation-cover aspect-[3/4] rounded-md" /><div className="flex-1 space-y-3"><Skeleton className="h-5 w-3/4" /><SkeletonText lines={3} /></div></div>)}</div></div>
+  </div>
 }

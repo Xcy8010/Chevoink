@@ -4,6 +4,7 @@ import { RotateCw, X } from 'lucide-react'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
+import ChevoinkMascot from '@/components/ui/ChevoinkMascot'
 import TextInput from '@/components/ui/TextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { cn } from '@/lib/utils'
@@ -11,11 +12,11 @@ import { authError, type CaptchaAnswer, type CodeReceipt } from './auth-api'
 
 type Captcha = { captchaId: string; imageBase64: string }
 
-export function AccountDialog({ title, description, step, brand, children, onClose }: {
+export function AccountDialog({ title, description, step, mascotPose, children, onClose }: {
   title: string
   description?: string
   step?: 1 | 2 | 3
-  brand?: boolean
+  mascotPose?: 'welcome' | 'privacy'
   children: ReactNode
   onClose?: () => void
 }) {
@@ -66,10 +67,10 @@ export function AccountDialog({ title, description, step, brand, children, onClo
       )}>
         <header className={cn('mb-5', step && 'md:mb-0')}>
           <div className="flex items-center gap-3">
-            {brand && <img src="/favicon.png" alt="" className="h-10 w-10 shrink-0 rounded-xl" />}
+            {mascotPose && <ChevoinkMascot pose={mascotPose} className="size-14 shrink-0" />}
             <h2 id={titleId} tabIndex={-1} className={cn(
               'min-w-0 flex-1 font-semibold tracking-tight outline-none',
-              step ? 'text-2xl md:text-3xl' : brand ? 'text-xl' : 'text-lg',
+              step ? 'text-2xl md:text-3xl' : mascotPose ? 'text-xl' : 'text-lg',
             )}>{title}</h2>
             {onClose && <Button variant="ghost" size="sm" className="w-9 shrink-0 px-0" aria-label="关闭" onClick={onClose}>
               <X aria-hidden="true" className="h-4 w-4" />
