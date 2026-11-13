@@ -1,20 +1,62 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { Link, MemoryRouter, useLocation } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ get: vi.fn(), create: vi.fn(), reorder: vi.fn(), update: vi.fn(), lifecycle: vi.fn(), archive: vi.fn(), restore: vi.fn(), diagnostic: vi.fn() }))
 vi.mock('../../src/features/admin/api', () => ({ getAdminModelManagement: mocks.get, createAdminModel: mocks.create, reorderAdminModels: mocks.reorder, updateAdminModel: mocks.update, getAdminModelLifecyclePreview: mocks.lifecycle, archiveAdminModel: mocks.archive, restoreAdminModel: mocks.restore, startAdminModelDiagnostic: mocks.diagnostic, getAdminModelDiagnostic: mocks.diagnostic, cancelAdminModelDiagnostic: mocks.diagnostic }))
 import { clearAdminModelHistoryDrafts } from '../../src/features/admin/components/AdminModelDraftRecovery'
 import AdminModelsPage from '../../src/features/admin/pages/AdminModelsPage'
 import { WeightedRoutesEditor } from '../../src/features/admin/components/WeightedRoutesEditor'
+import { useLiveConfiguration } from '@/app/live-configuration'
 const row = (id: string, tier: 'speed' | 'builtin_0123456789abcdef', displayName: string) => ({ id, tier, displayName, revision: 1, archivedAt: null as string | null, archiveReason: null as string | null, sortOrder: 0, modelKind: 'text', provider: 'openai', modelName: 'fixture', baseUrl: 'https://fixture.invalid/v1', multiplier: 1,
   enabled: true, selectable: true, isDefault: id === 'a', apiKeyConfigured: true, requestCount: 0, requestTokens: 0, responseTokens: 0,
   reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false, contextWindowTokens: 128000, configurationReady: true, updatedAt: '' })
 function LocationProbe() { const location = useLocation(); return <><span data-testid="location">{location.pathname}{location.search}</span><Link to="/admin/users">前往用户列表</Link></> }
-function mount(initial = '/admin/models') { const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } }); return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initial]}><AdminModelsPage /><LocationProbe /></MemoryRouter></QueryClientProvider>) }
+function LiveUpdates() {
+  useLiveConfiguration(useQueryClient(), 'authenticated', 'admin')
+  return null
+}
+function mount(initial = '/admin/models', stream = false) { const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } }); return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initial]}>{stream && <LiveUpdates />}<AdminModelsPage /><LocationProbe /></MemoryRouter></QueryClientProvider>) }
 beforeEach(() => { vi.clearAllMocks(); vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); vi.spyOn(window, 'confirm').mockReturnValue(true); mocks.get.mockResolvedValue({ models: [row('a', 'speed', '极速'), row('b', 'builtin_0123456789abcdef', '动态模型')], trend: [] }); mocks.create.mockResolvedValue({ id: 'new', tier: 'builtin_fedcba9876543210' }); mocks.reorder.mockResolvedValue({ ok: true }); mocks.update.mockResolvedValue({ ok: true }) })
 afterEach(() => { cleanup(); clearAdminModelHistoryDrafts(); vi.restoreAllMocks() })
+
+it('refreshes live pricing at the promotion boundary without overwriting an open draft', async () => {
+  const now = Date.now()
+  const model = { ...row('a', 'speed', '极速'), multiplier: 0, baseMultiplier: 0,
+    freePromotion: { endsAt: new Date(now + 600).toISOString(), afterMultiplier: 1.8 } }
+  mocks.get
+    .mockResolvedValueOnce({ models: [model], modelPricesAsOf: new Date(now).toISOString(), trend: [] })
+    .mockResolvedValue({ models: [{ ...model, multiplier: 1.8 }], modelPricesAsOf: new Date(now + 600).toISOString(), trend: [] })
+  mount('/admin/models?model=a&section=billing')
+  await screen.findByText('当前生效倍率 0x')
+  fireEvent.change(screen.getByLabelText('到期 Credits 倍率'), { target: { value: '2.3' } })
+
+  await screen.findByText('当前生效倍率 1.8x', {}, { timeout: 2500 })
+  expect((screen.getByLabelText('到期 Credits 倍率') as HTMLInputElement).value).toBe('2.3')
+  expect(mocks.get).toHaveBeenCalledTimes(2)
+})
+
+it('coalesces server model changes and updates an open catalog without reloading', async () => {
+  const streams: EventTarget[] = []
+  vi.stubGlobal('EventSource', class extends EventTarget {
+    close() {}
+    constructor() { super(); streams.push(this) }
+  })
+  try {
+    mount('/admin/models', true)
+    await screen.findByText('极速')
+    expect(streams).toHaveLength(1)
+    mocks.get.mockResolvedValue({ models: [row('a', 'speed', '新版极速')], trend: [] })
+    streams[0].dispatchEvent(new Event('models'))
+    streams[0].dispatchEvent(new Event('models'))
+    await screen.findByText('新版极速')
+    expect(mocks.get).toHaveBeenCalledTimes(2)
+  } finally {
+    cleanup()
+    vi.unstubAllGlobals()
+  }
+})
 it('defaults tester selection off and exposes it only for enabled text models hidden from ordinary users', async () => {
   mount('/admin/models?model=a&section=basic')
   const ordinary = await screen.findByRole('checkbox', { name: '允许用户选择' })
@@ -145,9 +187,8 @@ it('edits image quality on a free-form relay alias, saves custom values and rest
   await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('image', expect.objectContaining({ modelName: 'renamed-unlisted-relay',
     imageQuality: { supportedValues: ['auto', 'high', 'max', 'proxy-ultra-v2', 'other-quality'], defaultValue: 'proxy-ultra-v2' } })))
   expect(mocks.update.mock.calls[0][1]).not.toHaveProperty('imageQualityCustomValues')
-  await waitFor(() => expect(screen.queryByRole('button', { name: '保存配置' })).toBeNull())
-  await waitFor(() => expect(mocks.get.mock.calls.length).toBeGreaterThan(1))
-  fireEvent.click(screen.getByRole('button', { name: /^编辑 / }))
+  fireEvent.click(await screen.findByRole('button', { name: /^编辑 / }))
+  expect(mocks.get.mock.calls.length).toBeGreaterThan(1)
   fireEvent.click(screen.getByRole('button', { name: '能力与参数' }))
   expect((screen.getByRole('combobox', { name: '默认图片质量' }) as HTMLSelectElement).value).toBe('proxy-ultra-v2')
   expect((screen.getByRole('textbox', { name: '自定义质量值（逗号分隔）' }) as HTMLInputElement).value).toBe('proxy-ultra-v2, other-quality')
@@ -196,8 +237,7 @@ it('edits independent weighted candidates and restores server IDs after refresh 
   await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('a', expect.objectContaining({ weightedRoutes: { primaryWeight: 40, candidates: [expect.objectContaining({
     weight: 60, provider: 'custom-provider', modelName: 'free-form/model-alias', apiKey: 'offline-weighted-secret', baseUrl: 'https://free.invalid/custom',
   })] }, routes: [expect.objectContaining({ id: oldRoute.id, enabled: true, provider: oldRoute.provider })] })))
-  await waitFor(() => expect(screen.queryByRole('button', { name: '保存配置' })).toBeNull())
-  fireEvent.click(screen.getByRole('button', { name: /^编辑 / }))
+  fireEvent.click(await screen.findByRole('button', { name: /^编辑 / }))
   fireEvent.click(screen.getByRole('button', { name: '线路' }))
   fireEvent.click(screen.getByRole('button', { name: /^权重线路（/ }))
   expect(screen.getByRole('spinbutton', { name: '主配置及原线路的入口概率 (%)' }).getAttribute('value')).toBe('40')
@@ -206,8 +246,7 @@ it('edits independent weighted candidates and restores server IDs after refresh 
   fireEvent.change(screen.getByRole('textbox', { name: '权重线路名称' }), { target: { value: '编辑后线路' } })
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
   await waitFor(() => expect(mocks.update).toHaveBeenLastCalledWith('a', expect.objectContaining({ weightedRoutes: { primaryWeight: 40, candidates: [expect.objectContaining({ id: 'server-stable-id', label: '编辑后线路' })] } })))
-  await waitFor(() => expect(screen.queryByRole('button', { name: '保存配置' })).toBeNull())
-  fireEvent.click(screen.getByRole('button', { name: /^编辑 / })); fireEvent.click(screen.getByRole('button', { name: '线路' })); fireEvent.click(screen.getByRole('button', { name: /^权重线路（/ })); fireEvent.click(screen.getByRole('button', { name: '移除权重线路' }))
+  fireEvent.click(await screen.findByRole('button', { name: /^编辑 / })); fireEvent.click(screen.getByRole('button', { name: '线路' })); fireEvent.click(screen.getByRole('button', { name: /^权重线路（/ })); fireEvent.click(screen.getByRole('button', { name: '移除权重线路' }))
   expect(screen.getByRole('spinbutton', { name: '主配置及原线路的入口概率 (%)' }).getAttribute('value')).toBe('100')
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
   await waitFor(() => expect(mocks.update).toHaveBeenLastCalledWith('a', expect.objectContaining({ weightedRoutes: { primaryWeight: 100, candidates: [] } })))
@@ -233,8 +272,7 @@ it.each(['search', 'fetch'] as const)('saves and reopens the complete YunShu %s 
   expect(screen.queryByRole('option', { name: 'bocha' }) !== null).toBe(operation === 'search')
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
   await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('tool', expect.objectContaining({ provider: 'deepseek_YunShu', webToolProtocol: 'deepseek', baseUrl, apiKey: undefined })))
-  await waitFor(() => expect(screen.queryByRole('button', { name: '保存配置' })).toBeNull())
-  fireEvent.click(screen.getByRole('button', { name: /^编辑 / }))
+  fireEvent.click(await screen.findByRole('button', { name: /^编辑 / }))
   expect((screen.getByRole('textbox', { name: 'Base URL' }) as HTMLInputElement).value).toBe(baseUrl)
   expect((screen.getByRole('textbox', { name: '供应商' }) as HTMLInputElement).value).toBe('deepseek_YunShu')
   expect((screen.getByRole('combobox', { name: '网页工具协议' }) as HTMLSelectElement).value).toBe('deepseek')

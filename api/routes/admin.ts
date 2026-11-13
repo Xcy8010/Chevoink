@@ -83,6 +83,7 @@ import { parseBody } from '../lib/parse-body.js'
 import { normalizePhoneNumber } from '../lib/phone.js'
 import { DataAccessError } from '../lib/prisma.js'
 import { sendRouteError } from '../lib/route-error.js'
+import { notifyConfigurationChange } from '../lib/live-configuration.js'
 import { sendAuthSmsCode, verifyAuthSmsCode } from '../lib/sms-service.js'
 import {
   addAgentEvalSample,
@@ -1276,7 +1277,9 @@ router.post('/model-rate-cards/:cardId/transition', async (req: Request, res: Re
     const admin = await requireAdmin(req)
     requireSuperAdmin(admin)
     const body = parseBody(z.object({ expectedRevision: z.number().int().nonnegative(), status: z.enum(['shadow', 'approved', 'active', 'retired']), evidence: rateCardEvidenceSchema }).strict(), req.body, '费率状态变更格式不正确。')
-    res.json(buildSuccess(requestId, { card: await transitionRateCard(admin.id, { ...body, id: req.params.cardId }) }))
+    const card = await transitionRateCard(admin.id, { ...body, id: req.params.cardId })
+    if (card.status === 'active' || card.status === 'retired') notifyConfigurationChange('models')
+    res.json(buildSuccess(requestId, { card }))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 
@@ -1298,7 +1301,9 @@ router.post('/models', async (req: Request, res: Response): Promise<void> => {
     const body = parseBody(adminModelUpdateSchema.extend({ provider: z.string().trim().min(1).max(40), displayName: z.string().trim().min(1).max(80), modelName: z.string().trim().min(1).max(160),
       expectedOrder: z.array(z.string().min(1).max(64)).max(500) }).strict(), req.body, '模型配置格式不正确。')
     const { expectedOrder, ...input } = body
-    res.json(buildSuccess(requestId, await createAdminModel(admin.id, input, expectedOrder)))
+    const result = await createAdminModel(admin.id, input, expectedOrder)
+    notifyConfigurationChange('models')
+    res.json(buildSuccess(requestId, result))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 
@@ -1308,7 +1313,9 @@ router.post('/models/reorder', async (req: Request, res: Response): Promise<void
     const admin = await requireAdmin(req)
     requireSuperAdmin(admin)
     const body = parseBody(z.object({ order: z.array(z.string().min(1).max(64)).max(500), expectedOrder: z.array(z.string().min(1).max(64)).max(500) }).strict(), req.body, '模型顺序格式不正确。')
-    res.json(buildSuccess(requestId, await reorderAdminModels(admin.id, body.order, body.expectedOrder)))
+    const result = await reorderAdminModels(admin.id, body.order, body.expectedOrder)
+    notifyConfigurationChange('models')
+    res.json(buildSuccess(requestId, result))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 
@@ -1331,6 +1338,7 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     requireSuperAdmin(admin)
     const body = parseBody(adminModelUpdateSchema, req.body, '模型配置格式不正确。')
     await updateAdminModel(admin.id, req.params.modelId, body, getRequestIp(req))
+    notifyConfigurationChange('models')
     res.status(200).json(buildSuccess(requestId, { ok: true }))
   } catch (error) {
     sendRouteError(res, requestId, error)
@@ -1621,12 +1629,24 @@ router.get('/models/:modelId/lifecycle', async (req: Request, res: Response): Pr
 })
 router.post('/models/:modelId/archive', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
-  try { const actor = await requireAdmin(req); requireSuperAdmin(actor); res.json(buildSuccess(requestId, await archiveAdminModel(actor.id, String(req.params.modelId), req.body))) }
+  try {
+    const actor = await requireAdmin(req)
+    requireSuperAdmin(actor)
+    const result = await archiveAdminModel(actor.id, String(req.params.modelId), req.body)
+    notifyConfigurationChange('models')
+    res.json(buildSuccess(requestId, result))
+  }
   catch (error) { sendRouteError(res, requestId, error) }
 })
 router.post('/models/:modelId/restore', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
-  try { const actor = await requireAdmin(req); requireSuperAdmin(actor); res.json(buildSuccess(requestId, await restoreAdminModel(actor.id, String(req.params.modelId), req.body))) }
+  try {
+    const actor = await requireAdmin(req)
+    requireSuperAdmin(actor)
+    const result = await restoreAdminModel(actor.id, String(req.params.modelId), req.body)
+    notifyConfigurationChange('models')
+    res.json(buildSuccess(requestId, result))
+  }
   catch (error) { sendRouteError(res, requestId, error) }
 })
 router.post('/models/:modelId/diagnostics', async (req: Request, res: Response): Promise<void> => {

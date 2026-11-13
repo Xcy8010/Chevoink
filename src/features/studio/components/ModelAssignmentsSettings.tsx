@@ -4,7 +4,8 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
-import { fetchCreditSummary, fetchCustomModels } from '@/features/account/credits-api'
+import { fetchCustomModels } from '@/features/account/credits-api'
+import { useModelCreditSummary } from '@/features/account/use-model-prices'
 import { cn } from '@/lib/utils'
 import { MODEL_ASSIGNMENT_TASKS, type AgentModelSelection, type ModelAssignmentTask, type ModelAssignmentsPayload, type PatchModelAssignments } from '../../../../shared/contracts/agent-model-assignments.js'
 import type { ModelReasoningEffort } from '../../../../shared/contracts/credits.js'
@@ -26,7 +27,7 @@ export default function ModelAssignmentsSettings({ novelId, novelTitle }: { nove
   const owner = targetNovelId ? `novel:${targetNovelId}` : 'global'
   const queryKey = ['agent', 'model-assignments', owner]
   const assignments = useQuery({ queryKey, queryFn: () => requestJson<ModelAssignmentsPayload>(`/api/agent/model-assignments${targetNovelId ? `?novelId=${encodeURIComponent(targetNovelId)}` : ''}`), enabled: scope !== 'novel' || Boolean(novelId) })
-  const models = useQuery({ queryKey: ['credits', 'summary'], queryFn: fetchCreditSummary, staleTime: 20_000 })
+  const models = useModelCreditSummary()
   const customModels = useQuery({ queryKey: ['credits', 'custom-models'], queryFn: fetchCustomModels, staleTime: 30_000 })
   const options: ModelOption[] = [
     ...(models.data?.models ?? []).filter(model => model.available && model.tier !== 'basic').map(model => ({ id: model.tier, label: model.label,

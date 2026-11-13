@@ -292,7 +292,9 @@ export async function getAdminModelManagement(view: 'active' | 'archived' | 'all
     row.totalTokens += (item.requestTokens ?? 0) + (item.responseTokens ?? 0)
     trendMap.set(date, row)
   }
+  const modelPricesAt = Date.now()
   return {
+    modelPricesAsOf: new Date(modelPricesAt).toISOString(),
     models: models.sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id)).map((model) => {
       const row = usageMap.get(model.tier)
       const capabilities = parseModelCapabilities(model.metadata, model.provider)
@@ -301,7 +303,9 @@ export async function getAdminModelManagement(view: 'active' | 'archived' | 'all
       const databaseReady = model.modelName !== 'unconfigured' && Boolean(model.baseUrl && model.apiKeyCiphertext)
       const fallback = model.archivedAt || databaseReady ? null : toolEnvironmentFallback(modelKind)
       const configurationReady = databaseReady || Boolean(fallback) || (model.tier === 'speed' && model.modelName !== 'unconfigured')
-      const price = modelKind === 'text' && model.tier && effectiveModelMultiplier(model) !== 0 && !readModelPromotion(model.metadata) ? prices.get(model.tier) : null
+      const multiplier = effectiveModelMultiplier(model, modelPricesAt) / 10_000
+      const price = modelKind === 'text' && model.tier && multiplier !== 0 && !readModelPromotion(model.metadata) ? prices.get(model.tier) : null
+      const imagePrice = modelKind === 'image_generation' ? publicImagePrice(model, modelPricesAt) : null
       return {
         ...((modelKind === 'web_search' || modelKind === 'web_fetch') && (metadata.webToolProtocol === 'deepseek' || metadata.webToolProtocol === 'bocha') ? { webToolProtocol: metadata.webToolProtocol } : {}),
         ...(modelKind === 'image_generation' && metadata.imageQuality ? { imageQuality: metadata.imageQuality as ImageQualityConfig } : {}),
@@ -309,13 +313,13 @@ export async function getAdminModelManagement(view: 'active' | 'archived' | 'all
         weightedRoutes: presentWeightedRoutes(model.metadata),
         pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
         id: model.id, revision: model.revision, archivedAt: model.archivedAt?.toISOString() ?? null, archiveReason: model.archiveReason, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
-        modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: effectiveModelMultiplier(model) / 10_000,
+        modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier,
         baseMultiplier: model.multiplierBps / 10000,
         ...modelPublicCopy(modelKind === 'text' ? model.tier : null, metadata),
         activities: readModelActivities(model.metadata),
-        activityStatus: modelKind === 'image_generation' ? publicImagePrice(model).activity : model.tier && isServerModelTier(model.tier) ? publicModelPrice(model, model.tier, prices.get(model.tier)).activity : null,
+        activityStatus: imagePrice ? imagePrice.activity : model.tier && isServerModelTier(model.tier) ? publicModelPrice(model, model.tier, prices.get(model.tier), modelPricesAt).activity : null,
         freePromotion: readModelPromotion(model.metadata),
-        ...(modelKind === 'image_generation' ? { perCallCredits: publicImagePrice(model).perCallCredits } : {}),
+        ...(imagePrice ? { perCallCredits: imagePrice.perCallCredits } : {}),
         ...(modelKind === 'web_search' || modelKind === 'web_fetch' ? { perCallCredits: webToolChargeMilli(model.multiplierBps) / MILLI } : {}),
         enabled: model.enabled || Boolean(fallback), selectable: model.selectable, testerSelectable: metadata.testerSelectable === true, isDefault: model.isDefault,
         apiKeyConfigured: Boolean(model.apiKeyCiphertext) || Boolean(fallback?.apiKeyConfigured), requestCount: row?._count._all ?? 0,

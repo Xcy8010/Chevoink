@@ -1,15 +1,77 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { afterEach, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import type { CreditModelOption } from '../../shared/contracts/credits'
 import { formatModelPrice, modelPriceOptionText } from '../../shared/model-price-format'
 import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../src/features/studio/components/ModelPriceDetails'
+import { useLiveConfiguration } from '@/app/live-configuration'
+import { useModelCreditSummary } from '@/features/account/use-model-prices'
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 const model = { tier: 'speed' as const, label: '浮层模型', multiplier: 0.125, baseMultiplier: 1, available: true, selectedByDefault: false,
   reasoningEfforts: ['high' as const], defaultReasoningEffort: 'high' as const, visionEnabled: false }
 const details = () => screen.getByRole('dialog', { name: '浮层模型模型详情' })
 const card = () => screen.getByLabelText('浮层模型模型卡片')
+
+it('updates an open studio model card with the saved name, description and tags', async () => {
+  const streams: EventTarget[] = []
+  vi.stubGlobal('EventSource', class extends EventTarget {
+    close() {}
+    constructor() { super(); streams.push(this) }
+  })
+  function ModelMenu() {
+    useLiveConfiguration(useQueryClient(), 'authenticated', 'author')
+    const { data } = useModelCreditSummary()
+    return data?.models.map(option => <ModelPriceDetails key={option.tier} model={option} />)
+  }
+  let current = { ...model, publicDescription: '原有说明', publicFeatures: ['旧标签'] }
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({ success: true, data: { models: [current] } })))
+  vi.stubGlobal('fetch', fetcher)
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(<QueryClientProvider client={client}><ModelMenu /></QueryClientProvider>)
+  fireEvent.mouseEnter(await screen.findByLabelText('浮层模型模型卡片'))
+  const openCard = screen.getByRole('dialog', { name: '浮层模型模型详情' })
+  expect(within(openCard).getByText('原有说明')).toBeTruthy()
+  expect(within(openCard).getByText('旧标签')).toBeTruthy()
+
+  current = { ...current, label: '更新后的模型', publicDescription: '适合多视角情节', publicFeatures: ['剧情整理', '角色对白'] }
+  streams[0].dispatchEvent(new Event('models'))
+
+  expect(await screen.findByRole('dialog', { name: '更新后的模型模型详情' })).toBe(openCard)
+  expect(within(openCard).getByText('适合多视角情节')).toBeTruthy()
+  expect(within(openCard).getByText('剧情整理')).toBeTruthy()
+  expect(within(openCard).getByText('角色对白')).toBeTruthy()
+  expect(within(openCard).queryByText('旧标签')).toBeNull()
+  expect(fetcher).toHaveBeenCalledTimes(2)
+})
+
+it('reloads the shared studio model data at the activity switch with the card open', async () => {
+  const now = Date.now()
+  const switchAt = new Date(now + 650).toISOString()
+  const initial = { ...model, multiplier: 1.8, activity: { name: null, revision: 1, timezone: 'Asia/Shanghai', asOf: new Date(now).toISOString(), nextSwitchAt: switchAt, rules: [] } }
+  const changed = { ...initial, multiplier: 0.9, activity: { ...initial.activity, name: '夜间折扣', asOf: switchAt, nextSwitchAt: null } }
+  const summary = (option: typeof initial | typeof changed) => new Response(JSON.stringify({
+    success: true, data: { models: [option], modelPricesAsOf: option.activity.asOf },
+  }))
+  const fetcher = vi.fn()
+    .mockImplementationOnce(async () => summary(initial))
+    .mockImplementation(async () => summary(changed))
+  vi.stubGlobal('fetch', fetcher)
+  function ModelMenu() {
+    const { data } = useModelCreditSummary()
+    return data?.models.map(option => <ModelPriceDetails key={option.tier} model={option} />)
+  }
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(<QueryClientProvider client={client}><ModelMenu /></QueryClientProvider>)
+  fireEvent.mouseEnter(await screen.findByLabelText('浮层模型模型卡片'))
+  const openCard = details()
+  expect(within(openCard).getByText('1.8x')).toBeTruthy()
+  expect(await within(openCard).findByText('0.9x', {}, { timeout: 2500 })).toBeTruthy()
+  expect(details()).toBe(openCard)
+  expect(fetcher).toHaveBeenCalledTimes(2)
+})
+
 it('shows precise public details on the original whole row hover and focus without an info control', () => {
   vi.useFakeTimers()
   const select = vi.fn()

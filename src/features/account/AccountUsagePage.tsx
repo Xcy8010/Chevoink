@@ -4,7 +4,8 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { CalendarDays, Gift, LoaderCircle, RefreshCcw, UserPlus } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
-import { fetchCreditUsage, fetchReferral, fetchTaskCreditUsage } from './credits-api'
+import { fetchReferral, fetchTaskCreditUsage } from './credits-api'
+import { useCreditUsageWithModelPrices } from './use-model-prices'
 import InviteCreditsDialog from './InviteCreditsDialog'
 import { formatCreditAmount, roundCreditAmount } from './credit-format'
 import { ledgerLabel } from './ledger-label'
@@ -81,7 +82,7 @@ export default function AccountUsagePage() {
   const [copied, setCopied] = useState(false)
   const [ledgerFilter, setLedgerFilter] = useState<'used' | 'earned'>('used')
   const autoCopyInviteRef = useRef(false)
-  const usageQuery = useQuery({ queryKey: ['credits', 'usage'], queryFn: fetchCreditUsage, staleTime: 20_000 })
+  const usageQuery = useCreditUsageWithModelPrices()
   const referralQuery = useQuery({ queryKey: ['credits', 'referral'], queryFn: fetchReferral, staleTime: 60_000 })
   const usage = usageQuery.data
   const summary = usage?.account

@@ -8,8 +8,10 @@ import { createSiteContent, listSiteContent, mutateSiteContent, readPublicSiteCo
 import { parseBody } from '../lib/parse-body.js'
 import { buildSuccess, createRequestId } from '../lib/http.js'
 import { sendRouteError } from '../lib/route-error.js'
+import { notifyConfigurationChange, streamConfigurationChanges } from '../lib/live-configuration.js'
 
 export const publicSiteContentRouter = Router()
+publicSiteContentRouter.get('/updates', streamConfigurationChanges)
 publicSiteContentRouter.get('/', async (_req,res) => {
   const requestId = createRequestId()
   try { res.json(buildSuccess(requestId,await readPublicSiteContent())) } catch(error) { sendRouteError(res,requestId,error) }
@@ -51,6 +53,12 @@ router.post('/',async(req,res)=>{
 const operationSchema = z.object({expectedRevision:z.number().int().positive(),action:z.enum(['save','publish','withdraw','delete','restore']),draft:contentDraftSchema.optional(),replace:z.object({id:z.string().min(1).max(64),expectedRevision:z.number().int().positive()}).optional()}).refine(input => !input.replace || input.action === 'publish','只有发布可以替换公告')
 router.post('/:id',async(req,res)=>{
   const requestId = createRequestId()
-  try { const actor=await requireAdmin(req); const input=parseBody(operationSchema,req.body,'内容操作格式不正确。'); res.json(buildSuccess(requestId,await mutateSiteContent(req.params.id,input,actor.id,getRequestIp(req)))) } catch(error) { sendRouteError(res,requestId,error) }
+  try {
+    const actor=await requireAdmin(req)
+    const input=parseBody(operationSchema,req.body,'内容操作格式不正确。')
+    const result=await mutateSiteContent(req.params.id,input,actor.id,getRequestIp(req))
+    if (result.kind === 'announcement' && input.action !== 'save') notifyConfigurationChange('announcements')
+    res.json(buildSuccess(requestId,result))
+  } catch(error) { sendRouteError(res,requestId,error) }
 })
 export default router

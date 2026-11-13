@@ -2,6 +2,7 @@ import { PropsWithChildren, useEffect, useLayoutEffect } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import { ACCOUNT_REQUIREMENT_EVENT, ApiClientError, requestJson } from '@/app/api-client'
+import { useLiveConfiguration } from './live-configuration'
 import { DeviceProvider } from '@/components/layout/DeviceProvider'
 import { ToastProvider } from '@/components/ui/Toast'
 import UpdateBanner from '@/components/ui/UpdateBanner'
@@ -24,6 +25,8 @@ export default function AppProviders({ children }: PropsWithChildren) {
   const theme = useShellStore((state) => state.theme)
   const studioAppearance = useShellStore((state) => state.studioAppearance)
   const authStatus = useShellStore((state) => state.authStatus)
+  const viewerId = useShellStore((state) => state.sessionUser?.id ?? null)
+  useLiveConfiguration(queryClient, authStatus, viewerId)
   const setSessionChecking = useShellStore((state) => state.setSessionChecking)
   const setSessionUnavailable = useShellStore((state) => state.setSessionUnavailable)
   const setGuest = useShellStore((state) => state.setGuest)

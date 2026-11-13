@@ -6,7 +6,7 @@ import { Prisma, type CreditLedgerEntry, type CreditAccount, type CreditSystemSe
 import { z } from 'zod'
 import { webToolRefundEvidenceSchema } from './billing/web-tool-refund.js'
 import { publicModelPrice } from './billing/public-model-price.js'
-import { effectiveModelMultiplier, readModelPromotion } from '../../shared/model-promotion.js'
+import { baseModelMultiplier, effectiveModelMultiplier, readModelPromotion } from '../../shared/model-promotion.js'
 
 import { isBuiltInModelTier, isServerModelTier, taskSpecSchema } from '../../shared/contracts/index.js'
 import type {
@@ -208,7 +208,7 @@ export async function ensureCreditAccount(userId: string, now = new Date()) {
   return ensureAccountWithDb(prisma, userId, now)
 }
 
-async function listPublicModelOptions(tester: boolean): Promise<CreditModelOption[]> {
+async function listPublicModelOptions(tester: boolean, now: number): Promise<CreditModelOption[]> {
   const configs = await prisma.aiModelConfig.findMany({
     where: { ownerUserId: null, tier: { not: null } },
     orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
@@ -223,13 +223,12 @@ async function listPublicModelOptions(tester: boolean): Promise<CreditModelOptio
     if (item.archivedAt || !item.tier || !isBuiltInModelTier(item.tier) || (!item.selectable && !(tester && testerModelSelectable(item.metadata)))) return []
     const capabilities = parseModelCapabilities(item.metadata, item.provider)
     // 0 倍率档对用户公示为免费：不列分项费率，历史费率卡不参与免费档结算。
-    const multiplierBps = effectiveModelMultiplier(item)
     return [{
-      ...publicModelPrice(item, item.tier, activePrices.get(item.tier)),
+      ...publicModelPrice(item, item.tier, activePrices.get(item.tier), now),
       ...modelPublicCopy(item.tier, item.metadata),
       tier: item.tier as CreditModelOption['tier'],
       label: item.displayName,
-      freePromotion: multiplierBps === 0 ? readModelPromotion(item.metadata) : null,
+      freePromotion: item.multiplierBps === 0 && baseModelMultiplier(item, now) === 0 ? readModelPromotion(item.metadata) : null,
       available: item.enabled && isConfiguredBuiltIn(item),
       selectedByDefault: item.isDefault,
       ...capabilities,
@@ -288,6 +287,7 @@ async function toCreditSummary(
   const usedPercent = account.dailyAllowanceMilli > 0
     ? Math.min(100, Math.round((account.dailyUsedMilli / account.dailyAllowanceMilli) * 1000) / 10)
     : 100
+  const modelPricesAt = Date.now()
   return {
     plan: setting.publicBetaEnabled ? 'public_beta' : 'free',
     planLabel: setting.publicBetaEnabled ? '公测版' : '免费版',
@@ -307,7 +307,8 @@ async function toCreditSummary(
     globallyPaused: setting.globallyPaused,
     suspended: Boolean(account.suspendedAt) && !tester,
     tester: { eligible: tester, pauseExempt: tester, threshold: TESTER_CREDIT_RULE.thresholdMilli / 1000, target: TESTER_CREDIT_RULE.targetMilli / 1000, balanceBasis: TESTER_CREDIT_RULE.balanceBasis },
-    models: await listPublicModelOptions(tester),
+    modelPricesAsOf: new Date(modelPricesAt).toISOString(),
+    models: await listPublicModelOptions(tester, modelPricesAt),
     archivedModelTiers: (await prisma.aiModelConfig.findMany({ where: { ownerUserId: null, archivedAt: { not: null } }, select: { tier: true, archivedAt: true } })).flatMap(row => row.archivedAt && row.tier ? [row.tier] : []),
   }
 }

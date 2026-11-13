@@ -29,7 +29,7 @@ const run: AdminAgentRunRow = {
       tool(23, 'plan_save', { status: 'success', args: { planId: 'plan-synthetic' },
         display: { kind: 'planFile', artifactId: 'plan-synthetic', title: '远征计划', content: '合成计划' } }),
     ] },
-    { id: 'reply', runId: 'run-synthetic', role: 'assistant', createdAt: at, parts: [{ type: 'text', text: '**方向还未确认。**' }] },
+    { id: 'reply', runId: 'run-synthetic', role: 'assistant', createdAt: '2026-11-12T16:36:41Z', parts: [{ type: 'text', text: '**方向还未确认。**' }] },
   ],
 }
 const runDetails: AdminAgentRunDetailsPayload = {
@@ -80,6 +80,10 @@ it('replays saved author-facing conversation with Studio controls and loads raw 
   expect(await screen.findByRole('heading', { name: session.title })).toBeTruthy()
   expect(screen.getByText('帮我创建一部沙漠探险小说').closest('.agent-conversation-width')).toBeTruthy()
   expect(screen.getByText('方向还未确认。').tagName).toBe('STRONG')
+  const prompt = screen.getByText('帮我创建一部沙漠探险小说').closest('.group\\/replay-message') as HTMLElement
+  const reply = screen.getByText('方向还未确认。').closest('.group\\/replay-message') as HTMLElement
+  expect(within(prompt).getByLabelText('发送时间 2026-11-13 00:04:21 香港时间').getAttribute('datetime')).toBe(at)
+  expect(within(reply).getByLabelText('回复时间 2026-11-13 00:36:41 香港时间').getAttribute('datetime')).toBe('2026-11-12T16:36:41Z')
   expect(screen.getByText(run.errorMessage!)).toBeTruthy()
   expect(screen.queryByText(/309 项操作|内部记录/)).toBeNull()
   expect(request.mock.lastCall?.[0]).toContain('view=replay')

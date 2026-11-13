@@ -441,6 +441,7 @@ export type AdminCreditsManagementPayload = {
 }
 
 export type AdminModelManagementPayload = {
+  modelPricesAsOf?: string
   models: Array<{
     revision: number
     archivedAt: string | null

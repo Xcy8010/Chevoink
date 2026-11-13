@@ -35,6 +35,14 @@ function ReplayCopy({ text, label }: { text: string; label: string }) {
   </button>
 }
 
+function ReplayMessageTime({ value, label, focusable }: { value: string; label: string; focusable: boolean }) {
+  const time = formatReplayTime(value)
+  return <time dateTime={value} aria-label={`${label} ${time}`} tabIndex={focusable ? 0 : undefined}
+    className="text-xs tabular-nums text-[var(--text-tertiary)] opacity-0 transition-opacity group-hover/replay-message:opacity-100 group-focus-within/replay-message:opacity-100 [@media(hover:none)]:opacity-100">
+    {time}
+  </time>
+}
+
 function RunDetails({ sessionId, runs }: { sessionId: string; runs: AdminAgentRunRow[] }) {
   const [runId, setRunId] = useState('')
   const run = runs.find(item => item.id === runId) ?? runs.at(-1)!
@@ -163,9 +171,14 @@ export function AdminCreationReplay({ userId, sessionId }: { userId: string; ses
                 const block = projection.blockByAuthorId.get(message.id)
                 const timing = block ? timings.get(block.firstId) : undefined
                 const text = getMessageText(message.parts, 'user')
-                return <div key={message.id} className="group/message flex min-w-0 max-w-full flex-col items-end gap-1.5">
-                  <AuthorRequestBubble parts={message.parts} onPreview={setAttachmentPreview} />
-                  {text ? <ReplayCopy text={text} label="复制消息" /> : null}
+                return <div key={message.id} className="flex min-w-0 max-w-full flex-col items-end gap-1.5">
+                  <div className="group/replay-message flex min-w-0 max-w-[82%] flex-col items-end gap-1.5">
+                    <AuthorRequestBubble parts={message.parts} onPreview={setAttachmentPreview} />
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <ReplayMessageTime value={message.createdAt} label="发送时间" focusable={!text} />
+                      {text ? <ReplayCopy text={text} label="复制消息" /> : null}
+                    </div>
+                  </div>
                   {timing && (block?.ops || timing.elapsedMs !== null) ? <div className="agent-reading-column pt-3">
                     <AuthorActivitySummary timing={timing} active={false} open={Boolean(block && expanded[block.firstId])}
                       onToggle={block?.ops ? () => toggle(block.firstId) : undefined} />
@@ -181,20 +194,29 @@ export function AdminCreationReplay({ userId, sessionId }: { userId: string; ses
               const summary = timing && (timing.elapsedMs !== null || hasProcess)
               const groups = activities.byMessage.get(message.id)
               const hasActivity = groups && [...groups.values()].some(group => group.messageId === message.id)
+              const text = getMessageText(message.parts, 'assistant')
               const finalText = isLast ? activityAnswerText(message.parts) : ''
               const receipt = isLast && message.completedAt && !finalText ? activities.savedReplyByRun.get(message.runId) : undefined
               const opening = isFirst && hasProcess ? activities.openingByRun.get(block?.runIds?.[0] ?? message.runId) : undefined
-              if (!summary && !hasActivity && !opening && !receipt && !getMessageText(message.parts, 'assistant')) return null
+              if (!summary && !hasActivity && !opening && !receipt && !text) return null
               const wholeMessageIsProcess = hasProcess && !summary && !finalText && !receipt
+              const showReplyTime = Boolean(finalText || receipt || text && open)
+              const completedAt = isLast ? message.completedAt : null
+              const copyText = completedAt ? finalText || receipt : null
               return <AgentProcessRegion key={message.id} open={!wholeMessageIsProcess || open}
-                className={cn('agent-reading-column group/reply min-w-0', message.id !== projection.lastAssistantId && 'agent-msg-cv')}>
+                className={cn('agent-reading-column min-w-0', message.id !== projection.lastAssistantId && 'agent-msg-cv')}>
                 {summary ? <AuthorActivitySummary timing={timing} active={false} open={open} onToggle={block?.ops ? () => toggle(block.firstId) : undefined} /> : null}
-                {opening ? <AgentProcessRegion open={open} className="mb-4"><AuthorProgressText text={opening} /></AgentProcessRegion> : null}
-                <AuthorActivityParts parts={message.parts} groups={groups} messageId={message.id} runActive={false} readOnly
-                  processOpen={hasProcess && !wholeMessageIsProcess ? open : undefined}
-                  collapseText={hasProcess && !isLast && !wholeMessageIsProcess} />
-                {receipt ? <AuthorProgressText text={receipt} /> : null}
-                {isLast && message.completedAt && (finalText || receipt) ? <ReplayCopy text={finalText || receipt || ''} label="复制回复" /> : null}
+                <div className="group/replay-message">
+                  {opening ? <AgentProcessRegion open={open} className="mb-4"><AuthorProgressText text={opening} /></AgentProcessRegion> : null}
+                  <AuthorActivityParts parts={message.parts} groups={groups} messageId={message.id} runActive={false} readOnly
+                    processOpen={hasProcess && !wholeMessageIsProcess ? open : undefined}
+                    collapseText={hasProcess && !isLast && !wholeMessageIsProcess} />
+                  {receipt ? <AuthorProgressText text={receipt} /> : null}
+                  {showReplyTime ? <div className="mt-1 flex flex-wrap items-center gap-2">
+                    {copyText ? <ReplayCopy text={copyText} label="复制回复" /> : null}
+                    <ReplayMessageTime value={completedAt ?? message.createdAt} label={completedAt ? '完成时间' : '回复时间'} focusable={!copyText} />
+                  </div> : null}
+                </div>
               </AgentProcessRegion>
             })}
             {run.status === 'failed' || run.status === 'cancelled' || run.status === 'paused' ? <div className="agent-reading-column flex flex-wrap items-baseline gap-2 border-t border-[var(--border-subtle)] pt-2 text-sm">

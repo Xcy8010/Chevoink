@@ -1196,7 +1196,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
         throw new ResponsesToolProtocolRequired()
       }
     }
-    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)
+    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion, params.physicalRouteId)
       && (durable || await hasKnownZeroProviderRejection(prepared?.id, params.usageLog.userId, response.status))) {
       throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), undefined)
     }
@@ -1678,7 +1678,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
       await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: { in: ['prepared', 'authorized_pending'] } },
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
     }
-    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)
+    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion, modelRuntime.physicalRouteId)
       && await hasKnownZeroProviderRejection(prepared.id, options.userId, response.status)) {
       throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), undefined)
     }

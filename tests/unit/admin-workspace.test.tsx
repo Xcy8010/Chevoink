@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, expect, it, vi } from 'vitest'
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom'
 import AdminLayout, { AdminConfirmDialog } from '../../src/features/admin/AdminLayout'
@@ -7,7 +8,16 @@ import { adminPages, searchAdminPages } from '../../src/features/admin/admin-nav
 import { useAdminQueryState } from '../../src/features/admin/admin-query-state'
 vi.mock('../../src/features/admin/admin-shared', async original => ({ ...await original<object>(), useAdminSession: () => ({ admin: { id: 'fixture-admin', nickname: '演示管理员', isSuperAdmin: true }, denied: false, isLoading: false }) }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ error: vi.fn() }) }))
+vi.mock('@/app/api-client', async original => ({
+  ...await original<object>(),
+  requestJson: async () => ({ viewerId: 'fixture-admin', items: [], serverNow: '2026-11-14T00:00:00.000Z', nextBoundaryAt: null }),
+}))
 afterEach(cleanup)
+
+function renderLayout(initialEntries = ['/admin'], title = '示例') {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={initialEntries}><AdminLayout><h1>{title}</h1></AdminLayout></MemoryRouter></QueryClientProvider>)
+}
 it('maps eighteen management routes with tester identity inside users and searches only page/action definitions', () => {
   expect(adminPages).toHaveLength(18)
   expect(new Set(adminPages.map(page => page.to)).size).toBe(18)
@@ -17,7 +27,8 @@ it('maps eighteen management routes with tester identity inside users and search
   expect(searchAdminPages('用户正文')).toEqual([])
 })
 it('offers direct mobile models, grouped page search, and collapsible business groups', () => {
-  render(<MemoryRouter initialEntries={['/admin/users']}><AdminLayout><h1>用户结果</h1></AdminLayout></MemoryRouter>)
+  renderLayout(['/admin/users'], '用户结果')
+  expect(screen.getByRole('button', { name: '通知中心' })).toBeTruthy()
   expect(screen.getByRole('navigation', { name: '手机后台导航' }).textContent).toContain('模型')
   expect(screen.getByRole('button', { name: '用户与权益' }).getAttribute('aria-expanded')).toBe('true')
   fireEvent.change(screen.getByRole('textbox', { name: '搜索后台页面及操作' }), { target: { value: '协议' } })
@@ -65,7 +76,7 @@ it('closes the mobile navigation and releases its focus trap at the desktop brea
   let resize: (() => void) | undefined
   const desktop = { matches: false, addEventListener: (_type: string, callback: () => void) => { resize = callback }, removeEventListener: vi.fn() }
   vi.stubGlobal('matchMedia', () => desktop)
-  render(<MemoryRouter><AdminLayout><h1>示例</h1></AdminLayout></MemoryRouter>)
+  renderLayout()
   fireEvent.click(screen.getByRole('button', { name: '全部' }))
   expect(screen.getByRole('dialog')).toBeTruthy()
   desktop.matches = true
@@ -78,7 +89,7 @@ it('closes the mobile navigation and releases its focus trap at the desktop brea
 
 it('collapses desktop sidebar without leaving invisible navigation focus targets and persists preference', () => {
   localStorage.removeItem('chevoink-admin-sidebar-collapsed')
-  render(<MemoryRouter><AdminLayout><h1>示例</h1></AdminLayout></MemoryRouter>)
+  renderLayout()
   fireEvent.click(screen.getByRole('button', { name: '收起侧栏' }))
   expect(screen.getByRole('button', { name: '展开侧栏' }).getAttribute('aria-expanded')).toBe('false')
   expect(screen.queryByRole('navigation', { name: '后台业务导航' })).toBeNull()

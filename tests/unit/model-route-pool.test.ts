@@ -33,6 +33,10 @@ describe('built-in route pools', () => {
     expect(() => saveModelRoutes([{ ...route, provider: 'openai', visionEnabled: false }], { routes }, ['low'], { contextWindowTokens: 128000, visionEnabled: true })).toThrow()
   })
   it('does not replay paid or partly observed failures', () => {
+    expect(routeRejectionMayRetry(404, undefined, undefined, id)).toBe(true)
+    expect(routeRejectionMayRetry(404, undefined, undefined)).toBe(false)
+    expect(routeRejectionMayRetry(404, 20, 0, id)).toBe(false)
+    expect(routeRejectionMayRetry(404, 0, undefined, id)).toBe(false)
     expect(routeRejectionMayRetry(429, 0, 0)).toBe(true)
     expect(routeRejectionMayRetry(503, undefined, undefined)).toBe(true)
     expect(routeRejectionMayRetry(503, 20, 0)).toBe(false)

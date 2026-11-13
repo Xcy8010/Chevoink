@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import AnnouncementBell from '@/features/site-content/AnnouncementBell'
 import { refreshPublishedAnnouncements } from '@/features/site-content/announcement-inbox-api'
+import { useLiveConfiguration } from '@/app/live-configuration'
 import { useShellStore } from '@/store/useShellStore'
 import type { AnnouncementInbox, ReadAnnouncementsRequest } from '../../shared/contracts/site-content'
 
@@ -109,4 +110,33 @@ it('refreshes an already open tab after an administrator publishes without needi
   await refreshPublishedAnnouncements(new QueryClient())
   const bell = await screen.findByRole('button', { name: '未读通知' })
   expect(bell.querySelector('.site-announcement-bell-dot')).toBeTruthy()
+})
+
+it('updates both closed bells from a server notification without a local publish event', async () => {
+  const streams: EventTarget[] = []
+  const close = vi.fn()
+  vi.stubGlobal('EventSource', class extends EventTarget {
+    close = close
+    constructor() { super(); streams.push(this) }
+  })
+  const payload = inbox('author')
+  payload.items = []
+  signIn()
+  request.mockImplementation(async () => structuredClone(payload))
+  function Layout() {
+    useLiveConfiguration(useQueryClient(), 'authenticated', 'author')
+    return <><AnnouncementBell placement="studio" /><AnnouncementBell placement="admin" /></>
+  }
+  try {
+    mount(<Layout />)
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1))
+    expect(streams).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: '通知中心' })).toHaveLength(2)
+    payload.items = inbox('author').items
+    streams[0].dispatchEvent(new Event('announcements'))
+    await waitFor(() => expect(screen.getAllByRole('button', { name: '未读通知' })).toHaveLength(2))
+    expect(request).toHaveBeenCalledTimes(2)
+    cleanup()
+    expect(close).toHaveBeenCalledOnce()
+  } finally { vi.unstubAllGlobals() }
 })

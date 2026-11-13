@@ -45,6 +45,7 @@ export type CreditAccountSummary = {
   resetTimeZone: 'UTC+8'
   globallyPaused: boolean
   suspended: boolean
+  modelPricesAsOf?: string
   archivedModelTiers?: string[]
   models: CreditModelOption[]
 }

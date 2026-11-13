@@ -5,7 +5,7 @@ import type { AnnouncementNotification, PersonalNotification } from '../../../sh
 import { useAnnouncementInbox } from './announcement-inbox-api'
 import './announcements.css'
 
-type Placement = 'site' | 'studio' | 'studio-mobile'
+type Placement = 'site' | 'studio' | 'studio-mobile' | 'admin'
 type InboxItem = PersonalNotification & { type: 'announcement' | 'personal' }
 const announcementItem = (item: AnnouncementNotification): InboxItem => ({ ...item, type: 'announcement', id: item.versionId })
 const itemKey = (item: InboxItem) => item.type + ':' + item.id
@@ -19,18 +19,19 @@ function PublishedTime({ value }: { value: string }) {
   return <time dateTime={value} title="北京时间（UTC+8）">{dateFormat.format(new Date(value))}</time>
 }
 
-export default function AnnouncementBell({ placement }: { placement: Placement }) {
+export default function AnnouncementBell({ placement, viewerId: adminViewerId }: { placement: Placement; viewerId?: string }) {
   const [anchor, setAnchor] = useState<{ top: number; right: number; bottom: number } | null>(null)
-  const { query, read, viewerId } = useAnnouncementInbox(true, anchor !== null)
+  const { query, read, viewerId } = useAnnouncementInbox(true, anchor !== null, adminViewerId)
   const dialogId = useId()
   const trigger = useRef<HTMLButtonElement>(null)
-  const items: InboxItem[] = [
-    ...(query.data?.items ?? []).map(announcementItem),
-    ...(query.data?.personalItems ?? []).map((item): InboxItem => ({ ...item, type: 'personal' })),
-  ]
-  items.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt) || itemKey(b).localeCompare(itemKey(a)))
-  const unread = items.filter(item => item.unread).length
-  const label = unread ? '未读通知' : '通知中心'
+  const announcements = query.data?.items ?? []
+  const personal = query.data?.personalItems ?? []
+  const hasUnread = announcements.some(item => item.unread) || personal.some(item => item.unread)
+  const items: InboxItem[] = anchor ? [
+    ...announcements.map(announcementItem),
+    ...personal.map((item): InboxItem => ({ ...item, type: 'personal' })),
+  ].sort((a, b) => b.publishedAt.localeCompare(a.publishedAt) || itemKey(b).localeCompare(itemKey(a))) : []
+  const label = hasUnread ? '未读通知' : '通知中心'
 
   function open() {
     const rect = trigger.current!.getBoundingClientRect()
@@ -54,14 +55,14 @@ export default function AnnouncementBell({ placement }: { placement: Placement }
       aria-controls={anchor ? dialogId : undefined}
       className={cn(
         'site-announcement-bell',
-        placement === 'studio' && 'site-announcement-bell--compact',
+        (placement === 'studio' || placement === 'admin') && 'site-announcement-bell--compact',
         placement === 'studio-mobile' && 'site-announcement-bell--plain',
       )}
       onClick={open}
     >
       <span className="relative inline-flex">
         <Bell aria-hidden="true" size={18} />
-        {unread > 0 && <span aria-hidden="true" className="site-announcement-bell-dot" />}
+        {hasUnread && <span aria-hidden="true" className="site-announcement-bell-dot" />}
       </span>
     </button>
     {anchor && <InboxDialog
@@ -71,7 +72,7 @@ export default function AnnouncementBell({ placement }: { placement: Placement }
       placement={placement}
       anchor={anchor}
       items={items}
-      unread={unread}
+      unread={items.filter(item => item.unread).length}
       viewerId={viewerId}
       loading={query.isFetching && !query.data}
       loadError={query.isError && !query.data}

@@ -2,6 +2,7 @@ import { modelActivitiesSchema, type ModelActivities } from '../../../../shared/
 import { isBuiltInModelTier } from '../../../../shared/contracts/model-tier'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { nextModelPriceRefreshAt, refreshConfigurationQueries, useModelPriceRefresh } from '@/app/live-configuration'
 import { ArrowDown, ArrowUp, Plus, ChevronLeft } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { rememberAdminModelHistoryDraft, takeAdminModelHistoryDraft, dropAdminModelHistoryDraft } from '../components/AdminModelDraftRecovery'
@@ -47,11 +48,15 @@ const emptyForm = {
     limitedFree: false, freeUntil: '', afterMultiplier: '1.5',
 }
 export type AdminModelForm = typeof emptyForm
-
+const adminModelsKey = ['admin', 'models'] as const
 
 export default function AdminModelsPage() {
   const queryClient = useQueryClient()
-  const query = useQuery({ queryKey: ['admin', 'models'], queryFn: () => getAdminModelManagement('all') })
+  const query = useQuery({ queryKey: adminModelsKey, queryFn: ({ signal }) => getAdminModelManagement('all', signal) })
+  const currentPrices = query.data?.models
+    .filter(model => !model.archivedAt)
+    .map(model => ({ freePromotion: model.freePromotion, activity: model.activityStatus })) ?? []
+  useModelPriceRefresh(queryClient, adminModelsKey, nextModelPriceRefreshAt(currentPrices, query.dataUpdatedAt, query.data?.modelPricesAsOf))
   const [params, setParams] = useSearchParams()
   const [editing, setEditing] = useState<ModelRow | null>(null)
   const savedForm = useRef('')
@@ -74,13 +79,17 @@ export default function AdminModelsPage() {
 
   useLayoutEffect(() => {
     if (!editing) return
+    const pricesAsOf = queryClient.getQueryData<Awaited<ReturnType<typeof getAdminModelManagement>>>(adminModelsKey)?.modelPricesAsOf
+    const promotion = editing.freePromotion
+    const promotionEnded = promotion && Date.parse(promotion.endsAt) <= (pricesAsOf ? Date.parse(pricesAsOf) : Date.now())
+    const baseMultiplier = promotionEnded ? promotion.afterMultiplier : editing.baseMultiplier ?? editing.multiplier
     const initial = {
       webToolProtocol: editing.webToolProtocol ?? (editing.provider.trim().toLowerCase() === 'deepseek' ? 'deepseek' : editing.provider.trim().toLowerCase() === 'bocha' ? 'bocha' : ''),
       publicDescription: editing.publicDescription ?? '', publicFeatures: editing.publicFeatures ?? [], activities: editing.activities ?? { revision: 0, timezone: 'Asia/Shanghai', rules: [] },
       provider: editing.provider, displayName: editing.displayName, modelName: editing.modelName,
       imageQuality: editing.imageQuality,
       imageQualityCustomValues: editing.imageQuality?.supportedValues.filter(value => !IMAGE_QUALITY_OPTIONS.some(option => option.value === value)).join(', ') ?? '',
-      baseUrl: editing.baseUrl ?? '', apiKey: '', multiplier: String(editing.baseMultiplier ?? editing.multiplier),
+      baseUrl: editing.baseUrl ?? '', apiKey: '', multiplier: String(baseMultiplier),
       enabled: editing.enabled, selectable: editing.selectable, testerSelectable: editing.testerSelectable ?? false, isDefault: editing.isDefault,
       reasoningEfforts: editing.reasoningEfforts, defaultReasoningEffort: editing.defaultReasoningEffort,
       reasoningParameterMode: editing.reasoningParameterMode ?? '',
@@ -90,7 +99,7 @@ export default function AdminModelsPage() {
       routes: (editing.routes ?? []).map(({ apiKeyConfigured: _configured, ...route }) => route),
       weightedRoutes: editing.weightedRoutes ? { primaryWeight: editing.weightedRoutes.primaryWeight,
         candidates: editing.weightedRoutes.candidates.map(({ apiKeyConfigured: _configured, ...route }) => route) } : { primaryWeight: 100, candidates: [] },
-      limitedFree: editing.multiplier === 0 && Boolean(editing.freePromotion),
+      limitedFree: baseMultiplier === 0 && Boolean(promotion),
       freeUntil: editing.freePromotion ? new Date(Date.parse(editing.freePromotion.endsAt) - new Date(editing.freePromotion.endsAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '',
       afterMultiplier: String(editing.freePromotion?.afterMultiplier ?? 1.5),
     } satisfies AdminModelForm
@@ -134,19 +143,18 @@ export default function AdminModelsPage() {
       return { ok: true as const }
     },
     onSuccess: async () => {
+      await refreshConfigurationQueries(queryClient, 'models')
       dropAdminModelHistoryDraft(queryClient)
       savedForm.current = ''
       setForm(emptyForm)
       setEditing(null)
       setParams(current => { const next = new URLSearchParams(current); next.delete('model'); next.delete('section'); return next }, { replace: true })
-      await queryClient.invalidateQueries({ queryKey: ['admin', 'models'] })
-      await queryClient.invalidateQueries({ queryKey: ['credits', 'summary'] })
     },
     onSettled: () => { submitLock.current = false },
   })
   const catalog = (query.data?.models ?? []).filter(model => !model.archivedAt && isBuiltInModelTier(model.tier))
   const reorder = useMutation({ mutationFn: ({ order, expected }: { order: string[]; expected: string[] }) => reorderAdminModels(order, expected),
-    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ['admin', 'models'] }); await queryClient.invalidateQueries({ queryKey: ['credits', 'summary'] }) },
+    onSuccess: () => refreshConfigurationQueries(queryClient, 'models'),
     onError: async () => { await queryClient.invalidateQueries({ queryKey: ['admin', 'models'] }) } })
   function moveModel(id: string, direction: number) {
     const expected = catalog.map(model => model.id)
@@ -244,6 +252,7 @@ export default function AdminModelsPage() {
       connection={{ name: model.displayName, disabled: mutation.isPending || Boolean(model.archivedAt), showIdle }} />
   }
   const editingDiagnostic = editing ? diagnostics[editing.id] : undefined
+  const liveEditing = editing && (query.data?.models.find(model => model.id === editing.id) ?? editing)
   function configurationCheck() {
     const model = editing
     if (!model) return
@@ -256,7 +265,7 @@ export default function AdminModelsPage() {
     setCheckMessage(errors.length ? `本地配置检查：${errors.join('；')}。未请求上游。` : '本地必要字段检查通过；未请求上游，连通性与能力均未检测。保存时仍执行服务端校验。')
   }
   return <div className="space-y-5 pb-20 text-sm md:pb-0">
-    <AdminPanelState state={query.isLoading ? 'loading' : query.isError ? 'error' : 'ready'}>
+    <AdminPanelState state={query.isLoading ? 'loading' : query.isError && !query.data ? 'error' : 'ready'}>
       {editing ? <div className="mx-auto w-full max-w-[1120px] space-y-5">
         <div className="sticky top-0 z-20 -mx-1 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--surface-default)] px-1 py-3">
           <div className="flex min-w-0 items-center gap-2"><Button variant="ghost" aria-label="返回模型列表" disabled={mutation.isPending} onClick={closeEditor}><ChevronLeft className="h-4 w-4" /></Button><div className="min-w-0"><h1 ref={heading} tabIndex={-1} className="break-words text-xl font-semibold outline-none">{editing.id ? editing.displayName : '添加内置模型'}</h1><p className="text-sm text-[var(--text-secondary)]">{dirty ? '有未保存的修改' : '模型详情'} · {typeLabel(editing)}</p></div></div>
@@ -268,15 +277,14 @@ export default function AdminModelsPage() {
         {!editing.id ? <label className="block">服务类型<select aria-label="服务类型" className="ml-3 min-h-11 rounded-md border border-[var(--border-strong)] bg-[var(--surface-default)] px-3" value={newModelKind} onChange={event => setNewModelKind(event.target.value as AdminModelKind)}>{[['text','文本'],['vision','图片理解'],['image_generation','生图'],['web_search','Search'],['web_fetch','Fetch']].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label> : null}
         {editing.archivedAt ? <p role="status">此配置已归档，仅供查阅。恢复后需重新确认配置。</p> : null}
         <AdminCard><h2 className="mb-4 text-base font-semibold">{sections.find(([id]) => id === section)?.[1]}</h2>
-          <fieldset disabled={mutation.isPending || Boolean(editing.archivedAt)}><AdminModelEditorSections editing={{ ...editing, modelKind: editingKind }} form={form} setForm={setForm} section={section} fieldError={fieldError} /></fieldset>
+          <fieldset disabled={mutation.isPending || Boolean(editing.archivedAt)}><AdminModelEditorSections editing={{ ...editing, modelKind: editingKind, multiplier: liveEditing?.multiplier ?? editing.multiplier, activityStatus: liveEditing?.activityStatus, freePromotion: liveEditing?.freePromotion, pricing: liveEditing?.pricing }} form={form} setForm={setForm} section={section} fieldError={fieldError} /></fieldset>
           {section === 'usage' ? <div className="space-y-4"><p>最近检测 <strong className="font-medium">{!editingDiagnostic ? '未检测' : editingDiagnostic.stale || editingDiagnostic.configRevision !== String(editing.revision ?? 1) ? '检测已过期' : editingDiagnostic.status === 'succeeded' ? '连接测试通过' : '查看上方测试结果'}</strong></p><p className="text-[var(--text-secondary)]">以下为档位 {editing.tier ?? '未分配'} 的累计用量，包含该档位过去实际模型的调用，不等于当前模型或渠道的历史。</p><dl className="grid grid-cols-3 gap-4"><div><dt>累计请求</dt><dd className="mt-1 text-xl">{editing.requestCount.toLocaleString('zh-CN')}</dd></div><div><dt>输入 Token</dt><dd className="mt-1 text-xl">{formatTokens(editing.requestTokens)}</dd></div><div><dt>输出 Token</dt><dd className="mt-1 text-xl">{formatTokens(editing.responseTokens)}</dd></div></dl><p className="text-[var(--text-secondary)]">来源：墨域本地用量记录。</p></div> : null}
           {section === 'billing' && (editingKind === 'web_search' || editingKind === 'web_fetch') ? <p className="mt-4 text-[var(--text-secondary)]">保存后费用：{toolPrice(Number(form.multiplier))}（基础 2 Credits × 倍率）；缓存、失败、超时、空搜索和网页直读免费。</p> : null}
           {section === 'changes' ? <div className="space-y-4"><p>配置更新时间：{editing.updatedAt ? new Date(editing.updatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '尚未保存'}（UTC+8）</p><Link className="inline-flex min-h-11 items-center underline" to="/admin/logs">查看操作审计</Link><p className="text-[var(--text-secondary)]">归档与停用独立管理；恢复不会重新启用服务或自动续跑任务。</p></div> : null}
           {section === 'changes' && editing.id ? <AdminModelLifecycle modelId={editing.id} revision={editing.revision ?? 1} archived={Boolean(editing.archivedAt)} dirty={dirty} onChanged={async () => {
+            await refreshConfigurationQueries(queryClient, 'models')
             savedForm.current = ''; setForm(emptyForm); setEditing(null)
             setParams(current => { const next = new URLSearchParams(current); next.delete('model'); next.delete('section'); return next })
-            await queryClient.invalidateQueries({ queryKey: ['admin', 'models'] })
-            await queryClient.invalidateQueries({ queryKey: ['credits', 'summary'] })
           }} /> : null}
         </AdminCard>
         <div className="fixed inset-x-0 bottom-[calc(64px+var(--safe-bottom))] z-30 flex items-center justify-between gap-3 border-t border-[var(--border-subtle)] bg-[var(--surface-default)] p-3 md:static"><span aria-live="polite" className="text-[var(--text-secondary)]">{dirty ? '未保存' : '配置草稿'}</span><div className="flex gap-2"><Button disabled={mutation.isPending} onClick={closeEditor}>返回列表</Button><Button className="md:hidden" aria-label={mutation.isPending ? '正在保存模型配置…' : '保存模型配置'} variant="primary" disabled={mutation.isPending || Boolean(editing.archivedAt)} onClick={() => { if (submitLock.current) return; submitLock.current = true; mutation.mutate() }}>{mutation.isPending ? '正在保存…' : '保存配置'}</Button></div></div>

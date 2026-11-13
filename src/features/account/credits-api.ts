@@ -9,12 +9,12 @@ import type {
   SaveCustomModelRequest,
 } from '../../../shared/contracts'
 
-export function fetchCreditSummary(): Promise<CreditAccountSummary> {
-  return requestJson<CreditAccountSummary>('/api/credits/summary')
+export function fetchCreditSummary({ signal }: { signal?: AbortSignal } = {}): Promise<CreditAccountSummary> {
+  return requestJson<CreditAccountSummary>('/api/credits/summary', { signal })
 }
 
-export function fetchCreditUsage(): Promise<CreditUsagePayload> {
-  return requestJson<CreditUsagePayload>('/api/credits/usage?take=150')
+export function fetchCreditUsage({ signal }: { signal?: AbortSignal } = {}): Promise<CreditUsagePayload> {
+  return requestJson<CreditUsagePayload>('/api/credits/usage?take=150', { signal })
 }
 
 export function fetchCreditActivity(): Promise<CreditActivityPayload> {

@@ -156,8 +156,8 @@ export function setAdminCreditsPaused(payload: { paused: boolean; captchaId: str
   return requestJson('/api/admin/credits/pause', { method: 'POST', body: JSON.stringify(payload) })
 }
 
-export function getAdminModelManagement(view: 'active' | 'archived' | 'all' = 'active'): Promise<AdminModelManagementPayload> {
-  return requestJson<AdminModelManagementPayload>(view === 'active' ? '/api/admin/models' : `/api/admin/models?view=${view}`)
+export function getAdminModelManagement(view: 'active' | 'archived' | 'all' = 'active', signal?: AbortSignal): Promise<AdminModelManagementPayload> {
+  return requestJson<AdminModelManagementPayload>(view === 'active' ? '/api/admin/models' : `/api/admin/models?view=${view}`, { signal })
 }
 
 export function updateAdminModel(modelId: string, payload: {

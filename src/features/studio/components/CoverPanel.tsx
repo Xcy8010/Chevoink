@@ -1,8 +1,9 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown, Download, ImagePlus, LoaderCircle, PenLine, Sparkles, Upload, X } from 'lucide-react'
 import { useId, useRef, useState } from 'react'
 
 import { requestJson } from '@/app/api-client'
+import { nextModelPriceRefreshAt, useModelPriceRefresh } from '@/app/live-configuration'
 import Button from '@/components/ui/Button'
 import { cn } from '@/lib/utils'
 import type { GetAiConfigResponse } from '../../../../shared/contracts/api'
@@ -41,6 +42,7 @@ type CoverPanelProps = {
 const textareaClass = 'w-full min-w-0 resize-y rounded-xl border border-[var(--border-subtle)] bg-transparent px-3 py-2.5 text-sm leading-6 text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] focus:border-[var(--border-strong)] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]'
 const controlClass = 'min-h-11 rounded-xl'
 const disclosureClass = 'flex min-h-11 cursor-pointer items-center gap-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--text-primary)]'
+const imageConfigKey = ['ai', 'public-config'] as const
 
 export default function CoverPanel({
   coverForm, coverAssets, selectedCover, currentCoverId, coverKeywords, coverMessage,
@@ -48,15 +50,16 @@ export default function CoverPanel({
   onChange, onUploadFile, onGeneratePrompt, onGenerateImages, onSelectAsset, onApplyCover, onApplyAsset, onDownloadAsset,
   onClose, modal = false,
 }: CoverPanelProps) {
+  const client = useQueryClient()
   const imageConfig = useQuery({
-    queryKey: ['ai', 'public-config'],
-    queryFn: () => requestJson<GetAiConfigResponse['data']>('/api/ai/config'),
+    queryKey: imageConfigKey,
+    queryFn: ({ signal }) => requestJson<GetAiConfigResponse['data']>('/api/ai/config', { signal }),
     staleTime: 20000,
-    refetchInterval: query => {
-      const next = query.state.data?.imageModel?.activity?.nextSwitchAt
-      return next ? Math.max(1000, Math.min(60000, Date.parse(next) - Date.now())) : 60000
-    },
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
   })
+  const imageModel = imageConfig.data?.imageModel
+  useModelPriceRefresh(client, imageConfigKey, imageModel ? nextModelPriceRefreshAt([imageModel], imageConfig.dataUpdatedAt) : undefined)
   const uploadInputRef = useRef<HTMLInputElement>(null)
   const panelRef = useRef<HTMLElement>(null)
   const titleId = useId()

@@ -3,7 +3,7 @@ import { requestJson } from '@/app/api-client'
 import type { Announcement, PublicSiteContent } from '../../../shared/contracts/site-content'
 
 export function usePublicSiteContent(enabled = true) {
-  return useQuery({queryKey:['site-content','public'],queryFn:()=>requestJson<PublicSiteContent>('/api/site-content'),enabled,staleTime:0,refetchOnWindowFocus:true,refetchInterval:query=>{
+  return useQuery({queryKey:['site-content','public'],queryFn:({signal})=>requestJson<PublicSiteContent>('/api/site-content',{signal}),enabled,staleTime:0,refetchOnWindowFocus:true,refetchInterval:query=>{
     const data=query.state.data
     const remaining=data?.nextBoundaryAt ? Date.parse(data.nextBoundaryAt)-Date.parse(data.serverNow)-(Date.now()-query.state.dataUpdatedAt) : 60000
     return Math.max(250,Math.min(60000,remaining+100))

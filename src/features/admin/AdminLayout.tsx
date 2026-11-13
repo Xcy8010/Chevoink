@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useId, useRef, useState, type FormEvent, ty
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutDashboard, Menu, Search, Users, Workflow, Pin, X, FileText, MessageSquare, CreditCard, Activity, Settings, Shield, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import Button from '@/components/ui/Button'
+import AnnouncementBell from '@/features/site-content/AnnouncementBell'
 import TextInput from './components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { useAutoHideScrollbars } from '@/hooks/useAutoHideScrollbars'
@@ -127,6 +128,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
             {search ? <div role="region" aria-label="页面搜索结果" className="absolute right-0 top-full z-50 mt-2 max-h-[65dvh] w-[min(320px,90vw)] overflow-y-auto rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-2 shadow-lg">{searchAdminPages(search).length ? searchAdminPages(search).map(item => <Link key={item.to} to={item.to} onClick={() => setSearch('')} className="flex min-h-11 items-center rounded-lg px-3 text-sm hover:bg-[var(--surface-muted)]">{item.label}</Link>) : <p role="status" className="p-3 text-sm">没有匹配页面</p>}</div> : null}
           </div>
           <Link to="/admin#attention" className="hidden min-h-11 shrink-0 items-center whitespace-nowrap px-3 text-sm sm:flex">待办</Link>
+          <AnnouncementBell placement="admin" viewerId={admin.id} />
           <details className="relative shrink-0"><summary aria-label="管理员账号菜单" className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-[var(--border-default)] px-3 text-sm"><span className="max-w-24 truncate">{admin.nickname || '管理员'}</span><ChevronDown size={14} /></summary><div className="absolute right-0 z-50 mt-2 w-44 rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-2 shadow-lg"><button type="button" className="admin-menu-item" onClick={toggleTheme}>{theme === 'light' ? '切换深色主题' : '切换浅色主题'}</button><Link to="/" className="admin-menu-item">返回主站</Link><button type="button" className="admin-menu-item" disabled={isLoggingOut} onClick={() => void logout()}>{isLoggingOut ? '正在退出…' : '退出登录'}</button></div></details>
         </div>
       </header>

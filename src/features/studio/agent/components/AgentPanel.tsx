@@ -38,7 +38,8 @@ import type {
   PendingAgentQuestion,
   StoryCompilerMode,
 } from '../../../../../shared/contracts/index.js'
-import { fetchCreditSummary, fetchCustomModels, fetchReferral } from '@/features/account/credits-api'
+import { fetchCustomModels, fetchReferral } from '@/features/account/credits-api'
+import { useModelCreditSummary } from '@/features/account/use-model-prices'
 import type { NovelImportModelSelection } from '../../../../../shared/contracts/novel-import.js'
 import { formatCreditAmount } from '@/features/account/credit-format'
 import CreditQuotaDialog from '@/features/account/CreditQuotaDialog'
@@ -611,20 +612,8 @@ export function AgentPanel({
   const workingGroup = latestWorkingGroup ?? (workingMessage && runId && !getMessageText(workingMessage.parts)
     ? activityGroups.lastGroupByRun.get(runId) : undefined)
   const workingMessageId = workingGroup?.messageId ?? workingMessage?.id
-  const creditSummaryQuery = useQuery({
-    queryKey: ['credits', 'summary'],
-    queryFn: fetchCreditSummary,
-    staleTime: 20_000,
-    refetchInterval: active ? 20_000 : 60_000,
-  })
+  const creditSummaryQuery = useModelCreditSummary(active ? 20_000 : 60_000)
   const refetchCredits = creditSummaryQuery.refetch
-  useEffect(() => {
-    const expiries = creditSummaryQuery.data?.models.flatMap(model => model.freePromotion ? [Date.parse(model.freePromotion.endsAt)] : []) ?? []
-    const next = Math.min(...expiries.filter(time => time > Date.now()))
-    if (!Number.isFinite(next)) return
-    const timer = window.setTimeout(() => { void refetchCredits() }, Math.min(2_147_483_647, Math.max(0, next - Date.now()) + 50))
-    return () => window.clearTimeout(timer)
-  }, [creditSummaryQuery.data?.models, refetchCredits])
   const previousActiveRef = useRef(active)
   const referralQuery = useQuery({
     queryKey: ['credits', 'referral'],
@@ -1729,16 +1718,20 @@ export function AgentPanel({
                 <div
                   key={message.presentationId ?? message.id}
                   id={`agent-message-${message.id}`}
-                  className={cn('group/message flex min-w-0 max-w-full flex-col items-end gap-1.5', !message.delivery && message.id !== messages.filter(item => item.role === 'user').at(-1)?.id && 'agent-msg-cv')}
-                  onTouchStart={() => startLongPress(message.id)}
-                  onTouchEnd={cancelLongPress}
-                  onTouchMove={cancelLongPress}
+                  className={cn('flex min-w-0 max-w-full flex-col items-end gap-1.5', !message.delivery && message.id !== messages.filter(item => item.role === 'user').at(-1)?.id && 'agent-msg-cv')}
                 >
-                  <AuthorRequestBubble parts={message.parts} onPreview={setAttachmentPreview} />
+                  <div className="group/message flex min-w-0 max-w-[82%] flex-col items-end gap-1.5"
+                    onTouchStart={() => startLongPress(message.id)}
+                    onTouchEnd={cancelLongPress}
+                    onTouchMove={cancelLongPress}
+                    onTouchCancel={cancelLongPress}>
+                    <AuthorRequestBubble parts={message.parts} onPreview={setAttachmentPreview} />
+                    {messageActions}
+                  </div>
                   {message.delivery?.status === 'failed' ? <div className="flex max-w-full items-center gap-2 text-xs text-[var(--text-secondary)]">
                     <span role="alert">发送未确认：{message.delivery.error}</span>
                     <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button>
-                  </div> : messageActions ?? (showSummary ? <div aria-hidden className="h-7 mobile:h-10" /> : null)}
+                  </div> : !messageActions && showSummary ? <div aria-hidden className="h-7 mobile:h-10" /> : null}
                   {showSummary ? <div className="agent-reading-column pt-3">
                     <AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
                       onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} />

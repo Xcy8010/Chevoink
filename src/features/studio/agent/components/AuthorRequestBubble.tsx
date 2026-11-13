@@ -7,7 +7,7 @@ export function AuthorRequestBubble({ parts, onPreview }: {
 }) {
   const attachments = parts.filter(part => part.type === 'attachment')
   return (
-    <div className="flex max-w-[82%] flex-col items-end gap-1.5">
+    <div className="flex max-w-full flex-col items-end gap-1.5">
       {attachments.length > 0 ? (
         <div className="flex flex-wrap justify-end gap-1.5">
           {attachments.map((part, index) => part.kind === 'image' ? (

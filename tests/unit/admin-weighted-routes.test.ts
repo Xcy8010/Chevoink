@@ -6,8 +6,10 @@ import { getAdminModelManagement, updateAdminModel } from '../../api/lib/admin-c
 import { presentWeightedRoutes, readWeightedRoutes, saveWeightedRoutes } from '../../api/lib/model-weighted-config.js'
 import { encryptSecret, decryptSecret } from '../../api/lib/secret-box.js'
 import adminRouter from '../../api/routes/admin.js'
+import { notifyConfigurationChange } from '../../api/lib/live-configuration.js'
 
 const mocks = vi.hoisted(() => ({ row: {} as Record<string, unknown>, update: vi.fn(), actor: vi.fn(), auth: vi.fn(), audit: vi.fn(), clear: vi.fn() }))
+vi.mock('../../api/lib/live-configuration.js', () => ({ notifyConfigurationChange: vi.fn() }))
 vi.mock('../../api/lib/admin-auth.js', async original => ({ ...await original<object>(), requireAdmin: mocks.auth }))
 vi.mock('../../api/lib/data-access.js', async original => ({ ...await original<object>(), recordAdminAuditLog: mocks.audit }))
 vi.mock('../../api/lib/tool-model-config.js', async original => ({ ...await original<object>(), clearToolModelRuntimeCache: mocks.clear }))
@@ -73,12 +75,15 @@ it('rejects invalid proportions through HTTP, redacts audit credentials, and ret
   const app = express().use(express.json()).use('/api/admin', adminRouter)
   expect((await request(app).patch('/api/admin/models/model').send({ weightedRoutes: { primaryWeight: 64, candidates: [candidate] } })).status).toBe(400)
   expect(mocks.update).not.toHaveBeenCalled()
+  expect(notifyConfigurationChange).not.toHaveBeenCalled()
   expect((await request(app).patch('/api/admin/models/model').send({ weightedRoutes: { primaryWeight: 65, candidates: [candidate] } })).status).toBe(200)
+  expect(notifyConfigurationChange).toHaveBeenCalledExactlyOnceWith('models')
   expect(JSON.stringify(mocks.audit.mock.calls)).not.toContain(candidate.apiKey)
   expect(mocks.audit).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'models.update', detail: expect.objectContaining({ routeKeysReplaced: [candidate.label], keyReplaced: false }) }) }))
   mocks.update.mockClear(); mocks.auth.mockResolvedValue({ id: 'normal-admin', role: 'admin', isSuperAdmin: false })
   expect((await request(app).patch('/api/admin/models/model').send({ weightedRoutes: { primaryWeight: 65, candidates: [candidate] } })).status).toBe(403)
   expect(mocks.update).not.toHaveBeenCalled()
+  expect(notifyConfigurationChange).toHaveBeenCalledTimes(1)
 })
 
 it.each([[0.01, 0.01, 99.98], [1e-7, 1e-7, 99.9999998]])('accepts exact decimal percentages and exponent notation without rounding: %j', (primaryWeight, first, second) => {

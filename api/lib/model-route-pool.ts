@@ -44,10 +44,11 @@ export class ModelRouteRejected extends DataAccessError {
     this.cooldownMs = Math.max(minimum, Math.min(300_000, Number.isFinite(delay) ? delay : 0))
   }
 }
-export const routeRetryableStatus = (status: number) => [429, 500, 502, 503, 504].includes(status)
+export const routeRetryableStatus = (status: number) => [404, 429, 500, 502, 503, 504].includes(status)
 // Preliminary response-shape filter only. Non-durable producers must also
 // verify the actual persisted zero-charge billing row before issuing rejection.
-export const routeRejectionMayRetry = (status: number, prompt: number | undefined, completion: number | undefined) => routeRetryableStatus(status)
+export const routeRejectionMayRetry = (status: number, prompt: number | undefined, completion: number | undefined, physicalRouteId?: string) =>
+  routeRetryableStatus(status) && (status !== 404 || Boolean(physicalRouteId))
   && (prompt == null && completion == null || prompt === 0 && completion === 0)
 const cursors = new Map<string, number>()
 const cooldowns = new Map<string, number>()

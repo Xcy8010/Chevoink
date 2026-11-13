@@ -11,6 +11,7 @@ import { reconcileCreditRefunds, reconcileTokenSettlements } from './lib/credits
 import { recoverNovelImportJobs } from './lib/novel-import-service.js'
 import { isNovelImportMaintenanceEnabled, maintainNovelImports } from './lib/novel-import-maintenance.js'
 import { drainNovelImportEffects } from './lib/novel-import-effects.js'
+import { closeConfigurationStreams } from './lib/live-configuration.js'
 
 // Do not accept new runs or dispatch schedules while startup recovery is scanning
 // old queued/running rows: otherwise a fresh request can be mistaken for an orphan.
@@ -76,6 +77,7 @@ process.on('SIGTERM', () => {
   clearInterval(queueTimer)
   clearInterval(scheduleTimer)
   console.log('SIGTERM signal received')
+  closeConfigurationStreams()
   server.close(() => {
     console.log('Server closed')
     process.exit(0)
@@ -87,6 +89,7 @@ process.on('SIGINT', () => {
   clearInterval(queueTimer)
   clearInterval(scheduleTimer)
   console.log('SIGINT signal received')
+  closeConfigurationStreams()
   server.close(() => {
     console.log('Server closed')
     process.exit(0)

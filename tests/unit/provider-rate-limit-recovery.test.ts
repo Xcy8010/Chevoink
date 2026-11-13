@@ -144,6 +144,33 @@ describe('actual singleton rate-limit request accounting', () => {
     })
   }
 })
+
+describe('configured model route HTTP 404 failover', () => {
+  it.each([
+    ['chat', '0ad2ca88-5d2d-432a-bfe1-c80c4ba251bb'],
+    ['auxiliary', 'fd55faea-31b0-4f84-adb8-dd22081c47b4'],
+  ] as const)('%s continues the original request on another route after a verified zero-fee 404', async (channel, id) => {
+    const backup = { id, label: '备用', enabled: true,
+      provider: runtime.provider, modelName: 'backup-model', baseUrl: 'https://backup.test/v1', apiKeyCiphertext: 'fixture-backup' }
+    mocks.findModel.mockResolvedValue({ id: `selected-${channel}`, ...runtime, apiKeyCiphertext: runtime.apiKey, metadata: { routes: [backup] } })
+    const fetcher = vi.fn()
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ error: { code: 'model_not_found' } }), { status: 404 }))
+      .mockImplementationOnce(async () => response())
+    vi.stubGlobal('fetch', fetcher)
+
+    const result = await invoke(channel, `${channel}-route-404`)
+
+    expect(typeof result === 'string' ? result : result.content).toBe('complete')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    const [first, second] = fetcher.mock.calls.map(([, init]) => JSON.parse(init.body))
+    expect(new Set([first.model, second.model])).toEqual(new Set([runtime.modelName, backup.modelName]))
+    expect(second).toEqual({ ...first, model: second.model })
+    expect(rows.get('usage-1')).toMatchObject({ modelName: first.model, billingStatus: 'provider_rejected', reservedCreditMilli: 0, creditChargeMilli: 0 })
+    expect(rows.get('usage-2')).toMatchObject({ modelName: second.model, billingStatus: 'settled' })
+    expect(mocks.charge).toHaveBeenCalledOnce()
+  })
+})
+
 describe('logical operation price admission', () => {
   it('refreshes an independent operation instead of authorizing from the cached run price', async () => {
     const original = { version: 'credits-v1-exact' as const, modelTier: 'standard' as const, multiplierBps: 0 }
