@@ -1170,13 +1170,13 @@ body.autohide-scrollbars .agent-activity-scroll::-webkit-scrollbar-thumb { backg
 /* Keep scrolling on the content layer; only translate the community header. */
 .community-reveal-header {
   position: sticky;
-  top: var(--safe-top);
+  top: 0;
   z-index: 30;
   background: var(--app-bg);
   transform: translateY(0);
   transition: transform 220ms cubic-bezier(.22, 1, .36, 1);
 }
-.community-reveal-header[data-hidden='true'] { transform: translateY(calc(-100% - var(--safe-top))); }
+.community-reveal-header[data-hidden='true'] { transform: translateY(-100%); }
 .site-header-actions .site-announcement-bell { width: 44px; height: 44px; border: 0; background: transparent; }
 @media (min-width: 768px) {
   .community-reveal-header { top: var(--app-header-visible-height, var(--app-header-height)); }

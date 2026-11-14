@@ -692,7 +692,8 @@ export default function AppShell({ title, description, children }: AppShellProps
               </div>
             </header>
 
-        <div className="flex min-h-0 flex-1 flex-col">
+        {/* Keep the community status-bar band outside the scrolling/clipped viewport. */}
+        <div className={cn('flex min-h-0 flex-1 flex-col', isCommunityRoute && 'mobile:pt-[var(--safe-top)]')}>
           <main
             ref={mainScrollRef}
             data-app-main-scroll
@@ -710,7 +711,7 @@ export default function AppShell({ title, description, children }: AppShellProps
                 'app-main-content space-y-4 pb-[calc(88px+var(--safe-bottom))] pr-0.5 pt-[calc(var(--app-header-height)+12px)] md:space-y-6 md:pb-8',
                 // 手机端隐藏顶部导航栏的页面：内容顶上去，只留安全区间距（studio 保持原行为）
                 hideMobileHeader && !isStudioRoute && 'mobile:pt-[calc(var(--safe-top)+12px)]',
-                isCommunityRoute && 'space-y-0 md:space-y-0 mobile:pr-0 mobile:pt-[var(--safe-top)]',
+                isCommunityRoute && 'space-y-0 md:space-y-0 mobile:pr-0 mobile:pt-0',
                 isReaderRoute && 'flex h-full min-h-0 flex-col space-y-4 pb-0 md:pb-0 md:pt-0',
                 // 创作区手机端由自己的底部导航接管，不再为全局底栏留白
                 isStudioRoute && 'flex h-full min-h-0 flex-col space-y-4 md:space-y-4 pb-0 md:pb-0',
