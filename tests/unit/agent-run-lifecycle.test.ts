@@ -151,6 +151,7 @@ vi.mock('../../api/lib/prisma.js', () => {
     return ownedRun(input)
   }
   const db: Record<string, unknown> = {
+  agentPersonalization: { findUnique: vi.fn(async () => null) },
   DataAccessError: class extends Error {
     constructor(readonly status: number, readonly code: string, message: string) { super(message) }
   },

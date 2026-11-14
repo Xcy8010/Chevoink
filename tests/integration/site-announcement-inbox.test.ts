@@ -28,10 +28,14 @@ describe.skipIf(!ready)('announcement inbox with isolated PostgreSQL', () => {
         }
       })
       const empty = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }
-      assertAnnouncementReadsState(catalog.announcementReads, 'after', empty)
-      assertUserNotificationsState(catalog.userNotifications, 'after', empty)
-      expect(() => assertAnnouncementReadsState({ ...catalog.announcementReads, rowCount: 1 }, 'after', empty)).toThrow(/rowCount/)
-      expect(() => assertUserNotificationsState({ ...catalog.userNotifications, rowCount: 1 }, 'after', empty)).toThrow(/rowCount/)
+      // A CI shard already runs application fixtures on this migrated database.
+      // Check the real catalog and exercise initial-row rejection independently.
+      const reads = { ...catalog.announcementReads, rowCount: 0 }
+      const notifications = { ...catalog.userNotifications, rowCount: 0 }
+      assertAnnouncementReadsState(reads, 'after', empty)
+      assertUserNotificationsState(notifications, 'after', empty)
+      expect(() => assertAnnouncementReadsState({ ...reads, rowCount: 1 }, 'after', empty)).toThrow(/rowCount/)
+      expect(() => assertUserNotificationsState({ ...notifications, rowCount: 1 }, 'after', empty)).toThrow(/rowCount/)
       await prisma.user.createMany({ data: [
         { id: authorId, nickname: '合成账号 A', passwordHash: 'unusable', createdAt: date(-60_000) },
         { id: otherId, nickname: '合成账号 B', passwordHash: 'unusable', createdAt: date(-45_000) },
