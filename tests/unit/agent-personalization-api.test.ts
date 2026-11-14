@@ -34,12 +34,13 @@ const settingsUrl = '/personalization'
 const memoriesUrl = `${settingsUrl}/memories`
 const memoryUrl = `${memoriesUrl}/:memoryId`
 
-async function invoke(method: string, path: string, input: { signed?: boolean; body?: unknown; revision?: string | string[] } = {}) {
+async function invoke(method: string, path: string, input: { signed?: boolean; body?: unknown; revision?: string | string[]; current?: boolean } = {}) {
   const route = agentPersonalizationRouter.stack.find(layer =>
     layer.route?.path === path && layer.route.stack.some(handler => handler.method === method))?.route
   const handler = route?.stack.find(layer => layer.method === method)
   if (!handler) throw new Error(`Missing route ${method} ${path}`)
   const req = { body: input.body, headers: input.signed ? { 'x-test-session': 'signed' } : {}, params: { memoryId: 'memory-a', toolName: 'chapter_read' },
+    get: (header: string) => header === 'X-Chevoink-Personalization' && input.current !== false ? '2' : undefined,
     query: input.revision === undefined ? {} : { expectedRevision: input.revision } } as Request
   const result = { status: 200, headers: new Map<string, string>(), body: {} as Record<string, unknown> }
   const res = {
@@ -107,6 +108,18 @@ describe('personalization HTTP boundary', () => {
     expect(response.headers.get('Cache-Control')).toBe('no-store')
     expect(response.body.data).toEqual({ memories: [], archived: [], revision: 2 })
     expect(service.listPersonalizationMemories).toHaveBeenCalledExactlyOnceWith('test-account')
+  })
+
+  it('keeps already loaded legacy assets readable using empty, read-only compatibility fields', async () => {
+    const payload = { settings: DEFAULT_AGENT_PERSONALIZATION_SETTINGS, revision: 0, rules: [] }
+    service.getAgentPersonalization.mockResolvedValue(payload)
+    const legacy = await invoke('get', settingsUrl, { signed: true, current: false })
+    const current = await invoke('get', settingsUrl, { signed: true })
+    expect(legacy.body.data).toEqual({ ...payload, settings: { ...payload.settings, preferredName: '', aboutMe: '' } })
+    expect(current.body.data).toEqual(payload)
+    expect(await invoke('patch', settingsUrl, { signed: true, current: false, body: { expectedRevision: 0, aboutMe: 'obsolete' } }))
+      .toMatchObject({ status: 400 })
+    expect(service.patchAgentPersonalization).not.toHaveBeenCalled()
   })
 
   it('validates memory input and preserves revision conflicts through the HTTP envelope', async () => {

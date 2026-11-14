@@ -1,6 +1,7 @@
 import { Router, type Request } from 'express'
 import { z } from 'zod'
 import {
+  AGENT_PERSONALIZATION_MEMORY_PROTOCOL,
   agentPersonalizationRevisionSchema,
   agentPersonalizationExpectedRevisionSchema,
   agentPersonalizationMemoryIdSchema,
@@ -10,6 +11,7 @@ import {
   patchAgentPersonalizationSchema,
   writeAgentPersonalizationRuleSchema,
 } from '../../shared/contracts/agent-personalization.js'
+import type { AgentPersonalizationPayload } from '../../shared/contracts/agent-personalization.js'
 import {
   changePersonalizationRule,
   clearPersonalizationMemories,
@@ -45,12 +47,19 @@ async function requirePersonalizationUser(req: Request): Promise<string> {
   return userId
 }
 
+/** An already loaded v1 asset may outlive the deploy. Keep its required
+ * string shape without recreating the retired settings or their private data. */
+function presentSettings(req: Request, payload: AgentPersonalizationPayload) {
+  return req.get('X-Chevoink-Personalization') === AGENT_PERSONALIZATION_MEMORY_PROTOCOL ? payload
+    : { ...payload, settings: { ...payload.settings, preferredName: '', aboutMe: '' } }
+}
+
 router.get(settingsPath, async (req, res) => {
   const requestId = createRequestId()
   try {
     const userId = await requirePersonalizationUser(req)
     res.setHeader('Cache-Control', 'no-store')
-    res.json(buildSuccess(requestId, await getAgentPersonalization(userId)))
+    res.json(buildSuccess(requestId, presentSettings(req, await getAgentPersonalization(userId))))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 
@@ -60,7 +69,7 @@ router.patch(settingsPath, async (req, res) => {
     const userId = await requirePersonalizationUser(req)
     const body = parseBody(patchAgentPersonalizationSchema, req.body, '个性化设置参数无效。')
     res.setHeader('Cache-Control', 'no-store')
-    res.json(buildSuccess(requestId, await patchAgentPersonalization(userId, body)))
+    res.json(buildSuccess(requestId, presentSettings(req, await patchAgentPersonalization(userId, body))))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 

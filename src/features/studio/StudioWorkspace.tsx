@@ -1285,6 +1285,10 @@ export default function StudioWorkspace() {
         || event.toolName === 'account_memory_save'
         || event.toolName === 'account_memory_update'
         || event.toolName === 'account_memory_delete'
+        || event.toolName === 'account_memory_restore'
+        || event.toolName === 'account_memory_clear'
+        || event.toolName === 'account_rule_set'
+        || event.toolName === 'account_rule_remove'
       )) {
         void queryClient.invalidateQueries({ queryKey: agentPersonalizationQueryKey })
       }

@@ -1,5 +1,6 @@
 import { requestJson } from '@/app/api-client'
 import { useShellStore } from '@/store/useShellStore'
+import { AGENT_PERSONALIZATION_MEMORY_PROTOCOL } from '../../../shared/contracts/agent-personalization.js'
 import type {
   AgentPersonalizationMemoriesPayload,
   AgentPersonalizationMemory,
@@ -31,7 +32,9 @@ function assertAccount(owner: string) {
 
 async function requestForAccount<T>(owner: string, endpoint: string, init: RequestInit) {
   assertAccount(owner)
-  const payload = await requestJson<T>(endpoint, init)
+  const headers = new Headers(init.headers)
+  headers.set('X-Chevoink-Personalization', AGENT_PERSONALIZATION_MEMORY_PROTOCOL)
+  const payload = await requestJson<T>(endpoint, { ...init, headers })
   assertAccount(owner)
   return payload
 }

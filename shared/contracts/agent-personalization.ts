@@ -6,6 +6,8 @@ export const AGENT_PERSONALIZATION_LIMITS = {
   activeMemories: 50,
 } as const
 
+export const AGENT_PERSONALIZATION_MEMORY_PROTOCOL = '2'
+
 export const agentPersonalizationStyleSchema = z.enum(['natural', 'professional', 'direct', 'partner'])
 export const agentPersonalizationDegreeSchema = z.enum(['less', 'default', 'more'])
 export const agentPersonalizationRevisionSchema = z.number().int().nonnegative().max(2_147_483_646)
