@@ -1,7 +1,10 @@
 import { z } from 'zod'
 
 import type { AgentMessagePart } from '../../../../shared/contracts/index.js'
+import { env } from '../../../config/env.js'
 import { prisma } from '../../prisma.js'
+import { PERSONALIZATION_LIST_OUTPUT_PREFIX } from '../personalization-context.js'
+import { PERSONALIZATION_TOOL_NAMES } from '../personalization-operations.js'
 import { defineTool } from './types.js'
 
 /**
@@ -42,12 +45,17 @@ export const executionContextReadTool = defineTool({
     const { executeDurableRead } = await import('./durable-read.js')
     return executeDurableRead(ctx, 'execution_context_read', args, raw => executionContextReadSchema.parse(raw), async tx => {
       const { readExecutionFrame } = await import('../runtime-state.js')
+      const canReadPersonalization = async () => env.appEnv !== 'production'
+        || await (await import('../../app-releases.js')).hasAgentPersonalizationCapability(ctx.userId, tx)
       if (args.operationId !== undefined) {
         const { runtimeJson } = await import('../runtime-common.js')
         const operation = await tx.agentOperation.findFirst({ where: { id: args.operationId, taskRootId: capability.lease.taskRootId, kind: 'tool',
           status: { in: ['succeeded', 'failed'] } }, include: { effectReceipt: true } })
         const receipt = operation?.effectReceipt
         if (!operation || !receipt) return { output: '当前任务没有该已完成工具结果。', outcome: 'failed' }
+        if (operation.action === 'account_memory_list') return { output: '请重新查看当前记忆列表。', outcome: 'failed' }
+        if (PERSONALIZATION_TOOL_NAMES.has(operation.action) && !await canReadPersonalization())
+          return { output: '当前版本未开放个性化记录。', outcome: 'failed' }
         if (runtimeJson(receipt.result).hash !== receipt.resultHash || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具结果或参数回执损坏。')
         if (receipt.resultHash !== args.resultHash) return { output: '结果摘要不匹配，请使用工具引用中的resultHash。', outcome: 'failed' }
         const source = z.object({ input: z.object({ normalization: z.object({ sourceRevision: z.number().int().nonnegative() }).optional(),
@@ -67,6 +75,18 @@ export const executionContextReadTool = defineTool({
       if (frame.snapshotHash !== args.hash) return { output: '提供的hash与该执行帧不一致，请使用归档提示中的准确位置。', outcome: 'failed' }
       const message = frame.state.messages[args.messageIndex!]
       if (!message) return { output: '原执行帧没有该消息。', outcome: 'failed' }
+      if (message.role === 'tool') {
+        let index = args.messageIndex! - 1
+        while (frame.state.messages[index]?.role === 'tool') index--
+        const owner = frame.state.messages[index]
+        const action = owner?.role === 'assistant' ? owner.toolCalls?.find(call => call.id === message.toolCallId)?.name : undefined
+        if (action === 'account_memory_list' || message.content.startsWith(PERSONALIZATION_LIST_OUTPUT_PREFIX))
+          return { output: '请重新查看当前记忆列表。', outcome: 'failed' }
+        if (action && PERSONALIZATION_TOOL_NAMES.has(action) && !await canReadPersonalization())
+          return { output: '当前版本未开放个性化记录。', outcome: 'failed' }
+      }
+      if (message.role === 'assistant' && message.toolCalls?.some(call => PERSONALIZATION_TOOL_NAMES.has(call.name)) && !await canReadPersonalization())
+        return { output: '当前版本未开放个性化记录。', outcome: 'failed' }
       const visibleMessage = { ...message }
       if (visibleMessage.role === 'assistant') delete visibleMessage.responsesContinuation
       const raw = JSON.stringify(visibleMessage)

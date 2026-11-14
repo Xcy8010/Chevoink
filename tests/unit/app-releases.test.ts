@@ -3,7 +3,7 @@ import type { AppRelease, AppReleaseChannel, AppReleaseOperation, AppReleaseReti
 import type { Request, Response } from 'express'
 import { env } from '../../api/config/env.js'
 import { accountEmailAuthEnabled, withAccountEmailAuthPreview, writeAccountEmailAuthPreviewGrant } from '../../api/lib/account-email-auth-scope.js'
-import { executeAppRelease, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, resolveEmailAuthPreview, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../../api/lib/app-releases.js'
+import { executeAppRelease, hasAgentPersonalizationCapability, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, resolveEmailAuthPreview, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../../api/lib/app-releases.js'
 import type { AppReleaseManifest, AppReleaseAction } from '../../shared/contracts/app-release.js'
 const state=vi.hoisted(()=>({releases:[] as AppRelease[],channels:[] as AppReleaseChannel[],operations:[] as AppReleaseOperation[],retirements:[] as AppReleaseRetirement[],audits:[] as unknown[],artifacts:new Map<string,{manifest:AppReleaseManifest;artifactSha256:string}>(),superAdmin:true,testers:new Set<string>(),policy:true,terms:'terms' as string|null,privacy:'privacy' as string|null,failAudit:false,serial:Promise.resolve<unknown>(undefined)}))
 const db={
@@ -25,7 +25,7 @@ vi.mock('../../api/lib/tester-entitlement.js',()=>({isEffectiveTester:async(_db:
 vi.mock('../../api/lib/site-content.js',()=>({readPublicSiteContent:async()=>({legal:{registrationAvailable:state.policy,terms:state.terms?{id:state.terms}:null,privacy:state.privacy?{id:state.privacy}:null}})}))
 vi.mock('../../api/lib/app-release-artifacts.js',()=>({readInstalledAppRelease:async(id:string)=>{const artifact=state.artifacts.get(id);if(!artifact)throw Error('missing artifact');return artifact}}))
 function manifest(id:string):AppReleaseManifest{return{format:1,entryProtocol:1,id,label:id,sourceSha:'a'.repeat(40),basePath:`/api/app-releases/artifacts/${id}/`,compatibility:{api:1,schema:1,task:1,legalConsentUi:true},capabilities:id==='test-version'?['siteContent','imageQuality']:[],publicNotes:{features:['Synthetic public feature'],fixes:[],changes:[]},files:[{path:'index.html',size:1,sha256:'1'.repeat(64)},{path:'release-entry.js',size:1,sha256:'2'.repeat(64)}],validation:{status:'verified',verifiedAt:'2026-11-06T00:00:00.000Z',ciRunId:'123',originalAttempt:1,ci:{headSha:'a'.repeat(40),workflowName:'CI',status:'completed',conclusion:'success',jobs:['plan test shards','check / lint / build / audit','merge coverage / test report','check / lint / test / build / audit','test shard 1/1'].map(name=>({name,status:'completed',conclusion:'success'}))}}}}
-function release(id:string){const data=manifest(id);state.artifacts.set(id,{manifest:data,artifactSha256:'b'.repeat(64)});const row:AppRelease={id,label:id,sourceSha:data.sourceSha,artifactSha256:'b'.repeat(64),manifest:JSON.parse(JSON.stringify(data)),publicNotes:JSON.parse(JSON.stringify(data.publicNotes)),compatibilityVersion:1,verifiedAt:new Date(),validationState:'verified',registeredById:'admin',createdAt:new Date()};state.releases.push(row);return row}
+function release(id:string,capabilities:AppReleaseManifest['capabilities']=[]){const data=manifest(id);data.capabilities.push(...capabilities);state.artifacts.set(id,{manifest:data,artifactSha256:'b'.repeat(64)});const row:AppRelease={id,label:id,sourceSha:data.sourceSha,artifactSha256:'b'.repeat(64),manifest:JSON.parse(JSON.stringify(data)),publicNotes:JSON.parse(JSON.stringify(data.publicNotes)),compatibilityVersion:1,verifiedAt:new Date(),validationState:'verified',registeredById:'admin',createdAt:new Date()};state.releases.push(row);return row}
 function channel(name:string,id:string,revision=1){state.channels.push({channel:name,releaseId:id,revision,enabled:true,updatedAt:new Date()})}
 const req=(user?:string,extra:Record<string,string>={})=>({headers:{...(user?{'fixture-user':user}:{}),...extra}} as unknown as Request)
 let sequence=0
@@ -73,6 +73,33 @@ it('authorizes only a fresh signed preview for the assigned revision, guest, or 
 async function operation(action:AppReleaseAction,releaseId:string){const view=await previewAppRelease('admin',action,releaseId);return{action,releaseId,expectedRevision:view.expectedRevision,previewHash:view.previewHash,operationId:`00000000-0000-4000-8000-${String(++sequence).padStart(12,'0')}`}}
 beforeEach(()=>{vi.clearAllMocks();state.releases=[];state.channels=[];state.operations=[];state.retirements=[];state.audits=[];state.artifacts.clear();state.superAdmin=true;state.testers.clear();state.policy=true;state.terms='terms';state.privacy='privacy';state.failAudit=false;state.serial=Promise.resolve()})
 it('selects real assigned artifacts from server tester qualification, never a URL or header',async()=>{release('stable-version');release('test-version');channel('stable','stable-version');channel('test','test-version');state.testers.add('tester');expect((await selectAppRelease(req('ordinary',{'x-release-channel':'test','x-release-id':'test-version'}))).release!.id).toBe('stable-version');expect((await selectAppRelease(req('tester'))).release).toMatchObject({id:'test-version',activatedAt:state.channels.find(row=>row.channel==='test')!.updatedAt.toISOString()});state.testers.delete('tester');expect((await selectAppRelease(req('tester'))).release!.id).toBe('stable-version');await expect(requireAppReleaseCapability(req('ordinary'),'siteContent')).rejects.toMatchObject({code:'APP_RELEASE_CAPABILITY_DISABLED'})})
+it('gates personalization by the effective account assignment and allows legacy development', async () => {
+ await expect(hasAgentPersonalizationCapability('ordinary')).resolves.toBe(true)
+ release('stable-version')
+ release('test-version',['agentPersonalization'])
+ channel('stable','stable-version')
+ channel('test','test-version')
+ state.testers.add('tester')
+ const testSelection=await selectAppRelease(req('tester'))
+ expect(testSelection.release?.capabilities).toContain('agentPersonalization')
+ await expect(withAccountEmailAuthPreview({selection:testSelection,recipient:'approved@example.test'},
+  ()=>hasAgentPersonalizationCapability('ordinary'))).resolves.toBe(false)
+ await expect(hasAgentPersonalizationCapability('tester')).resolves.toBe(true)
+ state.testers.delete('tester')
+ await expect(hasAgentPersonalizationCapability('tester')).resolves.toBe(false)
+ state.testers.add('tester')
+ const withdrawal=await operation('withdraw_test','test-version')
+ await executeAppRelease('admin',withdrawal,null)
+ await expect(hasAgentPersonalizationCapability('tester')).resolves.toBe(false)
+})
+it('accepts personalization after stable promotion using the verified registration', async () => {
+ const candidate=release('test-version',['agentPersonalization'])
+ await executeAppRelease('admin',await operation('full_release','test-version'),null)
+ state.artifacts.clear()
+ await expect(hasAgentPersonalizationCapability('ordinary')).resolves.toBe(true)
+ candidate.validationState='draft'
+ await expect(hasAgentPersonalizationCapability('ordinary')).rejects.toMatchObject({code:'APP_RELEASE_UNAVAILABLE'})
+})
 it('preserves unconfigured legacy behavior but fails configured missing or incompatible artifacts',async()=>{expect(await selectAppRelease(req())).toEqual({mode:'legacy',channel:'stable',release:null});const row=release('stable-version');channel('stable',row.id);state.artifacts.clear();await expect(selectAppRelease(req())).rejects.toThrow('missing artifact');const data=manifest(row.id);data.compatibility.legalConsentUi=false;row.manifest=JSON.parse(JSON.stringify(data));await expect(selectAppRelease(req())).rejects.toMatchObject({code:'APP_RELEASE_UNAVAILABLE'})})
 it('imports only protected manifest identity, retaining drafts honestly and forbidding replacement',async()=>{const data=manifest('draft-version');data.validation={status:'draft'};state.artifacts.set(data.id,{manifest:data,artifactSha256:'c'.repeat(64)});const imported=await importAppRelease('admin',data.id,null);expect(imported).toMatchObject({validationState:'draft',verifiedAt:null,sourceSha:'a'.repeat(40)});state.artifacts.set(data.id,{manifest:data,artifactSha256:'d'.repeat(64)});await expect(importAppRelease('admin',data.id,null)).rejects.toMatchObject({code:'APP_RELEASE_IMMUTABLE'})})
 it('requires a concrete stable baseline and compatible consent UI but allows routing when official policies are absent',async()=>{

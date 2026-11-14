@@ -1,4 +1,5 @@
 import type { ChatMessage, OpenAIToolDefinition } from '../ai-service.js'
+import { PERSONALIZATION_TOOL_NAMES } from './personalization-operations.js'
 import { scheduledToolHistoryIds } from './tool-turn-history.js'
 
 const IMAGE_INPUT_ESTIMATE_TOKENS = 1_024
@@ -180,6 +181,7 @@ export function collapseEarlyToolRounds(messages: ChatMessage[], keepRecentToolO
     const receipts = message.toolCalls!.map((call) => {
       const toolResult = outputs.find(output => output.toolCallId === call.id)!
       remove.add(toolResult)
+      if (PERSONALIZATION_TOOL_NAMES.has(call.name)) return `${call.name}：先前的个性化结果需要重新查询。`
       const excerpt = toolResult.content.replace(/^\[工具输出已压缩\]\s*/, '').slice(0, 180)
       return `${call.name}：${excerpt}${toolResult.content.length > 180 ? '…' : ''}`
     })

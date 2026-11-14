@@ -3,7 +3,7 @@ import { appReleasePeriods } from '../../shared/app-release-periods.js'
 import { claimAppReleaseRetirement, pendingReleaseCandidates, planAppReleaseRetention, requireRetainedRelease, scheduleAppReleaseRetention } from './app-release-retention.js'
 import type { AppRelease, AppReleaseChannel, Prisma } from '@prisma/client'
 import type { Request } from 'express'
-import { appReleaseManifestSchema, type AdminAppRelease, type AppReleaseAction, type AppReleaseBootstrap, type AppReleaseCapability, type AppReleaseExecute, type AppReleasePreview, type AppReleaseReceipt } from '../../shared/contracts/app-release.js'
+import { appReleaseManifestSchema, type AdminAppRelease, type AppReleaseAction, type AppReleaseBootstrap, type AppReleaseCapability, type AppReleaseExecute, type AppReleaseManifest, type AppReleasePreview, type AppReleaseReceipt } from '../../shared/contracts/app-release.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { getSessionUserId } from './auth-session.js'
 import { isEffectiveTester } from './tester-entitlement.js'
@@ -16,7 +16,7 @@ const fingerprint=(value:unknown)=>createHash('sha256').update(JSON.stringify(va
 const channelView=(row:AppReleaseChannel|undefined|null)=>row?{releaseId:row.releaseId,revision:row.revision,enabled:row.enabled}:null
 async function superAdmin(tx:Transaction,actorId:string){const actor=await tx.user.findUnique({where:{id:actorId},select:{role:true,isSuperAdmin:true,bannedAt:true}});if(!actor||actor.role!=='admin'||!actor.isSuperAdmin||actor.bannedAt)throw new DataAccessError(403,'SUPER_ADMIN_REQUIRED','应用版本操作仅限超级管理员。')}
 function present(row:AppRelease):AdminAppRelease{const manifest=appReleaseManifestSchema.parse(row.manifest);return{id:row.id,label:row.label,sourceSha:row.sourceSha,artifactSha256:row.artifactSha256,publicNotes:manifest.publicNotes,validationState:row.validationState,verifiedAt:row.verifiedAt?.toISOString()??null,compatibility:manifest.compatibility,capabilities:manifest.capabilities,ciRunId:manifest.validation.status==='verified'?manifest.validation.ciRunId:null,createdAt:row.createdAt.toISOString()}}
-const compatible=(row:AppRelease)=>{const manifest=appReleaseManifestSchema.parse(row.manifest);return manifest.compatibility.api===1&&manifest.compatibility.schema===1&&manifest.compatibility.task===1&&manifest.compatibility.legalConsentUi&&row.compatibilityVersion===1}
+const compatible=(row:AppRelease,manifest:AppReleaseManifest=appReleaseManifestSchema.parse(row.manifest))=>manifest.compatibility.api===1&&manifest.compatibility.schema===1&&manifest.compatibility.task===1&&manifest.compatibility.legalConsentUi&&row.compatibilityVersion===1
 async function installedRelease(row:AppRelease,full=false){const installed=await readInstalledAppRelease(row.id,full);if(installed.artifactSha256!==row.artifactSha256||installed.manifest.sourceSha!==row.sourceSha||fingerprint(installed.manifest)!==fingerprint(appReleaseManifestSchema.parse(row.manifest)))throw new DataAccessError(503,'APP_RELEASE_ARTIFACT_CHANGED','应用版本文件与登记信息不一致。');return installed}
 export async function importAppRelease(actorId:string,releaseId:string,ip:string|null){
  await superAdmin(prisma,actorId)
@@ -35,19 +35,32 @@ export async function importAppRelease(actorId:string,releaseId:string,ip:string
  })
 }
 export async function selectAppRelease(req:Request,tx:Transaction=prisma):Promise<AppReleaseBootstrap>{return accountEmailAuthPreview()?.selection??selectAppReleaseForUser(getSessionUserId(req),tx)}
-export async function selectAppReleaseForUser(userId:string|null,tx:Transaction=prisma):Promise<AppReleaseBootstrap>{
+async function selectAccountAssignment(tx:Transaction,userId:string|null){
  const channels=await tx.appReleaseChannel.findMany()
  const stable=channels.find(row=>row.channel==='stable'&&row.enabled),test=channels.find(row=>row.channel==='test'&&row.enabled)
- const channel=test&&userId&&await isEffectiveTester(tx,userId)?'test':'stable'
- const selected=channel==='test'?test:stable
+ const channel:'test'|'stable'=test&&userId&&await isEffectiveTester(tx,userId)?'test':'stable'
+ return {channel,selected:channel==='test'?test:stable}
+}
+export async function selectAppReleaseForUser(userId:string|null,tx:Transaction=prisma):Promise<AppReleaseBootstrap>{
+ const {channel,selected}=await selectAccountAssignment(tx,userId)
  if(!selected)return{mode:'legacy',channel:'stable',release:null}
  return selectAssignedRelease(tx,selected,channel)
 }
+async function readVerifiedRelease(tx:Transaction,releaseId:string){
+ const row=await tx.appRelease.findUnique({where:{id:releaseId}})
+ const manifest=appReleaseManifestSchema.safeParse(row?.manifest)
+ if(!row||row.validationState!=='verified'||!row.verifiedAt||!manifest.success||!compatible(row,manifest.data))throw new DataAccessError(503,'APP_RELEASE_UNAVAILABLE','已配置的应用版本尚未通过兼容验证。')
+ return {row,manifest:manifest.data}
+}
+export async function hasAgentPersonalizationCapability(userId:string,tx:Transaction=prisma):Promise<boolean>{
+ const {selected}=await selectAccountAssignment(tx,userId)
+ if(!selected)return true
+ const {manifest}=await readVerifiedRelease(tx,selected.releaseId)
+ return manifest.capabilities.includes('agentPersonalization')
+}
 async function selectAssignedRelease(tx:Transaction,selected:AppReleaseChannel,channel:'stable'|'test'):Promise<AppReleaseBootstrap>{
- const row=await tx.appRelease.findUnique({where:{id:selected.releaseId}})
- if(!row||row.validationState!=='verified'||!row.verifiedAt||!compatible(row))throw new DataAccessError(503,'APP_RELEASE_UNAVAILABLE','已配置的应用版本尚未通过兼容验证。')
+ const {row,manifest}=await readVerifiedRelease(tx,selected.releaseId)
  await installedRelease(row)
- const manifest=appReleaseManifestSchema.parse(row.manifest)
  return{mode:'artifact',channel,release:{id:row.id,label:row.label,notes:manifest.publicNotes,entryUrl:`${manifest.basePath}index.html`,capabilities:manifest.capabilities,activatedAt:selected.updatedAt.toISOString()}}
 }
 async function readActiveTestAssignment(tx:Transaction,releaseId:string,revision:number){

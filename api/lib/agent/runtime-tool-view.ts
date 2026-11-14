@@ -128,7 +128,7 @@ const functionDefinition = z.object({ name: z.string(), strict: z.boolean().opti
 const toolViews = z.array(z.object({ type: z.literal('function'), function: functionDefinition }).strict())
 const responsesToolViews = z.array(functionDefinition.extend({ type: z.literal('function') }))
 const frozenModelRequest = z.object({ input: z.object({ request: z.object({
-  endpoint: z.string().optional(), body: z.record(z.string(), z.unknown()),
+  endpoint: z.string().optional(), body: z.record(z.string(), z.unknown()), personalizationMemoryEpoch: z.number().int().nonnegative().optional(),
 }) }) })
 const successful = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
 
@@ -139,9 +139,9 @@ function modelRequestSnapshot(snapshot: unknown) {
 }
 
 export function readPreparedModelRequest(snapshot: unknown) {
-  const { endpoint, body } = modelRequestSnapshot(snapshot)
+  const { endpoint, body, personalizationMemoryEpoch } = modelRequestSnapshot(snapshot)
   if (!endpoint) return runtimeError('RUNTIME_RECEIPT_INVALID', '原主模型请求快照缺少接口地址。')
-  return { endpoint, body }
+  return { endpoint, body, ...(personalizationMemoryEpoch === undefined ? {} : { personalizationMemoryEpoch }) }
 }
 
 export function readFrozenModelToolViews(snapshot: unknown): NativeToolView[] {
@@ -159,7 +159,7 @@ export function readFrozenModelToolViews(snapshot: unknown): NativeToolView[] {
 /** Follow the actual assistant boundary, never a 'latest request' lookup.
  * Source frames, operation/request/result hashes and the result event all
  * authenticate the exact tool list that produced this assistant turn. */
-export async function readAssistantToolViews(tx: RuntimeTx, taskRootId: string, frame: Awaited<ReturnType<typeof readExecutionFrame>>): Promise<NativeToolView[]> {
+export async function readAssistantModelSnapshot(tx: RuntimeTx, taskRootId: string, frame: Awaited<ReturnType<typeof readExecutionFrame>>) {
   let index = frame.state.messages.length - 1
   while (index >= 0 && frame.state.messages[index].role === 'tool') index--
   const assistant = frame.state.messages[index]
@@ -195,9 +195,13 @@ export async function readAssistantToolViews(tx: RuntimeTx, taskRootId: string, 
     const request = object(object(attempt.requestSnapshot).request)
     const originalRequest = object(object(operation.inputSnapshot).input).request
     if (originalRequest === undefined || originalRequest === null || runtimeJson(request).hash !== runtimeJson(originalRequest).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原助手请求不属于对应模型操作。')
-    return readFrozenModelToolViews(operation.inputSnapshot)
+    return operation.inputSnapshot
   }
   return runtimeError('RUNTIME_SOURCE_REQUIRED', '没有产生当前助手调用的模型请求。')
+}
+
+export async function readAssistantToolViews(tx: RuntimeTx, taskRootId: string, frame: Awaited<ReturnType<typeof readExecutionFrame>>): Promise<NativeToolView[]> {
+  return readFrozenModelToolViews(await readAssistantModelSnapshot(tx, taskRootId, frame))
 }
 
 /** The authenticated actual request owns the schema. Execution permission is

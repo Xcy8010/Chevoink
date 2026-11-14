@@ -22,9 +22,9 @@ async function requireNovel(userId: string, novelId: string, tx: Prisma.Transact
 export function mergeModelAssignments(global: ModelAssignments, novel: ModelAssignments): ModelAssignments {
   return modelAssignmentsSchema.parse({ ...global, ...novel })
 }
-export async function getModelAssignments(userId: string, novelId?: string): Promise<ModelAssignmentsPayload> {
-  if (novelId) await requireNovel(userId, novelId)
-  const rows = await prisma.agentModelAssignment.findMany({ where: { userId, scopeKey: { in: novelId ? ['', novelId] : [''] } } })
+export async function getModelAssignments(userId: string, novelId?: string, db: Prisma.TransactionClient = prisma): Promise<ModelAssignmentsPayload> {
+  if (novelId) await requireNovel(userId, novelId, db)
+  const rows = await db.agentModelAssignment.findMany({ where: { userId, scopeKey: { in: novelId ? ['', novelId] : [''] } } })
   const read = (key: string) => { const row = rows.find(item => item.scopeKey === key)
     return { revision: row?.revision ?? 0, assignments: modelAssignmentsSchema.parse(row?.assignments ?? {}) } }
   const global = read(''), novel = novelId ? read(novelId) : null

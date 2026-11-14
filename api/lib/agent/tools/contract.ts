@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
+import { PERSONALIZATION_WRITE_ACTIONS } from '../personalization-operations.js'
 import { AGENT_TOOL_GOVERNANCE } from './governance.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
 
@@ -99,6 +100,7 @@ export type AgentToolContract = {
 // previews, trace-producing retrieval and bounded waits. They are not pure.
 const repeatableReads = new Set([
   'model_list', 'account_credits', 'account_credit_history', 'account_novels',
+  'account_profile', 'account_preferences_get', 'account_memory_list', 'creation_settings_get',
   'novel_get_context', 'chapter_read', 'chapter_list_summaries', 'memory_search',
   'plan_read', 'volume_list', 'structure_outline', 'directive_list',
   'memory_review_list', 'session_history_search', 'session_message_read',
@@ -109,10 +111,11 @@ const repeatableReads = new Set([
 ])
 const currentBodyRequired = new Set(['chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename',
   'continuity_validate', 'quality_analyze', 'chapter_bridge_commit'])
-const configuration = new Set(['agent_configure', 'model_assign', 'skill_enable', 'skill_install_shared', 'skill_rollback'])
+const configuration = new Set(['agent_configure', 'model_assign', 'skill_enable', 'skill_install_shared', 'skill_rollback', ...PERSONALIZATION_WRITE_ACTIONS])
 const account = new Set(['model_list', 'account_credits', 'account_credit_history', 'account_novels',
+  'account_profile', 'account_preferences_get', 'account_memory_list', ...PERSONALIZATION_WRITE_ACTIONS,
   'novel_create', 'skill_catalog', 'skill_shared_invites', 'skill_install_shared'])
-const session = new Set(['agent_configure', 'model_assign', 'session_rename', 'session_history_search',
+const session = new Set(['agent_configure', 'model_assign', 'creation_settings_get', 'session_rename', 'session_history_search',
   'session_message_read', 'task_context_list', 'task_context_read', 'task_spawn', 'task_send', 'task_wait',
   'goal_read', 'goal_enable', 'goal_report', 'plan_exit', 'todo_write', 'ask_user', 'task_respond', 'task_scope_bind'])
 

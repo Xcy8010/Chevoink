@@ -415,7 +415,7 @@ describe.runIf(available)('model assignments and native configuration real isola
     expect(body).toMatchObject({ model: '模型B', reasoning_effort: 'high' })
     expect(body.messages[0]).toEqual({ role: 'system', content: '同一任务完整设定' })
     expect(body.messages.filter((message: { role: string; content: string }) => message.role === 'system' && message.content === AGENT_TOOL_EXECUTION_POLICY)).toHaveLength(1)
-    expect(body.messages.filter((message: { role: string; content: string }) => message.role !== 'system' || message.content !== AGENT_TOOL_EXECUTION_POLICY)[1]).toEqual({ role: 'user', content: '请切换到 模型B high' })
+    expect(body.messages.filter((message: { role: string; content: string }) => message.role === 'user')[0]).toEqual({ role: 'user', content: '请切换到 模型B high' })
     expect(body.messages.some((message: { role: string; tool_call_id?: string }) => message.role === 'tool' && message.tool_call_id === exec.callId)).toBe(true)
     expect((await prisma.agentOperation.findUniqueOrThrow({ where: { id: prior.id } })).inputHash).toBe(prior.inputHash)
   }))

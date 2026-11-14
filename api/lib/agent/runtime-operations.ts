@@ -8,6 +8,8 @@ import { providerRequestOutputLimit } from '../ai-responses-route.js'
 import { assertProviderBudget } from './runtime-budget.js'
 import { assertPendingProviderState } from './runtime-state.js'
 import { readAttemptContentionScope } from './runtime-parent-contention.js'
+import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
+import { env } from '../../config/env.js'
 
 async function outbox(tx: RuntimeTx, input: { taskRootId: string; operationId: string; runId: string; eventKey: string; type: string; payload: Prisma.InputJsonValue }) {
   return tx.agentExecutionOutbox.create({ data: { id: randomUUID(), ...input } })
@@ -284,6 +286,15 @@ export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: 
 
     }
     await assertPendingProviderState(tx, token.taskRootId, attempt.operationId)
+    const memoryEpoch = (attempt.requestSnapshot as { request?: { personalizationMemoryEpoch?: number } }).request?.personalizationMemoryEpoch
+    if (memoryEpoch !== undefined) {
+      if (env.appEnv === 'production' && !await (await import('../app-releases.js')).hasAgentPersonalizationCapability(token.userId, tx))
+        runtimeError(STALE_PERSONALIZATION_REQUEST, '当前版本的个性化权限已变化，本次旧上下文未发送。')
+      await tx.$queryRaw`SELECT user_id FROM agent_personalizations WHERE user_id = ${token.userId} FOR SHARE`
+      const { getPersonalizationMemoryEpoch } = await import('./personalization.js')
+      if (await getPersonalizationMemoryEpoch(token.userId, tx) !== memoryEpoch)
+        runtimeError(STALE_PERSONALIZATION_REQUEST, '全局记忆已更新，本次旧上下文未发送。')
+    }
     const context = await (await import('./goal-fence.js')).readGoalExecution(token.userId, token.runId, tx)
     if (context) {
       const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: context.goalId } })

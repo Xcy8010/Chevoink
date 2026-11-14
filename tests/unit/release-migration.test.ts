@@ -10,7 +10,9 @@ import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex,
   appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum, retentionColumns, retentionIndexes, retentionConstraints, assertAppReleaseRetentionState, readAppReleaseRetentionState,
   announcementReadsMigrationName, announcementReadsMigrationChecksum, assertAnnouncementReadsState,
   userNotificationsMigrationName, userNotificationsMigrationChecksum,
-  emailAccountMigrationName, emailAccountMigrationChecksum } from '../../scripts/verify-release-migration.mjs'
+  emailAccountMigrationName, emailAccountMigrationChecksum,
+  agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum,
+  assertAgentPersonalizationState, readAgentPersonalizationState } from '../../scripts/verify-release-migration.mjs'
 
 // Static catalog captured after the four frozen SQL files in isolated PostgreSQL.
 const experienceCatalog = {
@@ -177,7 +179,8 @@ model AppReleaseRetirement {
     writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), baseline)
     writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), candidate)
     mkdirSync(path.join(f.candidate, `prisma/migrations/${appReleaseRetentionMigrationName}`))
-    writeFileSync(path.join(f.candidate, `prisma/migrations/${appReleaseRetentionMigrationName}/migration.sql`), readFileSync(`prisma/migrations/${appReleaseRetentionMigrationName}/migration.sql`))
+    writeFileSync(path.join(f.candidate, `prisma/migrations/${appReleaseRetentionMigrationName}/migration.sql`),
+      readFileSync(`prisma/migrations/${appReleaseRetentionMigrationName}/migration.sql`, 'utf8').replaceAll('\r\n', '\n'))
     return f
   }
   it('permits only the exact frozen retention schema pair and single SQL', () => {
@@ -369,6 +372,111 @@ enum AccountVerificationSendState {
     if (change === 'extra') writeFileSync(path.join(path.dirname(f.migrationPath), 'extra.sql'), 'SELECT 1;')
     expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
   })
+
+  const personalizationFixture = () => {
+    const f = emailAccountFixture()
+    const schema = readFileSync(path.join(f.candidate, 'prisma/schema.prisma'), 'utf8')
+    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), schema)
+    mkdirSync(path.join(f.baseline, 'prisma/migrations', emailAccountMigrationName))
+    writeFileSync(path.join(f.baseline, 'prisma/migrations', emailAccountMigrationName, 'migration.sql'), readFileSync(f.migrationPath))
+    const model = `enum AgentPersonalizationStyle {
+  natural
+  professional
+  direct
+  partner
+}
+
+enum AgentPersonalizationDegree {
+  less
+  default
+  more
+}
+
+enum AgentPersonalizationMemorySource {
+  manual
+  conversation
+}
+
+model AgentPersonalization {
+  userId             String                    @id @map("user_id") @db.VarChar(64)
+  user               User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  revision           Int                       @default(0)
+  memoryRevision     Int                       @default(0) @map("memory_revision")
+  memoryEpoch        Int                       @default(0) @map("memory_epoch")
+  memoryEpochChangedAt DateTime?                @map("memory_epoch_changed_at")
+  memoryEnabled      Boolean                   @default(true) @map("memory_enabled")
+  preferredName      String                    @default("") @map("preferred_name") @db.VarChar(80)
+  aboutMe            String                    @default("") @map("about_me") @db.VarChar(2000)
+  customInstructions String                    @default("") @map("custom_instructions") @db.VarChar(2000)
+  style              AgentPersonalizationStyle @default(natural)
+  warmth             AgentPersonalizationDegree @default(default)
+  enthusiasm         AgentPersonalizationDegree @default(default)
+  detail             AgentPersonalizationDegree @default(default)
+  emoji              AgentPersonalizationDegree @default(less)
+  format             AgentPersonalizationDegree @default(default)
+  memories           AgentPersonalizationMemory[]
+
+  @@map("agent_personalizations")
+}
+
+model AgentPersonalizationMemory {
+  id           String                          @id @default(cuid()) @db.VarChar(64)
+  userId       String                          @map("user_id") @db.VarChar(64)
+  profile      AgentPersonalization            @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  text         String                          @db.VarChar(500)
+  textDigest   String                          @map("text_digest") @db.VarChar(64)
+  source       AgentPersonalizationMemorySource
+  revision     Int                             @default(1)
+  createdAt    DateTime                        @default(now()) @map("created_at")
+  updatedAt    DateTime                        @updatedAt @map("updated_at")
+
+  @@unique([userId, textDigest])
+  @@index([userId, updatedAt(sort: Desc), id(sort: Desc)])
+  @@map("agent_personalization_memories")
+}
+
+`
+    const candidateSchema = schema
+      .replace('  agentRuns                  AgentRun[]\n', '  agentRuns                  AgentRun[]\n  agentPersonalization       AgentPersonalization?\n')
+      .replace('model AgentSession {', model + 'model AgentSession {')
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), candidateSchema)
+    const relative = `prisma/migrations/${agentPersonalizationMigrationName}/migration.sql`
+    const sql = path.join(f.candidate, relative)
+    mkdirSync(path.dirname(sql))
+    writeFileSync(sql, readFileSync(relative))
+    return { ...f, sql }
+  }
+
+  it('admits the exact personalization schema pair and sole reviewed SQL in the deploy entrypoint', () => {
+    const f = personalizationFixture()
+    expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(agentPersonalizationMigrationName)
+    expect(readFileSync('deploy/deploy-production.sh', 'utf8')).toContain(`"$MIGRATION_PLAN" == "${agentPersonalizationMigrationName}"`)
+    rmSync(path.dirname(f.candidate), { recursive: true })
+  })
+  it.each(['baseline', 'schema', 'history', 'sql', 'extra'])('rejects personalization %s outside its exact approval', change => {
+    const f = personalizationFixture()
+    if (change === 'baseline') writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), '// unrelated')
+    if (change === 'schema') writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), '// unrelated')
+    if (change === 'history') writeFileSync(f.migrationPath, 'SELECT 1;')
+    if (change === 'sql') writeFileSync(f.sql, 'SELECT 1;')
+    if (change === 'extra') writeFileSync(path.join(path.dirname(f.sql), 'extra.sql'), 'SELECT 1;')
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+    rmSync(path.dirname(f.candidate), { recursive: true })
+  })
+
+  it('verifies both personalization catalogs are absent before and queries only their metadata', async () => {
+    const statements: string[] = []
+    const read = (sql: string) => { statements.push(sql); return Promise.resolve([]) }
+    const tx = { $queryRawUnsafe: read, $queryRaw: ([sql]: TemplateStringsArray) => read(sql) }
+    const before = await readAgentPersonalizationState(tx, 'before')
+    expect(() => assertAgentPersonalizationState(before, 'before')).not.toThrow()
+    expect(() => assertAgentPersonalizationState({ ...before, enums: [{ name: 'AgentPersonalizationStyle', labels: [null] }] }, 'before')).toThrow(/enum catalog/)
+    expect(() => assertAgentPersonalizationState({ ...before, profiles: { ...before.profiles, tables: [{ name: 'agent_personalizations', kind: 'r' }] } }, 'before')).toThrow(/already exist/)
+    expect(() => assertAgentPersonalizationState({ ...before, memories: { ...before.memories, tables: [{ name: 'agent_personalization_memories', kind: 'v' }] } }, 'before')).toThrow(/already exist/)
+    expect(statements).toHaveLength(9)
+    for (const sql of statements) expect(sql).toMatch(/^SELECT [\s\S]*\bFROM pg_\w+/)
+  })
+
   it('rejects a preexisting announcement receipt table before migration', () => {
     const before = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }
     expect(() => assertAnnouncementReadsState(before, 'before')).not.toThrow()
@@ -380,6 +488,7 @@ enum AccountVerificationSendState {
     [announcementReadsMigrationName, announcementReadsMigrationChecksum],
     [userNotificationsMigrationName, userNotificationsMigrationChecksum],
     [emailAccountMigrationName, emailAccountMigrationChecksum],
+    [agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum],
   ])('requires only %s pending, one exact successful row afterwards and unchanged full history', (migration, checksum) => {
     const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1, historyHash: 'a'.repeat(32) }
     const target = { ...old, migration_name: migration, checksum }
@@ -447,7 +556,8 @@ enum AccountVerificationSendState {
     writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-admin-experience.schema.prisma', import.meta.url)))
     for (const [name] of adminExperienceMigrations) {
       mkdirSync(path.join(f.candidate, `prisma/migrations/${name}`))
-      writeFileSync(path.join(f.candidate, `prisma/migrations/${name}/migration.sql`), readFileSync(`prisma/migrations/${name}/migration.sql`))
+      writeFileSync(path.join(f.candidate, `prisma/migrations/${name}/migration.sql`),
+        readFileSync(`prisma/migrations/${name}/migration.sql`, 'utf8').replaceAll('\r\n', '\n'))
     }
     return f
   }
@@ -600,7 +710,8 @@ enum AccountVerificationSendState {
     writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), baseline)
     writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), schema)
     mkdirSync(path.join(f.candidate, `prisma/migrations/${webToolBillingMigrationName}`))
-    writeFileSync(path.join(f.candidate, `prisma/migrations/${webToolBillingMigrationName}/migration.sql`), readFileSync(`prisma/migrations/${webToolBillingMigrationName}/migration.sql`))
+    writeFileSync(path.join(f.candidate, `prisma/migrations/${webToolBillingMigrationName}/migration.sql`),
+      readFileSync(`prisma/migrations/${webToolBillingMigrationName}/migration.sql`, 'utf8').replaceAll('\r\n', '\n'))
     return f
   }
   it('permits only the frozen billing schema and exact SQL with unchanged historical files', () => {

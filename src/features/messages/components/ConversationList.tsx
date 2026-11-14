@@ -43,6 +43,8 @@ function formatUnreadBadge(count: number) {
   return count > 99 ? '99' : `${count}`
 }
 
+const listScrollClass = 'min-h-0 flex-1 overflow-y-auto mobile:[scrollbar-width:none] mobile:[&::-webkit-scrollbar]:hidden'
+
 /** 未读红点徽标：leading-none + 等宽数字保证数字落在圆圈正中心 */
 function UnreadBadge({ count }: { count: number }) {
   return (
@@ -192,7 +194,7 @@ export default function ConversationList({
           </button>
           <p className="text-base font-semibold text-[var(--text-primary)]">陌生消息</p>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className={listScrollClass}>
           <p className="px-4 pb-1 pt-3 text-xs text-[var(--text-tertiary)]">互相关注前，最多给对方发送 3 条消息。</p>
           <div className="space-y-1 px-2 pb-2">
             {strangerConversations.length === 0 ? (
@@ -218,7 +220,7 @@ export default function ConversationList({
         ) : null}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto" onScroll={handleListScroll}>
+      <div className={listScrollClass} onScroll={handleListScroll}>
         {/* 互关好友横向栏：点击头像直接发起/进入私聊 */}
         {loadingFriends ? <MutualFriendsSkeleton /> : mutualFriends.length > 0 ? (
           <div className="border-b border-[var(--border-subtle)] py-2">

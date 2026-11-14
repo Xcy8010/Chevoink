@@ -5,6 +5,8 @@ import type { readExecutionStateInTransaction } from './runtime-state.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { intersectToolAuthority, restrictToolsToTask, snapshotToolAuthority } from './tool-authority.js'
 import type { AgentTool } from './tools/types.js'
+import { PERSONALIZATION_TOOL_NAMES, PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
+import { env } from '../../config/env.js'
 
 type Configuration = Awaited<ReturnType<typeof readExecutionStateInTransaction>>['configuration']
 const grantSchema = z.object({ name: z.string(), permission: z.enum(['allow', 'ask', 'deny']), alwaysConfirm: z.boolean(), dangerous: z.boolean() }).strict()
@@ -47,9 +49,13 @@ export async function readEffectiveNativeTooling(tx: RuntimeTx, lease: RunLeaseT
   const { executionContextReadTool } = await import('./tools/task-context-tools.js')
   const { ORCHESTRATION_TOOL_NAMES } = await import('./tools/task-orchestration-tools.js')
   const goal = await tx.agentGoalExecution.findFirst({ where: { runId: lease.runId }, select: { goalId: true } })
+  const personalizationEnabled = !session.spawnedFromSessionId && !lease.parent && (env.appEnv !== 'production'
+    || await (await import('../app-releases.js')).hasAgentPersonalizationCapability(lease.userId, tx))
   const contextRead: AgentTool = { ...executionContextReadTool,
     execute: (ctx, args) => executionContextReadTool.execute(ctx, executionContextReadTool.parameters.parse(args)) }
   const candidates = [...getToolsForAgent(agent, configuration.mode, resolveAgent2FeatureFlags(lease.userId), { goalOwned: Boolean(goal) }), contextRead]
+    .filter(tool => personalizationEnabled || !PERSONALIZATION_TOOL_NAMES.has(tool.name))
+    .filter(tool => !(session.spawnedFromSessionId || lease.parent || goal) || !PERSONALIZATION_WRITE_ACTIONS.includes(tool.name))
     .filter(tool => !session.spawnedFromSessionId || !ORCHESTRATION_TOOL_NAMES.has(tool.name))
   let tools = applySessionToolPolicy(restrictToolsToTask(candidates, task, configuration.mode), configuration.mode, session.toolPolicy,
     session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
@@ -70,5 +76,5 @@ export async function readEffectiveNativeTooling(tx: RuntimeTx, lease: RunLeaseT
   // Existing custom parameter contracts remain significant. Missing tool names
   // may be restored from actual permissions without rewriting old contracts.
   const definitions = tools.map(tool => previous.find(item => item.function.name === tool.name) ?? toOpenAITools([tool], task.scope)[0])
-  return { tools: definitions, toolAuthority: [...snapshotToolAuthority(tools, configuration.mode)].map(([name, grant]) => ({ name, ...grant })) }
+  return { tools: definitions, toolAuthority: [...snapshotToolAuthority(tools, configuration.mode)].map(([name, grant]) => ({ name, ...grant })), personalizationEnabled }
 }

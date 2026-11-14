@@ -1,4 +1,5 @@
 import { readEffectiveNativeTooling, readNativeToolAdmission } from './native-tool-policy.js'
+import { PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
 import { DataAccessError } from '../prisma.js'
 import { findPlanByIdentity } from './novel-plan-contract.js'
 import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView } from './runtime-tool-view.js'
@@ -260,7 +261,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (input.effectDomain === 'import' && (input.action !== 'novel_import' || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入能力仅允许原任务的专用导入流程。')
     const plan = input.effectDomain === 'plan'
     const configuration = input.effectDomain === 'configuration'
-    if (configuration && (!['agent_configure', 'model_assign'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '配置能力只能更新当前任务的执行选项。')
+    if (configuration && (!['agent_configure', 'model_assign', ...PERSONALIZATION_WRITE_ACTIONS].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '配置能力只能用于本任务已获准的设置操作。')
     const read = input.effectDomain === 'read' || configuration
     const metadata = input.effectDomain === 'metadata'
     if (metadata && (!['task_scope_bind', 'novel_create', 'novel_publish', 'novel_archive', 'cover_generate', 'cover_apply', 'research_dossier_build', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')

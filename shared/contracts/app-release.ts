@@ -1,6 +1,6 @@
 import { z } from 'zod'
 export const appReleaseIdSchema=z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/)
-export const appReleaseCapabilities=['siteContent','testerManagement','imageQuality','modelPromotions','imageWeightedRoutes','publicModelDetails','legacyEmailBinding'] as const
+export const appReleaseCapabilities=['siteContent','testerManagement','imageQuality','modelPromotions','imageWeightedRoutes','publicModelDetails','legacyEmailBinding','agentPersonalization'] as const
 export type AppReleaseCapability=typeof appReleaseCapabilities[number]
 export const publicReleaseNotesSchema=z.object({changes:z.array(z.string().trim().min(1).max(1000)).max(50),features:z.array(z.string().trim().min(1).max(1000)).max(50),fixes:z.array(z.string().trim().min(1).max(1000)).max(50)}).refine(value=>value.changes.length+value.features.length+value.fixes.length>0,'请提供具体更新说明')
 const ciSchema=z.object({headSha:z.string().regex(/^[a-f0-9]{40}$/),workflowName:z.literal('CI'),status:z.literal('completed'),conclusion:z.literal('success'),jobs:z.array(z.object({name:z.string(),status:z.literal('completed'),conclusion:z.literal('success')})).min(5).max(100)})

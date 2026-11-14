@@ -25,6 +25,9 @@ const userNotificationsTable = 'user_notifications'
 export const emailAccountMigrationName = '20261112090000_email_account_auth'
 export const emailAccountMigrationChecksum = '07112bd97b8b5163f951d748df6d6681be343b9456866f2329235d9f07b48740'
 const emailAccountCandidateSchema = '8d8b27d023654f0330e35f81a12ee1894f0017dce1f31d663a3fd93d77dc1ecc'
+export const agentPersonalizationMigrationName = '20261114090000_agent_personalization'
+export const agentPersonalizationMigrationChecksum = 'bfdb011141b5fd5a447e6e896aef12e48203b2d199d23ec390629480e1fe6892'
+const agentPersonalizationCandidateSchema = 'b55c24ace244e9695ffa4d6733554fa16aa384907e8085766b12922ef12a8302'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -45,7 +48,8 @@ reviewed.set(appReleaseRetentionMigrationName, appReleaseRetentionMigrationCheck
 reviewed.set(announcementReadsMigrationName, announcementReadsMigrationChecksum)
 reviewed.set(userNotificationsMigrationName, userNotificationsMigrationChecksum)
 reviewed.set(emailAccountMigrationName, emailAccountMigrationChecksum)
-const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName])
+reviewed.set(agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum)
+const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -69,6 +73,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const personalizationTarget = `${agentPersonalizationMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === emailAccountCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === agentPersonalizationCandidateSchema
+    && !oldFiles.some(([name]) => name === personalizationTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== personalizationTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === personalizationTarget)?.[1] === agentPersonalizationMigrationChecksum) return agentPersonalizationMigrationName
   const emailTarget = `${emailAccountMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === userNotificationsCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === emailAccountCandidateSchema
@@ -436,6 +446,84 @@ export function readUserNotificationsState(tx, phase) {
   return readAddedTableState(tx, phase, userNotificationsTable)
 }
 
+const personalizationTable = 'agent_personalizations'
+const memoriesTable = 'agent_personalization_memories'
+const personalizationEnums = [
+  { name: 'AgentPersonalizationDegree', labels: ['less', 'default', 'more'] },
+  { name: 'AgentPersonalizationMemorySource', labels: ['manual', 'conversation'] },
+  { name: 'AgentPersonalizationStyle', labels: ['natural', 'professional', 'direct', 'partner'] },
+]
+const personalizationTimestamp = 'timestamp(3) without time zone'
+const personalizationDegree = '"AgentPersonalizationDegree"'
+
+function addedPersonalizationTable(table, columnSpecs, indexSpecs, primaryKey, foreignTable, foreignKey) {
+  return {
+    tables: [{ name: table, kind: 'r' }],
+    columns: columnSpecs.map(([name, type, required = true, defaultValue = null]) => ({ name, type, required, defaultValue })),
+    indexes: indexSpecs.map(([suffix, unique, columns, indexColumns = columns]) => ({
+      name: `${table}_${suffix}`, unique, columns,
+      definition: `CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${table}_${suffix} ON public.${table} USING btree (${indexColumns.join(', ')})`,
+      valid: true, ready: true, partial: false, expression: false,
+    })),
+    constraints: [
+      { name: `${table}_pkey`, kind: 'p', definition: `PRIMARY KEY (${primaryKey})`, valid: true },
+      { name: `${table}_user_id_fkey`, kind: 'f',
+        definition: `FOREIGN KEY (user_id) REFERENCES ${foreignTable}(${foreignKey}) ON UPDATE CASCADE ON DELETE CASCADE`, valid: true },
+    ],
+    rowCount: 0,
+  }
+}
+
+const personalizationState = addedPersonalizationTable(personalizationTable, [
+  ['user_id', 'character varying(64)'],
+  ['revision', 'integer', true, '0'],
+  ['memory_revision', 'integer', true, '0'],
+  ['memory_epoch', 'integer', true, '0'],
+  ['memory_epoch_changed_at', personalizationTimestamp, false],
+  ['memory_enabled', 'boolean', true, 'true'],
+  ['preferred_name', 'character varying(80)', true, "''::character varying"],
+  ['about_me', 'character varying(2000)', true, "''::character varying"],
+  ['custom_instructions', 'character varying(2000)', true, "''::character varying"],
+  ['style', '"AgentPersonalizationStyle"', true, `'natural'::"AgentPersonalizationStyle"`],
+  ...['warmth', 'enthusiasm', 'detail', 'format'].map(name => [name, personalizationDegree, true, `'default'::${personalizationDegree}`]),
+  ['emoji', personalizationDegree, true, `'less'::${personalizationDegree}`],
+], [['pkey', true, ['user_id']]], 'user_id', 'users', 'id')
+
+const memoriesState = addedPersonalizationTable(memoriesTable, [
+  ['id', 'character varying(64)'],
+  ['user_id', 'character varying(64)'],
+  ['text', 'character varying(500)'],
+  ['text_digest', 'character varying(64)'],
+  ['source', '"AgentPersonalizationMemorySource"'],
+  ['revision', 'integer', true, '1'],
+  ['created_at', personalizationTimestamp, true, 'CURRENT_TIMESTAMP'],
+  ['updated_at', personalizationTimestamp],
+], [
+  ['pkey', true, ['id']],
+  ['user_id_text_digest_key', true, ['user_id', 'text_digest']],
+  ['user_id_updated_at_id_idx', false, ['user_id', 'updated_at', 'id'], ['user_id', 'updated_at DESC', 'id DESC']],
+], 'id', personalizationTable, 'user_id')
+
+export function assertAgentPersonalizationState(state, phase, before) {
+  assertAddedTableState(state.profiles, phase, before?.profiles, personalizationState, 'Agent personalization profiles')
+  assertAddedTableState(state.memories, phase, before?.memories, memoriesState, 'Agent personalization memories')
+  const expectedEnums = phase === 'after' ? personalizationEnums : []
+  if (!sameRows(state.enums.map(({ name, labels }) => [name, labels]), expectedEnums.map(({ name, labels }) => [name, labels]))
+    || (phase === 'after' && before.enums.length)) throw Error('Agent personalization enum catalog mismatch')
+}
+
+export async function readAgentPersonalizationState(tx, phase) {
+  const [profiles, memories, enums] = await Promise.all([
+    readAddedTableState(tx, phase, personalizationTable),
+    readAddedTableState(tx, phase, memoriesTable),
+    tx.$queryRaw`SELECT t.typname AS name, array_agg(e.enumlabel::text ORDER BY e.enumsortorder) AS labels
+      FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace LEFT JOIN pg_enum e ON e.enumtypid=t.oid
+      WHERE n.nspname=current_schema() AND t.typname IN ('AgentPersonalizationDegree','AgentPersonalizationMemorySource','AgentPersonalizationStyle')
+      GROUP BY t.typname ORDER BY t.typname`,
+  ])
+  return { profiles, memories, enums }
+}
+
 const smsPurposeBefore = ['login', 'register', 'reset_password', 'admin_login', 'admin_bind']
 const emailPurposeAfter = ['register', 'login', 'bind', 'reset_password', 'change_password']
 const verificationStates = ['pending', 'accepted', 'rejected', 'unknown', 'suppressed']
@@ -613,6 +701,11 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === agentPersonalizationMigrationName) {
+        const personalization = await readAgentPersonalizationState(tx, phase)
+        assertAgentPersonalizationState(personalization, phase, before?.personalization)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, personalization }
+      }
       if (plan === emailAccountMigrationName) {
         const emailAccounts = await readEmailAccountMigrationState(tx, phase, before?.emailAccounts)
         return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, emailAccounts }

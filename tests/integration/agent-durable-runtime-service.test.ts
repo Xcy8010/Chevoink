@@ -49,6 +49,60 @@ import * as credits from '../../api/lib/credits.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
 import { interactiveRunSlots } from '../../api/lib/agent/run-slots.js'
+import { accountPreferencesUpdateTool } from '../../api/lib/agent/tools/personalization-tools.js'
+import { createPersonalizationMemory, deletePersonalizationMemory, getAgentPersonalization } from '../../api/lib/agent/personalization.js'
+import { modelRouteRevision, prepareModelCursorOperation } from '../../api/lib/agent/runtime-model-cursor.js'
+import { STALE_PERSONALIZATION_REQUEST } from '../../api/lib/agent/runtime-personalization.js'
+
+describe.runIf(available)('durable personalization', () => {
+  const model = { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high',
+    routeRevision: modelRouteRevision({ provider: 'fixture', model: 'fixture',
+      endpoint: 'https://provider.invalid/v1/chat/completions', reasoningEffort: 'high' }) }
+  const configuration = {
+    version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+    model, tools: toOpenAITools([accountPreferencesUpdateTool]),
+    toolAuthority: [{ name: accountPreferencesUpdateTool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }],
+    protectedChapterIds: [], pinnedSkillVersions: [],
+  }
+  const initial = { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle',
+    pendingOperationId: null, successfulToolSignatures: [] }
+
+  it('commits and observes a profile update once inside the owned tool receipt', async () => {
+    const prompt = '以后叫我小景。'
+    await fixture(async f => {
+      const lease = await claim(f)
+      await initializeExecutionState(lease, { configuration, snapshot: { ...initial,
+        messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null,
+          toolCalls: [{ id: 'set-name', name: 'account_preferences_update', arguments: '{"preferredName":"小景","expectedRevision":0}' }] }] } })
+      expect((await executeDurableToolStep(lease, new AbortController().signal)).kind).toBe('tool')
+      expect(await getAgentPersonalization(f.userId)).toMatchObject({ settings: { preferredName: '小景' }, revision: 1 })
+      expect((await executeDurableToolStep(lease, new AbortController().signal)).kind).toBe('idle')
+      expect(await getAgentPersonalization(f.userId)).toMatchObject({ revision: 1 })
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'account_preferences_update', status: 'succeeded', effectReceipt: { isNot: null } } })).toBe(1)
+    }, undefined, prompt, { agentWritingProtocol: 1 })
+  })
+
+  it('leaves an old personalized request unsent and advances to a fresh cursor', async () => {
+    await fixture(async f => {
+      const lease = await claim(f)
+      const messages = [{ role: 'user', content: '讨论提纲' }]
+      const { frame } = await initializeExecutionState(lease, { configuration, snapshot: { ...initial, messages } })
+      const memory = await createPersonalizationMemory(f.userId, '一条稍后删除的记忆')
+      const request = { endpoint: 'https://provider.invalid/v1/chat/completions', body: { model: 'fixture', messages, tools: configuration.tools }, personalizationMemoryEpoch: 0 }
+      const { operation } = await prepareModelCursorOperation(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash },
+        { key: 'exec:0', action: 'workspaceAgent', request, price: { version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 0 } })
+      const attempt = await runtimeOperations.prepareProviderAttempt(lease, { operationId: operation.id, request, attemptKey: '1', provider: 'fixture', model: 'fixture' })
+      await deletePersonalizationMemory(f.userId, memory.id, memory.revision)
+      await expect(runtimeOperations.markProviderDispatched(lease, attempt.id)).rejects.toMatchObject({ code: STALE_PERSONALIZATION_REQUEST })
+      await runtimeOperations.markProviderNotDispatched({ userId: f.userId, attemptId: attempt.id, requestHash: attempt.requestHash, code: STALE_PERSONALIZATION_REQUEST })
+      expect((await executeDurableStep(lease, new AbortController().signal)).kind).toBe('context')
+      expect((await loadExecutionState(f.userId, f.runId)).frame.state).toMatchObject({
+        phase: 'idle', pendingOperationId: null, nextOperationSequence: 1, messages,
+      })
+      expect(await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).toMatchObject({ status: 'cancelled', dispatchedAt: null })
+    })
+  })
+})
 
 describe.runIf(available)('durable domain reads', () => {
   it.each(['research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'trace-missing', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'search-rollback', 'search-repeat', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get'] as const)('%s records an observation or explicit missing-target failure', async scenario => {

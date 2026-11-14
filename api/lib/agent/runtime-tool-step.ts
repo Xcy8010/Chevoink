@@ -1,6 +1,10 @@
 import { DataAccessError } from '../prisma.js'
 import { findPlanByIdentity } from './novel-plan-contract.js'
-import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection } from './runtime-tool-view.js'
+import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection,
+  readAssistantModelSnapshot, readPreparedModelRequest } from './runtime-tool-view.js'
+import { PERSONALIZATION_READ_ACTIONS, PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
+import { accountProfileTool, accountPreferencesGetTool, accountPreferencesUpdateTool, accountMemoryListTool,
+  accountMemorySaveTool, accountMemoryUpdateTool, accountMemoryDeleteTool, creationSettingsTool } from './tools/personalization-tools.js'
 import { readEffectiveNativeTooling, readNativeToolAdmission, type NativeToolAdmission } from './native-tool-policy.js'
 import { z } from 'zod'
 import { originalToolParameterSchemas } from './tool-schema.js'
@@ -13,7 +17,7 @@ import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-s
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { normalizeToolInput, validateToolInput } from './tools/input-validation.js'
 import { readPreparedLiteraryArguments, rejectToolCursorCall } from './runtime-tool-cursor.js'
-import { readFailedToolResult, reduceExecutionReceipt } from './runtime-reducer.js'
+import { failedToolResultSchema, readFailedToolResult, reduceExecutionReceipt } from './runtime-reducer.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { chapterReadTool, planReadTool, novelGetContextTool, chapterListSummariesTool, memorySearchTool } from './tools/read-tools.js'
 import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from './tools/chapter-tools.js'
@@ -74,7 +78,7 @@ import { withGoalExecutionContext, withGoalEffects } from './goal-context.js'
 import { readGoalExecution } from './goal-fence.js'
 import { goalEnableTool, goalReadTool, goalReportTool } from './tools/goal-tools.js'
 import { prepareToolCursorOperation } from './runtime-tool-cursor.js'
-import { commitOperationEffect } from './runtime-operations.js'
+import { commitOperationEffect, recordToolFailure } from './runtime-operations.js'
 import type { CreditModelTier, ModelReasoningEffort } from '../../../shared/contracts/index.js'
 import { configureAgentTool, modelListTool } from './tools/configuration-tools.js'
 import { modelAssignmentTool } from './tools/model-assignment-tools.js'
@@ -85,7 +89,8 @@ import { executeDurableChildTool } from './runtime-child-tools.js'
 import { skillCatalogTool, skillLoadTool, skillRunExplainTool, skillSharedInvitesTool, skillCreateDraftTool, skillTestTool,
   skillEnableTool, skillInstallSharedTool, skillRollbackTool, skillPublishTool, creativeCritiqueTool, creativeRevisionDraftTool } from './tools/skill-tools.js'
 
-const HISTORY_READ_ACTIONS = ['account_credits', 'account_credit_history', 'account_novels', 'task_context_list', 'task_context_read', 'session_history_search', 'session_message_read'] as const
+const HISTORY_READ_ACTIONS = ['account_credits', 'account_credit_history', 'account_novels', 'task_context_list', 'task_context_read', 'session_history_search', 'session_message_read',
+  ...PERSONALIZATION_READ_ACTIONS] as const
 const DOMAIN_READ_ACTIONS = ['model_list', 'craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get', 'research_report_read', 'plan_exit', 'platform_novel_search', 'platform_novel_read'] as const
 
 function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
@@ -111,6 +116,8 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(goalEnableTool), checkedAdapter(goalReadTool), checkedAdapter(goalReportTool),
   checkedAdapter(novelImportTool),
   checkedAdapter(accountCreditsTool), checkedAdapter(accountCreditHistoryTool), checkedAdapter(accountNovelsTool), checkedAdapter(sessionRenameTool),
+  checkedAdapter(accountProfileTool), checkedAdapter(accountPreferencesGetTool), checkedAdapter(accountPreferencesUpdateTool), checkedAdapter(creationSettingsTool),
+  checkedAdapter(accountMemoryListTool), checkedAdapter(accountMemorySaveTool), checkedAdapter(accountMemoryUpdateTool), checkedAdapter(accountMemoryDeleteTool),
   checkedAdapter(projectSearchTool), checkedAdapter(entityResolveTool), checkedAdapter(impactAnalyzeTool), checkedAdapter(structureValidateTool),
   checkedAdapter(storyCharterGetTool), checkedAdapter(storyCharterSaveTool), checkedAdapter(readerPromiseSaveTool), checkedAdapter(readerPromiseUpdateTool), checkedAdapter(qualityReportGetTool),
   checkedAdapter(executionContextReadTool),
@@ -258,6 +265,13 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     ctx.inlineChild = Boolean(lease.parent)
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
     if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
+    else if (PERSONALIZATION_WRITE_ACTIONS.includes(call.name)) {
+      ctx.durableConfiguration = capability
+      if (call.name === 'account_memory_save') {
+        const source = readPreparedModelRequest(await readAssistantModelSnapshot(tx, lease.taskRootId, frame))
+        ctx.personalizationMemoryEpoch = source.personalizationMemoryEpoch
+      }
+    }
     else if (CHILD_ACTIONS.some(action => action === call.name) || call.name === 'task_wait') { /* Trusted child adapter below; no legacy ToolContext capability. */ }
     else if (call.name === 'goal_enable') ctx.durableGoalActivation = capability
     else if (call.name === 'web_search' || call.name === 'web_read') ctx.durableWeb = capability
@@ -373,6 +387,9 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   if (CHILD_ACTIONS.some(action => action === selected.tool.name) || selected.tool.name === 'task_wait') return executeDurableChildTool(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'ask_user') return executeDurableQuestion(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'agent_configure' || selected.tool.name === 'model_assign') return { kind: 'tool' as const, result: await selected.tool.execute(selected.ctx, selected.args) }
+  if (PERSONALIZATION_WRITE_ACTIONS.includes(selected.tool.name)) {
+    return { kind: 'tool' as const, result: await executeDurablePersonalization(selected.ctx, selected.tool, selected.args) }
+  }
   if (selected.tool.name === 'novel_import') return executeDurableImport(selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'goal_enable') return { kind: 'tool' as const, result: await selected.tool.execute(selected.ctx, selected.args) }
   if (selected.tool.name === 'goal_read' || selected.tool.name === 'goal_report') return executeDurableGoalTool(selected.ctx, selected.tool, selected.args)
@@ -397,6 +414,25 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   return { kind: 'tool' as const, result: selected.ctx.durableStructure
     ? await executeDurableStructure(selected.ctx, selected.tool, selected.args)
     : await selected.tool.execute(selected.ctx, selected.args) }
+}
+
+async function executeDurablePersonalization(ctx: ToolContext, tool: AgentTool, args: Record<string, unknown>): Promise<ToolResult> {
+  const capability = ctx.durableConfiguration
+  if (!capability) return runtimeError('RUNTIME_SCOPE_MISMATCH', '个性化设置缺少当前任务的执行权限。')
+  const { lease, cursor, operationKey } = capability
+  const normalize = (raw: unknown) => tool.parameters.parse(normalizeToolInput(tool, raw))
+  const prepared = await prepareToolCursorOperation(lease, cursor, { key: operationKey, action: tool.name, callId: ctx.callId,
+    targetId: lease.taskRootId, effectDomain: 'configuration', effectiveArgs: args, normalize,
+    operationInput: runtimeJson({ callId: ctx.callId, args }).value })
+  const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx =>
+    runtimeJson({ toolResult: await tool.execute({ ...ctx, transaction: tx }, args) }).value).catch(error => {
+    if (!(error instanceof DataAccessError) || !(error.code.startsWith('PERSONALIZATION_') || error.code === 'NOT_FOUND')) throw error
+    return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
+      code: error.code, output: error.message, summary: '个性化设置未修改' })
+  })
+  await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+  return failedToolResultSchema.safeParse(receipt.result).success ? readFailedToolResult(receipt.result)
+    : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }) }).parse(receipt.result).toolResult
 }
 
 /** Goal observations/reports are model tools, but they still need the same

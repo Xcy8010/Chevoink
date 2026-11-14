@@ -4,7 +4,10 @@ import { collapseEarlyToolRounds, releaseCompletedReasoning } from '../../api/li
 import { toolTurnHistory } from '../../api/lib/agent/tool-turn-history.js'
 import { addNextPromptInstruction } from '../../api/lib/agent/next-prompt.js'
 import type { ChatMessage } from '../../api/lib/ai-service.js'
+import { env } from '../../api/config/env.js'
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), reserveTokenCredits: vi.fn(), consumeTokenCredits: vi.fn(async () => ({ chargedMilli: 0 })) }))
+vi.mock('../../api/lib/agent/personalization.js', () => ({ getPersonalizationMemoryEpoch: vi.fn(async () => 2) }))
+vi.mock('../../api/lib/app-releases.js', () => ({ hasAgentPersonalizationCapability: vi.fn(async () => false) }))
 vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiUsageLog: { create: vi.fn(async () => ({ id: 'usage' })), findUnique: vi.fn(async () => null), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) }, agentGoalUsage: { findUnique: vi.fn(async () => null) } } }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
   resolveTokenPrice: async () => ({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }) }))
@@ -28,6 +31,49 @@ function stream(text: string) {
   } }))))
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+
+describe('personalization in actual model requests', () => {
+  const messages: ChatMessage[] = [{ role: 'system', content: 'Known author context' }, { role: 'user', content: '请给我三个提纲。' }]
+  const options = { messages, tools: [], providerApiKey: 'fake-test-key',
+    personalization: { memoryEpoch: 2, message: '语气更亲切。', data: '{"私人称呼":"小景"}' },
+    usageLog: { userId: 'test', action: 'agentLoopTurn' } }
+
+  it('encodes current guidance and private context without mutating the source messages', async () => {
+    const before = structuredClone(messages)
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(
+      'data: {"choices":[{"delta":{"content":"先看这三个方向。"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\ndata: [DONE]\n\n'))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(chatWithTools(options)).resolves.toMatchObject({ content: '先看这三个方向。' })
+    expect(fetcher).toHaveBeenCalledOnce()
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
+    expect(body.messages).toEqual(expect.arrayContaining([
+      { role: 'system', content: '语气更亲切。' },
+      { role: 'user', content: expect.stringContaining('小景') },
+      ...before,
+    ]))
+    expect(messages).toEqual(before)
+  })
+
+  it('does not send a request prepared before a change to memory', async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    await expect(chatWithTools({ ...options, personalization: { ...options.personalization, memoryEpoch: 1 } }))
+      .rejects.toMatchObject({ code: 'PERSONALIZATION_REQUEST_STALE' })
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('does not send a prepared legacy request after personalization is withdrawn', async () => {
+    const original = env.appEnv
+    env.appEnv = 'production'
+    try {
+      const fetcher = vi.fn()
+      vi.stubGlobal('fetch', fetcher)
+      await expect(chatWithTools(options)).rejects.toMatchObject({ code: 'PERSONALIZATION_REQUEST_STALE' })
+      expect(fetcher).not.toHaveBeenCalled()
+    } finally { env.appEnv = original }
+  })
+})
+
 describe('next prompt from the current response', () => {
   const marker = '[[CHEVOINK_NEXT_PROMPT_1234abcd]]'
   const options = { messages: [], tools: [], providerApiKey: 'fake-test-key', nextPromptMarker: marker, usageLog: { userId: 'test', action: 'test' } }

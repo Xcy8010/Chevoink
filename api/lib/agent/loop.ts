@@ -33,6 +33,9 @@ import type {
 } from '../../../shared/contracts/index.js'
 import { env } from '../../config/env.js'
 import { chatWithTools, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from '../ai-service.js'
+import { loadPersonalizationContext, projectPersonalizedMessages, type PersonalizationContext } from './personalization-context.js'
+import { PERSONALIZATION_TOOL_NAMES, PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
+import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
 import { addNextPromptInstruction, allowsModelNextPrompt, allowsNextPrompt, DEFAULT_COMPLETED_NEXT_PROMPT, LIMITED_COMPLETED_NEXT_PROMPT, readTaskResponseNextPrompt, selectInteractiveNextPrompt } from './next-prompt.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { withGoalEffects, withGoalExecutionContext } from './goal-context.js'
@@ -1632,8 +1635,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     // 派生窗口禁用跨任务编排：否则 b 再派生 e、e 再派生 f 会指数级打爆并发与额度，
     // 而且互相等待还会直接死锁；派生窗口的职责就是干完自己那一份并交回摘要
     const orchestrationScopedTools = sessionPolicy?.spawnedFromSessionId
-      ? scopedTools.filter((tool) => !ORCHESTRATION_TOOL_NAMES.has(tool.name))
-      : scopedTools
+      ? scopedTools.filter((tool) => !ORCHESTRATION_TOOL_NAMES.has(tool.name) && !PERSONALIZATION_WRITE_ACTIONS.includes(tool.name))
+      : ownedGoalExecution ? scopedTools.filter(tool => !PERSONALIZATION_WRITE_ACTIONS.includes(tool.name)) : scopedTools
     const currentTools = applySessionToolPolicy(
       orchestrationScopedTools,
       params.mode,
@@ -1645,11 +1648,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       return (await import('./goal-activation.js')).readGoalActivationToolCeiling(tx, goal)
     }) : null
     const ceiling = params.toolAuthorityCeiling ?? (activationCeiling ? new Map(activationCeiling) : null)
-    const tools = ceiling ? intersectToolAuthority(currentTools, params.mode, ceiling) : currentTools
-    const openAITools = toOpenAITools(tools, taskSpec.scope)
-    // This run's published tool definitions are immutable. Reuse only their
-    // estimate; messages are measured afresh after steering/skill updates.
-    const toolDefinitionTokens = estimateToolDefinitionTokens(openAITools)
+    const availableTools = ceiling ? intersectToolAuthority(currentTools, params.mode, ceiling) : currentTools
+    const stableTools = availableTools.filter(tool => !PERSONALIZATION_TOOL_NAMES.has(tool.name))
+    const availableDefinitions = toOpenAITools(availableTools, taskSpec.scope)
+    const stableDefinitions = availableDefinitions.filter(tool => !PERSONALIZATION_TOOL_NAMES.has(tool.function.name))
+    const availableDefinitionTokens = estimateToolDefinitionTokens(availableDefinitions)
+    const stableDefinitionTokens = estimateToolDefinitionTokens(stableDefinitions)
     const contextWindowTokens = modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens
     let requestOutputTokens = Math.min(env.aiTextMaxOutputTokens, modelRuntime.maxOutputTokens ?? env.aiTextMaxOutputTokens)
     let outputRecoveryFrom: number | undefined
@@ -1664,7 +1668,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
      * OpenAI-compatible models. It counts tool schemas, tool arguments,
      * reasoning and multimodal placeholders instead of only visible text.
      */
-    const prepareContextForRequest = (beforeTokens: number, reason = 'turn') => {
+    const prepareContextForRequest = (beforeTokens: number, toolDefinitionTokens: number, personalization?: PersonalizationContext) => {
       let afterTokens = beforeTokens
       let compactedToolArguments = 0
       let compactedToolOutputs = 0
@@ -1676,18 +1680,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         compactedToolArguments += firstStage.compactedToolArguments
         compactedToolOutputs += firstStage.compactedToolOutputs
         collapsedToolRounds += firstStage.collapsedToolRounds
-        afterTokens = firstStage.afterTokens + toolDefinitionTokens
+        afterTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
       }
       if (afterTokens > contextBudget.hardRequestTokens) {
         const secondStage = collapseEarlyToolRounds(messages, 1)
         collapsedToolRounds += secondStage.collapsedToolRounds
-        afterTokens = secondStage.afterTokens + toolDefinitionTokens
+        afterTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
       }
       if (compactedToolArguments > 0 || compactedToolOutputs > 0 || collapsedToolRounds > 0) {
         console.info('[agent-loop] 运行中上下文压缩', JSON.stringify({
           runId,
           turn,
-          reason,
+          reason: 'turn',
           modelTier: modelRuntime.tier,
           contextWindowTokens: contextBudget.contextWindowTokens,
           beforeTokens,
@@ -1743,7 +1747,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       assertCurrentExecution: tx => assertLegacyOwnerReceipt(tx),
       writingScope: taskSpec.scope,
       protectedChapterIds: protectsEarlierContent ? new Set(taskSpec.scope.chapterIds ?? []) : undefined,
-      toolAuthority: snapshotToolAuthority(tools, params.mode),
+      toolAuthority: snapshotToolAuthority(availableTools, params.mode),
       callId: '',
       mode: params.mode,
       creativeFreedom: taskSpec.creativeFreedom,
@@ -1899,6 +1903,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     while (executionControl.controlPolicy === 'until_completion') {
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
       if (await finishPersistedWritingIfComplete()) return
+      const personalizationEnabled = !sessionPolicy?.spawnedFromSessionId
+        && (env.appEnv !== 'production' || await (await import('../app-releases.js')).hasAgentPersonalizationCapability(params.userId))
+      const tools = personalizationEnabled ? availableTools : stableTools
+      toolContext.toolAuthority = snapshotToolAuthority(tools, params.mode)
       let bootstrapCall: ToolCallRequest | undefined
       if (taskSpec.researchNavigation?.version === 1 && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied') {
         const discovery = await (await import('./research-recovery.js')).takeResearchDiscoveryHandoff({ userId: params.userId,
@@ -1992,13 +2000,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         messages.push(preparationReminder)
       }
       const budgetStarted = performance.now()
-      let estimatedRequestTokens = estimateChatMessagesTokens(messages) + toolDefinitionTokens
+      const openAITools = personalizationEnabled ? availableDefinitions : stableDefinitions
+      const toolDefinitionTokens = personalizationEnabled ? availableDefinitionTokens : stableDefinitionTokens
+      const personalization = personalizationEnabled && !bootstrapCall ? await loadPersonalizationContext(params.userId, contextPrompt) : undefined
+      toolContext.personalizationMemoryEpoch = personalization?.memoryEpoch
+      let estimatedRequestTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
       if (completedWritingWrapUp.value || estimatedRequestTokens > contextBudget.warningTokens) {
         messages.push(contextReminder)
         estimatedRequestTokens += estimateChatMessageTokens(contextReminder)
       }
       // 在发往供应商之前执行模型窗口感知的压缩；仍超限则安全收尾，不把必失败请求交给供应商。
-      let requestBudget = prepareContextForRequest(estimatedRequestTokens, 'turn')
+      let requestBudget = prepareContextForRequest(estimatedRequestTokens, toolDefinitionTokens, personalization)
       if (!bootstrapCall && outputRecoveryFrom !== undefined) {
         const fittingOutput = emptyResponseRecoveryOutputTokens(outputRecoveryFrom, modelRuntime.maxOutputTokens, contextWindowTokens, requestBudget.afterTokens)
         if (fittingOutput === null) {
@@ -2056,11 +2068,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       const observeTurnUsage = trackRequestUsage(usage)
       const recoverySystem = JSON.stringify(messages), recoveryContent = JSON.stringify(openAITools)
-      const result: ChatCompletionResult = bootstrapCall ? { content: '', reasoning: '', toolCalls: [bootstrapCall], finishReason: 'tool_calls' as const,
+      const result: ChatCompletionResult | null = bootstrapCall ? { content: '', reasoning: '', toolCalls: [bootstrapCall], finishReason: 'tool_calls' as const,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } } : await chatWithTools({
         weightedRoute: modelRuntime.weightedRoute, freePromotion: modelRuntime.freePromotion,
         onUsage: observeTurnUsage,
         messages,
+        personalization,
         nextPromptMarker,
         tools: openAITools,
         ...(requireNativeToolCall && openAITools.length > 0 ? { toolChoice: 'required' as const } : {}),
@@ -2133,12 +2146,20 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           modelTier: modelRuntime.tier,
           multiplierBps: modelRuntime.multiplierBps,
         },
+      }).catch(error => {
+        if (!(error instanceof DataAccessError) || error.code !== STALE_PERSONALIZATION_REQUEST) throw error
+        return null
       })
 
       // A generated proposal may be replaced, restricted or served from cache.
       // End all parameter previews before admission/preflight can wait on other work.
       // Journal this small tombstone so reconnect also clears previews seen earlier.
       if (announcedToolNames.size > 0) bus.emit({ type: 'tool.preparation.end', messageId, callIds: [...announcedToolNames.keys()] })
+      if (!result) {
+        bus.emit({ type: 'text.final', messageId, text: '', asReasoning: false })
+        liveTurn = null
+        continue
+      }
       if (!bootstrapCall) observeTurnUsage(result.usage)
       await persistCheckpoint()
 

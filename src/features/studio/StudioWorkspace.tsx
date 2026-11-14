@@ -54,6 +54,7 @@ import CreateNovelDialog from './components/CreateNovelDialog'
 import StudioWorkspaceSidebar from './components/StudioWorkspaceSidebar'
 import { AgentConversationRail } from './components/AgentTaskSidebar'
 import StudioSettingsDialog, { type StudioSettingsSection } from './components/StudioSettingsDialog'
+import { agentPersonalizationQueryKey } from './personalization-api'
 import WorkPerspective from './components/WorkPerspective'
 import WorkInspector from './components/WorkInspector'
 import IdePerspective from './components/IdePerspective'
@@ -1268,6 +1269,14 @@ export default function StudioWorkspace() {
       }
       if (event.type === 'tool.result' && event.ok && event.toolName.startsWith('memory_')) {
         void queryClient.invalidateQueries({ queryKey: ['studio', activeNovelId, 'memory-graph'] })
+      }
+      if (event.type === 'tool.result' && event.ok && (
+        event.toolName === 'account_preferences_update'
+        || event.toolName === 'account_memory_save'
+        || event.toolName === 'account_memory_update'
+        || event.toolName === 'account_memory_delete'
+      )) {
+        void queryClient.invalidateQueries({ queryKey: agentPersonalizationQueryKey })
       }
       if (event.type === 'run.finished') {
         void queryClient.invalidateQueries({ queryKey: ['studio', activeNovelId, 'memory-graph'] })

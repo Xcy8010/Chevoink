@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
@@ -130,4 +130,26 @@ it('reuses the same pending direct conversation request after backing out and re
   expect(createDirectConversation).toHaveBeenCalledTimes(1)
   await act(async () => finish(conversation))
   expect(await screen.findByRole('link', { name: '山舟' })).toBeTruthy()
+})
+
+it('hides the mobile thumb in both message views and still requests the next page on scroll', async () => {
+  vi.mocked(listConversations)
+    .mockResolvedValueOnce({ items: [{ ...conversation, isMutualFollow: false }], pagination: { ...pagination, hasMore: true } })
+    .mockResolvedValue({ items: [], pagination: { ...pagination, page: 2 } })
+  renderMessages()
+  const strangerEntry = await screen.findByRole('button', { name: /^陌生消息/ })
+  const mainList = strangerEntry.closest<HTMLElement>('.overflow-y-auto')!
+  expect(mainList.classList.contains('mobile:[scrollbar-width:none]')).toBe(true)
+  expect(mainList.classList.contains('mobile:[&::-webkit-scrollbar]:hidden')).toBe(true)
+  Object.defineProperties(mainList, {
+    scrollHeight: { value: 280 },
+    clientHeight: { value: 200 },
+  })
+  fireEvent.scroll(mainList)
+  await waitFor(() => expect(listConversations).toHaveBeenCalledTimes(2))
+
+  fireEvent.click(strangerEntry)
+  const strangerList = screen.getByText('互相关注前，最多给对方发送 3 条消息。').closest<HTMLElement>('.overflow-y-auto')!
+  expect(strangerList.classList.contains('mobile:[scrollbar-width:none]')).toBe(true)
+  expect(strangerList.classList.contains('mobile:[&::-webkit-scrollbar]:hidden')).toBe(true)
 })

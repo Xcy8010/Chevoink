@@ -425,6 +425,7 @@ model User {
   aiModelConfigs             AiModelConfig[]
   agentSessions              AgentSession[]
   agentRuns                  AgentRun[]
+  agentPersonalization       AgentPersonalization?
   durableTaskRoots           AgentTaskRoot[]
   legacyAgentAttachmentGrants LegacyAgentAttachmentGrant[]
   smsVerificationCodes       SmsVerificationCode[]
@@ -1434,6 +1435,62 @@ model AiModelConfig {
   systemBindings   AiModelSystemBinding[]
   versions         AiModelConfigVersion[]
 
+}
+
+enum AgentPersonalizationStyle {
+  natural
+  professional
+  direct
+  partner
+}
+
+enum AgentPersonalizationDegree {
+  less
+  default
+  more
+}
+
+enum AgentPersonalizationMemorySource {
+  manual
+  conversation
+}
+
+model AgentPersonalization {
+  userId             String                    @id @map("user_id") @db.VarChar(64)
+  user               User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  revision           Int                       @default(0)
+  memoryRevision     Int                       @default(0) @map("memory_revision")
+  memoryEpoch        Int                       @default(0) @map("memory_epoch")
+  memoryEpochChangedAt DateTime?                @map("memory_epoch_changed_at")
+  memoryEnabled      Boolean                   @default(true) @map("memory_enabled")
+  preferredName      String                    @default("") @map("preferred_name") @db.VarChar(80)
+  aboutMe            String                    @default("") @map("about_me") @db.VarChar(2000)
+  customInstructions String                    @default("") @map("custom_instructions") @db.VarChar(2000)
+  style              AgentPersonalizationStyle @default(natural)
+  warmth             AgentPersonalizationDegree @default(default)
+  enthusiasm         AgentPersonalizationDegree @default(default)
+  detail             AgentPersonalizationDegree @default(default)
+  emoji              AgentPersonalizationDegree @default(less)
+  format             AgentPersonalizationDegree @default(default)
+  memories           AgentPersonalizationMemory[]
+
+  @@map("agent_personalizations")
+}
+
+model AgentPersonalizationMemory {
+  id           String                          @id @default(cuid()) @db.VarChar(64)
+  userId       String                          @map("user_id") @db.VarChar(64)
+  profile      AgentPersonalization            @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  text         String                          @db.VarChar(500)
+  textDigest   String                          @map("text_digest") @db.VarChar(64)
+  source       AgentPersonalizationMemorySource
+  revision     Int                             @default(1)
+  createdAt    DateTime                        @default(now()) @map("created_at")
+  updatedAt    DateTime                        @updatedAt @map("updated_at")
+
+  @@unique([userId, textDigest])
+  @@index([userId, updatedAt(sort: Desc), id(sort: Desc)])
+  @@map("agent_personalization_memories")
 }
 
 model AgentSession {

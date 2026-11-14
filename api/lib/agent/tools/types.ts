@@ -49,6 +49,8 @@ export type ToolContext = {
   toolAuthority?: ToolAuthority
   /** Internal execution provenance, never populated from model arguments. */
   inlineChild?: boolean
+  /** Memory generation observed by this main model request. Never model input. */
+  personalizationMemoryEpoch?: number
   durableGoalActivation?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   /** Internal, frozen at admission. Never populated from model arguments. */
   durableContent?: { lease: RunLeaseToken; operationKey: string; chapterId: string; expectedRevision: number;

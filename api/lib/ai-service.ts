@@ -18,6 +18,8 @@ import type { ResponsesContinuation } from './ai-responses-continuation.js'
 import { createNextPromptStream, splitNextPrompt } from './agent/next-prompt.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
+import { projectPersonalizedMessages, type PersonalizationContext } from './agent/personalization-context.js'
+import { STALE_PERSONALIZATION_REQUEST } from './agent/runtime-personalization.js'
 import type { settleProviderOperation } from './agent/runtime-settlement.js'
 import { withLeaseHeartbeat } from './agent/runtime-heartbeat.js'
 import { resolveDurableTokenPrice, resolveTokenPrice } from './billing/resolve-token-price.js'
@@ -791,7 +793,9 @@ export type ChatWithToolsParams = {
   /** Internal, hash-verified prepared auxiliary request. Never sourced from tool arguments. */
   preparedAuxiliaryRequest?: { endpoint: string; body: Record<string, unknown> }
   /** Exact durable main request prepared before dispatch and recovered by cursor. */
-  preparedMainRequest?: { endpoint: string; body: Record<string, unknown> }
+  preparedMainRequest?: { endpoint: string; body: Record<string, unknown>; personalizationMemoryEpoch?: number }
+  /** Server projection for a fresh main request. Saved execution frames keep the original messages. */
+  personalization?: PersonalizationContext
   messages: ChatMessage[]
   tools: OpenAIToolDefinition[]
   model?: string
@@ -935,6 +939,7 @@ function snapshotDurableChatParams(params: ChatWithToolsParams): ChatWithToolsPa
     ...(params.reasoningEfforts ? { reasoningEfforts: [...params.reasoningEfforts] } : {}),
     ...(params.preparedAuxiliaryRequest ? { preparedAuxiliaryRequest: structuredClone(params.preparedAuxiliaryRequest) } : {}),
     ...(params.preparedMainRequest ? { preparedMainRequest: structuredClone(params.preparedMainRequest) } : {}),
+    ...(params.personalization ? { personalization: { ...params.personalization } } : {}),
     durableExecution: { ...params.durableExecution, lease: { ...params.durableExecution.lease },
       ...(params.durableExecution.price ? { price: structuredClone(params.durableExecution.price) } : {}),
       ...(params.durableExecution.cursor ? { cursor: { ...params.durableExecution.cursor } } : {}) } }
@@ -1004,7 +1009,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     .update(JSON.stringify(['responses-tool-continuation', ...routeIdentity,
       params.durableExecution?.lease.taskRootId ?? params.usageLog.agentRunId ?? null,
       params.usageLog.targetId ?? null])).digest('hex') : undefined
-  const providerMessages = frozenRequest ? null : toProviderMessages(params.messages, responsesBinding)
+  const projectedMessages = frozenRequest ? params.messages : projectPersonalizedMessages(params.messages, params.personalization)
+  const providerMessages = frozenRequest ? null : toProviderMessages(projectedMessages, responsesBinding)
   const hasToolWork = params.tools.length > 0 || providerMessages?.some(message => message.role === 'tool')
   if (params.toolCallingProtocol === 'responses' && !responsesEndpoint && hasToolWork) {
     throw new DataAccessError(400, 'AI_TOOL_PROTOCOL_UNAVAILABLE', 'Responses 工具调用需要支持该接口的 HTTPS 模型地址。')
@@ -1082,10 +1088,12 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
       ...(params.weightedRoute ? { weightedRoute: params.weightedRoute } : {}) },
   })
   if (params.durableExecution?.price && params.durableExecution.price.modelTier !== tier) throw new DataAccessError(409, 'RUNTIME_PRICE_INVALID', '冻结价目与模型档位不一致。')
+  const personalizationMemoryEpoch = frozenMain?.personalizationMemoryEpoch ?? params.personalization?.memoryEpoch
   const durable = params.durableExecution ? await beginDurableChat({
     execution: params.durableExecution, userId: params.usageLog.userId, agentRunId: params.usageLog.agentRunId,
     action: params.usageLog.action, provider: params.provider ?? env.aiTextProvider, model,
-    request: { endpoint, body: JSON.parse(encodedBody), ...routeEvidence },
+    request: { endpoint, body: JSON.parse(encodedBody), ...routeEvidence,
+      ...(personalizationMemoryEpoch === undefined ? {} : { personalizationMemoryEpoch }) },
     price: params.durableExecution.price ?? await resolveDurableTokenPrice(params.durableExecution.lease, params.durableExecution.operationKey,
       tier, params.usageLog.multiplierBps ?? 10000),
     admit: async () => {
@@ -1116,6 +1124,13 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     : params.signal
   try {
     await assertGoalProviderAdmission()
+    if (!durable && personalizationMemoryEpoch !== undefined) {
+      if (env.appEnv === 'production' && !await (await import('./app-releases.js')).hasAgentPersonalizationCapability(params.usageLog.userId))
+        throw new DataAccessError(409, STALE_PERSONALIZATION_REQUEST, '当前版本的个性化权限已变化，本次旧上下文未发送。')
+      const { getPersonalizationMemoryEpoch } = await import('./agent/personalization.js')
+      if (await getPersonalizationMemoryEpoch(params.usageLog.userId) !== personalizationMemoryEpoch)
+        throw new DataAccessError(409, STALE_PERSONALIZATION_REQUEST, '全局记忆已更新，本次旧上下文未发送。')
+    }
     params.signal?.throwIfAborted()
     providerDispatched = true
     const requestInit = {
@@ -1450,7 +1465,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
   }
 
   if (!promptUsageObserved) {
-    usage.promptTokens = estimateTokenCount(JSON.stringify({ messages: toProviderMessages(params.messages), tools: params.tools }))
+    usage.promptTokens = estimateTokenCount(JSON.stringify({ messages: frozenMain
+      ? frozenMain.body.messages ?? frozenMain.body.input : toProviderMessages(projectedMessages), tools: params.tools }))
   }
   if (!completionUsageObserved) {
     usage.completionTokens = estimateTokenCount(JSON.stringify({ content, reasoning, toolCalls }))

@@ -2,6 +2,7 @@ import { planKindSchema, planMetadataPatchSchema, planTargetSchema } from '../..
 import { Router, type Request, type Response } from 'express'
 import styleLearningRouter from './style-learning.js'
 import agentGoalsRouter from './agent-goals.js'
+import agentPersonalizationRouter from './agent-personalization.js'
 import { z } from 'zod'
 import { patchModelAssignmentsSchema } from '../../shared/contracts/agent-model-assignments.js'
 import { patchAgentWindowConfigurationSchema } from '../../shared/contracts/agent-window-configuration.js'
@@ -90,6 +91,7 @@ import {
 const router = Router()
 router.use(styleLearningRouter)
 router.use(agentGoalsRouter)
+router.use(agentPersonalizationRouter)
 router.get('/model-assignments', async (req, res) => {
   const requestId = createRequestId()
   try {

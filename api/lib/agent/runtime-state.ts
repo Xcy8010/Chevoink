@@ -11,6 +11,7 @@ import { readTaskBudgetInTransaction, taskTurnLimit } from './runtime-budget.js'
 import { withObjectType } from './tool-schema.js'
 import { frozenModelAssignmentsSchema } from '../../../shared/contracts/agent-model-assignments.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
+import { assertUnsentPersonalizationRequest } from './runtime-personalization.js'
 
 const id = z.string().min(1).max(64)
 const count = z.number().int().nonnegative().max(2147483647)
@@ -207,7 +208,10 @@ function executionStateWrite(token: RunLeaseToken, input: { expectedRevision: nu
       const operation = await tx.agentOperation.findUnique({ where: { id: before.pendingOperationId }, include: { effectReceipt: true } })
       if (!operation || !['succeeded', 'failed', 'cancelled'].includes(operation.status)) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原操作尚未确认，不能跳过后继续。')
       if (!operation.inputSnapshot || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原操作输入回执损坏。')
-      if (operation.kind === 'provider') {
+      if (operation.kind === 'provider' && operation.status === 'cancelled' && after.phase === 'idle'
+        && runtimeJsonHash({ ...before, phase: 'idle', pendingOperationId: null }) === snapshot.hash) {
+        await assertUnsentPersonalizationRequest(tx, lease.taskRootId, operation.id)
+      } else if (operation.kind === 'provider') {
         const attempt = await tx.agentProviderAttempt.findFirst({ where: { operationId: operation.id, status: operation.status, dispatchedAt: { not: null } }, orderBy: { createdAt: 'desc' } })
         if (!attempt?.result || !attempt.resultHash || runtimeJsonHash(attempt.result) !== attempt.resultHash) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '缺少原模型结果回执，不能跳过。')
       } else if (!operation.effectReceipt || runtimeJsonHash(operation.effectReceipt.result) !== operation.effectReceipt.resultHash) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '缺少原工具效果回执，不能跳过。')

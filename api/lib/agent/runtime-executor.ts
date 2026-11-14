@@ -11,6 +11,7 @@ import { env } from '../../config/env.js'
 import { chatWithTools, type ChatMessage } from '../ai-service.js'
 import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
 import { getModelTierRuntime } from '../credits.js'
+import { DataAccessError } from '../prisma.js'
 import { resolveDurableTokenPrice } from '../billing/resolve-token-price.js'
 import { databaseNow, runtimeError, runtimeJson } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
@@ -25,7 +26,7 @@ import { pauseDurableTaskForAttention, finalizeDurableTask } from './runtime-lif
 import { collectDurableCompletionEvidence } from './runtime-completion-evidence.js'
 import { advanceDurableWritingDelivery } from './runtime-writing-delivery.js'
 import { advanceDurableMemory } from './runtime-memory.js'
-import { estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurableInputLimit } from './context-budget.js'
+import { estimateChatMessageTokens, estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurableInputLimit } from './context-budget.js'
 import { readDurableImportBoundary, waitForDurableImport } from './runtime-import.js'
 import { modelRouteRevision } from './runtime-model-cursor.js'
 import { consumeDurableGoalConsent } from './goal-consent.js'
@@ -34,6 +35,8 @@ import { awaitDurableChildren, wakeDurableChildren } from './runtime-child-tools
 import { verifyChildGrant } from './runtime-child.js'
 import { renderWritingPresentation, writingPresentationPreference } from './writing-request-context.js'
 import { NOVEL_SETUP_BLOCKED_NOTICE } from './novel-initialization.js'
+import { loadPersonalizationContext, projectPersonalizedMessages } from './personalization-context.js'
+import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
 
 const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const durableModelTier = creditModelTierSchema
@@ -278,7 +281,17 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
     if (state.frame.state.phase !== 'awaiting_operation') return null
     const operation = await tx.agentOperation.findUniqueOrThrow({ where: { id: state.frame.state.pendingOperationId! } })
-    if (operation.kind !== 'provider' || operation.status !== 'prepared') return null
+    if (operation.kind !== 'provider') return null
+    if (operation.status === 'cancelled') {
+      const stale = await tx.agentProviderAttempt.findFirst({ where: { operationId: operation.id, status: 'cancelled', dispatchedAt: null,
+        result: { path: ['result', 'code'], equals: STALE_PERSONALIZATION_REQUEST } }, select: { id: true } })
+      if (!stale) return null
+      const { frame } = state
+      const refreshed = await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+        snapshot: { ...frame.state, phase: 'idle', pendingOperationId: null } })
+      return { refreshed }
+    }
+    if (operation.status !== 'prepared') return null
     if (await tx.agentProviderAttempt.count({ where: { operationId: operation.id, OR: [{ dispatchedAt: { not: null } }, { status: { not: 'prepared' } }] } })) return null
     const source = await readExecutionFrame(tx, lease.taskRootId, state.frame.revision - 1)
     if (source.state.phase !== 'idle' || operation.operationKey !== `exec:${source.state.nextOperationSequence}`
@@ -289,6 +302,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     return { state: { ...state, frame: source }, preparedTools: readFrozenModelToolViews(operation.inputSnapshot),
       request: readPreparedModelRequest(operation.inputSnapshot) }
   })
+  if (prepared && 'refreshed' in prepared) return { kind: 'context' as const, frame: prepared.refreshed! }
   if (!prepared) {
     const writingDelivery = await advanceDurableWritingDelivery(lease)
     if (writingDelivery) return { kind: 'context' as const, frame: writingDelivery }
@@ -332,14 +346,18 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   // estimator's quarter-window allowance. Never shorten the requested answer.
   const inputLimit = resolveDurableInputLimit(window, maxOutputTokens)
   if (inputLimit < 1) return runtimeError('RUNTIME_CONTEXT_LIMIT', '模型上下文窗口不足以预留配置的输出空间，请调整模型配置；原任务保留。')
+  const originalSpec = taskSpecSchema.parse(current.state.originalSpec)
+  const effectiveTools = prepared ? null : await withRunLease(lease, tx => readEffectiveNativeTooling(tx, lease, configuration, originalSpec))
+  const personalization = !lease.parent && effectiveTools?.personalizationEnabled ? await loadPersonalizationContext(lease.userId, originalSpec.goals.join('\n')) : undefined
   if (!prepared) {
-    const compacted = await advanceDurableContext(lease, inputLimit)
+    const overhead = personalization ? projectPersonalizedMessages([], personalization)
+      .reduce((sum, message) => sum + estimateChatMessageTokens(message), 0) : 0
+    const compacted = await advanceDurableContext(lease, Math.max(1, inputLimit - overhead))
     if (compacted) return { kind: 'context' as const, frame: compacted }
   }
-  const originalSpec = taskSpecSchema.parse(current.state.originalSpec)
-  const effectiveTools = prepared ? configuration : await withRunLease(lease, tx => readEffectiveNativeTooling(tx, lease, configuration, originalSpec))
-  const tools = prepared?.preparedTools ?? await currentNativeToolViews(effectiveTools.tools, originalSpec.scope)
-  if (estimateChatMessagesTokens(frame.state.messages) + estimateToolDefinitionTokens(tools) > inputLimit) {
+  const tools = prepared?.preparedTools ?? await currentNativeToolViews(effectiveTools!.tools, originalSpec.scope)
+  const requestMessages = prepared ? frame.state.messages : projectPersonalizedMessages(frame.state.messages, personalization)
+  if (estimateChatMessagesTokens(requestMessages) + estimateToolDefinitionTokens(tools) > inputLimit) {
     return runtimeError('RUNTIME_CONTEXT_LIMIT', '原请求、工具定义或不可再归档内容超过模型输入预算；已保留完整原文，不截掉要求或盲目重试模型。')
   }
   const operationKey = `exec:${frame.state.nextOperationSequence}`
@@ -349,6 +367,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   signal.throwIfAborted()
   const result = await chatWithTools({ messages: frame.state.messages, tools,
     preparedMainRequest: prepared?.request,
+    personalization,
     nextPromptMarker: configuration.nextPromptMarker,
     weightedRoute: runtime.weightedRoute, provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, providerBaseUrl: runtime.baseUrl,
     providerApiKey: runtime.apiKey, reasoningEffort: effort.data, maxOutputTokens, signal,
@@ -358,8 +377,19 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
       && runtime.reasoningParameterMode === 'omit' ? { reasoningParameterMode: runtime.reasoningParameterMode } : {}),
     durableExecution: { lease, operationKey, attemptKey: '1', price, cursor: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash } },
     usageLog: { userId: lease.userId, agentRunId: lease.runId, action: 'workspaceAgent', modelTier: tier.data, multiplierBps: price.multiplierBps, turn: frame.state.turn + 1 },
+  }).then(result => ({ kind: 'model' as const, result }), async error => {
+    if (!(error instanceof DataAccessError) || error.code !== STALE_PERSONALIZATION_REQUEST) throw error
+    // Proceed only after cleanup actually committed. An unknown cleanup
+    // stays on the original reconciliation path instead of retrying in place.
+    return withRunLease(lease, async tx => {
+      const { frame } = await readExecutionStateInTransaction(tx, lease.taskRootId)
+      const cancelled = await tx.agentOperation.findFirst({ where: { id: frame.state.pendingOperationId ?? '',
+        taskRootId: lease.taskRootId, kind: 'provider', status: 'cancelled', operationKey }, select: { id: true } })
+      if (!cancelled) throw error
+      return { kind: 'context' as const, frame }
+    })
   })
-  return { kind: 'model' as const, result }
+  return result
 }
 
 /** Run until a real external decision/review boundary, not one model call.

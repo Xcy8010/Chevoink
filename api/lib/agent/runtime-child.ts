@@ -324,8 +324,12 @@ export async function admitChildExecutionInTransaction(tx: RuntimeTx, parent: Ru
   const parentSpec = taskSpecSchema.parse(root.specSnapshot)
   const existing = await tx.agentChildExecutionGrant.findUnique({ where: { parentOperationId_childIndex: { parentOperationId: operation.id, childIndex: input.childIndex } } })
   const existingSnapshot = existing ? verifyChildGrant(existing) : null
-  const ceiling = existingSnapshot ? existingSnapshot.configuration as ChildConfiguration : { ...current.configuration,
-    ...await (await import('./native-tool-policy.js')).readEffectiveNativeTooling(tx, parent, current.configuration, parentSpec) }
+  let ceiling: ChildConfiguration
+  if (existingSnapshot) ceiling = existingSnapshot.configuration as ChildConfiguration
+  else {
+    const { tools, toolAuthority } = await (await import('./native-tool-policy.js')).readEffectiveNativeTooling(tx, parent, current.configuration, parentSpec)
+    ceiling = { ...current.configuration, tools, toolAuthority }
+  }
   const configuration = intersectChildConfiguration(ceiling, input.configuration, input.roleTools)
   const spec = taskSpecSchema.parse(JSON.parse(JSON.stringify(input.spec)))
   if ((operation.action.startsWith('subagent_') ? input.kind !== 'inline' || input.childIndex !== 0 : input.kind !== 'spawned')) return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '子任务种类与原调用不一致。')
