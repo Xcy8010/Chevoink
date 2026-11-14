@@ -14,7 +14,8 @@ const lease = { userId: 'owner', runId: 'run', taskRootId: 'root', ownerId: 'wor
 const definition = { type: 'function' as const, function: { name: 'chapter_read', description: '合成读取', parameters: { type: 'object' } } }
 const grant = { name: 'chapter_read', permission: 'ask' as const, dangerous: false, alwaysConfirm: false }
 const configuration = { mode: 'build' as const, agentType: 'orchestrator', tools: [definition], toolAuthority: [grant] }
-const db = { agentGoal: { findUniqueOrThrow: vi.fn() }, $queryRaw: vi.fn().mockResolvedValue([]), agentTaskRoot: { findUniqueOrThrow: vi.fn() }, agentSession: { findFirst: vi.fn() }, agentGoalExecution: { findFirst: vi.fn() } }
+const db = { agentGoal: { findUniqueOrThrow: vi.fn() }, $queryRaw: vi.fn().mockResolvedValue([]), agentTaskRoot: { findUniqueOrThrow: vi.fn() }, agentSession: { findFirst: vi.fn() }, agentGoalExecution: { findFirst: vi.fn() },
+  agentPersonalization: { findUnique: vi.fn() } }
 const task = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt: '再检查一下能否新增后续卷', authorWritingProtocol: 2 })
 const current = (token: RunLeaseToken = lease, settings = configuration) => readEffectiveNativeTooling(db as unknown as RuntimeTx, token,
   settings as Parameters<typeof readEffectiveNativeTooling>[2], { ...task, scope: { ...task.scope, authorEffects: { ...task.scope.authorEffects!, structure: false, manuscript: false },
@@ -29,6 +30,7 @@ beforeEach(() => {
   parentState.mockResolvedValue({ configuration, originalSpec: task })
   db.agentSession.findFirst.mockResolvedValue({ toolPolicy: {}, sandboxMode: 'workspace', spawnedFromSessionId: null })
   db.agentGoalExecution.findFirst.mockResolvedValue(null)
+  db.agentPersonalization.findUnique.mockResolvedValue(null)
 })
 
 
@@ -138,4 +140,16 @@ it('rechecks a session revocation on the next call without retaining earlier wri
   expect(next.tools.some(tool => tool.function.name === 'chapter_write')).toBe(false)
   expect(next.toolAuthority.some(item => item.name === 'chapter_write')).toBe(false)
   expect(next.toolAuthority.some(item => item.name === 'chapter_read')).toBe(true)
+})
+
+it('honors live account rules without granting a denied session action', async () => {
+  db.agentPersonalization.findUnique.mockResolvedValue({ toolRules: [
+    { toolName: 'chapter_read', permission: 'deny' }, { toolName: 'volume_create', permission: 'ask' },
+    { toolName: 'chapter_write', permission: 'allow' },
+  ] })
+  const result = await current()
+  expect(result.toolAuthority.some(item => item.name === 'chapter_read')).toBe(false)
+  expect(result.toolAuthority.find(item => item.name === 'volume_create')).toMatchObject({ permission: 'ask', alwaysConfirm: true })
+  db.agentSession.findFirst.mockResolvedValue({ toolPolicy: { contentWrite: 'deny' }, sandboxMode: 'workspace' })
+  expect((await current()).toolAuthority.some(item => item.name === 'chapter_write')).toBe(false)
 })

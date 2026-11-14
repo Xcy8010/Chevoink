@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -139,8 +140,10 @@ it('hides the mobile thumb in both message views and still requests the next pag
   renderMessages()
   const strangerEntry = await screen.findByRole('button', { name: /^陌生消息/ })
   const mainList = strangerEntry.closest<HTMLElement>('.overflow-y-auto')!
-  expect(mainList.classList.contains('mobile:[scrollbar-width:none]')).toBe(true)
-  expect(mainList.classList.contains('mobile:[&::-webkit-scrollbar]:hidden')).toBe(true)
+  const stylesheet = readFileSync('src/index.css', 'utf8')
+  expect(mainList.classList.contains('messages-list-scroll')).toBe(true)
+  expect(stylesheet).toMatch(/@media \(max-width: 767px\), \(pointer: coarse\)\s*\{\s*\.messages-list-scroll\s*\{[^}]*scrollbar-width: none/u)
+  expect(stylesheet).toMatch(/\.messages-list-scroll::-webkit-scrollbar\s*\{[^}]*display: none;[^}]*width: 0;/u)
   Object.defineProperties(mainList, {
     scrollHeight: { value: 280 },
     clientHeight: { value: 200 },
@@ -150,6 +153,5 @@ it('hides the mobile thumb in both message views and still requests the next pag
 
   fireEvent.click(strangerEntry)
   const strangerList = screen.getByText('互相关注前，最多给对方发送 3 条消息。').closest<HTMLElement>('.overflow-y-auto')!
-  expect(strangerList.classList.contains('mobile:[scrollbar-width:none]')).toBe(true)
-  expect(strangerList.classList.contains('mobile:[&::-webkit-scrollbar]:hidden')).toBe(true)
+  expect(strangerList.classList.contains('messages-list-scroll')).toBe(true)
 })

@@ -522,7 +522,9 @@ export function assertAgentPersonalizationState(state, phase, before) {
     || (phase === 'after' && before.enums.length)) throw Error('Agent personalization enum catalog mismatch')
 }
 
-export async function readAgentPersonalizationState(tx, phase) {
+export async function readAgentPersonalizationState(tx, phase, schema = 'public') {
+  // This optional isolated-test schema is an identifier, never SQL input.
+  if (!/^[a-z][a-z0-9_]{0,62}$/.test(schema)) throw Error('Unexpected personalization schema')
   const [profiles, memories, enums] = await Promise.all([
     readAddedTableState(tx, phase, personalizationTable),
     readAddedTableState(tx, phase, memoriesTable),
@@ -531,6 +533,12 @@ export async function readAgentPersonalizationState(tx, phase) {
       WHERE n.nspname=current_schema() AND t.typname IN ('AgentPersonalizationDegree','AgentPersonalizationMemorySource','AgentPersonalizationStyle')
       GROUP BY t.typname ORDER BY t.typname`,
   ])
+  if (schema !== 'public') {
+    const indexSchema = ` ON ${schema}.`
+    const normalizeIndexSchema = table => ({ ...table,
+      indexes: table.indexes.map(index => ({ ...index, definition: index.definition.replace(indexSchema, ' ON public.') })) })
+    return { profiles: normalizeIndexSchema(profiles), memories: normalizeIndexSchema(memories), enums }
+  }
   return { profiles, memories, enums }
 }
 

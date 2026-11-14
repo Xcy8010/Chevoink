@@ -25,6 +25,7 @@ const subject = { operationId: 'body', action: 'chapter_write', novelId: 'novel'
 
 beforeEach(() => {
   vi.clearAllMocks()
+  tx.$queryRaw.mockResolvedValue([])
   const spec = buildTaskSpec({ runId: lease.runId, novelId: 'novel', chapterId: 'chapter', prompt: '完整改写本章' })
   spec.writingPacing = 'explicit_writing'; spec.scope.writingCoordinationProtocol = 1
   spec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 1, chapterId: 'chapter' }], titleAndBodyOnly: false, repairAuthorized: true }
@@ -93,14 +94,18 @@ describe('internal writing service authority', () => {
     await expect(readAdmittedWritingServiceStep(lease, checked, transaction)).rejects.toThrow()
     expect(assertParent).not.toHaveBeenCalled(); expect(mocks.policy).not.toHaveBeenCalled()
   })
-  it.each(['missing', 'denied', 'ask', 'always-confirm', 'narrowed-session'] as const)('does not turn a parent writer grant into %s child authorization', async kind => {
+  it.each(['missing', 'denied', 'ask', 'always-confirm', 'narrowed-session', 'account-deny', 'account-ask'] as const)('does not turn a parent writer grant into %s child authorization', async kind => {
     if (kind === 'missing') configuration.toolAuthority = configuration.toolAuthority.filter(item => item.name !== 'scene_task_build')
     if (kind === 'denied') configuration.toolAuthority[1].permission = 'deny'
     if (kind === 'ask') configuration.toolAuthority[1].permission = 'ask'
     if (kind === 'always-confirm') configuration.toolAuthority[1].alwaysConfirm = true
     if (kind === 'narrowed-session') mocks.policy.mockImplementation(tools => tools.map((tool: { permission: object }) => ({ ...tool, permission: { build: 'deny' } })))
+    if (kind === 'account-deny' || kind === 'account-ask') tx.$queryRaw.mockImplementation(async (parts: TemplateStringsArray) =>
+      parts.join('').includes('agent_personalizations') ? [{ tool_rules: [
+        { toolName: 'scene_task_build', permission: kind === 'account-deny' ? 'deny' : 'ask' },
+      ] }] : [])
     await expect(assertWritingServicePolicy(transaction, lease, child, vi.fn())).rejects.toMatchObject({ code:
-      kind === 'ask' || kind === 'always-confirm' ? 'RUNTIME_APPROVAL_REQUIRED' : 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
+      kind === 'ask' || kind === 'always-confirm' || kind === 'account-ask' ? 'RUNTIME_APPROVAL_REQUIRED' : 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
   })
 })
 
