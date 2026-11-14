@@ -7,6 +7,8 @@ import { intersectToolAuthority, restrictToolsToTask, snapshotToolAuthority } fr
 import type { AgentTool } from './tools/types.js'
 import { PERSONALIZATION_TOOL_NAMES, PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
 import { env } from '../../config/env.js'
+import { readPersonalizationRules } from './personalization.js'
+import { applyPersonalizationToolRules, hasPersonalizationSessionOverride } from './personalization-tool-policy.js'
 
 type Configuration = Awaited<ReturnType<typeof readExecutionStateInTransaction>>['configuration']
 const grantSchema = z.object({ name: z.string(), permission: z.enum(['allow', 'ask', 'deny']), alwaysConfirm: z.boolean(), dangerous: z.boolean() }).strict()
@@ -29,7 +31,7 @@ export function readNativeToolAdmission(operation: { action: string; inputSnapsh
 
 /** New calls use actual role/session permissions. Original configuration,
  * provider snapshots, prices and Continue identities remain unchanged. */
-export async function readEffectiveNativeTooling(tx: RuntimeTx, lease: RunLeaseToken, configuration: Configuration, task: TaskSpec) {
+export async function readEffectiveNativeTooling(tx: RuntimeTx, lease: RunLeaseToken, configuration: Configuration, task: TaskSpec, ruleLock?: 'share' | 'update') {
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
   let parentTooling: Awaited<ReturnType<typeof readEffectiveNativeTooling>> | undefined
   if (lease.parent) {
@@ -42,7 +44,7 @@ export async function readEffectiveNativeTooling(tx: RuntimeTx, lease: RunLeaseT
   await tx.$queryRaw`SELECT id FROM agent_sessions WHERE id = ${root.sessionId} FOR SHARE`
   const session = await tx.agentSession.findFirst({ where: { id: root.sessionId, userId: lease.userId, novelId: root.novelId } })
   if (!session || root.userId !== lease.userId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '工具会话不属于当前作者和作品。')
-  const { agentRegistry, getToolsForAgent, applySessionToolPolicy } = await import('./agents.js')
+  const { agentRegistry, getToolsForAgent, applySessionToolPolicy, governedPolicyKey } = await import('./agents.js')
   const agent = agentRegistry.find(item => item.type === configuration.agentType)
   if (!agent) return runtimeError('RUNTIME_SCOPE_MISMATCH', '原Agent角色不存在，不能替换为其他角色。')
   const { resolveAgent2FeatureFlags } = await import('../agent2-feature-flags.js')
@@ -59,6 +61,8 @@ export async function readEffectiveNativeTooling(tx: RuntimeTx, lease: RunLeaseT
     .filter(tool => !session.spawnedFromSessionId || !ORCHESTRATION_TOOL_NAMES.has(tool.name))
   let tools = applySessionToolPolicy(restrictToolsToTask(candidates, task, configuration.mode), configuration.mode, session.toolPolicy,
     session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
+  tools = applyPersonalizationToolRules(tools, configuration.mode, await readPersonalizationRules(lease.userId, tx, ruleLock),
+    tool => hasPersonalizationSessionOverride(session.toolPolicy, governedPolicyKey(tool)))
   const ceiling = new Map(snapshotToolAuthority(tools, configuration.mode))
   for (const grant of configuration.toolAuthority) ceiling.set(grant.name, grant)
   tools = intersectToolAuthority(tools, configuration.mode, ceiling)

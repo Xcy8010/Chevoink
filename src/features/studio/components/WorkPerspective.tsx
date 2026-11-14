@@ -47,7 +47,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
   const pendingX = useRef<number | null>(null)
   const frame = useRef(0)
   const [dragging, setDragging] = useState(false)
-  const [retainedViewer, setRetainedViewer] = useState(viewer)
+  const [retainedViewer, setRetainedViewer] = useState({ viewer, scopeKey })
   const hasViewer = Boolean(viewer)
   const geometry = fitWorkSplit(split, width || 1600, hasViewer)
   const inspectorOpen = !geometry.inspectorCollapsed
@@ -86,10 +86,10 @@ export default function WorkPerspective({ conversationRail, conversation, activi
     if (old.hasViewer !== hasViewer && !hasViewer) update({ ...splitRef.current, chatCollapsed: false })
   }, [scopeKey, rightOpen, hasViewer, update])
   useEffect(() => {
-    if (viewer) { setRetainedViewer(viewer); return }
-    const timer = window.setTimeout(() => setRetainedViewer(undefined), 240)
+    if (viewer) { setRetainedViewer({ viewer, scopeKey }); return }
+    const timer = window.setTimeout(() => setRetainedViewer({ viewer: undefined, scopeKey }), 240)
     return () => clearTimeout(timer)
-  }, [viewer])
+  }, [viewer, scopeKey])
   useLayoutEffect(() => {
     const node = root.current
     if (!node) return
@@ -137,7 +137,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
   }, [finish])
   const toggleInspector = () => {
     if (!inspectorOpen) {
-      update({ ...splitRef.current, inspectorCollapsed: false, viewerCollapsed: false })
+      update({ ...splitRef.current, inspectorCollapsed: false })
       if (!rightOpen) onToggleRight()
     } else {
       update({ ...splitRef.current, inspectorCollapsed: true, chatCollapsed: false })
@@ -198,7 +198,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       '--work-agent-dock-reserve': `${dockVisible ? motion.dock + WORK_ACTIVITY_DOCK_EDGE_GAP : 0}px`,
     } as CSSProperties}>{conversation}</main>
     <aside aria-hidden={!dockVisible} {...(!dockVisible ? { inert: '' } : {})} className={cn('work-activity-dock absolute top-0 z-40 h-full min-h-0 overflow-hidden', dockVisible && 'is-visible')} style={{ width: motion.dock, right: motion.inspector + motion.viewer + WORK_ACTIVITY_DOCK_EDGE_GAP }}><div className="h-full px-3 py-4" style={{ width: WORK_ACTIVITY_DOCK_WIDTH }}>{activityDock}</div></aside>
-    <section data-studio-panel="workViewer" aria-hidden={!viewerOpen} {...(!viewerOpen ? { inert: '' } : {})} className="work-split-column h-full min-h-0 shrink-0 overflow-hidden border-[var(--border-subtle)]" style={{ width: motion.viewer, borderLeftWidth: motion.viewer > 0 ? 1 : 0 }}><div className="h-full" style={{ minWidth: WORK_SPLIT.viewer }}>{retainedViewer}</div></section>
+    <section data-studio-panel="workViewer" aria-hidden={!viewerOpen} {...(!viewerOpen ? { inert: '' } : {})} className="work-split-column h-full min-h-0 shrink-0 overflow-hidden border-[var(--border-subtle)]" style={{ width: motion.viewer, borderLeftWidth: motion.viewer > 0 ? 1 : 0 }}><div className="h-full" style={{ minWidth: WORK_SPLIT.viewer }}>{viewer ?? (retainedViewer.scopeKey === scopeKey ? retainedViewer.viewer : undefined)}</div></section>
     <aside data-studio-panel="workInspector" className="work-split-column work-inspector-column relative ml-auto h-full min-h-0 shrink-0 overflow-hidden border-l border-[var(--border-subtle)] bg-[var(--app-bg)]" style={{ width: motion.inspector }}>
       <div aria-hidden={!inspectorOpen} {...(!inspectorOpen ? { inert: '' } : {})} className={cn('absolute inset-0 overflow-hidden transition-opacity duration-200', inspectorOpen ? 'opacity-100' : 'pointer-events-none opacity-0')}>{inspector}</div>
       {!inspectorOpen ? <div className="absolute inset-0 flex flex-col items-center py-2"><button type="button" onClick={toggleInspector} className="flex h-9 w-9 items-center justify-center" aria-label="展开检查区"><ChevronLeft className="h-4 w-4" /></button>{items.map(({ key, label, icon: Icon }) => <button key={key} type="button" aria-label={label} title={label} className="mt-2 flex h-9 w-9 items-center justify-center rounded-lg hover:bg-[var(--surface-muted)]" onClick={() => { onSelectInspectorTab(key); toggleInspector() }}><Icon className="h-4 w-4" /></button>)}</div> : <button type="button" onClick={toggleInspector} className="absolute left-1 top-2 z-20 rounded p-1.5 text-[var(--text-secondary)]" aria-label="收起检查区"><PanelRightClose className="h-4 w-4" /></button>}

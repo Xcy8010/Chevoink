@@ -3,14 +3,16 @@ import { findPlanByIdentity } from './novel-plan-contract.js'
 import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection,
   readAssistantModelSnapshot, readPreparedModelRequest } from './runtime-tool-view.js'
 import { PERSONALIZATION_READ_ACTIONS, PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
+import { readPersonalizationWriteAdmission } from './personalization-authority.js'
 import { accountProfileTool, accountPreferencesGetTool, accountPreferencesUpdateTool, accountMemoryListTool,
-  accountMemorySaveTool, accountMemoryUpdateTool, accountMemoryDeleteTool, creationSettingsTool } from './tools/personalization-tools.js'
+  accountMemorySaveTool, accountMemoryUpdateTool, accountMemoryDeleteTool, accountMemoryRestoreTool, accountMemoryClearTool,
+  accountRuleOperationsTool, accountRuleSetTool, accountRuleRemoveTool, creationSettingsTool } from './tools/personalization-tools.js'
 import { readEffectiveNativeTooling, readNativeToolAdmission, type NativeToolAdmission } from './native-tool-policy.js'
 import { z } from 'zod'
 import { originalToolParameterSchemas } from './tool-schema.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { env } from '../../config/env.js'
-import { requestToolApproval, pollToolApproval, readCommitReviewApproval } from './runtime-approval.js'
+import { requestToolApproval, pollToolApproval, readCommitReviewApproval, readToolApprovalOutcome } from './runtime-approval.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
@@ -118,6 +120,8 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(accountCreditsTool), checkedAdapter(accountCreditHistoryTool), checkedAdapter(accountNovelsTool), checkedAdapter(sessionRenameTool),
   checkedAdapter(accountProfileTool), checkedAdapter(accountPreferencesGetTool), checkedAdapter(accountPreferencesUpdateTool), checkedAdapter(creationSettingsTool),
   checkedAdapter(accountMemoryListTool), checkedAdapter(accountMemorySaveTool), checkedAdapter(accountMemoryUpdateTool), checkedAdapter(accountMemoryDeleteTool),
+  checkedAdapter(accountMemoryRestoreTool), checkedAdapter(accountMemoryClearTool), checkedAdapter(accountRuleOperationsTool),
+  checkedAdapter(accountRuleSetTool), checkedAdapter(accountRuleRemoveTool),
   checkedAdapter(projectSearchTool), checkedAdapter(entityResolveTool), checkedAdapter(impactAnalyzeTool), checkedAdapter(structureValidateTool),
   checkedAdapter(storyCharterGetTool), checkedAdapter(storyCharterSaveTool), checkedAdapter(readerPromiseSaveTool), checkedAdapter(readerPromiseUpdateTool), checkedAdapter(qualityReportGetTool),
   checkedAdapter(executionContextReadTool),
@@ -267,10 +271,6 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
     else if (PERSONALIZATION_WRITE_ACTIONS.includes(call.name)) {
       ctx.durableConfiguration = capability
-      if (call.name === 'account_memory_save') {
-        const source = readPreparedModelRequest(await readAssistantModelSnapshot(tx, lease.taskRootId, frame))
-        ctx.personalizationMemoryEpoch = source.personalizationMemoryEpoch
-      }
     }
     else if (CHILD_ACTIONS.some(action => action === call.name) || call.name === 'task_wait') { /* Trusted child adapter below; no legacy ToolContext capability. */ }
     else if (call.name === 'goal_enable') ctx.durableGoalActivation = capability
@@ -333,7 +333,15 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     // The adapter/effect rechecks that exact approval and current policy; a
     // pending recovery cannot re-enter the idle-only approval polling path.
     const resumeTool = current.frame.state.phase === 'awaiting_operation'
-    return { tool, args, ctx, cursor, historicalWriter, needsApproval: !resumeTool && (grant.permission === 'ask' || grant.alwaysConfirm || serviceConfirmation) }
+    const personalization = await readPersonalizationWriteAdmission(tx, ctx, call.name, args)
+    if (personalization === 'reject' && !resumeTool) return { reject: { cursor, callId: call.id, tool } }
+    if (call.name === 'account_memory_save') {
+      const source = readPreparedModelRequest(await readAssistantModelSnapshot(tx, lease.taskRootId, frame))
+      ctx.personalizationMemoryEpoch = source.personalizationMemoryEpoch
+    }
+    const needsApproval = !resumeTool && (grant.permission === 'ask' || grant.alwaysConfirm || serviceConfirmation || personalization === 'confirm'
+      || Boolean(await readToolApprovalOutcome(tx, lease, frame.snapshotHash, call.id, call.name, call.arguments)))
+    return { tool, args, ctx, cursor, historicalWriter, needsApproval }
   })
   if ('deferred' in selected) return { kind: 'context' as const, frame: selected.deferred! }
   if ('recover' in selected) {
@@ -424,9 +432,16 @@ async function executeDurablePersonalization(ctx: ToolContext, tool: AgentTool, 
   const prepared = await prepareToolCursorOperation(lease, cursor, { key: operationKey, action: tool.name, callId: ctx.callId,
     targetId: lease.taskRootId, effectDomain: 'configuration', effectiveArgs: args, normalize,
     operationInput: runtimeJson({ callId: ctx.callId, args }).value })
-  const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx =>
-    runtimeJson({ toolResult: await tool.execute({ ...ctx, transaction: tx }, args) }).value).catch(error => {
-    if (!(error instanceof DataAccessError) || !(error.code.startsWith('PERSONALIZATION_') || error.code === 'NOT_FOUND')) throw error
+  const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {
+    const input = z.object({ input: z.object({ normalization: z.object({ rawArguments: z.string(), normalizedArgsHash: z.string() }) }) })
+      .parse(prepared.operation.inputSnapshot).input.normalization
+    const approval = await readToolApprovalOutcome(tx, lease, cursor.expectedHash, ctx.callId, tool.name, input.rawArguments)
+    const approved = approval?.status === 'approved' && approval.requestData.argsHash === input.normalizedArgsHash
+    if (approval && !approved) return runtimeError('RUNTIME_APPROVAL_REQUIRED', '原确认未批准这项个性化变更。')
+    return runtimeJson({ toolResult: await tool.execute({ ...ctx, transaction: tx, personalizationApproved: approved ? true : undefined }, args) }).value
+  }).catch(error => {
+    if (!(error instanceof DataAccessError) || !(error.code.startsWith('PERSONALIZATION_') ||
+      ['NOT_FOUND', 'RUNTIME_EFFECT_NOT_AUTHORIZED', 'RUNTIME_APPROVAL_REQUIRED'].includes(error.code))) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
       code: error.code, output: error.message, summary: '个性化设置未修改' })
   })

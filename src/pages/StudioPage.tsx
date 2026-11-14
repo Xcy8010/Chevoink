@@ -54,10 +54,12 @@ export default function StudioPage() {
   })
 
   const studioEntryNovelId = useMemo(() => {
-    const authoredNovels = [...(meQuery.data?.authoredNovels ?? [])].sort(
+    const allNovels = meQuery.data?.authoredNovels ?? []
+    const archivedNovelIds = new Set(allNovels.filter(novel => novel.status === 'archived').map(novel => novel.id))
+    const authoredNovels = allNovels.filter(novel => !archivedNovelIds.has(novel.id)).sort(
       (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
     )
-    const draftNovelId = meQuery.data?.drafts?.[0]?.novelId ?? null
+    const draftNovelId = meQuery.data?.drafts?.find(draft => !archivedNovelIds.has(draft.novelId))?.novelId ?? null
     const draftNovel = authoredNovels.find((item) => item.id === draftNovelId) ?? null
     const lastNovelId =
       typeof window !== 'undefined' ? window.localStorage.getItem(STUDIO_LAST_NOVEL_STORAGE_KEY) : null

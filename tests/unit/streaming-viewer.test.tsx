@@ -160,6 +160,17 @@ it('keeps Work viewer IME input across lock and failed-write unlock without comm
   act(() => vi.advanceTimersByTime(40))
   expect(change).toHaveBeenCalledExactlyOnceWith({ ...draft, content: '中文候选尚未完成' })
 })
+
+it('offers a retry when the selected chapter cannot be loaded', () => {
+  const retry = vi.fn()
+  render(<StudioChapterViewer draft={null} selection={{ start: 0, end: 0, text: '' }}
+    errorMessage="章节暂时无法打开，请重试。" onRetryLoad={retry}
+    onChange={vi.fn()} onSelectionChange={vi.fn()} onAddSelection={vi.fn()} onClose={vi.fn()} onBlur={vi.fn()} />)
+  expect(screen.queryByText(/从右侧作品树选择章节/)).toBeNull()
+  expect(screen.getByText('章节暂时无法打开，请重试。')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '重试' }))
+  expect(retry).toHaveBeenCalledOnce()
+})
 it('shows the current chapter count beside its title across edits, preview and document switches', () => {
   const props = { positionScope: 'task-a', selection: { start: 0, end: 0, text: '' }, onSelectionChange: vi.fn(), onAddSelection: vi.fn(), onClose: vi.fn(), onBlur: vi.fn() }
   const initial = { id: 'a', title: '第一章', summary: '', content: '初稿', orderIndex: 1, revision: 1, localOnly: false, status: 'draft' as const, visibility: 'private' as const }

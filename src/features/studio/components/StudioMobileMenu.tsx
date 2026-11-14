@@ -101,10 +101,11 @@ function ConversationRows({ items, onSelect, onActions }: {
   return items.map(item => <ConversationRow key={item.id} item={item} onSelect={onSelect} onActions={onActions} />)
 }
 
-function MobileSearchResults({ search, viewerId, books, actions, actionRow, onNovel, onSession }: {
+function MobileSearchResults({ search, viewerId, books, archivedNovelIds, actions, actionRow, onNovel, onSession }: {
   search: string
   viewerId: string
   books: Novel[]
+  archivedNovelIds: Set<string>
   actions: Action[]
   actionRow: (action: Action) => ReactNode
   onNovel: (id: string) => void
@@ -126,7 +127,7 @@ function MobileSearchResults({ search, viewerId, books, actions, actionRow, onNo
   const keyword = search.toLocaleLowerCase()
   const foundBooks = books.filter(book => match(bookTitle(book), keyword) || match(book.title, keyword))
   const foundActions = actions.filter(action => match(action.label, keyword) || match(action.sectionLabel ?? '', keyword))
-  const foundSessions = ready ? (query.data?.items ?? []).filter(item => item.userId === viewerId) : []
+  const foundSessions = ready ? (query.data?.items ?? []).filter(item => item.userId === viewerId && item.status !== 'archived' && !archivedNovelIds.has(item.novelId)) : []
   const pending = Boolean(viewerId) && (!ready || query.isPending)
   return <div className="space-y-3 px-3 pb-4">
     {foundBooks.length > 0 && <section aria-label="匹配作品">
@@ -173,7 +174,9 @@ export default function StudioMobileMenu({ currentNovel, novels, loading, busy, 
   const [expandedBooks, setExpandedBooks] = useState(() => new Set([currentNovel.id]))
   const [conversationTarget, setConversationTarget] = useState<ConversationTarget | null>(null)
   useEffect(() => { setExpandedBooks(previous => new Set([...previous, currentNovel.id])) }, [currentNovel.id])
-  const books = novels.some(novel => novel.id === currentNovel.id) ? novels : [currentNovel, ...novels]
+  const knownBooks = novels.some(novel => novel.id === currentNovel.id) ? novels : [currentNovel, ...novels]
+  const books = knownBooks.filter(novel => novel.status !== 'archived')
+  const archivedNovelIds = new Set(knownBooks.filter(novel => novel.status === 'archived').map(novel => novel.id))
   const toggleBook = (id: string) => setExpandedBooks(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next })
   const actionRow = ({ key, label, icon: Icon, action, danger, disabled }: Action) => <button key={key} type="button" disabled={disabled} aria-current={view === key ? 'page' : undefined} onClick={() => { onClose(); action() }} className={cn('flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 text-left text-[13px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none disabled:opacity-45', view === key && 'bg-[var(--surface-muted)] font-medium', danger ? 'text-[var(--color-error)]' : 'text-[var(--text-primary)]', 'hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)]')}><Icon aria-hidden="true" className="h-4 w-4 shrink-0 text-[var(--text-tertiary)]" /><span className="min-w-0 break-words">{label}</span></button>
   const renderGroup = (group: typeof groups[number]) => <Section key={group.title} title={group.title} initialOpen={'open' in group && group.open}>{actions.filter(action => (group.keys as readonly string[]).includes(action.key)).map(actionRow)}</Section>
@@ -181,13 +184,13 @@ export default function StudioMobileMenu({ currentNovel, novels, loading, busy, 
   const selectNovel = (id: string) => { onClose(); onSelectNovel(id) }
   const selectSession = (session: AgentSession) => { onClose(); onSelectSession(session) }
   if (search) return <MobileSearchResults
-    search={search} viewerId={viewerId} books={books}
+    search={search} viewerId={viewerId} books={books} archivedNovelIds={archivedNovelIds}
     actions={[{ key: 'create-novel', label: '新建作品', icon: Plus, action: onCreateNovel, disabled: busy }, ...actions]}
     actionRow={actionRow} onNovel={selectNovel} onSession={selectSession}
   />
 
   const recent = recentSessions
-    .filter(item => item.userId === viewerId && item.lastRunAt)
+    .filter(item => item.userId === viewerId && item.lastRunAt && item.status !== 'archived' && !archivedNovelIds.has(item.novelId))
     .sort((a, b) => (b.lastRunAt ?? '').localeCompare(a.lastRunAt ?? '') || a.id.localeCompare(b.id))
     .slice(0, 6)
   return <div className="px-3 pb-4">

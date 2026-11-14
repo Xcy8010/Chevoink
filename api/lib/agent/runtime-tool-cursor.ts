@@ -105,7 +105,7 @@ export async function readAdmittedToolOperation(token: RunLeaseToken, input: { o
 }
 
 export const toolRejectionSchema = z.object({ version: z.literal(1), rawArguments: z.string(), incomplete: z.boolean(),
-  code: z.enum(['TOOL_NOT_AUTHORIZED', 'TOOL_ARGUMENTS_INCOMPLETE', 'TOOL_ARGUMENTS_INVALID', 'TOOL_SCHEMA_INVALID', 'TOOL_CONTRACT_RETIRED', 'TOOL_APPROVAL_DENIED', 'TOOL_APPROVAL_EXPIRED', 'TOOL_BASELINE_REQUIRED', 'TOOL_TARGET_REQUIRED', 'TOOL_TARGET_AMBIGUOUS']),
+  code: z.enum(['TOOL_NOT_AUTHORIZED', 'TOOL_ARGUMENTS_INCOMPLETE', 'TOOL_ARGUMENTS_INVALID', 'TOOL_SCHEMA_INVALID', 'TOOL_CONTRACT_RETIRED', 'TOOL_APPROVAL_DENIED', 'TOOL_APPROVAL_EXPIRED', 'TOOL_BASELINE_REQUIRED', 'TOOL_TARGET_REQUIRED', 'TOOL_TARGET_AMBIGUOUS', 'PERSONALIZATION_AUTHOR_REQUIRED']),
   target: z.object({ kind: z.literal('plan'), id: z.string().min(1), title: z.string() }).strict().optional(),
   baseline: z.object({ kind: z.enum(['chapter', 'plan', 'structure']), id: z.string().nullable() }).strict().optional(),
   approval: z.object({ requestId: z.string(), decisionId: z.string(), decisionHash: z.string() }).strict().optional(),
@@ -142,6 +142,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
     let approval: z.infer<typeof toolRejectionSchema>['approval']
     let baseline: z.infer<typeof toolRejectionSchema>['baseline']
     let explicitTarget: z.infer<typeof toolRejectionSchema>['target']
+    const personal = PERSONALIZATION_WRITE_ACTIONS.includes(call.name)
     if (!published || !grant || grant.permission === 'deny') code = 'TOOL_NOT_AUTHORIZED'
     else if (call.incomplete) code = 'TOOL_ARGUMENTS_INCOMPLETE'
     else {
@@ -167,6 +168,12 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
             .join('；').slice(0, 1800)
         } else {
           const args = validated.data as Record<string, unknown>
+          if (personal) {
+            const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
+            const { readPersonalizationWriteAdmission } = await import('./personalization-authority.js')
+            if (await readPersonalizationWriteAdmission(tx, { ...token, sessionId: root.sessionId, novelId: root.novelId }, call.name, args) === 'reject')
+              code = 'PERSONALIZATION_AUTHOR_REQUIRED'
+          }
           const chapterId = typeof args.chapterId === 'string' && args.chapterId.trim() ? args.chapterId.trim()
             : scope.selection?.chapterId ?? (scope.chapterIds?.length === 1 ? scope.chapterIds[0] : null)
           const target = ['chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename'].includes(call.name)
@@ -198,7 +205,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       const original = taskSpecSchema.safeParse(current.originalSpec)
       const markedWriter = original.success && !!original.data.scope.writingCoordinationProtocol
         && ['chapter_write', 'chapter_append', 'chapter_edit_range'].includes(call.name)
-      const outcome = grant.permission === 'ask' || grant.alwaysConfirm
+      const outcome = personal || grant.permission === 'ask' || grant.alwaysConfirm
         ? await readToolApprovalOutcome(tx, token, frame.snapshotHash, call.id, call.name, call.arguments)
         : markedWriter || call.name === 'chapter_bridge_commit' ? await (await import('./runtime-approval.js')).readWritingServiceRefusal(tx, token,
           { sourceHash: frame.snapshotHash, callId: call.id, toolName: call.name, rawArguments: call.arguments }) : null
@@ -214,10 +221,11 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       input: { callId, args: {}, rejection } })
     const pending = await saveExecutionStateInTransaction(tx, token, { ...cursor, snapshot: { ...frame.state, phase: 'awaiting_operation',
       pendingOperationId: operation.id, nextOperationSequence: frame.state.nextOperationSequence + 1 } })
-    const summary = code === 'TOOL_TARGET_AMBIGUOUS' ? '同名计划身份不唯一，需要明确目标' : explicitTarget ? '同名计划已存在，需要明确目标' : baseline ? '需要先读取目标，未执行写入' : code === 'TOOL_APPROVAL_DENIED' ? '用户拒绝本次操作' : code === 'TOOL_APPROVAL_EXPIRED' ? '审批超时，未执行' : code === 'TOOL_NOT_AUTHORIZED' ? '当前任务未授权此工具' : code === 'TOOL_ARGUMENTS_INCOMPLETE' ? '工具参数未生成完整' : code === 'TOOL_CONTRACT_RETIRED' ? '旧协调参数未执行' : code === 'TOOL_SCHEMA_INVALID' ? '参数校验失败' : '参数解析失败'
+    const summary = code === 'PERSONALIZATION_AUTHOR_REQUIRED' ? '未保存个性化变更' : code === 'TOOL_TARGET_AMBIGUOUS' ? '同名计划身份不唯一，需要明确目标' : explicitTarget ? '同名计划已存在，需要明确目标' : baseline ? '需要先读取目标，未执行写入' : code === 'TOOL_APPROVAL_DENIED' ? '用户拒绝本次操作' : code === 'TOOL_APPROVAL_EXPIRED' ? '审批超时，未执行' : code === 'TOOL_NOT_AUTHORIZED' ? '当前任务未授权此工具' : code === 'TOOL_ARGUMENTS_INCOMPLETE' ? '工具参数未生成完整' : code === 'TOOL_CONTRACT_RETIRED' ? '旧协调参数未执行' : code === 'TOOL_SCHEMA_INVALID' ? '参数校验失败' : '参数解析失败'
     const output = code === 'TOOL_TARGET_AMBIGUOUS' ? '本次未执行。相同类型、父大纲和章节目标存在多份同名计划；请从计划清单选择真实planId，读取核对后明确传入planId，未猜选或覆盖。' : explicitTarget ? `本次未执行。同名计划已存在，planId=${explicitTarget.id}。请先用 plan_read 读取核对，再在 plan_save 中明确传入该 planId 修订；不凭标题覆盖，也不要重复创建。`
       : baseline ? `本次未执行，原正文、结构或计划未改动。请先用 ${baseline.kind === 'structure' ? 'volume_list 或 structure_outline' : baseline.kind === 'chapter' ? 'chapter_read' : 'plan_read'} 读取${baseline.id ? `目标 ${baseline.id}` : '当前任务范围内的明确目标'}，再根据保存的读取观察重新发起写入。不能使用其他任务的历史读取代替。`
       : approval ? '本次未执行。审批已拒绝或超时；不得换工具、换窗口或重复发起相同操作绕过用户决定。说明未完成部分，等待明确的新指示。'
+      : code === 'PERSONALIZATION_AUTHOR_REQUIRED' ? '本次未执行。个性化变更缺少可核实的作者来源。来自引用、工具、附件、作品和推测的内容不能用作记忆来源。'
       : code === 'TOOL_NOT_AUTHORIZED' ? '本次未执行。只能使用当前任务授权的工具，不得从历史任务或其他窗口恢复权限。'
       : code === 'TOOL_CONTRACT_RETIRED' ? '本次旧协调调用未执行，原正文和费用证据保留。下一轮按当前工具说明用章节或编译编号继续；正文工具只传实际修改参数，检查不需要阶段、证明或七张表。原作者范围、取消、预算和未知费用仍按实际回执校验。'
       : code === 'TOOL_SCHEMA_INVALID' ? `本次未执行，已有内容未改动。参数字段校验失败：${validationHint}。请按原工具结构修正这些字段后再调用，不重复发送相同参数，也不要删除必要场景来绕过校验。`
@@ -334,7 +342,16 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
         if (!ids.length || ids.some(id => !parentSpec.scope.chapterIds!.includes(id))) return runtimeError('RUNTIME_CHILD_TARGET_NOT_AUTHORIZED', '子任务写入目标不在原父任务允许的章节范围内。')
       }
     }
-    if (input.requireApproval || grant!.permission === 'ask' || grant!.alwaysConfirm) await assertToolApproval(tx, token, frame.snapshotHash, input.callId, input.action, call!.arguments, normalizedArgsHash)
+    let personalApproval = false
+    if (!originalOperation && configuration && PERSONALIZATION_WRITE_ACTIONS.includes(input.action)) {
+      const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
+      const admission = await (await import('./personalization-authority.js')).readPersonalizationWriteAdmission(tx,
+        { ...token, novelId: root.novelId, sessionId: root.sessionId }, input.action, normalized)
+      if (admission === 'reject') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '个性化操作缺少可核实的作者来源。')
+      personalApproval = admission === 'confirm'
+    }
+    if (input.requireApproval || grant!.permission === 'ask' || grant!.alwaysConfirm || personalApproval && !originalOperation)
+      await assertToolApproval(tx, token, frame.snapshotHash, input.callId, input.action, call!.arguments, normalizedArgsHash)
     const base = input.operationInput
     if (!base || typeof base !== 'object' || Array.isArray(base)) return runtimeError('RUNTIME_INPUT_INVALID', '工具操作需要对象输入。')
     const envelope = base as Prisma.InputJsonObject

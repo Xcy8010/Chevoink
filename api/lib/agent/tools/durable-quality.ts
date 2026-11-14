@@ -83,7 +83,7 @@ const known = new Set(['QUALITY_TARGET_AMBIGUOUS', 'QUALITY_TASK_TARGET_REQUIRED
 /** 自动修订写的是作者正文：只读沙箱与受限子任务不获授权，只保存检查意见。 */
 async function chapterRevisionWritable(tx: RuntimeTx, lease: RunLeaseToken) {
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId }, select: { sessionId: true } })
-  return (await import('./chapter-mutation.js')).automaticChapterRevisionWritable(tx, { sessionId: root.sessionId, inlineChild: !!lease.parent })
+  return (await import('./chapter-mutation.js')).automaticChapterRevisionWritable(tx, { userId: lease.userId, sessionId: root.sessionId, inlineChild: !!lease.parent }, 'quality')
 }
 
 /** Freeze all critic inputs before admission. Paid child results are recoverable;
@@ -291,7 +291,7 @@ export async function executePreparedQualityWork(ctx: ToolContext, lease: RunLea
       if (canRepair && replacements.length) {
         try {
           repaired = await applyQualityRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id, replacements,
-            retainedFindings: retainedQualityCandidates(report, replacements, retainedFindings), signal: ctx.signal }, tx)
+            retainedFindings: retainedQualityCandidates(report, replacements, retainedFindings), signal: ctx.signal, automatic: true }, tx)
           if (repaired) report = await getQualityReport(ctx.userId, ctx.novelId, report.id, tx)
         } catch (error) {
           // 自动修订的可预期拦截（通道关闭、证据过期、范围冲突）：报告照常保存，

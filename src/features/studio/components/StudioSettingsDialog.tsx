@@ -106,7 +106,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { id: 'general', label: '通用', description: '工作区与基础行为', keywords: '工作区 模式 自动追踪 全屏', icon: Settings2 },
       { id: 'profile', label: '个人资料', description: '作者身份与公开信息', keywords: '头像 昵称 简介 作者 账号', icon: UserRound },
-      { id: 'personalization', label: '个性化', description: 'Agent 的称呼、风格与记忆', keywords: '个性化 指令 关于你 称呼 风格 全局记忆 Agent', icon: SlidersHorizontal },
+      { id: 'personalization', label: '个性化', description: 'Agent 的风格、记忆与权限', keywords: '个性化 自定义指令 回答偏好 风格 语气 全局记忆 权限 自定义规则 Agent', icon: SlidersHorizontal },
       { id: 'appearance', label: '外观', description: '主题与正文排版', keywords: '主题 浅色 深色 字体 字号 行距 宽度 动画', icon: Eye },
       { id: 'models', label: '模型', description: '自定义模型与密钥', keywords: '模型 API Key DeepSeek GLM 推理', icon: BrainCircuit },
       { id: 'model-assignments', label: '模型分工', description: '', keywords: '模型 分工 推理 全局 作品 检查 写作 子Agent', icon: BrainCircuit },
@@ -126,7 +126,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
 const SECTION_META: Record<StudioSettingsSection, { title: string; description: string }> = {
   general: { title: '通用', description: '管理当前创作区的工作方式与基础行为。' },
   profile: { title: '个人资料', description: '维护作者身份、公开简介与账户入口。' },
-  personalization: { title: '个性化', description: '设置 Agent 在所有创作对话中的交流方式和记忆。' },
+  personalization: { title: '个性化', description: '管理 Agent 在所有创作对话中的交流方式、记忆和权限。' },
   appearance: { title: '外观', description: '调整创作区主题与正文排版，修改会立即生效。' },
   models: { title: '模型', description: '管理当前账户可用于 Agent 的自定义模型。' },
   'model-assignments': { title: '模型分工', description: '' },
@@ -710,6 +710,7 @@ function ArchivesPanel({ novels }: { novels: Novel[] }) {
   const archivedTasks = (tasksQuery.data?.items ?? []).filter((task) => task.status === 'archived')
 
   async function refresh() {
+    void queryClient.invalidateQueries({ queryKey: ['community', 'me'], refetchType: 'none' })
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['studio', 'my-novels'] }),
       queryClient.invalidateQueries({ queryKey: ['agent', 'sessions'] }),

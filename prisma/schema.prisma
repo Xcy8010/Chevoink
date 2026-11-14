@@ -1455,6 +1455,16 @@ enum AgentPersonalizationMemorySource {
   conversation
 }
 
+enum AgentPersonalizationMemoryChange {
+  saved
+  edited
+  merged
+  corrected
+  capacity
+  restored
+  migrated
+}
+
 model AgentPersonalization {
   userId             String                    @id @map("user_id") @db.VarChar(64)
   user               User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1463,6 +1473,7 @@ model AgentPersonalization {
   memoryEpoch        Int                       @default(0) @map("memory_epoch")
   memoryEpochChangedAt DateTime?                @map("memory_epoch_changed_at")
   memoryEnabled      Boolean                   @default(true) @map("memory_enabled")
+  toolRules          Json                      @default("[]") @map("tool_rules")
   preferredName      String                    @default("") @map("preferred_name") @db.VarChar(80)
   aboutMe            String                    @default("") @map("about_me") @db.VarChar(2000)
   customInstructions String                    @default("") @map("custom_instructions") @db.VarChar(2000)
@@ -1484,13 +1495,33 @@ model AgentPersonalizationMemory {
   text         String                          @db.VarChar(500)
   textDigest   String                          @map("text_digest") @db.VarChar(64)
   source       AgentPersonalizationMemorySource
+  activeSlot   Int?                            @map("active_slot")
+  recoveryUntil DateTime?                      @map("recovery_until")
+  pinned       Boolean                         @default(false)
+  topic        String?                         @db.VarChar(40)
+  lastChange   AgentPersonalizationMemoryChange @default(saved) @map("last_change")
+  hitCount     Int                             @default(0) @map("hit_count")
+  lastHitAt    DateTime?                       @map("last_hit_at")
+  retrievals   AgentPersonalizationMemoryHit[]
   revision     Int                             @default(1)
   createdAt    DateTime                        @default(now()) @map("created_at")
   updatedAt    DateTime                        @updatedAt @map("updated_at")
 
   @@unique([userId, textDigest])
+  @@unique([userId, activeSlot])
   @@index([userId, updatedAt(sort: Desc), id(sort: Desc)])
   @@map("agent_personalization_memories")
+}
+
+model AgentPersonalizationMemoryHit {
+  memoryId String                     @map("memory_id") @db.VarChar(64)
+  memory   AgentPersonalizationMemory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  runId    String                     @map("run_id") @db.VarChar(64)
+  run      AgentRun                   @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@id([memoryId, runId])
+  @@index([runId])
+  @@map("agent_personalization_memory_hits")
 }
 
 model AgentSession {
@@ -1818,6 +1849,7 @@ model AgentEvalComparison {
 }
 
 model AgentRun {
+  personalizationMemoryHits AgentPersonalizationMemoryHit[]
   incomingChildGrant AgentChildExecutionGrant? @relation("ChildExecutionRun")
   admittedChildGrants AgentChildExecutionGrant[] @relation("ChildAdmissionRun")
   currentChildGrants AgentChildExecutionGrant[] @relation("ChildCurrentParent")

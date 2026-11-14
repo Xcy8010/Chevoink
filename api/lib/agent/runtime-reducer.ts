@@ -9,6 +9,7 @@ import { durableChatResultSchema } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionState, saveExecutionStateInTransaction, type executionSnapshotSchema } from './runtime-state.js'
 import { argumentNormalizationSchema, toolRejectionSchema } from './runtime-tool-cursor.js'
 import { readToolApprovalOutcome } from './runtime-approval.js'
+import { PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { formatDurableToolObservation, formatReferencedToolObservation, TOOL_OBSERVATION_INLINE_BYTES } from './runtime-common.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
@@ -100,6 +101,8 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         || frame.state.messages.slice(assistantIndex + 1).some(message => message.role === 'tool' && message.toolCallId === callId)) runtimeError('RUNTIME_STATE_CONFLICT', '工具结果不属于当前未回答的完整调用。')
       const normalization = parsedInput.data.input.normalization
       if (rejection) {
+        if (rejection.code === 'PERSONALIZATION_AUTHOR_REQUIRED' && !PERSONALIZATION_WRITE_ACTIONS.includes(operation.action))
+          runtimeError('RUNTIME_RECEIPT_INVALID', '个性化来源拒绝不匹配原操作。')
         if ((rejection.code === 'TOOL_TARGET_REQUIRED') !== Boolean(rejection.target)
           || (rejection.target && operation.action !== 'plan_save')) runtimeError('RUNTIME_RECEIPT_INVALID', '目标拒绝缺少原计划身份。')
         if ((rejection.code === 'TOOL_BASELINE_REQUIRED') !== Boolean(rejection.baseline)) runtimeError('RUNTIME_RECEIPT_INVALID', '基线拒绝缺少对应目标。')

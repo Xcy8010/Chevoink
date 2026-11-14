@@ -7,6 +7,7 @@ import * as auxiliaryRuntime from '../../api/lib/agent/runtime-auxiliary-call.js
 import * as formatRecovery from '../../api/lib/agent/quality-format-recovery.js'
 import * as repairAudit from '../../api/lib/agent/quality-repair-audit.js'
 import * as standaloneHistory from '../../api/lib/agent/standalone-quality-history.js'
+import * as personalizationPolicy from '../../api/lib/agent/personalization-tool-policy.js'
 import { beginTextRequest } from '../../api/lib/text-request-trace.js'
 import { selectAutomaticQualityFindings, qualityAutoRepairPending } from '../../api/lib/agent/quality-report-contract.js'
 
@@ -18,6 +19,9 @@ vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
   probeChapterReviewRevision: guard.probe, assertChapterReviewRevision: guard.assert,
   isChapterRevisionChannelOpen: guard.channel, readChapterReviewRevisionGuidance: guard.guidance,
   readChapterReviewReadiness: guard.readiness, chapterReviewDecisionGuidance: guard.decisions,
+}))
+vi.mock('../../api/lib/agent/personalization-tool-policy.js', async original => ({
+  ...await original<object>(), automaticRepairPermitted: async () => true,
 }))
 
 import {
@@ -435,6 +439,15 @@ describe('严谨创作自动落实质量建议', () => {
       expect.objectContaining({ agentRunId: 'r', action: 'agent3HumanityRevision', targetId: 'q' }),
       expect.objectContaining({ agentRunId: 'r', action: 'agent3HumanityRevisionRetry', targetId: 'q' }),
     ])
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it('keeps the quality report but does not send a repair request or write if the repair rule requires author approval', async () => {
+    const f = fixture(false)
+    vi.spyOn(personalizationPolicy, 'automaticRepairPermitted').mockResolvedValue(false)
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result.display).toMatchObject({ kind: 'qualityReport', chapterRevision: 1 })
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.model).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
   })
   it.each(['parse_error', 'schema_error', 'missing_patch', 'no_op'] as const)('audits both returned repair responses and the exact %s retry cause without storing private text', async classification => {

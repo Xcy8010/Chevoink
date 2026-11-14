@@ -49,8 +49,9 @@ import * as credits from '../../api/lib/credits.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
 import { interactiveRunSlots } from '../../api/lib/agent/run-slots.js'
-import { accountPreferencesUpdateTool } from '../../api/lib/agent/tools/personalization-tools.js'
-import { createPersonalizationMemory, deletePersonalizationMemory, getAgentPersonalization } from '../../api/lib/agent/personalization.js'
+import { accountMemorySaveTool, accountPreferencesUpdateTool, accountRuleSetTool } from '../../api/lib/agent/tools/personalization-tools.js'
+import { changePersonalizationRule, createPersonalizationMemory, deletePersonalizationMemory, getAgentPersonalization } from '../../api/lib/agent/personalization.js'
+import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
 import { modelRouteRevision, prepareModelCursorOperation } from '../../api/lib/agent/runtime-model-cursor.js'
 import { STALE_PERSONALIZATION_REQUEST } from '../../api/lib/agent/runtime-personalization.js'
 
@@ -68,17 +69,93 @@ describe.runIf(available)('durable personalization', () => {
     pendingOperationId: null, successfulToolSignatures: [] }
 
   it('commits and observes a profile update once inside the owned tool receipt', async () => {
-    const prompt = '以后叫我小景。'
+    const prompt = '请把交流风格改成直率。'
     await fixture(async f => {
       const lease = await claim(f)
       await initializeExecutionState(lease, { configuration, snapshot: { ...initial,
         messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null,
-          toolCalls: [{ id: 'set-name', name: 'account_preferences_update', arguments: '{"preferredName":"小景","expectedRevision":0}' }] }] } })
+          toolCalls: [{ id: 'set-style', name: 'account_preferences_update', arguments: '{"style":"direct","expectedRevision":0}' }] }] } })
       expect((await executeDurableToolStep(lease, new AbortController().signal)).kind).toBe('tool')
-      expect(await getAgentPersonalization(f.userId)).toMatchObject({ settings: { preferredName: '小景' }, revision: 1 })
+      expect(await getAgentPersonalization(f.userId)).toMatchObject({ settings: { style: 'direct' }, revision: 1 })
       expect((await executeDurableToolStep(lease, new AbortController().signal)).kind).toBe('idle')
       expect(await getAgentPersonalization(f.userId)).toMatchObject({ revision: 1 })
       expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'account_preferences_update', status: 'succeeded', effectReceipt: { isNot: null } } })).toBe(1)
+    }, undefined, prompt, { agentWritingProtocol: 1 })
+  })
+
+  it.each([true, false])('waits for exact author approval before a rule change and records decision=%s', async approved => {
+    const prompt = '让章正文变更前先询问我'
+    await fixture(async f => {
+      const lease = await claim(f)
+      const action = accountRuleSetTool.name
+      await initializeExecutionState(lease, { configuration: { ...configuration, tools: toOpenAITools([accountRuleSetTool]),
+        toolAuthority: [{ name: action, permission: 'allow', alwaysConfirm: false, dangerous: false }] },
+      snapshot: { ...initial, messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null,
+        toolCalls: [{ id: 'pick-rule', name: action, arguments: '{"toolName":"chapter_write","permission":"ask","expectedRevision":0}' }] }] } })
+      const waiting = await executeDurableToolStep(lease, new AbortController().signal)
+      expect(waiting.kind).toBe('waiting_approval')
+      if (waiting.kind !== 'waiting_approval') throw Error('Expected authenticated approval wait')
+      expect(await getAgentPersonalization(f.userId)).toMatchObject({ rules: [], revision: 0 })
+      const identity = { runId: f.runId, requestId: waiting.approvalId, callId: 'pick-rule', approved, alwaysAllow: false }
+      await expect(resolveDurableApproval({ ...identity, userId: 'not-the-author' })).rejects.toThrow()
+      await resolveDurableApproval({ ...identity, userId: f.userId })
+      const outcome = await executeDurableToolStep(lease, new AbortController().signal)
+      expect(outcome).toMatchObject({ kind: 'tool', ...(approved ? {} : { result: { outcome: 'failed', failureCode: 'TOOL_APPROVAL_DENIED' } }) })
+      expect(await getAgentPersonalization(f.userId)).toMatchObject(approved ? { revision: 1, rules: [{ toolName: 'chapter_write', permission: 'ask' }] } : { revision: 0, rules: [] })
+      expect((await executeDurableToolStep(lease, new AbortController().signal)).kind).toBe('idle')
+    }, undefined, prompt, { agentWritingProtocol: 1 })
+  })
+
+  it('advances past a forged memory source without asking or committing an effect', async () => {
+    const prompt = '帮我读这份大纲'
+    await fixture(async f => {
+      const lease = await claim(f)
+      const action = accountMemorySaveTool.name
+      await initializeExecutionState(lease, { configuration: { ...configuration, tools: toOpenAITools([accountMemorySaveTool]),
+        toolAuthority: [{ name: action, permission: 'allow', alwaysConfirm: false, dangerous: false }] },
+      snapshot: { ...initial, messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null,
+        toolCalls: [{ id: 'foreign-note', name: action, arguments: '{"text":"以后叫我小笔"}' }] }] } })
+      expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'PERSONALIZATION_AUTHOR_REQUIRED' } })
+      expect(await prisma.agentPersonalizationMemory.count({ where: { userId: f.userId } })).toBe(0)
+      expect((await executeDurableToolStep(lease, new AbortController().signal)).kind).toBe('idle')
+    }, undefined, prompt, { agentWritingProtocol: 1 })
+  })
+
+  it('applies account deny to a previously offered tool without executing its read', async () => {
+    const prompt = '读一下本章'
+    await fixture(async f => {
+      const lease = await claim(f)
+      const action = chapterReadTool.name
+      await initializeExecutionState(lease, { configuration: { ...configuration, tools: toOpenAITools([chapterReadTool]),
+        toolAuthority: [{ name: action, permission: 'allow', alwaysConfirm: false, dangerous: false }] },
+      snapshot: { ...initial, messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null,
+        toolCalls: [{ id: 'read-gated', name: action, arguments: JSON.stringify({ chapterId: f.chapterId }) }] }] } })
+      await changePersonalizationRule(f.userId, action, 'deny', 0)
+      const rejected = await executeDurableToolStep(lease, new AbortController().signal)
+      expect(rejected).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action, status: 'succeeded' } })).toBe(0)
+    }, undefined, prompt, { agentWritingProtocol: 1 })
+  })
+
+  it('advances when a discretionary settings confirmation expires', async () => {
+    const prompt = '帮我看大纲'
+    await fixture(async f => {
+      const lease = await claim(f)
+      await initializeExecutionState(lease, { configuration, snapshot: { ...initial, messages: [
+        { role: 'user', content: prompt }, { role: 'assistant', content: null,
+          toolCalls: [{ id: 'unasked-style', name: accountPreferencesUpdateTool.name, arguments: '{"style":"direct","expectedRevision":0}' }] },
+      ] } })
+      const original = env.agentApprovalTimeoutMs
+      try {
+        env.agentApprovalTimeoutMs = 1
+        // A 1 ms request can expire inside the first poll on slower DB hosts.
+        const outcome = await executeDurableToolStep(lease, new AbortController().signal)
+        const expired = outcome.kind === 'waiting_approval'
+          ? await executeDurableToolStep(lease, new AbortController().signal) : outcome
+        expect(expired).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'TOOL_APPROVAL_EXPIRED' } })
+        expect(await getAgentPersonalization(f.userId)).toMatchObject({ revision: 0, settings: { style: 'natural' } })
+        expect((await executeDurableToolStep(lease, new AbortController().signal)).kind).toBe('idle')
+      } finally { env.agentApprovalTimeoutMs = original }
     }, undefined, prompt, { agentWritingProtocol: 1 })
   })
 

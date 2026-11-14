@@ -7,6 +7,7 @@ import { readExecutionFrame } from './runtime-state.js'
 import { toOpenAIParameters, toOpenAIToolPresentation } from './tool-schema.js'
 import { novelImportArguments } from './tools/import-arguments.js'
 import { isResponsesToolRequest } from '../ai-responses-route.js'
+import { PERSONALIZATION_TOOL_NAMES } from './personalization-operations.js'
 
 export type NativeToolView = { type: 'function'; function: { name: string; strict?: boolean; description: string; parameters: Record<string, unknown> } }
 const simplified = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit', 'scene_task_build'])
@@ -37,6 +38,12 @@ export function projectNativeToolViews(frozen: readonly NativeToolView[], curren
     const definition = originalDefinition.function.strict === undefined
       ? { ...originalDefinition, function: { ...originalDefinition.function, strict: false } } : originalDefinition
     const tool = byName.get(definition.function.name)
+    if (tool && PERSONALIZATION_TOOL_NAMES.has(tool.name)) {
+      // Newly prepared requests describe the current settings. A previously
+      // dispatched request still uses its exact stored tool view.
+      const presentation = toOpenAIToolPresentation(tool, scope)
+      return { ...definition, function: { ...definition.function, ...presentation } }
+    }
     if (tool?.name === 'novel_import' && tool.parameters === novelImportArguments && definition.function.strict === false
       && runtimeJson(definition.function.parameters).hash === runtimeJson(toOpenAIParameters(novelImportArguments)).hash) {
       // Only new requests use the compatible view. Prepared requests still use

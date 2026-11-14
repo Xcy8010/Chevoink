@@ -82,7 +82,7 @@ import { buildCatalogPreview, buildChapterReviewDescription, buildPendingChapter
 import { usePendingReviewStorage } from './components/use-pending-review-storage'
 import type { AgentTaskWindowState, StoredAgentWorkspaceSnapshot } from './lib/workspace-types.js'
 import { getPlatformCapabilities, subscribePlatformLifecycle } from './platform-capabilities.js'
-import { useWorkPanelState, writeWorkPanelUi } from './components/use-work-panel-state'
+import { resolveWorkViewer, useWorkPanelState, writeWorkPanelUi } from './components/use-work-panel-state'
 import { reconcilePlanSelection } from './components/work-plan-selection'
 import { consumeSessionDeepLink, initialTaskWindows, selectInitialTask, selectTaskFallback } from './lib/initial-task-selection'
 import { createCatalogActions } from './components/catalog-actions'
@@ -285,6 +285,9 @@ export default function StudioWorkspace() {
   const workPanelScope = useWorkPanelState(taskUiScope,
     { rightOpen: workRightOpen, viewer: workViewer, inspectorTab: workInspectorTab, selectedTreeItemId, selectedChapterId },
     { setRightOpen: setWorkRightOpen, setViewer: setWorkViewer, setInspectorTab: setWorkInspectorTab, setSelectedTreeItemId, setSelectedChapterId })
+  const workPanelReady = Boolean(taskUiScope && workPanelScope === taskUiScope && currentNovel?.id === activeNovelId)
+  const workViewerMode = workPanelReady ? resolveWorkViewer(workViewer, selectedTreeItemId, selectedChapterId) : null
+  const viewerChapterId = selectedTreeItemId?.startsWith('chapter:') ? selectedTreeItemId.slice('chapter:'.length) : selectedChapterId
   const chapterStreamOwner = useMemo(() => ({ novelId: activeNovelId, scope: taskUiScope, sessionId: agentSessionId,
     epoch: workspaceOwnerRef.current.epoch }), [activeNovelId, taskUiScope, agentSessionId])
   const chapterStreamOwnerRef = useRef(chapterStreamOwner)
@@ -377,6 +380,17 @@ export default function StudioWorkspace() {
     }
   }, [featureFlags.dualWorkspace, workspacePerspective, setWorkspacePerspective])
 
+  const refreshWorkspaceNavigation = useCallback(() => {
+    // my-novels reads the shared profile query. Mark it stale before refreshing the derived list.
+    void queryClient.invalidateQueries({ queryKey: ['community', 'me'], refetchType: 'none' })
+    void queryClient.invalidateQueries({ queryKey: ['studio', 'my-novels'] })
+    void queryClient.invalidateQueries({ queryKey: ['agent', 'sessions', 'workspace-navigation'] })
+  }, [queryClient])
+
+  useEffect(() => {
+    if (mobileMoreOpen) refreshWorkspaceNavigation()
+  }, [mobileMoreOpen, refreshWorkspaceNavigation])
+
   useEffect(() => subscribePlatformLifecycle({
     onBack: () => {
       if (missingPublishFields.length) setMissingPublishFields([])
@@ -390,8 +404,9 @@ export default function StudioWorkspace() {
     onResume: () => {
       // SSE 以 seq 去重续传；这里只失效查询缓存，不重新启动 run，避免 APP 切后台造成重复写入。
       void queryClient.invalidateQueries({ queryKey: ['studio', activeNovelId] })
+      refreshWorkspaceNavigation()
     },
-  }), [activeChangeSetId, activeNovelId, activeToolPanel, missingPublishFields, mobileBackView, mobileMoreOpen, mobileView, navigate, queryClient, workspaceDialog])
+  }), [activeChangeSetId, activeNovelId, activeToolPanel, missingPublishFields, mobileBackView, mobileMoreOpen, mobileView, navigate, queryClient, refreshWorkspaceNavigation, workspaceDialog])
 
   useEffect(() => {
     if (!coverGenerationBusy) {
@@ -592,13 +607,6 @@ export default function StudioWorkspace() {
       )),
     )
   }
-
-  // 切换作品时只重置树选中与目录文档；审查态交由上方水合 effect 按作品键恢复，
-  // 此处若清空会在「返回创作区/刷新」时把未定夺的 diff 误判为已采纳（fix2）
-  useEffect(() => {
-    setSelectedTreeItemId(null)
-    setCatalogDocument(null)
-  }, [activeNovelId])
 
   useEffect(() => {
     if (!activeAgentTaskWindowId) {
@@ -897,8 +905,9 @@ export default function StudioWorkspace() {
       return
     }
 
-    window.localStorage.setItem(STUDIO_LAST_NOVEL_STORAGE_KEY, currentNovel.id)
-  }, [currentNovel?.id])
+    if (currentNovel.status !== 'archived') window.localStorage.setItem(STUDIO_LAST_NOVEL_STORAGE_KEY, currentNovel.id)
+    else if (window.localStorage.getItem(STUDIO_LAST_NOVEL_STORAGE_KEY) === currentNovel.id) window.localStorage.removeItem(STUDIO_LAST_NOVEL_STORAGE_KEY)
+  }, [currentNovel?.id, currentNovel?.status])
 
   useEffect(() => {
     setNovelDirty(isNovelFormDirty(currentNovel, novelForm))
@@ -967,7 +976,7 @@ export default function StudioWorkspace() {
   const chapterQuery = useQuery({
     queryKey: ['studio-chapter', activeNovelId, selectedChapterId],
     queryFn: () => getChapterContent(activeNovelId, selectedChapterId as string),
-    enabled: Boolean(taskUiScope && workPanelScope === taskUiScope && currentNovel?.id === activeNovelId && selectedChapterId && !selectedChapterId.startsWith('local-')),
+    enabled: Boolean(workPanelReady && selectedChapterId && !selectedChapterId.startsWith('local-')),
     refetchOnWindowFocus: false,
     retry: 1,
   })
@@ -1030,6 +1039,7 @@ export default function StudioWorkspace() {
       return
     }
     // 自动追踪更新正文查看器；检查区页签由用户选择，不随正文增量重置。
+    if (chapterId !== selectedChapterId && chapterDirtyRef.current) return
     if (workspacePerspective === 'work') {
       openWorkDocument(taskUiScope)
       setWorkRightOpen(true)
@@ -1038,10 +1048,10 @@ export default function StudioWorkspace() {
       setIdeTreeOpen(true)
       setIdeSidebarTab('work')
     }
-    if (chapterId === selectedChapterId || chapterDirty) {
+    setSelectedTreeItemId(`chapter:${chapterId}`)
+    if (chapterId === selectedChapterId) {
       return
     }
-    setSelectedTreeItemId(`chapter:${chapterId}`)
     setSelectedChapterId(chapterId)
     selectedChapterIdStateRef.current = chapterId
     setEditorChapterSettingsOpen(false)
@@ -1546,7 +1556,7 @@ export default function StudioWorkspace() {
   const novelOptions = useMemo(() => {
     const novelsWithSessions = new Set((navigationSessionsQuery.data?.items ?? []).map((session) => session.novelId))
     // “未命名、0 章、0 字”不等于可以丢弃：只要已产生 Agent 会话，它就是用户的真实作品。
-    const source = (myNovelsQuery.data ?? []).filter((novel) => shouldShowWorkspaceNovel(novel, novelsWithSessions.has(novel.id)))
+    const source = (myNovelsQuery.data ?? []).filter(novel => novel.status === 'archived' || shouldShowWorkspaceNovel(novel, novelsWithSessions.has(novel.id)))
     const byId = new Map(source.map((novel) => [novel.id, novel]))
     if (currentNovel && !byId.has(currentNovel.id)) byId.set(currentNovel.id, currentNovel)
     return [...byId.values()].sort((left, right) => {
@@ -1554,6 +1564,7 @@ export default function StudioWorkspace() {
       return latest || new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
     })
   }, [currentNovel, myNovelsQuery.data, navigationSessionsQuery.data?.items])
+  const activeNovelOptions = useMemo(() => novelOptions.filter(novel => novel.status !== 'archived'), [novelOptions])
 
   const activityChapterTitles = useMemo(() => new Map(chapters.map(chapter => [chapter.id, chapter.title])), [chapters])
   const activeChapterListItem = useMemo(
@@ -1648,8 +1659,13 @@ export default function StudioWorkspace() {
     return null
   }, [catalogDocument, catalogPreview, savedPlanFiles, selectedTreeItemId])
 
-  const selectionDocument = workspacePerspective === 'work' && workViewer !== 'document' ? null : activeWorkspaceDocument
-  const selectionChapter = selectionDocument || (workspacePerspective === 'work' && workViewer !== 'chapter') ? null : chapterDraft
+  const workChapterDraft = workViewerMode === 'chapter' && chapterDraft?.id === viewerChapterId ? chapterDraft : null
+  const workChapterLoadError = workViewerMode === 'chapter' && viewerChapterId === selectedChapterId
+    && !workChapterDraft && chapterQuery.isError
+    ? (chapterQuery.error instanceof Error ? chapterQuery.error.message : '章节暂时无法打开，请重试。')
+    : null
+  const selectionDocument = workspacePerspective === 'work' && workViewerMode !== 'document' ? null : activeWorkspaceDocument
+  const selectionChapter = workspacePerspective === 'work' ? workChapterDraft : selectionDocument ? null : chapterDraft
   const selectionSource = selectionDocument ? `${activeNovelId}:${selectionDocument.kind}:${selectionDocument.id}`
     : selectionChapter ? `${activeNovelId}:chapter:${selectionChapter.id}` : null
   if (capturedSelection && capturedSelection.source !== selectionSource) setCapturedSelection(null)
@@ -1696,6 +1712,9 @@ export default function StudioWorkspace() {
   const documentStreamingPreview = livePlanTarget && activeWorkspaceDocument?.kind === 'plan' && livePlanTarget.id === activeWorkspaceDocument.id
     ? activeLiveToolDraft?.content
     : undefined
+  const workViewerStreamingPreview = workViewerMode === 'chapter'
+    ? (viewerChapterId === selectedChapterId ? chapterStreamingPreview : undefined)
+    : documentStreamingPreview
   const selectChapterFromToolRef = useRef(handleSelectChapter)
   const { handleSelectPlanFromTree: selectPlanFromTree, handleRequestDeletePlan, handleRequestCreatePlan, handleCreatePlanFile, handleSavePlanSettings, handleRenamePlan, handleWorkspaceDocumentChange } = createPlanDocumentActions({
     isCurrentNovel: (() => { const owner = workspaceOwnerRef.current; return () => workspaceOwnerRef.current === owner })(),
@@ -1724,12 +1743,10 @@ export default function StudioWorkspace() {
         clearToolNavigationRequest()
         return
       }
-      openWorkDocument(taskUiScope)
-      selectChapterFromToolRef.current(chapterId)
+      selectChapterFromToolRef.current(chapterId, { showInWork: workspacePerspective === 'work' })
       if (workspacePerspective === 'work') {
         setWorkInspectorTab('work')
         setWorkRightOpen(true)
-        setWorkViewer('chapter')
       } else {
         setIdeTreeOpen(true)
         setIdeSidebarTab('work')
@@ -1800,7 +1817,7 @@ export default function StudioWorkspace() {
   )
   const agentTaskSidebarItems = useMemo(
     () => agentTaskWindows.map((taskWindow) => ({
-      id: taskWindow.id,
+      id: taskWindow.sessionId ?? taskWindow.id,
       title: taskWindow.title,
       updatedAt: taskWindow.updatedAt,
       temporary: taskWindow.temporary,
@@ -1831,16 +1848,15 @@ export default function StudioWorkspace() {
   }, [agentMessages])
 
   useEffect(() => {
-    if (!taskUiScope || workPanelScope !== taskUiScope || currentNovel?.id !== activeNovelId) return
-    if (workViewer === 'document') return
+    if (!workPanelReady) return
     if (!selectedTreeItemId && selectedChapterId) {
       setSelectedTreeItemId(`chapter:${selectedChapterId}`)
     }
-  }, [selectedChapterId, selectedTreeItemId, taskUiScope, workPanelScope, currentNovel?.id, activeNovelId, workViewer])
+  }, [selectedChapterId, selectedTreeItemId, workPanelReady])
 
   useEffect(() => {
     // Empty lists during cross-novel/task hydration are not deletion evidence.
-    if (!taskUiScope || workPanelScope !== taskUiScope || currentNovel?.id !== activeNovelId || agentSessionsResolving) return
+    if (!workPanelReady || agentSessionsResolving) return
     if (!selectedTreeItemId) {
       return
     }
@@ -1856,7 +1872,11 @@ export default function StudioWorkspace() {
         !chapters.some((chapter) => chapter.id === chapterId) &&
         !agentChangedChapterIdsRef.current.has(chapterId)
       ) {
-        setSelectedTreeItemId(selectedChapterId ? `chapter:${selectedChapterId}` : 'catalog')
+        const fallbackId = chapters.find(chapter => chapter.id === selectedChapterId)?.id ?? chapters[0]?.id ?? null
+        setSelectedTreeItemId(fallbackId ? `chapter:${fallbackId}` : 'catalog')
+        setSelectedChapterId(fallbackId)
+      } else if (chapterId !== selectedChapterId && selectedChapterId) {
+        setSelectedTreeItemId(`chapter:${selectedChapterId}`)
       }
       return
     }
@@ -1866,7 +1886,7 @@ export default function StudioWorkspace() {
         plansLoadedNovelId === activeNovelId && Boolean(activeAgentTaskWindow?.loaded || !activeAgentTaskWindow?.sessionId))
       if (next !== selectedTreeItemId) setSelectedTreeItemId(next)
     }
-  }, [chapters, savedPlanFiles, selectedChapterId, selectedTreeItemId, taskUiScope, workPanelScope, currentNovel?.id, activeNovelId, agentSessionsResolving, plansLoadedNovelId, activeAgentTaskWindow?.loaded, activeAgentTaskWindow?.sessionId])
+  }, [chapters, savedPlanFiles, selectedChapterId, selectedTreeItemId, workPanelReady, activeNovelId, agentSessionsResolving, plansLoadedNovelId, activeAgentTaskWindow?.loaded, activeAgentTaskWindow?.sessionId])
 
   function handleSelectWorkspaceNovel(novelId: string) {
     void switchWorkspaceNovel(novelId)
@@ -2012,6 +2032,7 @@ export default function StudioWorkspace() {
         ...novelForm,
         status: statusOverride ?? novelForm.status,
       })
+      if (statusOverride === undefined && novelForm.status === currentNovel.status) delete payload.status
 
       return updateNovelMeta(currentNovel.id, payload)
     },
@@ -2637,13 +2658,21 @@ export default function StudioWorkspace() {
     callback()
   }
 
-  function handleSelectChapter(nextChapterId: string, options?: { openSettings?: boolean }) {
+  function handleSelectChapter(nextChapterId: string, options?: { openSettings?: boolean; showInWork?: boolean }) {
     const openSettings = options?.openSettings ?? false
-    setSelectedTreeItemId(`chapter:${nextChapterId}`)
-
-    if (nextChapterId === selectedChapterId) {
+    const scope = chapterStreamOwnerRef.current
+    const selectChapter = () => {
+      setSelectedTreeItemId(`chapter:${nextChapterId}`)
       setEditorChapterSettingsOpen(openSettings)
       setMobileView('editor')
+      if (options?.showInWork) {
+        openWorkDocument(taskUiScope)
+        setWorkViewer('chapter')
+      }
+    }
+
+    if (nextChapterId === selectedChapterId) {
+      selectChapter()
 
       // 同章点击不再用缓存覆盖草稿，避免丢掉未保存输入：有改动先落盘，干净时才同步缓存。
       if (chapterDirtyRef.current) {
@@ -2666,12 +2695,12 @@ export default function StudioWorkspace() {
     }
 
     guardUnsavedChanges(() => {
+      if (chapterStreamOwnerRef.current !== scope) return
+      selectChapter()
       setSelectedChapterId(nextChapterId)
-      setEditorChapterSettingsOpen(openSettings)
       setChapterDraft(null)
       setChapterSaveState('idle')
       setChapterSaveMessage('正在打开章节...')
-      setMobileView('editor')
     })
   }
 
@@ -2696,6 +2725,7 @@ export default function StudioWorkspace() {
         ? { ...volume, chapterCount: volume.chapterCount + 1 }
         : volume))
       setSelectedChapterId(savedChapter.id)
+      setSelectedTreeItemId(`chapter:${savedChapter.id}`)
       setChapterDraft(buildChapterDraft(savedChapter))
       setChapterDirty(false)
       setChapterSaveState('saved')
@@ -3405,6 +3435,9 @@ export default function StudioWorkspace() {
     if (!wasActive) {
       return
     }
+    if (searchParams.get('session') === deletedTaskId) {
+      setSearchParams(current => consumeSessionDeepLink(current, deletedTaskId), { replace: true })
+    }
 
     // 回落目标从删除前的列表里算（setState 异步），已排除被删的那个
     const fallbackTaskWindow = pickFallbackAgentTaskWindow(agentTaskWindows, deletedTaskId)
@@ -3417,6 +3450,18 @@ export default function StudioWorkspace() {
     const nextTaskWindow = createLocalAgentTaskWindow()
     setAgentTaskWindows([nextTaskWindow])
     applyAgentTaskWindowState(nextTaskWindow)
+  }
+
+  function handleNovelArchivedFromSidebar(archivedNovel: Novel) {
+    if (archivedNovel.id !== activeNovelId || currentNovelStateRef.current?.id !== archivedNovel.id) return
+    // Preserve other unsaved fields while the outgoing workspace saves and changes route.
+    currentNovelStateRef.current = { ...currentNovelStateRef.current, status: archivedNovel.status }
+    setCurrentNovel(currentNovelStateRef.current)
+    if (novelFormStateRef.current) {
+      novelFormStateRef.current = { ...novelFormStateRef.current, status: archivedNovel.status }
+      setNovelForm(novelFormStateRef.current)
+    }
+    syncStudioPayload(current => current ? { ...current, novel: { ...current.novel, status: archivedNovel.status } } : current)
   }
 
   /**
@@ -3721,9 +3766,7 @@ export default function StudioWorkspace() {
     : undefined
 
   function handleSelectWorkChapter(chapterId: string) {
-    openWorkDocument(taskUiScope)
-    handleSelectChapter(chapterId)
-    setWorkViewer('chapter')
+    handleSelectChapter(chapterId, { showInWork: true })
   }
 
   function handleAddViewerSelectionToAgent() {
@@ -4263,7 +4306,7 @@ export default function StudioWorkspace() {
             currentTasks={agentTaskSidebarItems}
             currentTasksNovelId={agentStateNovelId}
             activeTaskId={searchParams.get('session') && searchParams.get('session') !== 'new'
-              ? searchParams.get('session') : agentStateNovelId === activeNovelId ? activeAgentTaskWindowId : null}
+              ? searchParams.get('session') : agentStateNovelId === activeNovelId ? agentSessionId ?? activeAgentTaskWindowId : null}
             taskSwitchLocked={agentRunState.active}
             onSelectNovel={handleSelectWorkspaceNovel}
             onCreateNovel={handleCreateWorkspaceNovel}
@@ -4277,6 +4320,7 @@ export default function StudioWorkspace() {
             onTaskDeleted={handleAgentTaskDeleted}
             onTaskForked={handleAgentTaskForked}
             onNovelDeleted={(deletedNovelId) => void handleNovelDeletedFromSidebar(deletedNovelId)}
+            onNovelArchived={handleNovelArchivedFromSidebar}
             currentNovelStatus={novelForm?.status}
             onOpenNovelMeta={() => setActiveToolPanel('meta')}
             onExportNovel={() => setExportDialogOpen(true)}
@@ -4298,7 +4342,7 @@ export default function StudioWorkspace() {
             onPerspectiveChange={setWorkspacePerspective}
             currentNovelId={currentNovel.id}
             novelTitle={novelTitle}
-            novelOptions={novelOptions}
+            novelOptions={activeNovelOptions}
             novelsLoading={myNovelsQuery.isLoading}
             switchingNovel={createNovelMutation.isPending}
             onSelectNovel={handleSelectWorkspaceNovel}
@@ -4325,7 +4369,7 @@ export default function StudioWorkspace() {
             {featureFlags.dualWorkspace && workspacePerspective === 'work' ? (
               <WorkPerspective
                 conversationRail={<AgentConversationRail conversations={agentConversationRailItems} onSelectConversation={(messageId) => window.dispatchEvent(new CustomEvent('chevoink:agent-conversation-navigate', { detail: { messageId } }))} />}
-                conversation={<div className="work-agent-frame h-full min-h-0 w-full py-2">{renderWritingAgent(undefined, false, workViewer ? 'inline' : 'responsive')}</div>}
+                conversation={<div className="work-agent-frame h-full min-h-0 w-full py-2">{renderWritingAgent(undefined, false, workViewerMode ? 'inline' : 'responsive')}</div>}
                 activityDock={(hasVisibleWorkspaceChanges || agentTodos.some(item => item.status !== 'cancelled') || pendingChapterReviews.length > 0 || Boolean(pendingPlanReview)) ? <div className="flex h-full min-h-0 flex-col"><div className="rounded-[20px] bg-[var(--surface-muted)] p-3"><p className="px-2 pb-1 pt-1 text-sm font-semibold text-[var(--text-secondary)]">任务状态</p><AgentActivityBar
                   activities={workspaceActivities}
                   activitiesVersion={workspaceActivitiesVersion}
@@ -4344,7 +4388,7 @@ export default function StudioWorkspace() {
                   workTree={<ChapterSidebar
                   taskScope={taskUiScope}
                     embedded chapters={chapters} volumes={volumes} savedPlans={savedPlanFiles}
-                    selectedChapterId={selectedChapterId} selectedTreeItemId={selectedTreeItemId}
+                    selectedChapterId={workPanelReady ? selectedChapterId : null} selectedTreeItemId={workPanelReady ? selectedTreeItemId : null}
                     catalogPreview={catalogPreview} novelWordCountLabel={wordCountLabel}
                     chapterCountLabel={chapterCountLabel} novelTitle={novelTitle} activeCoverLabel={coverLabel}
                     onSelectChapter={handleSelectWorkChapter} onSelectPlan={handleSelectPlanFromTree}
@@ -4367,46 +4411,36 @@ export default function StudioWorkspace() {
                   chapters={chapters}
                   plans={savedPlanFiles}
                   projectNotes={projectNotes}
-                  activeTaskTitle={agentTaskSidebarItems.find((task) => task.id === activeAgentTaskWindowId)?.title ?? null}
+                  activeTaskTitle={activeAgentTaskWindow?.title ?? null}
                   taskCount={agentTaskSidebarItems.length}
                   memoryGraph={featureFlags.memory2 ? <MemoryGraph novelId={currentNovel.id} active={agentRunState.active} /> : null}
                   skillsPanel={<SkillsPanel novelId={currentNovel.id} chapters={chapters} />}
                   contextPanel={<AgentMemoryCenter sessionId={agentSessionId} novelId={currentNovel.id} active={agentRunState.active} onOpenDetail={() => setContextDetailOpen(true)} />}
                 />}
-                viewer={workViewer ? <StudioChapterViewer
+                viewer={workViewerMode ? <StudioChapterViewer
                   positionScope={taskUiScope}
-                  draft={workViewer === 'chapter' ? chapterDraft : null}
-                  workspaceDocument={workViewer === 'document' ? activeWorkspaceDocument : null}
-                  loading={workViewer === 'chapter' ? chapterQuery.isLoading : plansLoadedNovelId !== activeNovelId || agentSessionsResolving} selection={editorSelection}
+                  draft={workChapterDraft}
+                  workspaceDocument={workViewerMode === 'document' ? activeWorkspaceDocument : null}
+                  loading={workViewerMode === 'chapter' ? !workChapterDraft && !workChapterLoadError : plansLoadedNovelId !== activeNovelId || agentSessionsResolving}
+                  selection={editorSelection}
+                  errorMessage={workChapterLoadError}
+                  onRetryLoad={() => void chapterQuery.refetch()}
                   onChange={handleChapterDraftChange} onSelectionChange={handleEditorSelection}
                   onWorkspaceDocumentChange={handleWorkspaceDocumentChange}
                   onAddSelection={handleAddViewerSelectionToAgent}
                   onCreateVolume={handleRequestCreateVolume} onCreateChapter={handleRequestCreateChapter}
                   onClose={() => setWorkViewer(null)}
                   onBlur={handleEditorBlurFlush}
-                  streamingContent={workViewer === 'chapter' ? chapterStreamingPreview : documentStreamingPreview}
-                  writeLocked={workViewer === 'chapter' ? chapterStreamingPreview !== undefined : documentStreamingPreview !== undefined}
+                  streamingContent={workViewerStreamingPreview}
+                  writeLocked={workViewerStreamingPreview !== undefined}
                 /> : undefined}
                 rightOpen={workRightOpen}
-                scopeKey={workPanelScope}
-                viewerIdentity={workViewer ? `${workViewer}:${selectedTreeItemId ?? ''}` : null}
+                scopeKey={workPanelReady ? workPanelScope : undefined}
                 inspectorWidth={panelWidths.workInspector}
                 viewerWidth={panelWidths.workViewer}
-                onToggleRight={() => {
-                  if (!workRightOpen && workInspectorTab === 'work') {
-                    if (selectedTreeItemId?.startsWith('chapter:')) setWorkViewer('chapter')
-                    else if (selectedTreeItemId === 'catalog' || selectedTreeItemId?.startsWith('plan:')) setWorkViewer('document')
-                  }
-                  setWorkRightOpen((value) => !value)
-                }}
+                onToggleRight={() => setWorkRightOpen(value => !value)}
                 inspectorTab={workInspectorTab}
-                onSelectInspectorTab={(tab) => {
-                  setWorkInspectorTab(tab)
-                  if (tab === 'work') {
-                    if (selectedTreeItemId?.startsWith('chapter:')) setWorkViewer('chapter')
-                    else if (selectedTreeItemId === 'catalog' || selectedTreeItemId?.startsWith('plan:')) setWorkViewer('document')
-                  }
-                }}
+                onSelectInspectorTab={setWorkInspectorTab}
               />
             ) : (
             <IdePerspective
@@ -4472,7 +4506,7 @@ export default function StudioWorkspace() {
                     chapters={chapters}
                     plans={savedPlanFiles}
                     projectNotes={projectNotes}
-                    activeTaskTitle={agentTaskSidebarItems.find((task) => task.id === activeAgentTaskWindowId)?.title ?? null}
+                    activeTaskTitle={activeAgentTaskWindow?.title ?? null}
                     taskCount={agentTaskSidebarItems.length}
                     skillsPanel={<SkillsPanel novelId={currentNovel.id} chapters={chapters} />}
                     contextPanel={<AgentMemoryCenter sessionId={agentSessionId} novelId={currentNovel.id} active={agentRunState.active} onOpenDetail={() => setContextDetailOpen(true)} />}

@@ -447,6 +447,23 @@ select {
   display: none;
 }
 
+@media (max-width: 767px), (pointer: coarse) {
+  .messages-list-scroll {
+    scrollbar-width: none;
+    scrollbar-color: transparent transparent;
+  }
+
+  .messages-list-scroll::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
+  .messages-list-scroll::-webkit-scrollbar-thumb {
+    background: transparent;
+  }
+}
+
 /* 创作区（含沉浸创作）：静止时隐藏滚动条，滚动中才显示。
    由 useAutoHideScrollbars 在创作区挂载时给 body 加作用域类，
    正在滚动的容器会被临时打上 data-scrolling，回退到全局 6px 细滚动条样式。

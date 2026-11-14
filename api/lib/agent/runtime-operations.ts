@@ -10,6 +10,7 @@ import { assertPendingProviderState } from './runtime-state.js'
 import { readAttemptContentionScope } from './runtime-parent-contention.js'
 import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
 import { env } from '../../config/env.js'
+import { PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
 
 async function outbox(tx: RuntimeTx, input: { taskRootId: string; operationId: string; runId: string; eventKey: string; type: string; payload: Prisma.InputJsonValue }) {
   return tx.agentExecutionOutbox.create({ data: { id: randomUUID(), ...input } })
@@ -53,7 +54,8 @@ export async function assertCurrentToolPolicy(tx: RuntimeTx, token: RunLeaseToke
   let grant = admission?.grant ?? configuration.toolAuthority.find(item => item.name === operation.action)
   {
     const tooling = await (await import('./native-tool-policy.js')).readEffectiveNativeTooling(tx, token, configuration,
-      (await import('../../../shared/contracts/task-spec-contracts.js')).taskSpecSchema.parse(originalSpec))
+      (await import('../../../shared/contracts/task-spec-contracts.js')).taskSpecSchema.parse(originalSpec),
+      PERSONALIZATION_WRITE_ACTIONS.includes(operation.action) ? 'update' : 'share')
     const current = tooling.toolAuthority.find(item => item.name === operation.action)
     if (!grant || !current || current.permission === 'deny') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '当前实际权限已撤销此工具。')
     grant = { ...grant, permission: grant.permission === 'deny' ? 'deny'

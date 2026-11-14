@@ -129,6 +129,13 @@ export async function requestToolApproval(token: RunLeaseToken, input: { expecte
       writingServices = review.manifest
       serviceConfirmation = review.confirmations.length > 0
     }
+    if ((await import('./personalization-operations.js')).PERSONALIZATION_WRITE_ACTIONS.includes(call.name)) {
+      const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
+      const { readPersonalizationWriteAdmission } = await import('./personalization-authority.js')
+      const admission = await readPersonalizationWriteAdmission(tx, { ...token, sessionId: root.sessionId, novelId: root.novelId }, call.name, args.value)
+      if (admission === 'reject') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '个性化操作缺少可核实的作者来源。')
+      serviceConfirmation = admission === 'confirm'
+    }
     if (grant.permission !== 'ask' && !grant.alwaysConfirm && !serviceConfirmation) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原工具不需要本次确认。')
     if (current.frame.revision !== frame.revision) runtimeError('RUNTIME_STATE_CONFLICT', '不能为已经离开的执行位置新建审批。')
     const now = await databaseNow(tx)

@@ -519,16 +519,21 @@ export async function readWritingServiceConfirmations(tx: RuntimeTx, lease: RunL
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
   await tx.$queryRaw`SELECT id FROM agent_sessions WHERE id = ${root.sessionId} FOR SHARE`
   const session = await tx.agentSession.findUnique({ where: { id: root.sessionId } })
-  const [{ getToolByName }, { applySessionToolPolicy }] = await Promise.all([import('./tools/registry.js'), import('./agents.js')])
+  const [{ getToolByName }, { applySessionToolPolicy }, { applyPersonalizationToolRules }, { readPersonalizationRules }] = await Promise.all([
+    import('./tools/registry.js'), import('./agents.js'), import('./personalization-tool-policy.js'), import('./personalization.js'),
+  ])
   if (!session || session.userId !== lease.userId || session.novelId !== root.novelId) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '内部写作会话归属已变化。')
   const required: string[] = []
+  const rules = await readPersonalizationRules(lease.userId, tx, 'share')
   for (const action of new Set(actions)) {
     const grant = current.configuration.toolAuthority.find(item => item.name === action), tool = getToolByName(action)
     if (!tool || !grant || grant.permission === 'deny' || !current.configuration.tools.some(item => item.function.name === action)) {
       return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务未授予内部写作步骤的实际工具能力。')
     }
-    const effective = applySessionToolPolicy([{ ...tool, permission: { ...tool.permission, [current.configuration.mode]: grant.permission } }],
-      current.configuration.mode, session.toolPolicy, session.sandboxMode === 'read_only' ? 'read_only' : 'workspace')[0]
+    const effective = applyPersonalizationToolRules(
+      applySessionToolPolicy([{ ...tool, permission: { ...tool.permission, [current.configuration.mode]: grant.permission } }],
+        current.configuration.mode, session.toolPolicy, session.sandboxMode === 'read_only' ? 'read_only' : 'workspace'),
+      current.configuration.mode, rules)[0]
     if (!effective || effective.permission[current.configuration.mode] === 'deny') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '当前会话已收紧内部写作权限。')
     if (effective.permission[current.configuration.mode] === 'ask' || grant.alwaysConfirm) required.push(action)
   }

@@ -13,8 +13,15 @@ const service = vi.hoisted(() => ({
   updatePersonalizationMemory: vi.fn(),
   deletePersonalizationMemory: vi.fn(),
   clearPersonalizationMemories: vi.fn(),
+  restorePersonalizationMemory: vi.fn(),
+  changePersonalizationRule: vi.fn(),
+}))
+const operations = vi.hoisted(() => ({
+  assertPersonalizationRuleOperation: vi.fn(),
+  listPersonalizationRuleOperations: vi.fn(),
 }))
 vi.mock('../../api/lib/agent/personalization.js', () => service)
+vi.mock('../../api/lib/agent/personalization-tool-policy.js', () => operations)
 vi.mock('../../api/lib/app-releases.js', () => ({ hasAgentPersonalizationCapability: vi.fn() }))
 vi.mock('../../api/lib/auth-session.js', () => ({
   requireSessionUserId(req: Request) {
@@ -32,7 +39,7 @@ async function invoke(method: string, path: string, input: { signed?: boolean; b
     layer.route?.path === path && layer.route.stack.some(handler => handler.method === method))?.route
   const handler = route?.stack.find(layer => layer.method === method)
   if (!handler) throw new Error(`Missing route ${method} ${path}`)
-  const req = { body: input.body, headers: input.signed ? { 'x-test-session': 'signed' } : {}, params: { memoryId: 'memory-a' },
+  const req = { body: input.body, headers: input.signed ? { 'x-test-session': 'signed' } : {}, params: { memoryId: 'memory-a', toolName: 'chapter_read' },
     query: input.revision === undefined ? {} : { expectedRevision: input.revision } } as Request
   const result = { status: 200, headers: new Map<string, string>(), body: {} as Record<string, unknown> }
   const res = {
@@ -65,6 +72,8 @@ describe('personalization HTTP boundary', () => {
       ['get', settingsUrl], ['patch', settingsUrl],
       ['get', memoriesUrl], ['post', memoriesUrl], ['delete', memoriesUrl],
       ['patch', memoryUrl], ['delete', memoryUrl],
+      ['post', `${memoryUrl}/restore`], ['get', `${settingsUrl}/rule-operations`],
+      ['put', `${settingsUrl}/rules`], ['delete', `${settingsUrl}/rules/:toolName`],
     ]
     for (const [method, path] of requests) {
       expect(await invoke(method, path, { signed: true })).toMatchObject({
@@ -77,25 +86,26 @@ describe('personalization HTTP boundary', () => {
   })
 
   it('uses the session as its account boundary and validates strict sparse patches', async () => {
-    const payload = { settings: { ...DEFAULT_AGENT_PERSONALIZATION_SETTINGS, preferredName: '小叶' }, revision: 3 }
+    const payload = { settings: { ...DEFAULT_AGENT_PERSONALIZATION_SETTINGS, customInstructions: '先给结论' }, revision: 3, rules: [] }
     service.patchAgentPersonalization.mockResolvedValue(payload)
     const patch = (body: unknown) => invoke('patch', settingsUrl, { signed: true, body })
     expect(await patch({ userId: 'other', expectedRevision: 2, preferredName: '小叶' })).toMatchObject({ status: 400 })
+    expect(await patch({ expectedRevision: 2, preferredName: '小叶' })).toMatchObject({ status: 400 })
     expect(await patch({ expectedRevision: 2 })).toMatchObject({ status: 400 })
-    expect(await patch({ expectedRevision: 2, preferredName: ' 小叶 ' })).toMatchObject({ status: 200, body: { success: true, data: payload } })
-    expect(service.patchAgentPersonalization).toHaveBeenCalledExactlyOnceWith('test-account', { expectedRevision: 2, preferredName: '小叶' })
+    expect(await patch({ expectedRevision: 2, customInstructions: ' 先给结论 ' })).toMatchObject({ status: 200, body: { success: true, data: payload } })
+    expect(service.patchAgentPersonalization).toHaveBeenCalledExactlyOnceWith('test-account', { expectedRevision: 2, customInstructions: '先给结论' })
   })
 
   it('prevents caching of personal reads and hides the internal memory epoch', async () => {
-    service.getAgentPersonalization.mockResolvedValue({ settings: DEFAULT_AGENT_PERSONALIZATION_SETTINGS, revision: 0 })
-    service.listPersonalizationMemories.mockResolvedValue({ memories: [], revision: 2, memoryEpoch: 4 })
+    service.getAgentPersonalization.mockResolvedValue({ settings: DEFAULT_AGENT_PERSONALIZATION_SETTINGS, revision: 0, rules: [] })
+    service.listPersonalizationMemories.mockResolvedValue({ memories: [], archived: [], revision: 2, memoryEpoch: 4 })
     const settings = await invoke('get', settingsUrl, { signed: true })
     expect(settings.status).toBe(200)
     expect(settings.headers.get('Cache-Control')).toBe('no-store')
     const response = await invoke('get', memoriesUrl, { signed: true })
     expect(response.status).toBe(200)
     expect(response.headers.get('Cache-Control')).toBe('no-store')
-    expect(response.body.data).toEqual({ memories: [], revision: 2 })
+    expect(response.body.data).toEqual({ memories: [], archived: [], revision: 2 })
     expect(service.listPersonalizationMemories).toHaveBeenCalledExactlyOnceWith('test-account')
   })
 
@@ -113,5 +123,19 @@ describe('personalization HTTP boundary', () => {
     expect(response.status).toBe(409)
     expect(response.body).toMatchObject({ success: false, error: { code: 'PERSONALIZATION_MEMORY_CONFLICT' } })
     expect(service.deletePersonalizationMemory).toHaveBeenCalledExactlyOnceWith('test-account', 'memory-a', 1)
+  })
+
+  it('checks the registered operation and account before updating any rules', async () => {
+    const put = (body: unknown) => invoke('put', `${settingsUrl}/rules`, { signed: true, body })
+    const rule = { toolName: 'chapter_read', permission: 'deny', expectedRevision: 2 }
+    expect(await put({ ...rule, userId: 'other' })).toMatchObject({ status: 400 })
+    expect(service.changePersonalizationRule).not.toHaveBeenCalled()
+    operations.assertPersonalizationRuleOperation.mockRejectedValueOnce(new DataAccessError(400, 'PERSONALIZATION_RULE_UNKNOWN_TOOL', '操作不可用'))
+    expect(await put({ ...rule, toolName: 'unknown_operation' })).toMatchObject({ status: 400 })
+    expect(service.changePersonalizationRule).not.toHaveBeenCalled()
+    service.changePersonalizationRule.mockResolvedValue({ revision: 3 })
+    expect(await put(rule)).toMatchObject({ status: 200 })
+    expect(operations.assertPersonalizationRuleOperation).toHaveBeenLastCalledWith('chapter_read')
+    expect(service.changePersonalizationRule).toHaveBeenLastCalledWith('test-account', 'chapter_read', 'deny', 2)
   })
 })

@@ -28,6 +28,9 @@ const emailAccountCandidateSchema = '8d8b27d023654f0330e35f81a12ee1894f0017dce1f
 export const agentPersonalizationMigrationName = '20261114090000_agent_personalization'
 export const agentPersonalizationMigrationChecksum = 'bfdb011141b5fd5a447e6e896aef12e48203b2d199d23ec390629480e1fe6892'
 const agentPersonalizationCandidateSchema = 'b55c24ace244e9695ffa4d6733554fa16aa384907e8085766b12922ef12a8302'
+export const personalizationRulesMigrationName = '20261114150000_personalization_memory_rules'
+export const personalizationRulesMigrationChecksum = 'd41574f1cce335e0046ea6c18a59407a34523a409dd8c1689ceb65e6660f91ba'
+const personalizationRulesCandidateSchema = 'fc3dfaaaf9c3d9bc4515e7ac380817bf87b6333a56e9945318393672f58c34d4'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -49,7 +52,8 @@ reviewed.set(announcementReadsMigrationName, announcementReadsMigrationChecksum)
 reviewed.set(userNotificationsMigrationName, userNotificationsMigrationChecksum)
 reviewed.set(emailAccountMigrationName, emailAccountMigrationChecksum)
 reviewed.set(agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum)
-const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName])
+reviewed.set(personalizationRulesMigrationName, personalizationRulesMigrationChecksum)
+const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -73,6 +77,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const rulesTarget = `${personalizationRulesMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === agentPersonalizationCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === personalizationRulesCandidateSchema
+    && !oldFiles.some(([name]) => name === rulesTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== rulesTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === rulesTarget)?.[1] === personalizationRulesMigrationChecksum) return personalizationRulesMigrationName
   const personalizationTarget = `${agentPersonalizationMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === emailAccountCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === agentPersonalizationCandidateSchema
@@ -670,6 +680,35 @@ export function assertFindingIndex(rows, phase) {
     || JSON.stringify(rows[0].columns) !== JSON.stringify(columns)) throw Error('Quality finding index mismatch')
 }
 
+export async function readPersonalizationRulesMigrationState(tx, phase) {
+  const [catalog] = await tx.$queryRaw`
+    SELECT
+      to_regclass('agent_personalization_memory_hits') IS NOT NULL AS hits,
+      EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'agent_personalizations'::regclass
+        AND attname = 'tool_rules' AND atttypid = 'jsonb'::regtype AND attnotnull AND NOT attisdropped) AS rules,
+      EXISTS (SELECT 1 FROM pg_index WHERE indrelid = 'agent_personalization_memories'::regclass
+        AND indexrelid = to_regclass('agent_personalization_memories_user_id_active_slot_key')
+        AND indisunique AND indisvalid AND indisready AND indpred IS NULL
+        AND pg_get_indexdef(indexrelid) LIKE '%(user_id, active_slot)') AS slots,
+      EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'agent_personalization_memories'::regclass
+        AND conname = 'agent_personalization_memories_slot_state' AND convalidated) AS "slotState",
+      EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'agent_personalization_memories'::regclass
+        AND tgname = 'agent_personalization_fill_active_slot' AND tgenabled = 'O') AS trigger,
+      EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'agent_personalizations'::regclass
+        AND conname = 'agent_personalizations_legacy_fields_retired' AND convalidated) AS "legacyRetired"`
+  const expected = phase === 'after'
+  if (!catalog || Object.values(catalog).some(value => value !== expected)) throw Error('Personalization memory and rules catalog mismatch')
+  if (!expected) return catalog
+  const [invariants] = await tx.$queryRaw`
+    SELECT
+      EXISTS (SELECT 1 FROM agent_personalizations WHERE preferred_name <> '' OR about_me <> ''
+        OR jsonb_typeof(tool_rules) <> 'array') AS "invalidProfiles",
+      EXISTS (SELECT 1 FROM agent_personalization_memories
+        WHERE active_slot IS NOT NULL GROUP BY user_id HAVING count(*) > 50) AS "excessActive"`
+  if (!invariants || Object.values(invariants).some(Boolean)) throw Error('Personalization memory migration invariants failed')
+  return { ...catalog, ...invariants }
+}
+
 async function main() {
   const [phase, candidate, baseline, receipt] = process.argv.slice(2)
   const plan = releaseMigrationPlan(candidate, baseline)
@@ -701,6 +740,10 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === personalizationRulesMigrationName) {
+        const personalization = await readPersonalizationRulesMigrationState(tx, phase)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, personalization }
+      }
       if (plan === agentPersonalizationMigrationName) {
         const personalization = await readAgentPersonalizationState(tx, phase)
         assertAgentPersonalizationState(personalization, phase, before?.personalization)

@@ -12,6 +12,8 @@ type Props = {
   draft: ChapterDraftState | null
   workspaceDocument?: WorkspaceDocumentView | null
   loading?: boolean
+  errorMessage?: string | null
+  onRetryLoad?: () => void
   positionScope?: string
   selection: EditorSelectionState
   onChange: (draft: ChapterDraftState) => void
@@ -26,7 +28,7 @@ type Props = {
   writeLocked?: boolean
 }
 
-export default function StudioChapterViewer({ draft, workspaceDocument = null, loading, positionScope, selection, onChange, onWorkspaceDocumentChange, onSelectionChange, onAddSelection, onCreateVolume, onCreateChapter, onClose, onBlur, streamingContent: receivedContent, writeLocked = false }: Props) {
+export default function StudioChapterViewer({ draft, workspaceDocument = null, loading, errorMessage, onRetryLoad, positionScope, selection, onChange, onWorkspaceDocumentChange, onSelectionChange, onAddSelection, onCreateVolume, onCreateChapter, onClose, onBlur, streamingContent: receivedContent, writeLocked = false }: Props) {
   const streaming = receivedContent !== undefined
   const visibleContent = useStreamingText(receivedContent ?? '', streaming, `${positionScope ?? ''}:${workspaceDocument?.id ?? draft?.id ?? ''}`)
   const streamingContent = streaming ? visibleContent : undefined
@@ -49,6 +51,9 @@ export default function StudioChapterViewer({ draft, workspaceDocument = null, l
       {workspaceDocument.kind === 'plan' ? <PlanMarkdownEditor positionScope={positionScope} documentId={workspaceDocument.id} markdown={streamingContent ?? workspaceDocument.content} editable={workspaceDocument.editableContent && !writeLocked} streaming={streaming} onChange={(content) => onWorkspaceDocumentChange?.({ title: workspaceDocument.title, content })} onSelectionChange={onSelectionChange} onBlur={onBlur} /> : <LocalFirstTextarea ref={streamingScroll.ref} onScroll={streamingScroll.onScroll} value={streamingContent ?? workspaceDocument.content} readOnly={!workspaceDocument.editableContent || writeLocked} resetKey={`${positionScope ?? ''}:${workspaceDocument.id}`} onCommit={(content) => onWorkspaceDocumentChange?.({ title: workspaceDocument.title, content })} onSelectionChange={onSelectionChange} onBlur={onBlur} className="h-full w-full resize-none bg-transparent text-[14px] leading-8 text-[var(--text-primary)] outline-none" placeholder="在这里维护目录内容。" />}
     </div> : draft ? <div className="min-h-0 flex-1 overflow-hidden px-5 py-4">
       <LocalFirstTextarea ref={streamingScroll.ref} onScroll={streamingScroll.onScroll} value={chapterContent} readOnly={writeLocked} resetKey={`${positionScope ?? ''}:${draft.id}`} onCommit={(content) => onChange({ ...draft, content })} onSelectionChange={onSelectionChange} onBlur={onBlur} className="h-full w-full resize-none bg-transparent font-serif text-[15px] leading-8 text-[var(--text-primary)] outline-none read-only:cursor-progress read-only:opacity-90" placeholder="继续写这一章的正文。" />
+    </div> : errorMessage ? <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center text-xs text-[var(--text-secondary)]">
+      <p>{errorMessage}</p>
+      {onRetryLoad ? <button type="button" onClick={onRetryLoad} className="rounded-md px-3 py-1.5 hover:bg-[var(--surface-muted)]">重试</button> : null}
     </div> : <div className="flex flex-1 items-center justify-center px-8 text-center text-xs leading-6 text-[var(--text-secondary)]">从右侧作品树选择章节、计划或目录，在查看器中查看和修改。</div>}
   </section>
 }

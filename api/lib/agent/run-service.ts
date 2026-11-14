@@ -146,7 +146,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const { initializeExecutionState, loadExecutionState } = await import('./runtime-state.js')
   const { buildTaskSpec } = await import('./task-spec.js')
   const { taskSpecSchema } = await import('../../../shared/contracts/task-spec-contracts.js')
-  const { applySessionToolPolicy, getAgentDefinition, getToolsForAgent } = await import('./agents.js')
+  const { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, governedPolicyKey } = await import('./agents.js')
   const { resolveAgent2FeatureFlags } = await import('../agent2-feature-flags.js')
   const { assembleContext, insertSubagentCatalog } = await import('./context.js')
   const { snapshotToolAuthority, intersectToolAuthority, restrictToolsToTask } = await import('./tool-authority.js')
@@ -212,8 +212,13 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   })
   // Freeze the same task ceiling as the ordinary loop before applying the
   // session/goal ceilings. Existing saved configurations return above intact.
-  const currentTools = applySessionToolPolicy(restrictToolsToTask([...scoped, contextRead], spec, input.mode), input.mode, session.toolPolicy,
+  const sessionTools = applySessionToolPolicy(restrictToolsToTask([...scoped, contextRead], spec, input.mode), input.mode, session.toolPolicy,
     session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
+  const [{ applyPersonalizationToolRules, hasPersonalizationSessionOverride }, { readPersonalizationRules }] = await Promise.all([
+    import('./personalization-tool-policy.js'), import('./personalization.js'),
+  ])
+  const currentTools = applyPersonalizationToolRules(sessionTools, input.mode, await readPersonalizationRules(userId),
+    tool => hasPersonalizationSessionOverride(session.toolPolicy, governedPolicyKey(tool)))
   const tools = activationCeiling ? intersectToolAuthority(currentTools, input.mode, new Map(activationCeiling)) : currentTools
   const assembled = await assembleContext({ agent, mode: input.mode, userId, sessionId: run.sessionId, runId, novelId: run.novelId, chapterId: run.chapterId,
     prompt: input.prompt, selection: input.selection, attachments: input.attachments, visionEnabled: runtime.visionEnabled, taskSpec: spec,

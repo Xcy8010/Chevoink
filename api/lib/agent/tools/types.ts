@@ -51,6 +51,10 @@ export type ToolContext = {
   inlineChild?: boolean
   /** Memory generation observed by this main model request. Never model input. */
   personalizationMemoryEpoch?: number
+  /** Exact tool call was approved by the authenticated author. Executor only. */
+  personalizationApproved?: true
+  /** Account rules are re-read before legacy and inline tool dispatch. */
+  personalizationToolRulesEnabled?: boolean
   durableGoalActivation?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   /** Internal, frozen at admission. Never populated from model arguments. */
   durableContent?: { lease: RunLeaseToken; operationKey: string; chapterId: string; expectedRevision: number;

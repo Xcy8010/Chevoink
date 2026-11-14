@@ -17,7 +17,7 @@ import FeedbackDialog from '@/features/feedback/components/FeedbackDialog'
 import { copyToClipboard } from '@/lib/clipboard'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
-import type { AgentSession, FeedbackKind, Novel } from '../../../../shared/contracts/index.js'
+import type { AgentSession, FeedbackKind, Novel, UserMePayload } from '../../../../shared/contracts/index.js'
 import { deleteNovelWorkspace, updateNovelMeta } from '../api'
 import { deleteAgentSession, fetchAgentSessions, fetchSessionsRunStatus, forkAgentSession, renameAgentSession, updateAgentSessionSettings } from '../agent/agentApi'
 import ChevoinkAgentMark from '../agent/components/ChevoinkAgentMark'
@@ -59,6 +59,7 @@ type Props = {
   onTaskForked: (session: AgentSession) => void
   /** 作品删除完成：宿主清缓存、必要时换到其它作品 */
   onNovelDeleted: (novelId: string) => void
+  onNovelArchived?: (novel: Novel) => void
   /** 以下作品级动作只对当前作品生效（宿主 handler 绑定 activeNovelId），菜单里也只给当前作品渲染 */
   currentNovelStatus?: Novel['status']
   onOpenNovelMeta?: () => void
@@ -105,6 +106,9 @@ const LEGACY_DEFAULT_WIDTH = 304
 const VISIBLE_PROJECT_TASKS = 5
 const VISIBLE_RECENT_TASKS = 10
 const workspaceSessionsKey = ['agent', 'sessions', 'workspace-navigation'] as const
+const workspaceSearchKey = ['agent', 'sessions', 'workspace-search'] as const
+const workspaceNovelsKey = ['studio', 'my-novels'] as const
+const profileKey = ['community', 'me'] as const
 const sidebarRowClass = 'flex h-8 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--border-strong)]'
 
 function TaskDisclosure({ id, label, open, children }: { id?: string; label?: string; open: boolean; children: ReactNode }) {
@@ -164,6 +168,8 @@ export default function StudioWorkspaceSidebar(props: Props) {
   const queryClient = useQueryClient()
   const toast = useToast()
   const sessionUser = useShellStore((state) => state.sessionUser)
+  const latestProps = useRef(props)
+  latestProps.current = props
   const [width, setWidth] = useState(initialWidth)
   const onWidthChangeRef = useRef(props.onWidthChange)
   onWidthChangeRef.current = props.onWidthChange
@@ -225,11 +231,14 @@ export default function StudioWorkspaceSidebar(props: Props) {
 
   const [taskSnapshots, setTaskSnapshots] = useState<Record<string, SidebarTask[]>>({})
   const [novelSnapshots, setNovelSnapshots] = useState<Record<string, Novel>>({})
+  const archivedNovelIds = useMemo(() => new Set([
+    ...Object.values(novelSnapshots), ...props.novels,
+  ].filter(novel => novel.status === 'archived').map(novel => novel.id)), [novelSnapshots, props.novels])
   const novels = useMemo(() => {
     const currentIds = new Set(props.novels.map(novel => novel.id))
     const retained = Object.values(novelSnapshots).filter(novel => !currentIds.has(novel.id) && (taskSnapshots[novel.id]?.length ?? 0) > 0)
-    return sortWorkspaceItemsByLatest([...props.novels, ...retained].filter(novel => novel.status !== 'archived'))
-  }, [props.novels, novelSnapshots, taskSnapshots])
+    return sortWorkspaceItemsByLatest([...props.novels, ...retained].filter(novel => !archivedNovelIds.has(novel.id)))
+  }, [props.novels, novelSnapshots, taskSnapshots, archivedNovelIds])
   const sessionsQuery = useQuery({
     queryKey: workspaceSessionsKey,
     queryFn: () => fetchAgentSessions(),
@@ -237,14 +246,16 @@ export default function StudioWorkspaceSidebar(props: Props) {
     enabled: props.open || peek || searchOpen,
   })
   const searchQuery = useQuery({
-    queryKey: ['agent', 'sessions', 'workspace-search', searchText.trim()],
+    queryKey: [...workspaceSearchKey, searchText.trim()],
     queryFn: () => fetchAgentSessions(undefined, { query: searchText.trim() }),
     staleTime: 8_000,
     enabled: searchOpen && searchText.trim().length > 0,
   })
   const creditQuery = useQuery({ queryKey: ['credits', 'summary'], queryFn: fetchCreditSummary, staleTime: 20_000, refetchInterval: 60_000 })
   const referralQuery = useQuery({ queryKey: ['credits', 'referral'], queryFn: fetchReferral, staleTime: 60_000, enabled: inviteOpen })
-  const sessions = useMemo(() => sessionsQuery.data?.items ?? [], [sessionsQuery.data?.items])
+  const sessions = useMemo(() => (sessionsQuery.data?.items ?? []).filter(
+    session => session.status !== 'archived' && !archivedNovelIds.has(session.novelId),
+  ), [sessionsQuery.data?.items, archivedNovelIds])
   const sessionsByNovel = useMemo(() => {
     const result = new Map<string, AgentSession[]>()
     sessions.forEach((session) => result.set(session.novelId, [...(result.get(session.novelId) ?? []), session]))
@@ -261,10 +272,11 @@ export default function StudioWorkspaceSidebar(props: Props) {
   }, [localTasks, props.currentTasksNovelId, props.novels])
   function forgetTask(taskId: string) {
     setTaskSnapshots(current => Object.fromEntries(Object.entries(current).map(([owner, tasks]) => [owner, tasks.filter(task => task.id !== taskId)])))
-    queryClient.setQueryData<{ items: AgentSession[] }>(workspaceSessionsKey, current => current && {
+    const remove = (current: { items: AgentSession[] } | undefined) => current && {
       items: current.items.filter(session => session.id !== taskId),
-    })
-    props.onTaskDeleted(taskId)
+    }
+    queryClient.setQueryData(workspaceSessionsKey, remove)
+    latestProps.current.onTaskDeleted(taskId)
   }
   // 任务状态信号：本地 SSE 实时层（agentStore）+ 服务端 run-status 轮询兑底，
   // 覆盖切走窗口/跨作品/折叠期间的任务完成、待确认、异常中止与运行中提示
@@ -457,24 +469,46 @@ export default function StudioWorkspaceSidebar(props: Props) {
   async function runArchive() {
     const target = archiveTarget
     if (!target) return
+    const userId = sessionUser?.id
+    const stillOwned = () => useShellStore.getState().sessionUser?.id === userId
     setBusy(true)
     try {
       if (target.kind === 'novel') {
-        await updateNovelMeta(target.id, { status: 'archived' })
-        setNovelSnapshots(current => current[target.id] ? { ...current, [target.id]: { ...current[target.id], status: 'archived' } } : current)
-        if (target.id === props.currentNovelId) {
-          const next = novels.find((item) => item.id !== target.id)
-          if (next) props.onSelectNovel(next.id); else props.onCreateNovel()
+        const archived = await updateNovelMeta(target.id, { status: 'archived' })
+        if (!stillOwned()) return
+        await Promise.all([
+          queryClient.cancelQueries({ queryKey: workspaceNovelsKey }),
+          queryClient.cancelQueries({ queryKey: profileKey }),
+        ])
+        if (!stillOwned()) return
+        const updateNovels = (items: Novel[]) => items.map(novel => novel.id === archived.id ? archived : novel)
+        setNovelSnapshots(current => ({ ...current, [archived.id]: archived }))
+        queryClient.setQueryData<Novel[]>(workspaceNovelsKey, current => current && updateNovels(current))
+        queryClient.setQueryData<UserMePayload>(profileKey, current => current && ({
+          ...current, authoredNovels: updateNovels(current.authoredNovels ?? []),
+        }))
+        const host = latestProps.current
+        host.onNovelArchived?.(archived)
+        if (archived.id === host.currentNovelId) {
+          const next = novels.find(item => item.id !== archived.id)
+          if (next) host.onSelectNovel(next.id); else host.onCreateNovel()
         }
         toast.success('作品已归档，可在左侧栏「更多 → 归档内容」中找回并恢复。')
       } else {
         await updateAgentSessionSettings(target.id, { status: 'archived' })
-        // 归档与删除同为窗口回收：不能新建任务窗口（否则作者会看到「归档了却又冒出一个新任务」），
-        // 且必须移除本地窗口，被归档的任务才不会继续留在列表里
+        if (!stillOwned()) return
+        await Promise.all([
+          queryClient.cancelQueries({ queryKey: workspaceSessionsKey }),
+          queryClient.cancelQueries({ queryKey: workspaceSearchKey }),
+        ])
+        if (!stillOwned()) return
         forgetTask(target.id)
+        queryClient.setQueriesData<{ items: AgentSession[] }>({ queryKey: workspaceSearchKey }, current => current && ({
+          items: current.items.filter(session => session.id !== target.id),
+        }))
         toast.success('任务已归档，可在左侧栏「更多 → 归档内容」中找回并恢复。')
       }
-      await refreshNavigation()
+      void refreshNavigation()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '归档失败，请稍后再试。')
     } finally { setBusy(false); setArchiveTarget(null) }
@@ -806,7 +840,9 @@ export default function StudioWorkspaceSidebar(props: Props) {
     : { title: '归档任务', description: `将归档任务「${archiveTarget.title}」。归档后它会从任务列表收起，可随时恢复。`, bullets: ['任务不会被删除，对话记录与已写入作品的正文保留', '归档后可在左侧栏「更多 → 归档内容」中找到它', '恢复后会重新出现在所属作品的任务列表'], confirmLabel: '确认归档' }
     : null
 
-  const foundSessions = searchText.trim() ? (searchQuery.data?.items ?? []) : sessions.slice(0, 10)
+  const foundSessions = searchText.trim() ? (searchQuery.data?.items ?? []).filter(
+    session => session.status !== 'archived' && !archivedNovelIds.has(session.novelId),
+  ) : sessions.slice(0, 10)
   const needle = searchText.trim().toLocaleLowerCase()
   const foundNovels = novels.filter((item) => !needle || novelTitle(item).toLocaleLowerCase().includes(needle))
 

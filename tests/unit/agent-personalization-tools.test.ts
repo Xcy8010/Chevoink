@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_AGENT_PERSONALIZATION_SETTINGS } from '../../shared/contracts/agent-personalization.js'
-import { accountMemorySaveTool, accountProfileTool } from '../../api/lib/agent/tools/personalization-tools.js'
+import { accountMemorySaveTool, accountPreferencesUpdateTool, accountProfileTool, accountRuleSetTool } from '../../api/lib/agent/tools/personalization-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
 import { loadPersonalizationContext, projectPersonalizedMessages } from '../../api/lib/agent/personalization-context.js'
@@ -11,13 +11,16 @@ import { env } from '../../api/config/env.js'
 
 const mocks = vi.hoisted(() => ({
   getSettings: vi.fn(), getContext: vi.fn(), saveMemory: vi.fn(), user: vi.fn(), run: vi.fn(), message: vi.fn(), owner: vi.fn(), capability: vi.fn(),
+  patchSettings: vi.fn(), changeRule: vi.fn(), identify: vi.fn(),
 }))
 vi.mock('../../api/lib/app-releases.js', () => ({ hasAgentPersonalizationCapability: mocks.capability }))
 vi.mock('../../api/lib/agent/personalization.js', () => ({
   getAgentPersonalization: mocks.getSettings, getAgentPersonalizationContext: mocks.getContext, saveConversationMemory: mocks.saveMemory,
+  patchAgentPersonalization: mocks.patchSettings, changePersonalizationRule: mocks.changeRule, identifyMemory: mocks.identify,
 }))
+vi.mock('../../api/lib/agent/personalization-tool-policy.js', () => ({ assertPersonalizationRuleOperation: vi.fn() }))
 
-const prompt = '我通常先确认悬疑线索，再讨论人物。'
+const prompt = '我通常喜欢先确认悬疑线索，再讨论人物。'
 const createdAt = new Date('2026-11-14T10:00:00.000Z')
 const tx = { user: { findUnique: mocks.user }, agentRun: { findFirst: mocks.run }, agentMessage: { findFirst: mocks.message } } as unknown as RuntimeTx
 const ctx: ToolContext = { userId: 'author', runId: 'run', sessionId: 'session', novelId: 'novel', chapterId: null,
@@ -26,15 +29,18 @@ const ctx: ToolContext = { userId: 'author', runId: 'run', sessionId: 'session',
 
 beforeEach(() => {
   vi.resetAllMocks()
-  mocks.getSettings.mockResolvedValue({ settings: { ...DEFAULT_AGENT_PERSONALIZATION_SETTINGS, preferredName: '小景' }, revision: 1 })
-  mocks.getContext.mockResolvedValue({ settings: { ...DEFAULT_AGENT_PERSONALIZATION_SETTINGS, warmth: 'more', aboutMe: '习惯先构思线索' },
-    memories: [{ text: prompt }], memoryEpoch: 5 })
+  mocks.getSettings.mockResolvedValue({ settings: { ...DEFAULT_AGENT_PERSONALIZATION_SETTINGS }, revision: 1, rules: [] })
+  mocks.getContext.mockResolvedValue({ settings: { ...DEFAULT_AGENT_PERSONALIZATION_SETTINGS, warmth: 'more' },
+    memories: [{ text: '习惯先构思线索' }], memoryEpoch: 5 })
+  mocks.identify.mockReturnValue({ protected: false })
   mocks.user.mockResolvedValue({ nickname: '作者号', bio: '悬疑作者' })
   mocks.run.mockResolvedValue({ id: 'run', taskRootId: null, startRequest: withHumanAdmission({
     sessionId: 'session', novelId: 'novel', prompt, mode: 'build', modelTier: 'lite',
   }) })
   mocks.message.mockResolvedValue({ parts: [{ type: 'text', text: prompt }], createdAt })
   mocks.saveMemory.mockResolvedValue({ memory: { id: 'memory', revision: 1 }, status: 'created' })
+  mocks.patchSettings.mockResolvedValue({ settings: { ...DEFAULT_AGENT_PERSONALIZATION_SETTINGS, style: 'direct' }, revision: 2, rules: [] })
+  mocks.changeRule.mockResolvedValue({ revision: 2 })
 })
 
 describe('本人资料与全局记忆工具', () => {
@@ -42,13 +48,13 @@ describe('本人资料与全局记忆工具', () => {
     expect(accountProfileTool.parameters.safeParse({ userId: 'another-user' }).success).toBe(false)
     const result = await accountProfileTool.execute(ctx, {})
     expect(mocks.user).toHaveBeenCalledWith({ where: { id: 'author' }, select: { nickname: true, bio: true } })
-    expect(JSON.parse(result.output)).toEqual({ nickname: '作者号', bio: '悬疑作者', preferredName: '小景' })
+    expect(JSON.parse(result.output)).toEqual({ nickname: '作者号', bio: '悬疑作者' })
   })
 
   it('将对话记忆绑定本次真实作者原话、时间和实际请求版本', async () => {
-    await accountMemorySaveTool.execute(ctx, { text: '通常先确认悬疑线索' })
+    await accountMemorySaveTool.execute(ctx, { text: prompt })
     expect(mocks.owner).toHaveBeenCalledWith(tx)
-    expect(mocks.saveMemory).toHaveBeenCalledExactlyOnceWith('author', '通常先确认悬疑线索', 5, tx, createdAt)
+    expect(mocks.saveMemory).toHaveBeenCalledExactlyOnceWith('author', prompt, 5, tx, createdAt, false)
   })
 
   it('拒绝附件、助手推断或子任务提供的记忆来源', async () => {
@@ -65,10 +71,23 @@ describe('本人资料与全局记忆工具', () => {
       mocks.capability.mockResolvedValueOnce(true).mockResolvedValue(false)
       await expect(accountProfileTool.execute(ctx, {})).resolves.toMatchObject({ summary: '已读取本人资料' })
       await expect(accountProfileTool.execute(ctx, {})).rejects.toMatchObject({ code: 'APP_RELEASE_CAPABILITY_DISABLED' })
-      await expect(accountMemorySaveTool.execute(ctx, { text: '通常先确认悬疑线索' })).rejects.toMatchObject({ code: 'APP_RELEASE_CAPABILITY_DISABLED' })
+      await expect(accountMemorySaveTool.execute(ctx, { text: prompt })).rejects.toMatchObject({ code: 'APP_RELEASE_CAPABILITY_DISABLED' })
       expect(mocks.capability).toHaveBeenLastCalledWith('author', tx)
       expect(mocks.saveMemory).not.toHaveBeenCalled()
     } finally { env.appEnv = original }
+  })
+
+  it('does not treat a real user message as approval to change unrelated settings or make a rule', async () => {
+    await expect(accountPreferencesUpdateTool.execute(ctx, { expectedRevision: 1, style: 'direct' })).rejects
+      .toMatchObject({ code: 'PERSONALIZATION_CONFIRMATION_REQUIRED' })
+    const rule = { toolName: 'chapter_read', permission: 'allow' as const, expectedRevision: 1 }
+    await expect(accountRuleSetTool.execute(ctx, rule)).rejects.toMatchObject({ code: 'PERSONALIZATION_CONFIRMATION_REQUIRED' })
+    await expect(accountRuleSetTool.execute({ ...ctx, personalizationApproved: true, inlineChild: true }, rule)).rejects
+      .toMatchObject({ code: 'PERSONALIZATION_AUTHOR_REQUIRED' })
+    expect(mocks.patchSettings).not.toHaveBeenCalled()
+    expect(mocks.changeRule).not.toHaveBeenCalled()
+    await expect(accountRuleSetTool.execute({ ...ctx, personalizationApproved: true }, rule)).resolves.toMatchObject({ summary: '已保存自定义权限规则' })
+    expect(mocks.changeRule).toHaveBeenCalledExactlyOnceWith('author', 'chapter_read', 'allow', 1, tx)
   })
 })
 

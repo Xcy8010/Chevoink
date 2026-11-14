@@ -8,8 +8,9 @@ import type { AgentExecutionMode, TaskSpec } from '../../../../shared/contracts/
 import type { OpenAIToolDefinition } from '../../ai-service.js'
 import { coverApplyTool, coverGenerateTool } from './cover-tools.js'
 import { accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool } from './account-tools.js'
-import { accountProfileTool, accountPreferencesGetTool, accountPreferencesUpdateTool,
-  accountMemoryListTool, accountMemorySaveTool, accountMemoryUpdateTool, accountMemoryDeleteTool, creationSettingsTool } from './personalization-tools.js'
+import { accountProfileTool, accountPreferencesGetTool, accountPreferencesUpdateTool, creationSettingsTool,
+  accountMemoryListTool, accountMemorySaveTool, accountMemoryUpdateTool, accountMemoryDeleteTool, accountMemoryRestoreTool, accountMemoryClearTool,
+  accountRuleOperationsTool, accountRuleSetTool, accountRuleRemoveTool } from './personalization-tools.js'
 import { readFileTool, viewImageTool } from './attachment-tools.js'
 import {
   chapterAppendTool,
@@ -143,6 +144,7 @@ export const allTools: AgentTool<any>[] = [
   accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool,
   accountProfileTool, creationSettingsTool, accountPreferencesGetTool, accountPreferencesUpdateTool,
   accountMemoryListTool, accountMemorySaveTool, accountMemoryUpdateTool, accountMemoryDeleteTool,
+  accountMemoryRestoreTool, accountMemoryClearTool, accountRuleOperationsTool, accountRuleSetTool, accountRuleRemoveTool,
   volumeListTool,
   structureOutlineTool,
   projectSearchTool,

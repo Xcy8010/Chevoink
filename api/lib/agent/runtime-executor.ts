@@ -348,7 +348,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   if (inputLimit < 1) return runtimeError('RUNTIME_CONTEXT_LIMIT', '模型上下文窗口不足以预留配置的输出空间，请调整模型配置；原任务保留。')
   const originalSpec = taskSpecSchema.parse(current.state.originalSpec)
   const effectiveTools = prepared ? null : await withRunLease(lease, tx => readEffectiveNativeTooling(tx, lease, configuration, originalSpec))
-  const personalization = !lease.parent && effectiveTools?.personalizationEnabled ? await loadPersonalizationContext(lease.userId, originalSpec.goals.join('\n')) : undefined
+  const personalization = !lease.parent && effectiveTools?.personalizationEnabled ? await loadPersonalizationContext(lease.userId, originalSpec.goals.join('\n'), lease.runId) : undefined
   if (!prepared) {
     const overhead = personalization ? projectPersonalizedMessages([], personalization)
       .reduce((sum, message) => sum + estimateChatMessageTokens(message), 0) : 0

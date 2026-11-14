@@ -4,56 +4,97 @@ import type {
   AgentPersonalizationMemoriesPayload,
   AgentPersonalizationMemory,
   AgentPersonalizationPayload,
+  AgentPersonalizationRule,
+  AgentPersonalizationRuleOperation,
   AgentPersonalizationSettings,
 } from '../../../shared/contracts/agent-personalization.js'
 
 const settingsEndpoint = '/api/agent/personalization'
 const memoriesEndpoint = settingsEndpoint + '/memories'
+const rulesEndpoint = settingsEndpoint + '/rules'
 
 export const agentPersonalizationQueryKey = ['agent-personalization'] as const
 export const personalizationSettingsQueryKey = (owner: string) => [...agentPersonalizationQueryKey, 'settings', owner] as const
 export const personalizationMemoriesQueryKey = (owner: string) => [...agentPersonalizationQueryKey, 'memories', owner] as const
+export const personalizationRuleOperationsQueryKey = (owner: string) => [...agentPersonalizationQueryKey, 'rule-operations', owner] as const
+
+export function isPersonalizationAccount(owner: string) {
+  const { authStatus, sessionUser } = useShellStore.getState()
+  return authStatus === 'authenticated' && sessionUser?.id === owner
+}
 
 function assertAccount(owner: string) {
-  const { authStatus, sessionUser } = useShellStore.getState()
-  if (authStatus !== 'authenticated' || sessionUser?.id !== owner) {
+  if (!isPersonalizationAccount(owner)) {
     throw new Error('登录状态已变更，请重新打开个性化设置。')
   }
 }
 
-export async function fetchPersonalizationSettings(owner: string, signal: AbortSignal) {
+async function requestForAccount<T>(owner: string, endpoint: string, init: RequestInit) {
   assertAccount(owner)
-  const payload = await requestJson<AgentPersonalizationPayload>(settingsEndpoint, { signal, cache: 'no-store' })
+  const payload = await requestJson<T>(endpoint, init)
   assertAccount(owner)
   return payload
 }
 
+export function fetchPersonalizationSettings(owner: string, signal: AbortSignal) {
+  return requestForAccount<AgentPersonalizationPayload>(owner, settingsEndpoint, { signal, cache: 'no-store' })
+}
+
 export function patchPersonalizationSettings(owner: string, expectedRevision: number, changes: Partial<AgentPersonalizationSettings>) {
-  assertAccount(owner)
-  return requestJson<AgentPersonalizationPayload>(settingsEndpoint, {
+  return requestForAccount<AgentPersonalizationPayload>(owner, settingsEndpoint, {
     method: 'PATCH',
     body: JSON.stringify({ expectedRevision, ...changes }),
   })
 }
 
-export async function fetchPersonalizationMemories(owner: string, signal: AbortSignal) {
-  assertAccount(owner)
-  const payload = await requestJson<AgentPersonalizationMemoriesPayload>(memoriesEndpoint, { signal, cache: 'no-store' })
-  assertAccount(owner)
-  return payload
+export function fetchPersonalizationRuleOperations(owner: string, signal: AbortSignal) {
+  return requestForAccount<AgentPersonalizationRuleOperation[]>(owner, settingsEndpoint + '/rule-operations', { signal, cache: 'no-store' })
 }
 
-export function savePersonalizationMemory(owner: string, text: string, memory?: AgentPersonalizationMemory) {
-  assertAccount(owner)
-  const endpoint = memory ? `${memoriesEndpoint}/${encodeURIComponent(memory.id)}` : memoriesEndpoint
-  return requestJson<AgentPersonalizationMemory>(endpoint, {
-    method: memory ? 'PATCH' : 'POST',
-    body: JSON.stringify(memory ? { text, expectedRevision: memory.revision } : { text }),
+export function putPersonalizationRule(owner: string, expectedRevision: number, rule: AgentPersonalizationRule) {
+  return requestForAccount<AgentPersonalizationPayload>(owner, rulesEndpoint, {
+    method: 'PUT',
+    body: JSON.stringify({ ...rule, expectedRevision }),
+  })
+}
+
+export function deletePersonalizationRule(owner: string, expectedRevision: number, toolName: string) {
+  const endpoint = `${rulesEndpoint}/${encodeURIComponent(toolName)}?expectedRevision=${expectedRevision}`
+  return requestForAccount<AgentPersonalizationPayload>(owner, endpoint, { method: 'DELETE' })
+}
+
+export function fetchPersonalizationMemories(owner: string, signal: AbortSignal) {
+  return requestForAccount<AgentPersonalizationMemoriesPayload>(owner, memoriesEndpoint, { signal, cache: 'no-store' })
+}
+
+export function createPersonalizationMemory(owner: string, text: string, pinned: boolean) {
+  return requestForAccount<AgentPersonalizationMemory>(owner, memoriesEndpoint, {
+    method: 'POST',
+    body: JSON.stringify({ text, pinned }),
+  })
+}
+
+export function patchPersonalizationMemory(
+  owner: string,
+  memory: Pick<AgentPersonalizationMemory, 'id' | 'revision'>,
+  changes: Partial<Pick<AgentPersonalizationMemory, 'text' | 'pinned'>>,
+) {
+  const endpoint = `${memoriesEndpoint}/${encodeURIComponent(memory.id)}`
+  return requestForAccount<AgentPersonalizationMemory>(owner, endpoint, {
+    method: 'PATCH',
+    body: JSON.stringify({ ...changes, expectedRevision: memory.revision }),
+  })
+}
+
+export function restorePersonalizationMemory(owner: string, memory: Pick<AgentPersonalizationMemory, 'id' | 'revision'>) {
+  const endpoint = `${memoriesEndpoint}/${encodeURIComponent(memory.id)}/restore`
+  return requestForAccount<AgentPersonalizationMemory>(owner, endpoint, {
+    method: 'POST',
+    body: JSON.stringify({ expectedRevision: memory.revision }),
   })
 }
 
 export function deletePersonalizationMemory(owner: string, revision: number, id?: string) {
-  assertAccount(owner)
   const endpoint = id ? `${memoriesEndpoint}/${encodeURIComponent(id)}` : memoriesEndpoint
-  return requestJson<{ revision: number }>(`${endpoint}?expectedRevision=${revision}`, { method: 'DELETE' })
+  return requestForAccount<{ revision: number }>(owner, `${endpoint}?expectedRevision=${revision}`, { method: 'DELETE' })
 }

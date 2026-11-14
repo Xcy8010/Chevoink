@@ -2,7 +2,7 @@
 import { StrictMode, useEffect, useState } from 'react'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { readWorkPanelUi, useWorkPanelState, writeWorkPanelUi, type WorkPanelUiState } from '../../src/features/studio/components/use-work-panel-state'
+import { readWorkPanelUi, resolveWorkViewer, useWorkPanelState, writeWorkPanelUi, type WorkPanelUiState } from '../../src/features/studio/components/use-work-panel-state'
 import { reconcilePlanSelection, stablePlanId } from '../../src/features/studio/components/work-plan-selection'
 
 beforeEach(() => window.localStorage.clear())
@@ -50,6 +50,29 @@ it('does not overwrite a saved layout during StrictMode mount replay', () => {
   const hook = renderHook(() => useFixture('strict'), { wrapper: StrictMode })
   expect(hook.result.current.state).toMatchObject({ rightOpen: true, viewer: 'document', inspectorTab: 'changes' })
   expect(readWorkPanelUi('strict')).toMatchObject({ rightOpen: true, viewer: 'document' })
+})
+
+it('uses the restored tree target as Viewer authority without reopening a closed task panel', () => {
+  const a = 'user:novel-a:task-a', b = 'user:novel-b:task-b', closed = 'user:novel-a:closed'
+  writeWorkPanelUi(a, { rightOpen: true, viewer: 'document', inspectorTab: 'work', selectedTreeItemId: 'chapter:chapter-seven', selectedChapterId: 'chapter-one' })
+  writeWorkPanelUi(b, { rightOpen: true, viewer: 'chapter', inspectorTab: 'work', selectedTreeItemId: 'plan:server-nine', selectedChapterId: 'chapter-nine' })
+  writeWorkPanelUi(closed, { rightOpen: true, viewer: null, inspectorTab: 'work', selectedTreeItemId: 'chapter:chapter-three' })
+  const hook = renderHook(({ scope }) => useFixture(scope), { initialProps: { scope: a }, wrapper: StrictMode })
+  const mode = () => {
+    const { viewer, selectedTreeItemId, selectedChapterId } = hook.result.current.state
+    return resolveWorkViewer(viewer, selectedTreeItemId, selectedChapterId)
+  }
+  expect(hook.result.current.state.selectedChapterId).toBe('chapter-seven')
+  expect(mode()).toBe('chapter')
+  hook.rerender({ scope: b })
+  expect(mode()).toBe('document')
+  hook.rerender({ scope: closed })
+  expect(hook.result.current.state.selectedChapterId).toBe('chapter-three')
+  expect(mode()).toBeNull()
+  hook.rerender({ scope: a })
+  expect(mode()).toBe('chapter')
+  expect(hook.result.current.state.selectedChapterId).toBe('chapter-seven')
+  expect(resolveWorkViewer('document', null, 'legacy-chapter')).toBe('chapter')
 })
 
 it('restores A plan after A → unowned loading → B → unowned loading → A, including delayed plans', () => {

@@ -118,7 +118,7 @@ const DEFAULT_POLICY: AgentSessionToolPolicy = {
   destructive: 'ask',
 }
 
-function governedPolicyKey(tool: AgentTool): keyof AgentSessionToolPolicy | null {
+export function governedPolicyKey(tool: AgentTool): keyof AgentSessionToolPolicy | null {
   if (tool.name === 'web_search' || tool.name === 'web_read' || tool.name === 'research_dossier_build') return 'network'
   if (tool.name === 'novel_publish' || tool.name === 'cover_apply') return 'publish'
   if (tool.name === 'changeset_apply' || tool.name === 'changeset_rollback' || tool.name === 'chapter_merge' || tool.name === 'chapter_split') return 'bulkWrite'

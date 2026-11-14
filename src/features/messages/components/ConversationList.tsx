@@ -43,7 +43,7 @@ function formatUnreadBadge(count: number) {
   return count > 99 ? '99' : `${count}`
 }
 
-const listScrollClass = 'min-h-0 flex-1 overflow-y-auto mobile:[scrollbar-width:none] mobile:[&::-webkit-scrollbar]:hidden'
+const listScrollClass = 'messages-list-scroll min-h-0 flex-1 overflow-y-auto'
 
 /** 未读红点徽标：leading-none + 等宽数字保证数字落在圆圈正中心 */
 function UnreadBadge({ count }: { count: number }) {

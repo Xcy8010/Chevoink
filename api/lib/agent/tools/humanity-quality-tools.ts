@@ -44,6 +44,7 @@ import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportCheckedCurrentContent, qualityAutoRepairPending, pendingQualityDecisions, selectAutomaticQualityFindings, standaloneAdviceReportOnly } from '../quality-report-contract.js'
 import { probeChapterReviewRevision, readChapterReviewRevisionGuidance, readChapterReviewReadiness, qualityDecisionSnapshotHash, chapterReviewDecisionGuidance } from '../chapter-review-guard.js'
+import { automaticRepairPermitted } from '../personalization-tool-policy.js'
 import { verificationQualityAdviceRequiresDecision } from '../review-cycle.js'
 import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCorrectableCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings, qualityCorrectionResponseWitness } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
@@ -199,7 +200,7 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
   const advisoryCount = report.findings.filter(finding => finding.severity === 'advisory').length
   // 自动修订写的是作者正文：只读沙箱与受限子任务不获授权，只保存检查意见（正文由各自的写入工具负责）。
   const automatic = allowRepair && ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
-    && !ctx.inlineChild && ctx.sandboxMode !== 'read_only'
+    && !ctx.inlineChild && ctx.sandboxMode !== 'read_only' && await automaticRepairPermitted(ctx.userId, prisma, 'quality')
   const decisionGuidance = pending.length
     ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
       { id: report.chapterId, revision: report.chapterRevision })) : ''
@@ -218,7 +219,7 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
       if (!probe.open) return { output: `质量报告 ${report.id}已保留，自动修订未应用：${probe.message}剩余意见保留待审，不重复自动改写。${decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
       if (await reserveQualityAutoRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id })) {
-        const repaired = await applySelectedQualityRepairs(ctx, report, selected, frozenQuality)
+        const repaired = await applySelectedQualityRepairs(ctx, report, selected, frozenQuality, true)
         const retainedNote = renderQualityRetainProposals(report, repaired?.retainedFindings ?? [], checkedRevision)
         if (repaired?.result) {
           const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
@@ -251,7 +252,7 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
     summary: `人类感质量检查完成${cached ? '（复用）' : ''} · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
 
-async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityReport, selected: QualityReport['findings'], frozenQuality?: FrozenQualityRuntime) {
+async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityReport, selected: QualityReport['findings'], frozenQuality?: FrozenQualityRuntime, automatic = false) {
   const bundle = await buildHumanityQualityContext(ctx.userId, ctx.novelId, report.chapterId, ctx.runId)
   const expectedContextHash = qualityReviewContextHash(bundle)
   const metrics = report.deterministicMetrics
@@ -268,6 +269,8 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const remaining = selected.filter((finding) => !patches.has(finding.id) && !retained.has(finding.id) && !unsafe.has(finding.id))
     if (remaining.length === 0) break
+    if (automatic && !await automaticRepairPermitted(ctx.userId, prisma, 'quality'))
+      throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '当前个性化权限要求单独确认修订，正文未修改。')
     // Only a normally returned response may enter format recovery. A timeout
     // or transport error can carry unknown billed usage; never dispatch again.
     ctx.signal.throwIfAborted()
@@ -364,7 +367,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
   // 模型若仍漏掉个别项，只应用已逐字绑定的安全补丁，并把漏项退回待审，不让整章修订归零。
   await selectQualityFindings(ctx.userId, ctx.novelId, report.id, replacements.map((patch) => patch.findingId))
   const result = await applyQualityRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id, replacements,
-    retainedFindings: retainedQualityCandidates(report, replacements, retainedFindings), expectedContextHash, signal: ctx.signal })
+    retainedFindings: retainedQualityCandidates(report, replacements, retainedFindings), expectedContextHash, signal: ctx.signal, automatic })
   recordChapterBaseline(ctx.runId, result.updated.id, result.updated.revision)
   return { result, patchCount: result.repairedFindingIds.length, missingCount: selected.length - result.repairedFindingIds.length,
     report: await getQualityReport(ctx.userId, ctx.novelId, report.id), retainedFindings }

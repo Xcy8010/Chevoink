@@ -39,6 +39,22 @@ describe('mobile book folders and categorized existing actions', () => {
     expect(screen.getByRole('button', { name: '展开作品：第一本作品' }).getAttribute('aria-expanded')).toBe('false')
     expect(screen.queryByRole('button', { name: '新建作品' })).toBeNull()
   })
+
+  it('removes a work archived on another device even while it is open on mobile', () => {
+    const session = { id: 'session-a', userId: 'owner', novelId: one.id, title: '已归档作品的对话', status: 'active', lastRunAt: '2026-11-01' } as AgentSession
+    const props = {
+      ...defaults, currentNovel: one, novels: [one, two], recentSessions: [session],
+      loading: false, busy: false, view: 'assistant', actions: [],
+      onClose: vi.fn(), onSelectNovel: vi.fn(), onCreateNovel: vi.fn(),
+    }
+    const { rerender } = render(<StudioMobileMenu {...props} />)
+    expect(screen.getByRole('button', { name: '选择作品：第一本作品' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: session.title })).toBeTruthy()
+    rerender(<StudioMobileMenu {...props} novels={[{ ...one, status: 'archived' }, two]} />)
+    expect(screen.queryByRole('button', { name: '选择作品：第一本作品' })).toBeNull()
+    expect(screen.queryByRole('button', { name: session.title })).toBeNull()
+    expect(screen.getByRole('button', { name: '选择作品：第二本作品' })).toBeTruthy()
+  })
   it('expands categories and delegates an existing action exactly once, keeping disabled and future actions', () => {
     const action = vi.fn(), unavailable = vi.fn()
     render(<StudioMobileMenu {...defaults} currentNovel={one} novels={[one]} loading={false} busy={false} view="assistant" actions={[

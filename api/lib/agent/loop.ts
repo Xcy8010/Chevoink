@@ -35,6 +35,9 @@ import { env } from '../../config/env.js'
 import { chatWithTools, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from '../ai-service.js'
 import { loadPersonalizationContext, projectPersonalizedMessages, type PersonalizationContext } from './personalization-context.js'
 import { PERSONALIZATION_TOOL_NAMES, PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
+import { readPersonalizationRules } from './personalization.js'
+import { applyPersonalizationToolRules, hasPersonalizationSessionOverride } from './personalization-tool-policy.js'
+import { readPersonalizationWriteAdmission } from './personalization-authority.js'
 import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
 import { addNextPromptInstruction, allowsModelNextPrompt, allowsNextPrompt, DEFAULT_COMPLETED_NEXT_PROMPT, LIMITED_COMPLETED_NEXT_PROMPT, readTaskResponseNextPrompt, selectInteractiveNextPrompt } from './next-prompt.js'
 import { DataAccessError, prisma } from '../prisma.js'
@@ -42,7 +45,7 @@ import { withGoalEffects, withGoalExecutionContext } from './goal-context.js'
 import { readGoalExecution } from './goal-fence.js'
 import { getModelTierRuntime } from '../credits.js'
 import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
-import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, type AgentDefinition } from './agents.js'
+import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, governedPolicyKey, type AgentDefinition } from './agents.js'
 import { deregisterActiveRun, registerActiveRun, getActiveRun } from './active-runs.js'
 import { clearRunBaselines, getLastTouchedChapter } from './baseline.js'
 import { AGENT_BEHAVIOR_CORE, assembleContext, insertSubagentCatalog } from './context.js'
@@ -352,9 +355,11 @@ export async function handleToolCall(
 ): Promise<ToolCallOutcome> {
   const startedAt = Date.now()
   const admitted = tools.find((candidate) => candidate.name === call.name)
-  const tool = admitted && ctx.toolAuthority
-    ? intersectToolAuthority([admitted], ctx.mode, ctx.toolAuthority)[0]
-    : admitted
+  const baseTool = admitted && ctx.personalizationToolRulesEnabled
+    ? applyPersonalizationToolRules([admitted], ctx.mode, await readPersonalizationRules(ctx.userId))[0] : admitted
+  const tool = baseTool && ctx.toolAuthority
+    ? intersectToolAuthority([baseTool], ctx.mode, ctx.toolAuthority)[0]
+    : baseTool
   // 子 Agent 归属标记：随事件与持久化分部下发，前端据此把卡片分组到所属子 Agent 容器内
   const subagentMark = subagent ? { subagentCallId: subagent.callId } : {}
   const basePart = {
@@ -419,18 +424,13 @@ export async function handleToolCall(
   }
 
   // 审批预判（与下方执行前判定同一公式）：提前给事件流打标，供前端与审计识别自动批准的工具调用
-  const autoApproved =
-    (env.agentAutoApprove && !tool?.alwaysConfirm) ||
-    tool === undefined ||
-    tool.permission[ctx.mode] !== 'ask' ||
-    (hasAlwaysAllow(ctx.sessionId, tool.name) && !tool.dangerous)
+  let autoApproved = false
 
   const directionPurposeMissing = !coercionFailed && call.name === 'ask_user' && ctx.writingScope?.novelDirectionRequired
     && (!parsedArgs || typeof parsedArgs !== 'object' || !('purpose' in parsedArgs) || parsedArgs.purpose !== 'novel_direction')
   const publishToolCall = (args: unknown) => bus.emit({ type: 'tool.call', messageId, callId: call.id, toolName: call.name, title: basePart.title, args, autoApproved, ...subagentMark })
   const questionCall = call.name === 'ask_user' && (directionPurposeMissing || tool.execute === askUserTool.execute)
-  let published = !questionCall
-  if (published) publishToolCall(parsedArgs)
+  let published = false
 
   const requestTrace = createTextRequestTrace()
   // These tools expose execution success/failure. Review judgments remain
@@ -468,6 +468,7 @@ export async function handleToolCall(
   // Only these parser/schema branches can certify that execute was not entered.
   // ToolResult/failureCode/summary returned by an executed tool cannot mint it.
   const rejectBeforeExecution = (summary: string, observation: string): ToolCallOutcome => {
+    if (!published && !questionCall) { publishToolCall(parsedArgs); published = true }
     const outcome = fail(summary, observation, 'failed')
     outcome.part.preExecutionFailure = true
     return outcome
@@ -512,6 +513,17 @@ export async function handleToolCall(
     return rejectBeforeExecution('参数校验失败', `工具 ${call.name} 参数校验失败：${issues}。${retentionHint}${chapterHint}${writingHint}本次调用完全没有执行。纠正所列字段后再调用，不重复相同无效输入，也不能将回复里的正文当作已经保存。`)
   }
 
+  const personalAdmission = !subagent && PERSONALIZATION_WRITE_ACTIONS.includes(tool.name)
+    ? await readPersonalizationWriteAdmission(prisma, ctx, tool.name, validated.data) : 'direct'
+  const hardConfirmation = tool.alwaysConfirm || personalAdmission === 'confirm'
+  const needAsk = Boolean(hardConfirmation || (permission === 'ask' && !env.agentAutoApprove
+    && !(hasAlwaysAllow(ctx.sessionId, tool.name) && !tool.dangerous)))
+  autoApproved = !needAsk && personalAdmission !== 'reject'
+  if (!questionCall) { publishToolCall(validated.data); published = true }
+  if (personalAdmission === 'reject') {
+    return fail('个性化设置未修改', '缺少可核实的本次作者来源，不能修改个性化。', 'denied')
+  }
+
   // 协作作用域约束：检查派生授权和目标归属，不拦截无关章节写入。
   const orchestrationBlock = await assertOrchestrationResumeGuard(runId, ctx.sessionId, tool.name, validated.data)
   if (orchestrationBlock) {
@@ -520,10 +532,7 @@ export async function handleToolCall(
 
   // 审批：'ask' 且未被会话级“总是允许”覆盖时，挂起等待前端批复；
   // 全权限开关（默认开）短路审批：产品决策为 agent 自主判断所有动作，翻 env 可回退
-  const needAsk =
-    permission === 'ask' &&
-    (tool.alwaysConfirm || !env.agentAutoApprove) &&
-    !(hasAlwaysAllow(ctx.sessionId, tool.name) && !tool.dangerous && !tool.alwaysConfirm)
+  let humanApproved = false
 
   if (needAsk) {
     const expiresAt = new Date(Date.now() + env.agentApprovalTimeoutMs).toISOString()
@@ -534,7 +543,7 @@ export async function handleToolCall(
       toolName: tool.name,
       title: tool.title,
       args: validated.data,
-      allowAlways: !tool.dangerous && !tool.alwaysConfirm,
+      allowAlways: !tool.dangerous && !hardConfirmation,
       expiresAt,
     })
 
@@ -550,7 +559,8 @@ export async function handleToolCall(
       return fail(reason, `${reason}：工具 ${call.name} 未执行。请尊重用户决定，换一种方式完成任务或直接说明情况。`, 'denied')
     }
 
-    if (decision.alwaysAllow && !tool.dangerous && !tool.alwaysConfirm) {
+    humanApproved = true
+    if (decision.alwaysAllow && !tool.dangerous && !hardConfirmation) {
       grantAlwaysAllow(ctx.sessionId, tool.name)
     }
   }
@@ -576,7 +586,12 @@ export async function handleToolCall(
       ctx.signal.throwIfAborted()
       await beforeExecute?.()
       ctx.signal.throwIfAborted()
-      return tool.execute({ ...ctx, inlineChild: Boolean(subagent), publishQuestion: questionCall ? () => {
+      if (ctx.personalizationToolRulesEnabled) {
+        const recent = applyPersonalizationToolRules([tool], ctx.mode, await readPersonalizationRules(ctx.userId))[0]
+        if (!recent || recent.alwaysConfirm && !humanApproved)
+          throw new DataAccessError(409, 'PERSONALIZATION_PERMISSION_CHANGED', '当前个性化权限没有批准本次操作。')
+      }
+      return tool.execute({ ...ctx, inlineChild: Boolean(subagent), personalizationApproved: humanApproved ? true : undefined, publishQuestion: questionCall ? () => {
         if (!published) publishToolCall(validated.data)
         published = true
       } : undefined }, validated.data)
@@ -1652,8 +1667,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const stableTools = availableTools.filter(tool => !PERSONALIZATION_TOOL_NAMES.has(tool.name))
     const availableDefinitions = toOpenAITools(availableTools, taskSpec.scope)
     const stableDefinitions = availableDefinitions.filter(tool => !PERSONALIZATION_TOOL_NAMES.has(tool.function.name))
-    const availableDefinitionTokens = estimateToolDefinitionTokens(availableDefinitions)
-    const stableDefinitionTokens = estimateToolDefinitionTokens(stableDefinitions)
     const contextWindowTokens = modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens
     let requestOutputTokens = Math.min(env.aiTextMaxOutputTokens, modelRuntime.maxOutputTokens ?? env.aiTextMaxOutputTokens)
     let outputRecoveryFrom: number | undefined
@@ -1905,7 +1918,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (await finishPersistedWritingIfComplete()) return
       const personalizationEnabled = !sessionPolicy?.spawnedFromSessionId
         && (env.appEnv !== 'production' || await (await import('../app-releases.js')).hasAgentPersonalizationCapability(params.userId))
-      const tools = personalizationEnabled ? availableTools : stableTools
+      const rules = await readPersonalizationRules(params.userId)
+      const tools = applyPersonalizationToolRules(personalizationEnabled ? availableTools : stableTools, params.mode, rules,
+        ceiling ? undefined : tool => hasPersonalizationSessionOverride(sessionPolicy?.toolPolicy, governedPolicyKey(tool)))
+      toolContext.personalizationToolRulesEnabled = true
       toolContext.toolAuthority = snapshotToolAuthority(tools, params.mode)
       let bootstrapCall: ToolCallRequest | undefined
       if (taskSpec.researchNavigation?.version === 1 && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied') {
@@ -2000,9 +2016,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         messages.push(preparationReminder)
       }
       const budgetStarted = performance.now()
-      const openAITools = personalizationEnabled ? availableDefinitions : stableDefinitions
-      const toolDefinitionTokens = personalizationEnabled ? availableDefinitionTokens : stableDefinitionTokens
-      const personalization = personalizationEnabled && !bootstrapCall ? await loadPersonalizationContext(params.userId, contextPrompt) : undefined
+      const openAITools = (personalizationEnabled ? availableDefinitions : stableDefinitions).filter(definition => toolContext.toolAuthority?.has(definition.function.name))
+      const toolDefinitionTokens = estimateToolDefinitionTokens(openAITools)
+      const personalization = personalizationEnabled && !bootstrapCall ? await loadPersonalizationContext(params.userId, contextPrompt, runId) : undefined
       toolContext.personalizationMemoryEpoch = personalization?.memoryEpoch
       let estimatedRequestTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
       if (completedWritingWrapUp.value || estimatedRequestTokens > contextBudget.warningTokens) {

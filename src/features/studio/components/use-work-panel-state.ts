@@ -10,6 +10,13 @@ export type WorkPanelUiState = {
 }
 const STORAGE_KEY = 'chevoink:studio-work-panel-ui'
 
+export function resolveWorkViewer(viewer: WorkPanelUiState['viewer'], treeItemId: string | null, chapterId: string | null) {
+  if (!viewer) return null
+  if (treeItemId === 'catalog' || treeItemId?.startsWith('plan:')) return 'document'
+  if (treeItemId?.startsWith('chapter:') || chapterId) return 'chapter'
+  return null
+}
+
 export function readWorkPanelUi(scope: string): WorkPanelUiState | null {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY)
@@ -44,11 +51,13 @@ export function useWorkPanelState(scope: string | undefined, state: WorkPanelUiS
   useLayoutEffect(() => {
     if (!scope) { setHydratedScope(undefined); return }
     const restored = readWorkPanelUi(scope)
+    const treeItemId = restored?.selectedTreeItemId ?? null
+    const chapterId = treeItemId?.startsWith('chapter:') ? treeItemId.slice('chapter:'.length) : restored?.selectedChapterId ?? null
     setRightOpen(restored?.rightOpen ?? false)
     setViewer(restored?.viewer ?? null)
     setInspectorTab(restored?.inspectorTab ?? 'work')
-    setSelectedTreeItemId(restored?.selectedTreeItemId ?? null)
-    setSelectedChapterId(restored?.selectedChapterId ?? null)
+    setSelectedTreeItemId(treeItemId)
+    setSelectedChapterId(chapterId)
     setHydratedScope(scope)
   }, [scope, setRightOpen, setViewer, setInspectorTab, setSelectedTreeItemId, setSelectedChapterId])
   useLayoutEffect(() => {

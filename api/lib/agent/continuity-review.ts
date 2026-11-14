@@ -619,7 +619,7 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
   }
   const apply = async (tx: Prisma.TransactionClient) => {
     await lockNovelActiveScope(tx, ctx.novelId); await assertCurrent(ctx, args, snapshot, tx)
-    if (!await automaticChapterRevisionWritable(tx, ctx)) throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '当前会话不允许改稿，正文未修改。')
+    if (!await automaticChapterRevisionWritable(tx, ctx, 'continuity', true)) throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '当前会话不允许改稿，正文未修改。')
     const ranges = patches.map(patch => { const finding = selected.find(finding => finding.id === patch.findingId)!
       return { start: finding.startOffset, end: finding.endOffset, newText: patch.replacement } }).sort((a, b) => a.start - b.start)
     let after = snapshot.chapter.content

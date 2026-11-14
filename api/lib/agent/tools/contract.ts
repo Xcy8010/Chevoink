@@ -100,7 +100,7 @@ export type AgentToolContract = {
 // previews, trace-producing retrieval and bounded waits. They are not pure.
 const repeatableReads = new Set([
   'model_list', 'account_credits', 'account_credit_history', 'account_novels',
-  'account_profile', 'account_preferences_get', 'account_memory_list', 'creation_settings_get',
+  'account_profile', 'account_preferences_get', 'account_memory_list', 'account_rule_operations', 'creation_settings_get',
   'novel_get_context', 'chapter_read', 'chapter_list_summaries', 'memory_search',
   'plan_read', 'volume_list', 'structure_outline', 'directive_list',
   'memory_review_list', 'session_history_search', 'session_message_read',
@@ -113,7 +113,7 @@ const currentBodyRequired = new Set(['chapter_write', 'chapter_append', 'chapter
   'continuity_validate', 'quality_analyze', 'chapter_bridge_commit'])
 const configuration = new Set(['agent_configure', 'model_assign', 'skill_enable', 'skill_install_shared', 'skill_rollback', ...PERSONALIZATION_WRITE_ACTIONS])
 const account = new Set(['model_list', 'account_credits', 'account_credit_history', 'account_novels',
-  'account_profile', 'account_preferences_get', 'account_memory_list', ...PERSONALIZATION_WRITE_ACTIONS,
+  'account_profile', 'account_preferences_get', 'account_memory_list', 'account_rule_operations', ...PERSONALIZATION_WRITE_ACTIONS,
   'novel_create', 'skill_catalog', 'skill_shared_invites', 'skill_install_shared'])
 const session = new Set(['agent_configure', 'model_assign', 'creation_settings_get', 'session_rename', 'session_history_search',
   'session_message_read', 'task_context_list', 'task_context_read', 'task_spawn', 'task_send', 'task_wait',

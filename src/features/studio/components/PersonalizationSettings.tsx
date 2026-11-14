@@ -1,18 +1,35 @@
-import { useState, type FormEvent } from 'react'
+import { useId, useRef, useState } from 'react'
+import { ChevronRight } from 'lucide-react'
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+
 import { ApiClientError } from '@/app/api-client'
 import Button from '@/components/ui/Button'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
-import { AGENT_PERSONALIZATION_LIMITS, type AgentPersonalizationSettings } from '../../../../shared/contracts/agent-personalization.js'
-import { fetchPersonalizationSettings, patchPersonalizationSettings, personalizationSettingsQueryKey } from '../personalization-api'
+import {
+  AGENT_PERSONALIZATION_LIMITS,
+  type AgentPersonalizationPayload,
+  type AgentPersonalizationRule,
+  type AgentPersonalizationSettings,
+} from '../../../../shared/contracts/agent-personalization.js'
+import {
+  deletePersonalizationRule,
+  fetchPersonalizationSettings,
+  isPersonalizationAccount,
+  patchPersonalizationSettings,
+  personalizationSettingsQueryKey,
+  putPersonalizationRule,
+} from '../personalization-api'
 import PersonalizationMemorySettings from './PersonalizationMemorySettings'
+import PersonalizationRuleSettings from './PersonalizationRuleSettings'
+import { PersonalizationDialog, PersonalizationFeedback, PersonalizationGroup, personalizationField, personalizationRow } from './personalization-ui'
 
 const STYLE_LABELS: Record<AgentPersonalizationSettings['style'], string> = {
-  natural: '自然', professional: '专业', direct: '直率', partner: '创作搭档',
+  natural: '默认', professional: '专业', direct: '直率', partner: '创作搭档',
 }
 
-const DEGREES = [
+const STYLE_FIELDS = [
+  { field: 'style', label: '基础风格和语气', options: STYLE_LABELS },
   { field: 'warmth', label: '亲切程度', options: { less: '克制', default: '默认', more: '更亲切' } },
   { field: 'enthusiasm', label: '热情程度', options: { less: '平稳', default: '默认', more: '更积极' } },
   { field: 'detail', label: '回答详略', options: { less: '简短', default: '默认', more: '详细' } },
@@ -20,63 +37,19 @@ const DEGREES = [
   { field: 'format', label: '标题与列表', options: { less: '少用', default: '默认', more: '多用' } },
 ] as const
 
-const STYLE_SAMPLE: Record<AgentPersonalizationSettings['style'], string> = {
-  natural: '可以开头就让主角听见门后的动静，读者会更想接着读。',
-  professional: '建议把门后的声响提前到开场，以便更早建立悬念。',
-  direct: '把门后的声响放到开头，先让读者产生疑问。',
-  partner: '我们试试让主角开头就听见门后的动静，把读者一起拉到门外。',
-}
-
-type SettingsChanges = Partial<Omit<AgentPersonalizationSettings, 'memoryEnabled'>>
-type SettingsDraft = { revision: number; changes: SettingsChanges }
-type SettingsUpdate = { revision: number; changes: Partial<AgentPersonalizationSettings> }
-
-const fieldClass = 'w-full min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 py-2 text-sm text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50'
-
-function StylePreview({ value }: { value: AgentPersonalizationSettings }) {
-  const name = value.preferredName.trim()
-  const greeting = {
-    less: '',
-    default: '说说这一幕的开头。',
-    more: `${name ? `${name}，` : ''}我们一起看看怎么让这一幕更抓人。`,
-  }[value.warmth]
-  const opening = value.enthusiasm === 'more' ? '这一幕很有张力！' : value.enthusiasm === 'default' ? '这个开场有潜力。' : ''
-  const suggestion = STYLE_SAMPLE[value.style]
-  const explanation = value.detail === 'less' ? '' : '先写主角听见了什么，再写主角的反应。'
-  const example = value.detail === 'more' ? '例如：门后传来一声轻响，她停住了，钥匙还抵在锁眼上。' : ''
-  const emoji = value.emoji === 'more' ? ' ✨📝' : value.emoji === 'default' ? ' ✨' : ''
-
-  return (
-    <div className="min-w-0 space-y-2 rounded-xl bg-[var(--surface-muted)] p-4 text-sm leading-6 text-[var(--text-secondary)] [overflow-wrap:anywhere]">
-      <h4 className="font-medium text-[var(--text-primary)]">风格预览</h4>
-      {value.format === 'more' ? (
-        <>
-          {greeting || opening ? <p>{greeting}{opening}{emoji}</p> : null}
-          <p className="font-medium text-[var(--text-primary)]">开场建议</p>
-          <ul className="list-disc space-y-1 pl-5">
-            <li>{suggestion}{!greeting && !opening ? emoji : ''}</li>
-            {explanation ? <li>{explanation}</li> : null}
-          </ul>
-          {example ? <p>{example}</p> : null}
-        </>
-      ) : value.format === 'less' ? (
-        <p>{greeting}{opening}{suggestion}{explanation}{example}{emoji}</p>
-      ) : (
-        <>
-          <p>{greeting}{opening}{suggestion}{emoji}</p>
-          {explanation ? <p>{explanation}{example}</p> : null}
-        </>
-      )}
-    </div>
-  )
-}
+type SettingsChanges = Partial<AgentPersonalizationSettings>
+type SettingsAction = { revision: number } & (
+  | { kind: 'settings'; changes: SettingsChanges }
+  | { kind: 'put-rule'; rule: AgentPersonalizationRule }
+  | { kind: 'delete-rule'; toolName: string }
+)
 
 export default function PersonalizationSettings() {
   const authStatus = useShellStore(state => state.authStatus)
   const owner = useShellStore(state => state.sessionUser?.id)
-  if (authStatus === 'checking') return <p role="status" className="text-sm text-[var(--text-secondary)]">正在加载个性化设置…</p>
+  if (authStatus === 'checking') return <PersonalizationFeedback>正在加载个性化设置…</PersonalizationFeedback>
   if (authStatus !== 'authenticated' || !owner) {
-    return <p role="status" className="text-sm text-[var(--text-secondary)]">登录后可管理个性化设置。</p>
+    return <PersonalizationFeedback>登录后可管理个性化设置。</PersonalizationFeedback>
   }
   return <AccountPersonalizationSettings key={owner} owner={owner} />
 }
@@ -90,127 +63,148 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
     refetchOnMount: 'always',
     refetchOnWindowFocus: 'always',
   })
-  const [draft, setDraft] = useState<SettingsDraft | null>(null)
-  const [updateMessage, setUpdateMessage] = useState<{ text: string; error: boolean } | null>(null)
   const { mutateAsync } = useMutation({
     mutationKey: queryKey,
-    mutationFn: async ({ revision, changes }: SettingsUpdate) => {
+    mutationFn: async (action: SettingsAction) => {
       await client.cancelQueries({ queryKey })
-      const saved = await patchPersonalizationSettings(owner, revision, changes)
-      if (useShellStore.getState().sessionUser?.id === owner) {
-        client.setQueryData<typeof saved>(queryKey, current => current && current.revision > saved.revision ? current : saved)
+      let saved: AgentPersonalizationPayload
+      switch (action.kind) {
+        case 'settings':
+          saved = await patchPersonalizationSettings(owner, action.revision, action.changes)
+          break
+        case 'put-rule':
+          saved = await putPersonalizationRule(owner, action.revision, action.rule)
+          break
+        case 'delete-rule':
+          saved = await deletePersonalizationRule(owner, action.revision, action.toolName)
+          break
       }
-      return saved
+      if (isPersonalizationAccount(owner)) {
+        client.setQueryData<AgentPersonalizationPayload>(queryKey, current => current && current.revision > saved.revision ? current : saved)
+      }
     },
     onSettled: async () => {
-      if (useShellStore.getState().sessionUser?.id === owner) await client.invalidateQueries({ queryKey })
+      if (isPersonalizationAccount(owner)) await client.invalidateQueries({ queryKey })
     },
   })
   const busy = useIsMutating({ mutationKey: queryKey }) > 0
   const saved = settings.data
-  const value = saved ? { ...saved.settings, ...draft?.changes } : null
+  const disabled = busy || settings.isError || !saved
+  const [feedback, setFeedback] = useState<{ message: string; retry?: SettingsChanges } | null>(null)
+  const [draft, setDraft] = useState<{ text: string; revision: number; error?: string } | null>(null)
+  const replyButton = useRef<HTMLButtonElement>(null)
+  const replyId = useId()
+  const replyStale = Boolean(draft && saved && draft.revision !== saved.revision)
 
-  function change<K extends keyof SettingsChanges>(field: K, next: AgentPersonalizationSettings[K]) {
-    if (!saved || busy) return
-    setUpdateMessage(null)
-    setDraft(current => {
-      const changes = { ...current?.changes, [field]: next }
-      if (next === saved.settings[field]) delete changes[field]
-      return Object.keys(changes).length > 0 ? { changes, revision: current?.revision ?? saved.revision } : null
-    })
-  }
-
-  async function update({ revision, changes }: SettingsUpdate) {
-    setUpdateMessage(null)
+  async function updateImmediate(changes: SettingsChanges) {
+    if (!saved || disabled) return
+    setFeedback(null)
     try {
-      const result = await mutateAsync({ revision, changes })
-      if (changes.memoryEnabled === undefined) {
-        setDraft(null)
-      } else {
-        setDraft(current => current?.revision === revision ? { ...current, revision: result.revision } : current)
-      }
-      setUpdateMessage({ text: changes.memoryEnabled === undefined ? '已保存个性化设置。' : (result.settings.memoryEnabled ? '已开启全局记忆。' : '已关闭全局记忆。'), error: false })
+      await mutateAsync({ kind: 'settings', revision: saved.revision, changes })
+      setFeedback({ message: '已保存个性化设置。' })
     } catch (error) {
-      if (error instanceof ApiClientError && error.status === 409) {
-        const refreshed = client.getQueryState<typeof saved>(queryKey)
-        if (refreshed?.status === 'success' && refreshed.data) {
-          const nextRevision = refreshed.data.revision
-          setDraft(current => current ? { ...current, revision: nextRevision } : current)
-          setUpdateMessage({ text: '已刷新最新设置，请核对后重试。', error: true })
-          return
-        }
-      }
-      setUpdateMessage({ text: error instanceof Error ? error.message : '保存失败，请重试。', error: true })
+      setFeedback({ message: error instanceof Error ? error.message : '保存失败，请重试。', retry: changes })
     }
   }
 
-  function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (draft && !busy) void update(draft)
+  async function saveReply() {
+    if (!draft || !saved || disabled || replyStale || draft.text.trim() === saved.settings.customInstructions) return
+    try {
+      await mutateAsync({ kind: 'settings', revision: draft.revision, changes: { customInstructions: draft.text.trim() } })
+      setDraft(null)
+      setFeedback({ message: '已保存回答偏好。' })
+    } catch (error) {
+      const message = error instanceof ApiClientError && error.status === 409
+        ? '回答偏好已更新。已保留草稿，请核对最新内容后重试。'
+        : error instanceof Error ? error.message : '保存失败，请重试。'
+      setDraft({ ...draft, error: message })
+    }
   }
 
   return (
-    <div className="max-w-[680px] space-y-8">
-      {settings.isPending ? <p role="status" className="text-sm text-[var(--text-secondary)]">正在加载个性化设置…</p> : null}
+    <div className="mx-auto max-w-[760px] space-y-6">
+      {settings.isPending ? <PersonalizationFeedback>正在加载个性化设置…</PersonalizationFeedback> : null}
       {settings.isError ? (
         <div className="flex flex-wrap items-center gap-2">
-          <p role="alert" className="text-sm text-rose-500">个性化设置加载失败。</p>
-          <Button size="sm" variant="ghost" disabled={settings.isFetching} onClick={() => void settings.refetch()}>重试加载设置</Button>
+          <PersonalizationFeedback error>个性化设置加载失败。</PersonalizationFeedback>
+          <Button size="sm" variant="ghost" disabled={settings.isFetching || busy} onClick={() => void settings.refetch()}>重试加载设置</Button>
         </div>
       ) : null}
-      {value ? (
-        <form onSubmit={save} className="space-y-7">
-          <fieldset disabled={busy} className="min-w-0 space-y-4 border-b border-[var(--border-subtle)] pb-6">
-            <legend className="mb-2 text-sm font-semibold text-[var(--text-primary)]">关于你</legend>
-            <p className="text-xs text-[var(--text-secondary)]">这些信息仅用于你的 Agent 对话。</p>
-            <label className="block space-y-2 text-sm">
-              <span className="font-medium">希望 Agent 如何称呼你</span>
-              <input className={fieldClass} value={value.preferredName} maxLength={AGENT_PERSONALIZATION_LIMITS.preferredName} onChange={event => change('preferredName', event.target.value)} />
-            </label>
-            <label className="block space-y-2 text-sm">
-              <span className="font-medium">希望 Agent 了解的创作背景</span>
-              <textarea className={cn(fieldClass, 'resize-y')} rows={3} value={value.aboutMe} maxLength={AGENT_PERSONALIZATION_LIMITS.aboutMe} onChange={event => change('aboutMe', event.target.value)} />
-            </label>
-          </fieldset>
-
-          <fieldset disabled={busy} className="min-w-0 space-y-4 border-b border-[var(--border-subtle)] pb-6">
-            <legend className="mb-2 text-sm font-semibold text-[var(--text-primary)]">交流风格</legend>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-              <label className="min-w-0 space-y-2 text-sm">
-                <span className="font-medium">基础风格</span>
-                <select className={fieldClass} value={value.style} onChange={event => change('style', event.target.value as AgentPersonalizationSettings['style'])}>
-                  {Object.entries(STYLE_LABELS).map(([option, label]) => <option key={option} value={option}>{label}</option>)}
-                </select>
-              </label>
-              {DEGREES.map(({ field, label, options }) => (
-                <label key={field} className="min-w-0 space-y-2 text-sm">
-                  <span className="font-medium">{label}</span>
-                  <select className={fieldClass} value={value[field]} onChange={event => change(field, event.target.value as AgentPersonalizationSettings[typeof field])}>
-                    {Object.entries(options).map(([option, text]) => <option key={option} value={option}>{text}</option>)}
-                  </select>
-                </label>
-              ))}
-            </div>
-            <StylePreview value={value} />
-          </fieldset>
-
-          <label className="block space-y-2 text-sm">
-            <span className="font-semibold">自定义指令</span>
-            <textarea disabled={busy} className={cn(fieldClass, 'resize-y')} rows={4} value={value.customInstructions} maxLength={AGENT_PERSONALIZATION_LIMITS.customInstructions} onChange={event => change('customInstructions', event.target.value)} />
-          </label>
-          <div className="flex flex-wrap items-center gap-3">
-            <Button type="submit" variant="primary" disabled={!draft || busy}>{busy && draft ? '保存中…' : '保存设置'}</Button>
-            {updateMessage ? <p role={updateMessage.error ? 'alert' : 'status'} className={cn('text-sm', updateMessage.error ? 'text-rose-500' : 'text-[var(--text-secondary)]')}>{updateMessage.text}</p> : null}
-          </div>
-        </form>
-      ) : null}
-
       <PersonalizationMemorySettings
         owner={owner}
         memoryEnabled={saved?.settings.memoryEnabled}
-        settingBusy={busy}
-        onToggle={enabled => { if (saved && !busy) void update({ revision: saved.revision, changes: { memoryEnabled: enabled } }) }}
+        settingBusy={disabled}
+        onToggle={enabled => void updateImmediate({ memoryEnabled: enabled })}
       />
+      {saved ? <>
+        <PersonalizationGroup title="风格与语气">
+          {STYLE_FIELDS.map(({ field, label, options }) => (
+            <label key={field} className={cn(personalizationRow, 'text-sm font-medium')}>
+              {label}
+              <select
+                className={cn(personalizationField, 'w-[7.5rem] shrink-0 font-normal')}
+                value={saved.settings[field]}
+                disabled={disabled}
+                onChange={event => void updateImmediate({ [field]: event.target.value })}
+              >
+                {Object.entries(options).map(([option, text]) => <option key={option} value={option}>{text}</option>)}
+              </select>
+            </label>
+          ))}
+        </PersonalizationGroup>
+
+        <PersonalizationRuleSettings
+          owner={owner}
+          saved={saved}
+          disabled={disabled}
+          busy={busy}
+          onSave={(rule, revision) => mutateAsync({ kind: 'put-rule', rule, revision })}
+          onDelete={(toolName, revision) => mutateAsync({ kind: 'delete-rule', toolName, revision })}
+        />
+
+        <PersonalizationGroup title="自定义指令">
+          <button type="button" ref={replyButton} aria-haspopup="dialog" onClick={() => {
+            setFeedback(null)
+            setDraft({ text: saved.settings.customInstructions, revision: saved.revision })
+          }} className={cn(personalizationRow, 'min-h-[4.5rem] rounded-2xl text-left hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]')}>
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium">回答偏好</span>
+              <span className="mt-1 block truncate text-xs text-[var(--text-secondary)]">{saved.settings.customInstructions || '告诉 Agent，你希望它如何与你交流、协作。'}</span>
+            </span>
+            <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-[var(--text-secondary)]" />
+          </button>
+        </PersonalizationGroup>
+        {draft ? (
+          <PersonalizationDialog title="回答偏好" busy={busy} onClose={() => setDraft(null)} returnFocus={() => replyButton.current}
+            footer={<>
+              <Button variant="ghost" disabled={busy} onClick={() => setDraft(null)}>取消</Button>
+              <Button form={replyId} type="submit" variant="primary" disabled={disabled || replyStale || draft.text.trim() === saved.settings.customInstructions}>{busy ? '保存中…' : '保存'}</Button>
+            </>}>
+            <form id={replyId} className="space-y-3" onSubmit={event => { event.preventDefault(); void saveReply() }}>
+              <label className="block space-y-2 text-sm">
+                <span className="font-medium">自定义指令</span>
+                <textarea className={cn(personalizationField, 'w-full resize-y text-base sm:text-sm')} rows={5} maxLength={AGENT_PERSONALIZATION_LIMITS.customInstructions}
+                  data-personalization-focus disabled={busy} value={draft.text} onChange={event => setDraft({ ...draft, text: event.target.value })} />
+              </label>
+              {replyStale ? (
+                <div className="space-y-2 text-sm">
+                  <p>个性化设置已更新。当前回答偏好：</p>
+                  <p className="whitespace-pre-wrap text-[var(--text-secondary)] [overflow-wrap:anywhere]">{saved.settings.customInstructions || '尚未设置回答偏好。'}</p>
+                  <Button size="sm" disabled={disabled} onClick={() => setDraft({ ...draft, revision: saved.revision, error: undefined })}>已核对，继续编辑</Button>
+                </div>
+              ) : null}
+              {draft.error ? <PersonalizationFeedback error>{draft.error}</PersonalizationFeedback> : null}
+            </form>
+          </PersonalizationDialog>
+        ) : null}
+      </> : null}
+      {busy && !draft ? <PersonalizationFeedback>正在保存个性化设置…</PersonalizationFeedback> : null}
+      {feedback ? <div className="flex flex-wrap items-center gap-2">
+        <PersonalizationFeedback error={Boolean(feedback.retry)}>{feedback.message}</PersonalizationFeedback>
+        {feedback.retry ? <Button size="sm" variant="ghost" disabled={disabled} onClick={() => {
+          if (feedback.retry) void updateImmediate(feedback.retry)
+        }}>重试保存</Button> : null}
+      </div> : null}
     </div>
   )
 }

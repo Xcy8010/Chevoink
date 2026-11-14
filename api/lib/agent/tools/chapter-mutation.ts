@@ -7,14 +7,17 @@ import { assertWritingTarget } from '../writing-scope.js'
 import { assertChapterManuscriptRevision, createChapterReviewReadScope, type ChapterReviewReadScope, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
 import { recordStoryCompilerWrite } from '../story-compiler.js'
 import type { ToolContext } from './types.js'
+import { automaticRepairPermitted } from '../personalization-tool-policy.js'
 
 /** Optional review repairs keep the current session's manuscript policy. */
 export async function automaticChapterRevisionWritable(tx: Prisma.TransactionClient,
-  subject: Pick<ToolContext, 'sessionId' | 'inlineChild'>) {
+  subject: Pick<ToolContext, 'sessionId' | 'inlineChild' | 'userId'>,
+  kind: 'quality' | 'continuity' = 'continuity', lock = false) {
   if (subject.inlineChild) return false
   const session = await tx.agentSession.findUnique({ where: { id: subject.sessionId }, select: { sandboxMode: true, toolPolicy: true } })
   const policy = session?.toolPolicy && typeof session.toolPolicy === 'object' && !Array.isArray(session.toolPolicy) ? session.toolPolicy : {}
   return !!session && session.sandboxMode !== 'read_only' && policy.contentWrite !== 'deny'
+    && await automaticRepairPermitted(subject.userId, tx, kind, lock)
 }
 
 /** Shared manuscript CAS. Both runtimes and coordinated writing use the same

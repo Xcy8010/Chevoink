@@ -64,6 +64,19 @@ it('preserves a folded viewer through delayed hydration, task revisit and remoun
   reopened.rerender(<WorkPerspective {...props()} />)
   expect(reopened.container.querySelector('[data-studio-panel="workViewer"]')?.getAttribute('aria-hidden')).toBe('true')
 })
+
+it('keeps the viewer folded when opening the inspector rail and drops outgoing viewer content on a scope change', () => {
+  localStorage.setItem('chevoink:work-split-v2:task-a', JSON.stringify({ viewer: 600, inspector: 400, viewerCollapsed: true, inspectorCollapsed: true, chatCollapsed: false }))
+  const view = render(<WorkPerspective {...props()} viewer={<p>上一作品正文</p>} />)
+  const panel = () => view.container.querySelector('[data-studio-panel="workViewer"]')
+  fireEvent.click(screen.getByRole('button', { name: '展开检查区' }))
+  expect(panel()?.getAttribute('aria-hidden')).toBe('true')
+  expect(panel()?.textContent).toBe('上一作品正文')
+  view.rerender(<WorkPerspective {...props('task-b')} viewer={undefined} />)
+  expect(panel()?.textContent).toBe('')
+  view.rerender(<WorkPerspective {...props('task-b')} viewer={<p>当前作品正文</p>} />)
+  expect(panel()?.textContent).toBe('当前作品正文')
+})
 it('restores A/B/A widths and explicit collapsed flags, including remount', () => {
   localStorage.setItem('chevoink:work-split-v2:task-a', JSON.stringify({ viewer: 260, inspector: 220, viewerCollapsed: true, inspectorCollapsed: true, chatCollapsed: false }))
   localStorage.setItem('chevoink:work-split-v2:task-b', JSON.stringify({ viewer: 380, inspector: 240, viewerCollapsed: false, inspectorCollapsed: false, chatCollapsed: false }))

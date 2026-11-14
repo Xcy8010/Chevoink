@@ -613,6 +613,7 @@ export async function applyQualityRepair(input: {
   retainedFindings?: Array<{ source: 'quality'; reportId: string; findingId: string; reason: string }>
   expectedContextHash?: string
   signal?: AbortSignal
+  automatic?: boolean
 }, transaction?: Prisma.TransactionClient) {
   input = { ...input, replacements: input.replacements.map(item => ({ ...item })) }
   const report = await getQualityReport(input.userId, input.novelId, input.reportId, transaction ?? prisma)
@@ -645,6 +646,8 @@ export async function applyQualityRepair(input: {
   const apply = async (tx: Prisma.TransactionClient) => {
     await lockNovelActiveScope(tx, input.novelId)
     if (input.runId) await assertAgentManuscriptCurrent(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId })
+    if (input.automatic && !await (await import('./personalization-tool-policy.js')).automaticRepairPermitted(input.userId, tx, 'quality', true))
+      throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '当前个性化权限要求单独确认修订，正文未修改。')
     if (input.runId) {
       // 授权由 assertChapterReviewRevision 统一判定（原始修复授权或本任务新稿一次
       // 合并修订，质量通道）；这里只保留范围与谱系保护，不再要求原始请求显式含修复词。
