@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="splashBackground">#FCFAF6</color>
+    <!-- A light navigation bar cannot request dark icons from the launch theme before API 27. -->
+    <color name="startupNavigationBar">#000000</color>
 </resources>

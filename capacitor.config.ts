@@ -8,7 +8,7 @@ const config: CapacitorConfig = {
   // 版本号供 APP 内更新提示与线上 version.json 比对。
   // 发新壳版本必须三处一起改：这里、android/app/build.gradle 的 versionCode+versionName、
   // 线上 /download/version.json；漏改这里会导致装了新包仍被判定为旧版本、更新横幅不消失。
-  appendUserAgent: 'ChevoinkApp/1.0.13',
+  appendUserAgent: 'ChevoinkApp/1.0.14',
   server: {
     // Stage 1: remote mode - load the production site directly (same-origin cookies)
     url: 'https://chevoink.chevolink.com',
@@ -16,11 +16,15 @@ const config: CapacitorConfig = {
   },
   android: {
     allowMixedContent: false,
+    // Match the native splash while the remote document has yet to draw.
+    backgroundColor: '#FCFAF6',
   },
   plugins: {
     SplashScreen: {
       launchShowDuration: 1500,
       launchAutoHide: true,
+      // Use the system exit so AndroidX does not reapply the launch bar theme over the web theme.
+      launchFadeOutDuration: 0,
       backgroundColor: '#FCFAF6',
       // 无字品牌图完整显示，信箱区为纸色与背景无缝
       androidScaleType: 'FIT_CENTER',
@@ -31,6 +35,9 @@ const config: CapacitorConfig = {
       overlaysWebView: false,
       style: 'LIGHT',
       backgroundColor: '#FCFAF6',
+    },
+    SystemBars: {
+      style: 'LIGHT',
     },
   },
 }

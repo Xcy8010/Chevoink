@@ -40,6 +40,7 @@ public class MainActivity extends BridgeActivity {
     private BroadcastReceiver legacyNetworkReceiver;
 
     @Override
+    @SuppressWarnings("deprecation")
     public void onCreate(Bundle savedInstanceState) {
         // 阅读区全屏沉浸自定义插件（官方 StatusBar 的 overlay 在 Android 15+ 失效，见插件注释）；
         // 必须在 super.onCreate 之前注册，Bridge 初始化时才能收进插件表
@@ -49,6 +50,11 @@ public class MainActivity extends BridgeActivity {
         // Older documents start fitted. Updated documents explicitly opt in through the bridge.
         WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
         getBridge().getWebView().setWebChromeClient(new SpeechWebChromeClient(getBridge()));
+
+        // API 26 supports dark navigation icons at runtime (SystemBars), but not in a launch theme.
+        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.O) {
+            getWindow().setNavigationBarColor(getColor(R.color.splashBackground));
+        }
 
         // 阅读区要全屏沉浸（StatusBar.hide()）。系统默认行为是「任意触摸即恢复系统栏」，
         // 翻页时的每一次点按都会把状态栏拽回来，而临时恢复出来的状态栏自带黑色蒙层且忽略

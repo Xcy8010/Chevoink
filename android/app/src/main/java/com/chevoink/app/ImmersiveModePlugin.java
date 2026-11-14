@@ -458,7 +458,8 @@ public class ImmersiveModePlugin extends Plugin {
             window.setStatusBarColor(edgeToEdge ? Color.TRANSPARENT : color);
             // API 24–25 cannot use dark navigation buttons on a light surface.
             int edgeNavigationColor = Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1 && !dark ? 0x99000000 : Color.TRANSPARENT;
-            window.setNavigationBarColor(edgeToEdge ? edgeNavigationColor : color);
+            int fittedNavigationColor = Build.VERSION.SDK_INT < Build.VERSION_CODES.O && !dark ? Color.BLACK : color;
+            window.setNavigationBarColor(edgeToEdge ? edgeNavigationColor : fittedNavigationColor);
             WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
             controller.setAppearanceLightStatusBars(!dark);
             controller.setAppearanceLightNavigationBars(!dark);

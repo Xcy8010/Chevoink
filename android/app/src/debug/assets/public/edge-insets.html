@@ -5,5 +5,11 @@
 <style>
   input { position: fixed; left: 15%; top: 45%; width: 70%; height: 10%; box-sizing: border-box; font-size: 18px; }
 </style>
+<script>
+  if (location.search === '?darkStartup') {
+    document.documentElement.style.backgroundColor = '#111318'
+    window.Capacitor.Plugins.ImmersiveMode.setSystemBarAppearance({ color: '#111318', dark: true })
+  }
+</script>
 <input aria-label="Test keyboard" type="text">
 </html>
