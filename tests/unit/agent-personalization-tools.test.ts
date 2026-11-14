@@ -18,7 +18,10 @@ vi.mock('../../api/lib/agent/personalization.js', () => ({
   getAgentPersonalization: mocks.getSettings, getAgentPersonalizationContext: mocks.getContext, saveConversationMemory: mocks.saveMemory,
   patchAgentPersonalization: mocks.patchSettings, changePersonalizationRule: mocks.changeRule, identifyMemory: mocks.identify,
 }))
-vi.mock('../../api/lib/agent/personalization-tool-policy.js', () => ({ assertPersonalizationRuleOperation: vi.fn() }))
+vi.mock('../../api/lib/agent/personalization-tool-policy.js', () => ({
+  assertPersonalizationRuleOperation: vi.fn(),
+  listPersonalizationRuleOperations: vi.fn(async () => [{ toolName: 'chapter_read', title: '读取章节正文' }]),
+}))
 
 const prompt = '我通常喜欢先确认悬疑线索，再讨论人物。'
 const createdAt = new Date('2026-11-14T10:00:00.000Z')
@@ -80,14 +83,17 @@ describe('本人资料与全局记忆工具', () => {
   it('does not treat a real user message as approval to change unrelated settings or make a rule', async () => {
     await expect(accountPreferencesUpdateTool.execute(ctx, { expectedRevision: 1, style: 'direct' })).rejects
       .toMatchObject({ code: 'PERSONALIZATION_CONFIRMATION_REQUIRED' })
-    const rule = { toolName: 'chapter_read', permission: 'allow' as const, expectedRevision: 1 }
+    const rule = { toolName: 'chapter_read', permission: 'allow' as const, expectedRevision: 1, text: '可以直接查阅章节。' }
     await expect(accountRuleSetTool.execute(ctx, rule)).rejects.toMatchObject({ code: 'PERSONALIZATION_CONFIRMATION_REQUIRED' })
     await expect(accountRuleSetTool.execute({ ...ctx, personalizationApproved: true, inlineChild: true }, rule)).rejects
       .toMatchObject({ code: 'PERSONALIZATION_AUTHOR_REQUIRED' })
     expect(mocks.patchSettings).not.toHaveBeenCalled()
     expect(mocks.changeRule).not.toHaveBeenCalled()
+    await expect(accountRuleSetTool.execute({ ...ctx, personalizationApproved: true }, { ...rule, text: '不要查阅章节。' })).rejects
+      .toMatchObject({ code: 'PERSONALIZATION_RULE_TEXT_MISMATCH' })
+    expect(mocks.changeRule).not.toHaveBeenCalled()
     await expect(accountRuleSetTool.execute({ ...ctx, personalizationApproved: true }, rule)).resolves.toMatchObject({ summary: '已保存自定义权限规则' })
-    expect(mocks.changeRule).toHaveBeenCalledExactlyOnceWith('author', 'chapter_read', 'allow', 1, tx)
+    expect(mocks.changeRule).toHaveBeenCalledExactlyOnceWith('author', 'chapter_read', 'allow', 1, tx, rule.text)
   })
 })
 

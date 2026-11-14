@@ -3,8 +3,6 @@ import { ChevronRight } from 'lucide-react'
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { ApiClientError } from '@/app/api-client'
-import Button from '@/components/ui/Button'
-import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
 import {
   AGENT_PERSONALIZATION_LIMITS,
@@ -22,7 +20,7 @@ import {
 } from '../personalization-api'
 import PersonalizationMemorySettings from './PersonalizationMemorySettings'
 import PersonalizationRuleSettings from './PersonalizationRuleSettings'
-import { PersonalizationDialog, PersonalizationFeedback, PersonalizationGroup, personalizationField, personalizationRow } from './personalization-ui'
+import { PersonalizationDialog, PersonalizationFeedback, PersonalizationGroup } from './personalization-ui'
 
 const STYLE_LABELS: Record<AgentPersonalizationSettings['style'], string> = {
   natural: '默认', professional: '专业', direct: '直率', partner: '创作搭档',
@@ -40,7 +38,7 @@ const STYLE_FIELDS = [
 type SettingsChanges = Partial<AgentPersonalizationSettings>
 type SettingsAction = { revision: number } & (
   | { kind: 'settings'; changes: SettingsChanges }
-  | { kind: 'put-rule'; rule: AgentPersonalizationRule }
+  | { kind: 'put-rule'; rule: AgentPersonalizationRule & { text: string }; originalToolName?: string }
   | { kind: 'delete-rule'; toolName: string }
 )
 
@@ -73,7 +71,7 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
           saved = await patchPersonalizationSettings(owner, action.revision, action.changes)
           break
         case 'put-rule':
-          saved = await putPersonalizationRule(owner, action.revision, action.rule)
+          saved = await putPersonalizationRule(owner, action.revision, action.rule, action.originalToolName)
           break
         case 'delete-rule':
           saved = await deletePersonalizationRule(owner, action.revision, action.toolName)
@@ -94,6 +92,7 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
   const [draft, setDraft] = useState<{ text: string; revision: number; error?: string } | null>(null)
   const replyButton = useRef<HTMLButtonElement>(null)
   const replyId = useId()
+  const styleId = useId()
   const replyStale = Boolean(draft && saved && draft.revision !== saved.revision)
 
   async function updateImmediate(changes: SettingsChanges) {
@@ -122,14 +121,7 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
   }
 
   return (
-    <div className="mx-auto max-w-[760px] space-y-6">
-      {settings.isPending ? <PersonalizationFeedback>正在加载个性化设置…</PersonalizationFeedback> : null}
-      {settings.isError ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <PersonalizationFeedback error>个性化设置加载失败。</PersonalizationFeedback>
-          <Button size="sm" variant="ghost" disabled={settings.isFetching || busy} onClick={() => void settings.refetch()}>重试加载设置</Button>
-        </div>
-      ) : null}
+    <div className="studio-settings-groups">
       <PersonalizationMemorySettings
         owner={owner}
         memoryEnabled={saved?.settings.memoryEnabled}
@@ -139,17 +131,17 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
       {saved ? <>
         <PersonalizationGroup title="风格与语气">
           {STYLE_FIELDS.map(({ field, label, options }) => (
-            <label key={field} className={cn(personalizationRow, 'text-sm font-medium')}>
-              {label}
+            <div key={field} className="studio-settings-row">
+              <label htmlFor={styleId + '-' + field}>{label}</label>
               <select
-                className={cn(personalizationField, 'w-[7.5rem] shrink-0 font-normal')}
+                id={styleId + '-' + field}
                 value={saved.settings[field]}
                 disabled={disabled}
                 onChange={event => void updateImmediate({ [field]: event.target.value })}
               >
                 {Object.entries(options).map(([option, text]) => <option key={option} value={option}>{text}</option>)}
               </select>
-            </label>
+            </div>
           ))}
         </PersonalizationGroup>
 
@@ -158,7 +150,7 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
           saved={saved}
           disabled={disabled}
           busy={busy}
-          onSave={(rule, revision) => mutateAsync({ kind: 'put-rule', rule, revision })}
+          onSave={(rule, revision, originalToolName) => mutateAsync({ kind: 'put-rule', rule, revision, originalToolName })}
           onDelete={(toolName, revision) => mutateAsync({ kind: 'delete-rule', toolName, revision })}
         />
 
@@ -166,31 +158,30 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
           <button type="button" ref={replyButton} aria-haspopup="dialog" onClick={() => {
             setFeedback(null)
             setDraft({ text: saved.settings.customInstructions, revision: saved.revision })
-          }} className={cn(personalizationRow, 'min-h-[4.5rem] rounded-2xl text-left hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]')}>
-            <span className="min-w-0 flex-1">
-              <span className="block text-sm font-medium">回答偏好</span>
-              <span className="mt-1 block truncate text-xs text-[var(--text-secondary)]">{saved.settings.customInstructions || '告诉 Agent，你希望它如何与你交流、协作。'}</span>
+          }} className="studio-settings-row studio-settings-row-link spacious">
+            <span className="studio-settings-row-copy">
+              <span className="studio-settings-row-title">回答偏好</span>
+              <span className="studio-settings-description">{saved.settings.customInstructions || '告诉 Agent，你希望它如何与你交流、协作。'}</span>
             </span>
-            <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-[var(--text-secondary)]" />
+            <ChevronRight aria-hidden="true" strokeWidth={1.6} className="studio-settings-arrow" />
           </button>
         </PersonalizationGroup>
         {draft ? (
           <PersonalizationDialog title="回答偏好" busy={busy} onClose={() => setDraft(null)} returnFocus={() => replyButton.current}
             footer={<>
-              <Button variant="ghost" disabled={busy} onClick={() => setDraft(null)}>取消</Button>
-              <Button form={replyId} type="submit" variant="primary" disabled={disabled || replyStale || draft.text.trim() === saved.settings.customInstructions}>{busy ? '保存中…' : '保存'}</Button>
+              <button type="button" className="studio-settings-button" disabled={busy} onClick={() => setDraft(null)}>取消</button>
+              <button form={replyId} type="submit" className="studio-settings-button primary" disabled={disabled || replyStale || draft.text.trim() === saved.settings.customInstructions}>{busy ? '保存中…' : '保存'}</button>
             </>}>
-            <form id={replyId} className="space-y-3" onSubmit={event => { event.preventDefault(); void saveReply() }}>
-              <label className="block space-y-2 text-sm">
-                <span className="font-medium">自定义指令</span>
-                <textarea className={cn(personalizationField, 'w-full resize-y text-base sm:text-sm')} rows={5} maxLength={AGENT_PERSONALIZATION_LIMITS.customInstructions}
-                  data-personalization-focus disabled={busy} value={draft.text} onChange={event => setDraft({ ...draft, text: event.target.value })} />
-              </label>
+            <form id={replyId} onSubmit={event => { event.preventDefault(); void saveReply() }}>
+              <label className="studio-settings-form-label" htmlFor={replyId + '-instructions'}>希望 Agent 如何回应你</label>
+              <textarea id={replyId + '-instructions'} className="studio-settings-field" rows={6} maxLength={AGENT_PERSONALIZATION_LIMITS.customInstructions}
+                placeholder="例如：直奔主题，少用套话；提出建议时，给出具体例子。"
+                data-personalization-focus disabled={busy} value={draft.text} onChange={event => setDraft({ ...draft, text: event.target.value })} />
               {replyStale ? (
-                <div className="space-y-2 text-sm">
+                <div className="mt-3 space-y-2">
                   <p>个性化设置已更新。当前回答偏好：</p>
-                  <p className="whitespace-pre-wrap text-[var(--text-secondary)] [overflow-wrap:anywhere]">{saved.settings.customInstructions || '尚未设置回答偏好。'}</p>
-                  <Button size="sm" disabled={disabled} onClick={() => setDraft({ ...draft, revision: saved.revision, error: undefined })}>已核对，继续编辑</Button>
+                  <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{saved.settings.customInstructions || '尚未设置回答偏好。'}</p>
+                  <button type="button" className="studio-settings-button" disabled={disabled} onClick={() => setDraft({ ...draft, revision: saved.revision, error: undefined })}>已核对，继续编辑</button>
                 </div>
               ) : null}
               {draft.error ? <PersonalizationFeedback error>{draft.error}</PersonalizationFeedback> : null}
@@ -198,12 +189,19 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
           </PersonalizationDialog>
         ) : null}
       </> : null}
+      {settings.isPending ? <PersonalizationFeedback>正在加载个性化设置…</PersonalizationFeedback> : null}
+      {settings.isError ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <PersonalizationFeedback error>个性化设置加载失败。</PersonalizationFeedback>
+          <button type="button" className="studio-settings-button" disabled={settings.isFetching || busy} onClick={() => void settings.refetch()}>重试加载设置</button>
+        </div>
+      ) : null}
       {busy && !draft ? <PersonalizationFeedback>正在保存个性化设置…</PersonalizationFeedback> : null}
       {feedback ? <div className="flex flex-wrap items-center gap-2">
         <PersonalizationFeedback error={Boolean(feedback.retry)}>{feedback.message}</PersonalizationFeedback>
-        {feedback.retry ? <Button size="sm" variant="ghost" disabled={disabled} onClick={() => {
+        {feedback.retry ? <button type="button" className="studio-settings-button" disabled={disabled} onClick={() => {
           if (feedback.retry) void updateImmediate(feedback.retry)
-        }}>重试保存</Button> : null}
+        }}>重试保存</button> : null}
       </div> : null}
     </div>
   )

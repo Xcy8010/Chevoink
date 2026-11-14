@@ -75,6 +75,7 @@ describe('personalization HTTP boundary', () => {
       ['patch', memoryUrl], ['delete', memoryUrl],
       ['post', `${memoryUrl}/restore`], ['get', `${settingsUrl}/rule-operations`],
       ['put', `${settingsUrl}/rules`], ['delete', `${settingsUrl}/rules/:toolName`],
+      ['post', `${settingsUrl}/rules/interpret`], ['put', `${settingsUrl}/rules/text`],
     ]
     for (const [method, path] of requests) {
       expect(await invoke(method, path, { signed: true })).toMatchObject({
@@ -150,5 +151,26 @@ describe('personalization HTTP boundary', () => {
     expect(await put(rule)).toMatchObject({ status: 200 })
     expect(operations.assertPersonalizationRuleOperation).toHaveBeenLastCalledWith('chapter_read')
     expect(service.changePersonalizationRule).toHaveBeenLastCalledWith('test-account', 'chapter_read', 'deny', 2)
+  })
+
+  it('previews plain text without writing and verifies the same choice at save time', async () => {
+    operations.listPersonalizationRuleOperations.mockResolvedValue([
+      { toolName: 'chapter_read', title: '读取章节正文' }, { toolName: 'web_search', title: '联网搜索' },
+    ])
+    const text = '  查阅章节前，先问我。  '
+    const preview = (draft: string) => invoke('post', `${settingsUrl}/rules/interpret`, { signed: true, body: { text: draft } })
+    expect(await preview('a'.repeat(501))).toMatchObject({ status: 400 })
+    expect(await preview('看情况再决定。')).toMatchObject({ status: 422 })
+    expect(await preview('不要联网。')).toMatchObject({ status: 422 })
+    expect(await preview('不要读取章节正文，除非我同意。')).toMatchObject({ status: 422 })
+    expect(await preview(text)).toMatchObject({ status: 200, body: { data: { toolName: 'chapter_read', permission: 'ask', title: '读取章节正文' } } })
+    expect(service.changePersonalizationRule).not.toHaveBeenCalled()
+    const write = (permission: string) => invoke('put', `${settingsUrl}/rules/text`, { signed: true,
+      body: { toolName: 'chapter_read', permission, text, expectedRevision: 2 } })
+    expect(await write('allow')).toMatchObject({ status: 409, body: { error: { code: 'PERSONALIZATION_RULE_PREVIEW_CHANGED' } } })
+    expect(service.changePersonalizationRule).not.toHaveBeenCalled()
+    service.changePersonalizationRule.mockResolvedValue({ revision: 3 })
+    expect(await write('ask')).toMatchObject({ status: 200 })
+    expect(service.changePersonalizationRule).toHaveBeenCalledExactlyOnceWith('test-account', 'chapter_read', 'ask', 2, undefined, text.trim(), undefined)
   })
 })

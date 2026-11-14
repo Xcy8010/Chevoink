@@ -83,7 +83,6 @@ type AgentComposerProps = {
   onContinue?: () => Promise<void>
   continueLabel?: string
   nextPrompt?: string
-  onAcceptNextPrompt?: () => void
   creativeFreedom: CreativeFreedom
   onCreativeFreedomChange: (value: CreativeFreedom) => void
   qualityMode: StoryCompilerMode
@@ -263,7 +262,6 @@ export function AgentComposer({
   onContinue,
   continueLabel = '继续运行',
   nextPrompt,
-  onAcceptNextPrompt,
   creativeFreedom,
   onCreativeFreedomChange,
   qualityMode,
@@ -742,7 +740,6 @@ export function AgentComposer({
     if (!isComposerBlank(current.draft) || current.references.length > 0) return
     caretAfterDraft.current = offeredNextPrompt.length
     setComposerContent(offeredNextPrompt, [])
-    onAcceptNextPrompt?.()
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {

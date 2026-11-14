@@ -3,7 +3,6 @@ import { ModelPriceDetails, ModelPriceSummary } from './ModelPriceDetails'
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiClientError, requestJson } from '@/app/api-client'
-import Button from '@/components/ui/Button'
 import { fetchCustomModels } from '@/features/account/credits-api'
 import { useModelCreditSummary } from '@/features/account/use-model-prices'
 import { cn } from '@/lib/utils'
@@ -13,7 +12,7 @@ import type { ModelReasoningEffort } from '../../../../shared/contracts/credits.
 type ModelOption = { id: string; label: string; price?: string; selection: AgentModelSelection; efforts: ModelReasoningEffort[]; vision: boolean }
 type Draft = { revision: number; changes: PatchModelAssignments['assignments'] }
 const effortLabels: Record<ModelReasoningEffort, string> = { none: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高' }
-const fieldClass = 'min-w-0 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 py-2 text-sm text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50'
+const fieldClass = 'min-w-0 w-full'
 function modelKey(selection: AgentModelSelection | null | undefined) { return selection ? selection.modelTier === 'custom' ? `custom:${selection.customModelId}` : selection.modelTier : '' }
 
 export default function ModelAssignmentsSettings({ novelId, novelTitle }: { novelId?: string; novelTitle?: string }) {
@@ -68,7 +67,7 @@ export default function ModelAssignmentsSettings({ novelId, novelTitle }: { nove
   const error = errors[owner] || (assignments.error instanceof Error ? assignments.error.message : '') || (models.error instanceof Error ? models.error.message : '') || (customModels.error instanceof Error ? customModels.error.message : '')
   const row = (task: typeof MODEL_ASSIGNMENT_TASKS[number]) => {
     if (task.key === 'quality' || task.key === 'continuity') return <div key={task.key}
-      className="grid gap-2 border-b border-[var(--border-subtle)] py-3 sm:grid-cols-[140px_minmax(0,1fr)] sm:items-center">
+      className="studio-settings-model-row grid min-h-14 gap-2 py-3 sm:grid-cols-[140px_minmax(0,1fr)] sm:items-center">
       <span className="text-sm font-medium">{task.label}</span>
       <span className="text-sm text-[var(--text-secondary)]">跟随对话中当前选择的模型与 Credits 倍率</span>
     </div>
@@ -78,7 +77,7 @@ export default function ModelAssignmentsSettings({ novelId, novelTitle }: { nove
     const selected = choices.find(option => option.id === value)
     const inherited = scope === 'novel' ? assignments.data?.global.assignments[task.key] : undefined
     const inheritedLabel = inherited ? options.find(option => option.id === modelKey(inherited))?.label : undefined
-    return <div key={task.key} className="grid grid-cols-[minmax(0,1fr)_96px] gap-2 border-b border-[var(--border-subtle)] py-3 sm:grid-cols-[140px_minmax(0,1fr)_112px] sm:items-center">
+    return <div key={task.key} className="studio-settings-model-row grid min-h-14 grid-cols-[minmax(0,1fr)_96px] gap-2 py-3 sm:grid-cols-[140px_minmax(0,1fr)_112px] sm:items-center">
       <span className="col-span-2 text-sm font-medium sm:col-span-1">{task.label}</span>
       <select aria-label={`${task.label}模型`} className={fieldClass} value={value} disabled={!ready || busy} onChange={event => { const chosen = choices.find(option => option.id === event.target.value); change(task.key, chosen ? { ...chosen.selection } : null) }}>
         <option value="">{inheritedLabel ? `跟随全局 · ${inheritedLabel}` : '跟随默认模型'}</option>
@@ -97,9 +96,9 @@ export default function ModelAssignmentsSettings({ novelId, novelTitle }: { nove
     </div>
     {error ? <p role="alert" className="text-sm text-rose-500">{error}</p> : null}
     {assignments.isPending ? <p role="status" className="text-sm text-[var(--text-secondary)]">加载中…</p> : null}
-    <details><summary className="cursor-pointer py-2 text-sm">内置模型说明</summary><div className="space-y-1">{(models.data?.models ?? []).filter(model => model.available).map(model => <ModelPriceDetails key={model.tier} model={model} className="rounded-lg px-3 py-2 hover:bg-[var(--surface-muted)]"><span tabIndex={0} className="flex items-center justify-between gap-3 text-sm"><span>{model.label}</span><ModelPriceSummary model={model} /></span></ModelPriceDetails>)}</div></details>
-    <div>{MODEL_ASSIGNMENT_TASKS.slice(0, 6).map(row)}</div>
-    <details><summary className="cursor-pointer py-2 text-sm text-[var(--text-secondary)]">其它工具</summary><div>{MODEL_ASSIGNMENT_TASKS.slice(6).map(row)}</div></details>
-    <Button disabled={!ready || !draft || busy} onClick={() => void save()}>{busy ? '保存中…' : '保存'}</Button>
+    <details className="studio-settings-card studio-settings-scroll-card"><summary className="cursor-pointer py-3 text-sm">内置模型说明</summary><div className="space-y-1 pb-3">{(models.data?.models ?? []).filter(model => model.available).map(model => <ModelPriceDetails key={model.tier} model={model} className="rounded-lg px-3 py-2 hover:bg-[var(--surface-muted)]"><span tabIndex={0} className="flex items-center justify-between gap-3 text-sm"><span>{model.label}</span><ModelPriceSummary model={model} /></span></ModelPriceDetails>)}</div></details>
+    <div className="studio-settings-card">{MODEL_ASSIGNMENT_TASKS.slice(0, 6).map(row)}</div>
+    <details className="studio-settings-card"><summary className="cursor-pointer py-3 text-sm">其它工具</summary><div>{MODEL_ASSIGNMENT_TASKS.slice(6).map(row)}</div></details>
+    <button type="button" className="studio-settings-button" disabled={!ready || !draft || busy} onClick={() => void save()}>{busy ? '保存中…' : '保存'}</button>
   </div>
 }

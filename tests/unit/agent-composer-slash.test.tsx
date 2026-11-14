@@ -507,7 +507,7 @@ describe('composer next-prompt completion', () => {
   const offer = () => screen.queryByRole('button', { name: '补全建议：' + suggestion })
 
   it('keeps the preview out of the draft and accepts only a plain focused Tab', async () => {
-    const input = { ...props(), nextPrompt: suggestion, onAcceptNextPrompt: vi.fn() }
+    const input = { ...props(), nextPrompt: suggestion }
     const view = render(<AgentComposer {...input} />)
     expect(offer()?.textContent).toBe(suggestion + 'Tab')
     expect(editor().textContent).toBe('')
@@ -525,19 +525,18 @@ describe('composer next-prompt completion', () => {
 
     expect(editor().textContent).toBe(suggestion)
     expect(window.getSelection()?.anchorOffset).toBe(suggestion.length)
-    expect(input.onAcceptNextPrompt).toHaveBeenCalledOnce()
     expect(input.onSend).not.toHaveBeenCalled()
     expect(offer()).toBeNull()
     expect(fireEvent.keyDown(editor(), { key: 'Tab' })).toBe(true)
 
-    view.rerender(<AgentComposer {...input} nextPrompt={undefined} />)
     await act(async () => fireEvent.keyDown(editor(), { key: 'Enter' }))
     expect(input.onSend).toHaveBeenCalledWith(suggestion, [], 'balanced', 'premium', [])
+    view.rerender(<AgentComposer {...input} nextPrompt={undefined} />)
     expect(screen.getByText(defaultPlaceholder)).toBeTruthy()
   })
 
   it('hides the suggestion while typing, then restores tap acceptance when the draft is cleared', () => {
-    const input = { ...props(), nextPrompt: suggestion, onAcceptNextPrompt: vi.fn() }
+    const input = { ...props(), nextPrompt: suggestion }
     const view = render(<AgentComposer {...input} running />)
     expect(screen.getByText(defaultPlaceholder)).toBeTruthy()
     expect(offer()).toBeNull()
@@ -549,13 +548,11 @@ describe('composer next-prompt completion', () => {
     expect(fireEvent.keyDown(editor(), { key: 'Tab' })).toBe(true)
     expect(editor().textContent).toBe('我想换个写法')
     expect(useAgentStore.getState().composerDraft).toBe('我想换个写法')
-    expect(input.onAcceptNextPrompt).not.toHaveBeenCalled()
 
     editor().replaceChildren(document.createElement('br'))
     fireEvent.input(editor())
     fireEvent.click(offer()!)
     expect(editor().textContent).toBe(suggestion)
-    expect(input.onAcceptNextPrompt).toHaveBeenCalledOnce()
     expect(input.onSend).not.toHaveBeenCalled()
   })
 })

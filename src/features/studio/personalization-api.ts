@@ -8,6 +8,7 @@ import type {
   AgentPersonalizationRule,
   AgentPersonalizationRuleOperation,
   AgentPersonalizationSettings,
+  InterpretedAgentPersonalizationRule,
 } from '../../../shared/contracts/agent-personalization.js'
 
 const settingsEndpoint = '/api/agent/personalization'
@@ -54,10 +55,17 @@ export function fetchPersonalizationRuleOperations(owner: string, signal: AbortS
   return requestForAccount<AgentPersonalizationRuleOperation[]>(owner, settingsEndpoint + '/rule-operations', { signal, cache: 'no-store' })
 }
 
-export function putPersonalizationRule(owner: string, expectedRevision: number, rule: AgentPersonalizationRule) {
-  return requestForAccount<AgentPersonalizationPayload>(owner, rulesEndpoint, {
+export function interpretPersonalizationRule(owner: string, text: string) {
+  return requestForAccount<InterpretedAgentPersonalizationRule>(owner, rulesEndpoint + '/interpret', {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  })
+}
+
+export function putPersonalizationRule(owner: string, expectedRevision: number, rule: AgentPersonalizationRule & { text: string }, originalToolName?: string) {
+  return requestForAccount<AgentPersonalizationPayload>(owner, rulesEndpoint + '/text', {
     method: 'PUT',
-    body: JSON.stringify({ ...rule, expectedRevision }),
+    body: JSON.stringify({ toolName: rule.toolName, permission: rule.permission, text: rule.text, expectedRevision, originalToolName }),
   })
 }
 

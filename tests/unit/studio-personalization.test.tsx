@@ -65,10 +65,17 @@ function respond(path: string, init?: RequestInit) {
     return settings
   }
   if (url.pathname === settingsUrl + '/rule-operations') return operations
-  if (url.pathname === rulesUrl) {
-    const { expectedRevision, ...rule } = JSON.parse(String(init?.body)) as AgentPersonalizationRule & { expectedRevision: number }
+  if (url.pathname === rulesUrl + '/interpret') {
+    const { text } = JSON.parse(String(init?.body)) as { text: string }
+    const operation = operations.find(item => text === '不要' + item.title + '。')
+    if (!operation) throw new ApiClientError('规则无法识别。', 422)
+    return { ...operation, permission: 'deny' }
+  }
+  if (url.pathname === rulesUrl + '/text') {
+    const { expectedRevision, originalToolName, ...rule } = JSON.parse(String(init?.body)) as AgentPersonalizationRule & { expectedRevision: number; originalToolName?: string }
     if (expectedRevision !== settings.revision) throw new ApiClientError('设置已更改。', 409)
-    settings = { ...settings, rules: [...settings.rules.filter(item => item.toolName !== rule.toolName), rule], revision: settings.revision + 1 }
+    if (!rule.text) delete rule.text
+    settings = { ...settings, rules: [...settings.rules.filter(item => item.toolName !== rule.toolName && item.toolName !== originalToolName), rule], revision: settings.revision + 1 }
     return settings
   }
   if (url.pathname.startsWith(rulesUrl + '/')) {
@@ -155,11 +162,14 @@ afterEach(() => {
   vi.resetAllMocks()
 })
 
-it('exposes compact settings from both navigation layouts and saves tone immediately', async () => {
+it('shares the settings shell across sections and saves tone immediately', async () => {
   renderSettings('general')
   const [desktop, mobile] = screen.getAllByRole('navigation', { name: '设置导航' })
   expect(within(desktop).getByRole('button', { name: /个性化/ })).toBeTruthy()
+  expect(screen.getByRole('heading', { level: 1, name: '通用' })).toBeTruthy()
+  expect(within(screen.getByRole('main')).getByRole('combobox', { name: '工作模式' })).toBeTruthy()
   fireEvent.click(within(mobile).getByRole('button', { name: '个性化' }))
+  expect(within(desktop).getByRole('button', { name: '个性化' }).getAttribute('aria-current')).toBe('page')
   const style = await screen.findByRole<HTMLSelectElement>('combobox', { name: '基础风格和语气' })
   expect(screen.queryByText('关于你')).toBeNull()
   expect(screen.queryByText('风格预览')).toBeNull()
@@ -177,7 +187,7 @@ it('keeps a reply draft on conflict and restores focus when the native dialog cl
   const open = await screen.findByRole('button', { name: /^回答偏好/ })
   fireEvent.click(open)
   const replyDialog = screen.getByRole('dialog', { name: '回答偏好' })
-  const instructions = within(replyDialog).getByRole<HTMLTextAreaElement>('textbox', { name: '自定义指令' })
+  const instructions = within(replyDialog).getByRole<HTMLTextAreaElement>('textbox', { name: '希望 Agent 如何回应你' })
   expect(document.activeElement).toBe(instructions)
   fireEvent.change(instructions, { target: { value: '改写前先给出建议。' } })
   settings = { ...settings, settings: { ...settings.settings, customInstructions: '用最新版本。' }, revision: 1 }
@@ -198,40 +208,50 @@ it('keeps a reply draft on conflict and restores focus when the native dialog cl
   expect(onClose).not.toHaveBeenCalled()
 })
 
-it('manages one rule per registered operation and requires review when the revision changes', async () => {
+it('previews and manages user-written rules without a tool selector and preserves conflicts', async () => {
   settings = { ...settings, rules: [{ toolName: 'edit_body', permission: 'ask' }] }
   renderSettings()
   fireEvent.click(await screen.findByRole('button', { name: /^自定义规则/ }))
   const manager = screen.getByRole('dialog', { name: '自定义规则' })
-  const add = await within(manager).findByRole('button', { name: '添加规则' })
-  expect(within(manager).getByText(/平台要求的确认仍然适用/)).toBeTruthy()
   await within(manager).findByText('修改章节正文')
-  fireEvent.click(add)
+  fireEvent.click(within(manager).getByRole('button', { name: '添加规则' }))
   const addDialog = screen.getByRole('dialog', { name: '添加规则' })
-  const operation = within(addDialog).getByRole('combobox', { name: '操作' })
-  expect(within(operation).getAllByRole('option').map(option => option.textContent)).toEqual(['请选择操作', '查看本人资料'])
-  expect(within(addDialog).getByRole('button', { name: '保存' })).toHaveProperty('disabled', true)
-  fireEvent.change(operation, { target: { value: 'read_profile' } })
-  fireEvent.change(within(addDialog).getByRole('combobox', { name: '执行方式' }), { target: { value: 'deny' } })
+  const input = within(addDialog).getByRole('textbox', { name: '规则内容' })
+  const preview = within(addDialog).getByRole('button', { name: '预览规则' })
+  expect(within(addDialog).queryByRole('combobox')).toBeNull()
+  expect(preview).toHaveProperty('disabled', true)
+  fireEvent.change(input, { target: { value: '看情况决定。' } })
+  fireEvent.click(preview)
+  await within(addDialog).findByRole('alert')
+  const authorRule = '不要查看本人资料。'
+  fireEvent.change(input, { target: { value: authorRule } })
+  fireEvent.click(preview)
+  await within(addDialog).findByText('查看本人资料 · 不允许')
+  expect(settings.rules).toHaveLength(1)
   fireEvent.click(within(addDialog).getByRole('button', { name: '保存' }))
   await within(manager).findByText('已保存自定义规则。')
-  expect(settings.rules).toContainEqual({ toolName: 'read_profile', permission: 'deny' })
-  await waitFor(() => expect(add).toHaveProperty('disabled', true))
+  expect(settings.rules).toContainEqual({ toolName: 'read_profile', permission: 'deny', text: authorRule })
+  expect(within(manager).getByText(authorRule)).toBeTruthy()
 
   fireEvent.click(within(manager).getByRole('button', { name: '编辑规则：修改章节正文' }))
   const editor = screen.getByRole('dialog', { name: '编辑规则' })
-  const mode = within(editor).getByRole<HTMLSelectElement>('combobox', { name: '执行方式' })
-  fireEvent.change(mode, { target: { value: 'deny' } })
+  const draft = within(editor).getByRole('textbox', { name: '规则内容' })
+  expect(draft).toHaveProperty('value', '修改章节正文前，先问我。')
+  fireEvent.change(draft, { target: { value: '不要修改章节正文。' } })
+  fireEvent.click(within(editor).getByRole('button', { name: '预览规则' }))
+  await within(editor).findByText('修改章节正文 · 不允许')
   settings = { ...settings, rules: settings.rules.map(rule => rule.toolName === 'edit_body' ? { ...rule, permission: 'allow' } : rule), revision: 2 }
   fireEvent.click(within(editor).getByRole('button', { name: '保存' }))
   const review = await within(editor).findByRole('button', { name: '已核对，继续编辑' })
-  expect(mode.value).toBe('deny')
-  expect(within(editor).getByText(/当前的执行方式为「无需询问」/)).toBeTruthy()
-  expect(within(editor).getByRole('button', { name: '保存' })).toHaveProperty('disabled', true)
+  expect(draft).toHaveProperty('value', '不要修改章节正文。')
+  expect(within(editor).getByText(/原规则：可以直接修改章节正文/)).toBeTruthy()
+  expect(within(editor).getByRole('button', { name: '预览规则' })).toHaveProperty('disabled', true)
   fireEvent.click(review)
-  fireEvent.click(within(editor).getByRole('button', { name: '保存' }))
+  fireEvent.click(within(editor).getByRole('button', { name: '预览规则' }))
+  const save = await within(editor).findByRole('button', { name: '保存' })
+  fireEvent.click(save)
   await waitFor(() => expect(screen.queryByRole('dialog', { name: '编辑规则' })).toBeNull())
-  expect(settings.rules).toContainEqual({ toolName: 'edit_body', permission: 'deny' })
+  expect(settings.rules).toContainEqual({ toolName: 'edit_body', permission: 'deny', text: '不要修改章节正文。' })
 
   const remove = within(manager).getByRole('button', { name: '删除规则：修改章节正文' })
   fireEvent.click(remove)
@@ -243,7 +263,7 @@ it('manages one rule per registered operation and requires review when the revis
   fireEvent.click(remove)
   fireEvent.click(within(screen.getByRole('dialog', { name: '删除这条规则？' })).getByRole('button', { name: '删除规则' }))
   await within(manager).findByText('已删除自定义规则。')
-  expect(settings.rules).toEqual([{ toolName: 'read_profile', permission: 'deny' }])
+  expect(settings.rules).toEqual([{ toolName: 'read_profile', permission: 'deny', text: authorRule }])
 })
 
 it('can manage, pin, edit, restore and permanently delete memories while automatic memory is off', async () => {

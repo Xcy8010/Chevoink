@@ -2,7 +2,7 @@ import { afterAll, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { prisma } from '../../api/lib/prisma.js'
-import { assertAgentPersonalizationState, readAgentPersonalizationState, readPersonalizationRulesMigrationState } from '../../scripts/verify-release-migration.mjs'
+import { assertAgentPersonalizationState, readAgentPersonalizationState, readPersonalizationRulesMigrationState, readPersonalizationRuleTextsState } from '../../scripts/verify-release-migration.mjs'
 import { verifyTestDatabase } from '../support/database-preflight.js'
 
 await verifyTestDatabase(true)
@@ -40,5 +40,7 @@ it('checks the actual upgraded catalog and verifies that the former v1 readback 
     await expect(readPersonalizationRulesMigrationState(tx, 'after')).resolves.toMatchObject({ slots: true, trigger: true, rules: true,
       legacyRetired: true, invalidProfiles: false, excessActive: false })
     await expect(readPersonalizationRulesMigrationState(tx, 'before')).rejects.toThrow(/catalog mismatch/)
+    await expect(readPersonalizationRuleTextsState(tx, 'after')).resolves.toEqual({ column: true, constraint: true, trigger: true })
+    await expect(readPersonalizationRuleTextsState(tx, 'before')).rejects.toThrow(/catalog mismatch/)
   })
 })

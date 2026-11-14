@@ -3,6 +3,7 @@ import { z } from 'zod'
 export const AGENT_PERSONALIZATION_LIMITS = {
   customInstructions: 2_000,
   memoryText: 500,
+  ruleText: 500,
   activeMemories: 50,
 } as const
 
@@ -67,9 +68,19 @@ export const agentPersonalizationRuleSchema = z.object({
   toolName: agentPersonalizationRuleNameSchema,
   permission: z.enum(['allow', 'ask', 'deny']),
 }).strict()
+const editableAgentPersonalizationRuleSchema = agentPersonalizationRuleSchema.extend({
+  text: authorText(AGENT_PERSONALIZATION_LIMITS.ruleText).refine(hasNoNull).optional(),
+})
 export const writeAgentPersonalizationRuleSchema = agentPersonalizationRuleSchema.extend(agentPersonalizationExpectedRevisionSchema.shape)
+export const writeAgentPersonalizationToolRuleSchema = editableAgentPersonalizationRuleSchema.extend(agentPersonalizationExpectedRevisionSchema.shape)
+export const interpretAgentPersonalizationRuleSchema = z.object({
+  text: authorText(AGENT_PERSONALIZATION_LIMITS.ruleText).min(1).refine(hasNoNull),
+}).strict()
+export const saveAgentPersonalizationRuleTextSchema = writeAgentPersonalizationRuleSchema
+  .extend({ ...interpretAgentPersonalizationRuleSchema.shape, originalToolName: agentPersonalizationRuleNameSchema.optional() })
 export const removeAgentPersonalizationRuleSchema = agentPersonalizationExpectedRevisionSchema.extend({ toolName: agentPersonalizationRuleNameSchema })
-export type AgentPersonalizationRule = z.infer<typeof agentPersonalizationRuleSchema>
+export type AgentPersonalizationRule = z.infer<typeof editableAgentPersonalizationRuleSchema>
+export type InterpretedAgentPersonalizationRule = z.infer<typeof agentPersonalizationRuleSchema> & { title: string }
 export type AgentPersonalizationRuleOperation = { toolName: string; title: string }
 
 export type AgentPersonalizationMemory = {

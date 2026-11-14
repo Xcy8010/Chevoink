@@ -43,7 +43,12 @@ function projectRules(raw: Prisma.JsonValue | undefined): AgentPersonalizationRu
 }
 
 function projectProfile(profile: AgentPersonalization | null): AgentPersonalizationPayload {
-  return { settings: projectSettings(profile), revision: profile?.revision ?? 0, rules: projectRules(profile?.toolRules) }
+  const texts = profile?.toolRuleTexts
+  const rules = projectRules(profile?.toolRules).map(rule => {
+    const text = texts && typeof texts === 'object' && !Array.isArray(texts) ? texts[rule.toolName] : undefined
+    return typeof text === 'string' && text ? { ...rule, text } : rule
+  })
+  return { settings: projectSettings(profile), revision: profile?.revision ?? 0, rules }
 }
 
 const settingsConflict = () => new DataAccessError(409, 'PERSONALIZATION_CONFLICT', '个性化设置已更新，请刷新后重试。')
@@ -101,18 +106,26 @@ export function patchAgentPersonalization(userId: string, input: PatchAgentPerso
 }
 
 export function changePersonalizationRule(userId: string, toolName: string, permission: AgentPersonalizationRule['permission'] | null,
-  expectedRevision: number, tx?: Prisma.TransactionClient) {
+  expectedRevision: number, tx?: Prisma.TransactionClient, text?: string, originalToolName = toolName) {
   return transact(tx, async db => {
     const profile = await lockProfile(db, userId)
     if (profile.revision !== expectedRevision) throw settingsConflict()
     const rules = projectRules(profile.toolRules)
     const existing = rules.find(rule => rule.toolName === toolName)
-    if (existing?.permission === permission || !existing && permission === null) return projectProfile(profile)
-    const toolRules = rules.filter(rule => rule.toolName !== toolName)
+    if (originalToolName !== toolName && (existing || !rules.some(rule => rule.toolName === originalToolName)))
+      throw new DataAccessError(409, 'PERSONALIZATION_RULE_TARGET_CONFLICT', '这项操作已有规则，或原来的规则已经删除。')
+    const previous = profile.toolRuleTexts
+    const texts = previous && typeof previous === 'object' && !Array.isArray(previous) ? { ...previous } : {}
+    if ((!existing && permission === null) || (existing?.permission === permission
+      && (text === undefined || text === (texts[toolName] ?? '')))) return projectProfile(profile)
+    const toolRules = rules.filter(rule => rule.toolName !== toolName && rule.toolName !== originalToolName)
     if (permission !== null) toolRules.push({ toolName, permission })
     toolRules.sort((a, b) => a.toolName.localeCompare(b.toolName))
+    if (originalToolName !== toolName) delete texts[originalToolName]
+    if (permission === null || text === '' || (text === undefined && existing?.permission !== permission)) delete texts[toolName]
+    else if (text !== undefined) texts[toolName] = text
     return projectProfile(await db.agentPersonalization.update({
-      where: { userId }, data: { toolRules, revision: { increment: 1 } },
+      where: { userId }, data: { toolRules, toolRuleTexts: texts as Prisma.InputJsonObject, revision: { increment: 1 } },
     }))
   })
 }

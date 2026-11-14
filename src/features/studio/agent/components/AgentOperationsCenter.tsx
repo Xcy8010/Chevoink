@@ -159,7 +159,7 @@ function ScheduleDialog({
 }) {
   if (!open) return null
   return createPortal(
-    <div className="studio-workspace fixed inset-0 z-[260] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="studio-settings-style studio-settings-popup studio-workspace fixed inset-0 z-[260] flex items-center justify-center p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section role="dialog" aria-modal="true" aria-label="新建定时计划" className="w-full max-w-xl overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_24px_70px_rgba(15,23,42,.2)]">
         <header className="flex items-start gap-4 border-b border-[var(--border-subtle)] px-5 py-4">
           <div className="min-w-0 flex-1"><h3 className="text-base font-semibold">新建定时计划</h3><p className="mt-1 text-xs text-[var(--text-secondary)]">Agent 会在当前任务中按周期执行这项检查。</p></div>
@@ -167,7 +167,7 @@ function ScheduleDialog({
         </header>
         <div className="space-y-4 px-5 py-5">
           <label className="block"><span className="mb-1.5 block text-xs font-medium">计划名称</span><input autoFocus className={inputClass} value={name} onChange={(event) => onNameChange(event.target.value)} placeholder="例如：章节质量巡检" /></label>
-          <label className="block"><span className="mb-1.5 block text-xs font-medium">执行周期</span><select className={inputClass} value={cadenceMinutes} onChange={(event) => onCadenceChange(Number(event.target.value))}><option value={360}>每 6 小时</option><option value={1440}>每天</option><option value={10080}>每周</option></select></label>
+          <label className="block"><span className="mb-1.5 block text-xs font-medium">执行周期</span><select className="studio-settings-block-select" value={cadenceMinutes} onChange={(event) => onCadenceChange(Number(event.target.value))}><option value={360}>每 6 小时</option><option value={1440}>每天</option><option value={10080}>每周</option></select></label>
           <label className="block"><span className="mb-1.5 block text-xs font-medium">Agent 要完成什么</span><textarea className={textareaClass} value={prompt} onChange={(event) => onPromptChange(event.target.value)} placeholder="描述检查范围、输出格式和完成标准" /></label>
         </div>
         <footer className="flex justify-end gap-2 border-t border-[var(--border-subtle)] px-5 py-4"><Button variant="ghost" onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" onClick={onSubmit} disabled={busy || !name.trim() || !prompt.trim()}>{busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}创建计划</Button></footer>
@@ -279,26 +279,26 @@ export default function AgentOperationsCenter({
   }
 
   const content = (
-    <div className={cn(embedded ? 'h-full min-h-0' : 'fixed inset-0 z-[155] flex items-end justify-center bg-black/35 backdrop-blur-[2px] sm:items-center sm:p-6')} onMouseDown={(event) => { if (!embedded && event.target === event.currentTarget) onClose() }}>
-      <section role={embedded ? 'region' : 'dialog'} aria-modal={embedded ? undefined : 'true'} aria-label="Agent 操作中心" className={cn('flex w-full flex-col overflow-hidden bg-[var(--surface-default)]', embedded ? 'h-full min-h-0' : 'h-[92dvh] max-w-5xl border border-[var(--border-subtle)] shadow-[0_28px_90px_rgba(15,23,42,0.28)] sm:h-[78dvh] sm:rounded-[20px]')}>
+    <div className={cn(!embedded && 'studio-settings-style studio-settings-popup fixed inset-0 z-[155] flex items-end justify-center sm:items-center sm:p-6')} onMouseDown={(event) => { if (!embedded && event.target === event.currentTarget) onClose() }}>
+      <section role={embedded ? 'region' : 'dialog'} aria-modal={embedded ? undefined : 'true'} aria-label="Agent 操作中心" className={cn('flex w-full flex-col', !embedded && 'h-[92dvh] max-w-5xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_28px_90px_rgba(15,23,42,0.28)] sm:h-[78dvh] sm:rounded-[20px]')}>
         <header className={cn('items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-3 sm:px-6', embedded ? 'hidden' : 'flex')}>
           <SlidersHorizontal className="h-4 w-4" />
           <div className="min-w-0 flex-1"><h2 className="text-sm font-semibold">Agent 操作中心</h2><p className="truncate text-xs text-[var(--text-secondary)]">任务、专业助手、计划与安全边界</p></div>
           <button type="button" onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-[8px] hover:bg-[var(--surface-muted)]" aria-label="关闭"><X className="h-4 w-4" /></button>
         </header>
 
-        <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-          <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border-subtle)] p-2 sm:w-48 sm:flex-col sm:border-b-0 sm:border-r sm:p-3" aria-label="Agent 操作导航">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <nav className="studio-settings-operation-tabs" aria-label="Agent 操作导航">
             {tabs.map((item) => (
-              <button key={item.id} type="button" onClick={() => setTab(item.id)} className={cn('inline-flex shrink-0 items-center gap-2.5 rounded-[9px] px-3 py-2.5 text-left transition-colors', tab === item.id ? 'bg-[var(--surface-muted)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]/70 hover:text-[var(--text-primary)]')}>
+              <button key={item.id} type="button" aria-pressed={tab === item.id} onClick={() => setTab(item.id)} className="studio-settings-button">
                 <item.icon className="h-4 w-4 shrink-0" />
-                <span className="min-w-0"><span className="block text-xs font-medium">{item.label}</span><span className="mt-0.5 hidden truncate text-[10px] text-[var(--text-tertiary)] sm:block">{item.description}</span></span>
+                {item.label}
               </button>
             ))}
           </nav>
 
-          <main className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-7">
-            <div className="mx-auto w-full max-w-5xl">
+          <div className={cn('min-h-0 flex-1', embedded ? 'mt-5' : 'overflow-y-auto px-4 py-5 sm:px-7 sm:py-7')}>
+            <div className="studio-settings-card py-5">
               {error ? <div role="alert" className="mb-5 border-l-2 border-rose-500 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:bg-rose-950/20 dark:text-rose-300">{error}</div> : null}
               {notice ? <div role="status" className="mb-5 border-l-2 border-[#71857c] bg-[var(--surface-muted)] px-3 py-2 text-xs text-[var(--text-secondary)]">{notice}</div> : null}
 
@@ -393,7 +393,7 @@ export default function AgentOperationsCenter({
                 </section>
               ) : null}
             </div>
-          </main>
+          </div>
         </div>
 
         {busy ? <div className="pointer-events-none fixed bottom-6 right-6 z-[270] inline-flex items-center gap-2 rounded-full bg-[var(--surface-contrast)] px-4 py-2 text-xs text-[var(--text-contrast)] shadow-lg"><LoaderCircle className="h-3.5 w-3.5 animate-spin" />正在处理</div> : null}

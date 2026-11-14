@@ -7,8 +7,10 @@ import {
   agentPersonalizationMemoryIdSchema,
   agentPersonalizationRuleNameSchema,
   createAgentPersonalizationMemorySchema,
+  interpretAgentPersonalizationRuleSchema,
   patchAgentPersonalizationMemorySchema,
   patchAgentPersonalizationSchema,
+  saveAgentPersonalizationRuleTextSchema,
   writeAgentPersonalizationRuleSchema,
 } from '../../shared/contracts/agent-personalization.js'
 import type { AgentPersonalizationPayload } from '../../shared/contracts/agent-personalization.js'
@@ -24,6 +26,7 @@ import {
   updatePersonalizationMemory,
 } from '../lib/agent/personalization.js'
 import { assertPersonalizationRuleOperation, listPersonalizationRuleOperations } from '../lib/agent/personalization-tool-policy.js'
+import { interpretPersonalizationRule } from '../lib/agent/personalization-rule-language.js'
 import { hasAgentPersonalizationCapability } from '../lib/app-releases.js'
 import { requireSessionUserId } from '../lib/auth-session.js'
 import { buildSuccess, createRequestId } from '../lib/http.js'
@@ -140,6 +143,30 @@ router.get(`${settingsPath}/rule-operations`, async (req, res) => {
     await requirePersonalizationUser(req)
     res.setHeader('Cache-Control', 'no-store')
     res.json(buildSuccess(requestId, await listPersonalizationRuleOperations()))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.post(`${settingsPath}/rules/interpret`, async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    await requirePersonalizationUser(req)
+    const { text } = parseBody(interpretAgentPersonalizationRuleSchema, req.body, '请输入有效的规则内容。')
+    res.setHeader('Cache-Control', 'no-store')
+    res.json(buildSuccess(requestId, await interpretPersonalizationRule(text)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.put(`${settingsPath}/rules/text`, async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const userId = await requirePersonalizationUser(req)
+    const { text, expectedRevision, toolName, permission, originalToolName } = parseBody(saveAgentPersonalizationRuleTextSchema, req.body, '权限规则无效。')
+    const interpreted = await interpretPersonalizationRule(text)
+    if (toolName !== interpreted.toolName || permission !== interpreted.permission)
+      throw new DataAccessError(409, 'PERSONALIZATION_RULE_PREVIEW_CHANGED', '规则的识别结果已变化，请重新预览。')
+    res.setHeader('Cache-Control', 'no-store')
+    res.json(buildSuccess(requestId, await changePersonalizationRule(userId, toolName, permission, expectedRevision, undefined, text,
+      originalToolName)))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 

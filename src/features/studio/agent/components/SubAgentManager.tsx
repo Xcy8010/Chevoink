@@ -100,7 +100,7 @@ function SubAgentEditorDialog({
   const updateDraft = (patch: Partial<Draft>) => onChange({ ...state, draft: { ...state.draft, ...patch } })
 
   return createPortal(
-    <div className="studio-workspace fixed inset-0 z-[270] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="studio-settings-style studio-settings-popup studio-workspace fixed inset-0 z-[270] flex items-center justify-center p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section role="dialog" aria-modal="true" aria-label={state.mode === 'create' ? '新建子 Agent' : '编辑子 Agent'} className="flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_26px_80px_rgba(15,23,42,.22)]">
         <header className="flex items-start gap-4 border-b border-[var(--border-subtle)] px-5 py-4 sm:px-6">
           <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--text-secondary)]"><Bot className="h-5 w-5" /></span>
@@ -111,7 +111,7 @@ function SubAgentEditorDialog({
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5 sm:px-6">
           <div className="grid gap-4 sm:grid-cols-[1fr_190px]">
             <label className="block"><span className="mb-1.5 block text-xs font-medium">名称</span><input autoFocus className={inputClass} value={state.draft.name} maxLength={60} onChange={(event) => updateDraft({ name: event.target.value })} placeholder="例如：世界观校对员" /></label>
-            <label className="block"><span className="mb-1.5 block text-xs font-medium">专业分类</span><select className={inputClass} value={state.draft.role} onChange={(event) => updateDraft({ role: event.target.value as AgentSubtaskRole })}>{roleOrder.map((role) => <option key={role} value={role}>{roleMeta[role].label}</option>)}</select></label>
+            <label className="block"><span className="mb-1.5 block text-xs font-medium">专业分类</span><select className="studio-settings-block-select" value={state.draft.role} onChange={(event) => updateDraft({ role: event.target.value as AgentSubtaskRole })}>{roleOrder.map((role) => <option key={role} value={role}>{roleMeta[role].label}</option>)}</select></label>
           </div>
           <label className="block"><span className="mb-1.5 block text-xs font-medium">什么时候调用</span><input className={inputClass} value={state.draft.triggerCondition} maxLength={240} onChange={(event) => updateDraft({ triggerCondition: event.target.value })} placeholder="例如：章节涉及已有设定、时间线或人物状态时" /><span className="mt-1.5 block text-[10px] leading-4 text-[var(--text-tertiary)]">写清可判断的场景，主 Agent 才能稳定选择它。</span></label>
           <label className="block"><span className="mb-1.5 block text-xs font-medium">职责与输出</span><textarea className={textareaClass} value={state.draft.prompt} maxLength={4000} onChange={(event) => updateDraft({ prompt: event.target.value })} placeholder="说明要检查什么、必须参考哪些内容、输出什么，以及不得做什么…" /><span className="mt-1.5 block text-[10px] leading-4 text-[var(--text-tertiary)]">子 Agent 跟随主任务模型和计费；执行上限由服务端统一保护。</span></label>

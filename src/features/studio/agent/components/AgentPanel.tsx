@@ -1965,9 +1965,6 @@ export function AgentPanel({
           voiceDisabled={voiceDisabled || sessionResolving}
           running={active}
           nextPrompt={nextPrompt?.text}
-          onAcceptNextPrompt={() => {
-            if (nextPrompt) useAgentStore.setState({ nextPrompt: null })
-          }}
           onContinue={canContinue ? goalView.runBelongsToGoal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
           disabled={conversationLoading || modelPreference.loading}
           onSend={(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId) => handleSend(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId)}

@@ -4,7 +4,7 @@ import { DataAccessError, prisma } from '../../prisma.js'
 import {
   agentPersonalizationExpectedRevisionSchema, agentPersonalizationMemoryIdSchema, createAgentPersonalizationMemorySchema,
   patchAgentPersonalizationMemoryFields, patchAgentPersonalizationSchema, removeAgentPersonalizationRuleSchema,
-  writeAgentPersonalizationRuleSchema,
+  writeAgentPersonalizationToolRuleSchema,
 } from '../../../../shared/contracts/agent-personalization.js'
 import { getModelAssignments } from '../model-assignments.js'
 import {
@@ -13,6 +13,7 @@ import {
 } from '../personalization.js'
 import { assertPersonalizationWriteAdmission, personalizationWriteAdmission, readPersonalizationAuthor } from '../personalization-authority.js'
 import { assertPersonalizationRuleOperation, listPersonalizationRuleOperations } from '../personalization-tool-policy.js'
+import { interpretPersonalizationRule } from '../personalization-rule-language.js'
 import { runtimeTransaction } from '../runtime-common.js'
 import { getWindowConfiguration, readRunWindowConfiguration } from '../window-configuration.js'
 import { defineTool, type ToolContext } from './types.js'
@@ -211,13 +212,18 @@ export const accountRuleOperationsTool = defineTool({
 
 export const accountRuleSetTool = defineTool({
   name: 'account_rule_set', title: '新增或修改自定义权限规则',
-  description: '按作者要求新增或修改一条规则。先查询已保存设置版本和实际操作编号。任意更改都要由作者确认；既有禁止、作品归属、费用及平台强制确认不能被这项操作绕过。',
-  parameters: writeAgentPersonalizationRuleSchema, permission: writePermission, readOnly: false,
+  description: '按作者要求新增或修改一条规则。查询设置版本和实际操作编号。text 可保留和执行方式相符的作者原话。更改须经作者确认，既有禁止、作品归属、费用和平台强制确认仍适用。',
+  parameters: writeAgentPersonalizationToolRuleSchema, permission: writePermission, readOnly: false,
   async execute(ctx, args) {
     return withOwnedPreferenceWrite(ctx, 'account_rule_set', args, async tx => {
       await assertPersonalizationRuleOperation(args.toolName)
-      const { revision } = await changePersonalizationRule(ctx.userId, args.toolName, args.permission, args.expectedRevision, tx)
-      return { output: JSON.stringify({ toolName: args.toolName, permission: args.permission, revision }), summary: '已保存自定义权限规则' }
+      if (args.text) {
+        const interpreted = await interpretPersonalizationRule(args.text)
+        if (args.toolName !== interpreted.toolName || args.permission !== interpreted.permission)
+          throw new DataAccessError(422, 'PERSONALIZATION_RULE_TEXT_MISMATCH', '规则原文和对应的操作或权限不一致。')
+      }
+      const { revision } = await changePersonalizationRule(ctx.userId, args.toolName, args.permission, args.expectedRevision, tx, args.text)
+      return { output: JSON.stringify({ toolName: args.toolName, permission: args.permission, text: args.text, revision }), summary: '已保存自定义权限规则' }
     })
   },
 })

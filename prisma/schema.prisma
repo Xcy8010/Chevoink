@@ -1474,6 +1474,7 @@ model AgentPersonalization {
   memoryEpochChangedAt DateTime?                @map("memory_epoch_changed_at")
   memoryEnabled      Boolean                   @default(true) @map("memory_enabled")
   toolRules          Json                      @default("[]") @map("tool_rules")
+  toolRuleTexts      Json                      @default("{}") @map("tool_rule_texts")
   preferredName      String                    @default("") @map("preferred_name") @db.VarChar(80)
   aboutMe            String                    @default("") @map("about_me") @db.VarChar(2000)
   customInstructions String                    @default("") @map("custom_instructions") @db.VarChar(2000)

@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   changePersonalizationRule,
+  readPersonalizationRules,
   clearPersonalizationMemories,
   createPersonalizationMemory,
   deletePersonalizationMemory,
@@ -198,6 +199,36 @@ describe.skipIf(!dbAvailable)('account personalization (isolated PostgreSQL)', (
     await expect(changePersonalizationRule(ownerId, 'chapter_read', 'allow', 0)).rejects.toMatchObject({ code: 'PERSONALIZATION_CONFLICT' })
     await expect(getAgentPersonalization(readerId)).resolves.toMatchObject({ revision: 0, rules: [] })
     await expect(changePersonalizationRule(ownerId, 'chapter_read', null, 1)).resolves.toMatchObject({ revision: 2, rules: [], settings: { memoryEnabled: true } })
+  })
+
+  it('stores original rule text independently of the permission applied by the runtime', async () => {
+    await changePersonalizationRule(ownerId, 'chapter_read', 'ask', 0)
+    const text = '查阅章节前，先问我。'
+    const documented = await changePersonalizationRule(ownerId, 'chapter_read', 'ask', 1, undefined, text)
+    expect(documented).toMatchObject({ revision: 2, rules: [{ toolName: 'chapter_read', permission: 'ask', text }] })
+    await expect(getAgentPersonalization(readerId)).resolves.toMatchObject({ rules: [] })
+    await expect(readPersonalizationRules(ownerId)).resolves.toEqual([{ toolName: 'chapter_read', permission: 'ask' }])
+    await expect(changePersonalizationRule(ownerId, 'chapter_read', 'ask', 1, undefined, '过期草稿')).rejects.toMatchObject({ code: 'PERSONALIZATION_CONFLICT' })
+    await expect(changePersonalizationRule(ownerId, 'chapter_read', 'deny', 2)).resolves.toMatchObject({
+      revision: 3, rules: [{ toolName: 'chapter_read', permission: 'deny' }],
+    })
+    await changePersonalizationRule(ownerId, 'chapter_read', null, 3)
+    const recreated = await changePersonalizationRule(ownerId, 'chapter_read', 'allow', 4)
+    expect(recreated.revision).toBe(5)
+    expect(recreated.rules).toEqual([{ toolName: 'chapter_read', permission: 'allow' }])
+    await changePersonalizationRule(ownerId, 'chapter_read', 'deny', 5, undefined, '不要查阅章节。')
+    // Simulate an earlier server that only writes the original permission column.
+    const writeLegacyRules = (toolRules: Array<{ toolName: string; permission: string }>) => prisma.agentPersonalization.update({
+      where: { userId: ownerId }, data: { toolRules, revision: { increment: 1 } },
+    })
+    await writeLegacyRules([{ toolName: 'chapter_read', permission: 'allow' }])
+    expect((await getAgentPersonalization(ownerId)).rules).toEqual([{ toolName: 'chapter_read', permission: 'allow' }])
+    await changePersonalizationRule(ownerId, 'chapter_read', 'allow', 7, undefined, '可以直接查阅章节。')
+    await writeLegacyRules([])
+    await writeLegacyRules([{ toolName: 'chapter_read', permission: 'allow' }])
+    const upgraded = await getAgentPersonalization(ownerId)
+    expect(upgraded.revision).toBe(10)
+    expect(upgraded.rules).toEqual([{ toolName: 'chapter_read', permission: 'allow' }])
   })
 
   it('keeps quality checks report-only when an implicit repair has an ask or deny rule', async () => {

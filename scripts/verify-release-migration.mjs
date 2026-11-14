@@ -31,6 +31,9 @@ const agentPersonalizationCandidateSchema = 'b55c24ace244e9695ffa4d6733554fa16aa
 export const personalizationRulesMigrationName = '20261114150000_personalization_memory_rules'
 export const personalizationRulesMigrationChecksum = 'd41574f1cce335e0046ea6c18a59407a34523a409dd8c1689ceb65e6660f91ba'
 const personalizationRulesCandidateSchema = 'fc3dfaaaf9c3d9bc4515e7ac380817bf87b6333a56e9945318393672f58c34d4'
+export const personalizationRuleTextsMigrationName = '20261115003000_personalization_rule_texts'
+export const personalizationRuleTextsMigrationChecksum = '824fddcfd9d96458709b0b2e00448307d381ce967678cf5077ff139b6da45d18'
+const personalizationRuleTextsCandidateSchema = 'cc3c8a349ef54e3baf3e7881202e3c49b6f46b979b9a76163202b801f94ab91c'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -53,7 +56,8 @@ reviewed.set(userNotificationsMigrationName, userNotificationsMigrationChecksum)
 reviewed.set(emailAccountMigrationName, emailAccountMigrationChecksum)
 reviewed.set(agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum)
 reviewed.set(personalizationRulesMigrationName, personalizationRulesMigrationChecksum)
-const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName])
+reviewed.set(personalizationRuleTextsMigrationName, personalizationRuleTextsMigrationChecksum)
+const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName, personalizationRuleTextsMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -77,6 +81,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const ruleTextsTarget = `${personalizationRuleTextsMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === personalizationRulesCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === personalizationRuleTextsCandidateSchema
+    && !oldFiles.some(([name]) => name === ruleTextsTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== ruleTextsTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === ruleTextsTarget)?.[1] === personalizationRuleTextsMigrationChecksum) return personalizationRuleTextsMigrationName
   const rulesTarget = `${personalizationRulesMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === agentPersonalizationCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === personalizationRulesCandidateSchema
@@ -717,6 +727,30 @@ export async function readPersonalizationRulesMigrationState(tx, phase) {
   return { ...catalog, ...invariants }
 }
 
+export async function readPersonalizationRuleTextsState(tx, phase) {
+  const columns = await tx.$queryRaw`
+    SELECT a.atttypid = 'jsonb'::regtype AND a.attnotnull AS "requiredJson",
+      pg_get_expr(d.adbin, d.adrelid) AS "defaultValue"
+    FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+    WHERE a.attrelid = 'agent_personalizations'::regclass AND a.attname = 'tool_rule_texts' AND NOT a.attisdropped`
+  const constraints = await tx.$queryRaw`
+    SELECT convalidated, pg_get_constraintdef(oid) AS definition FROM pg_constraint
+    WHERE conrelid = 'agent_personalizations'::regclass AND conname = 'agent_personalizations_tool_rule_texts_object'`
+  const triggers = await tx.$queryRaw`
+    SELECT t.tgenabled AS enabled, p.prosecdef AS "definerRights", p.proname AS name
+    FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+    WHERE t.tgrelid = 'agent_personalizations'::regclass
+      AND t.tgname = 'agent_personalization_prune_rule_texts'`
+  if (phase === 'before' && columns.length === 0 && constraints.length === 0 && triggers.length === 0)
+    return { column: false, constraint: false, trigger: false }
+  if (phase === 'after' && columns.length === 1 && columns[0].requiredJson && columns[0].defaultValue === "'{}'::jsonb"
+    && constraints.length === 1 && constraints[0].convalidated
+    && constraints[0].definition.includes("jsonb_typeof(tool_rule_texts) = 'object'")
+    && triggers.length === 1 && triggers[0].enabled === 'O' && !triggers[0].definerRights
+    && triggers[0].name === 'agent_personalization_prune_rule_texts') return { column: true, constraint: true, trigger: true }
+  throw Error('Personalization rule text catalog mismatch')
+}
+
 async function main() {
   const [phase, candidate, baseline, receipt] = process.argv.slice(2)
   const plan = releaseMigrationPlan(candidate, baseline)
@@ -748,6 +782,10 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === personalizationRuleTextsMigrationName) {
+        const personalization = await readPersonalizationRuleTextsState(tx, phase)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, personalization }
+      }
       if (plan === personalizationRulesMigrationName) {
         const personalization = await readPersonalizationRulesMigrationState(tx, phase)
         return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, personalization }
