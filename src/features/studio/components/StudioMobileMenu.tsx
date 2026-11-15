@@ -31,6 +31,7 @@ const match = (value: string, query: string) => value.toLocaleLowerCase().includ
 const bookTitle = (novel: Novel) => novel.displayTitle?.trim() || novel.title || '未命名作品'
 const rowClass = 'flex min-h-12 w-full items-center gap-2.5 rounded-lg px-3 text-left text-[15px] hover:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)]'
 const sortConversations = (a: AgentSession, b: AgentSession) => Number(Boolean(b.pinnedAt)) - Number(Boolean(a.pinnedAt)) || (b.lastRunAt ?? b.updatedAt ?? '').localeCompare(a.lastRunAt ?? a.updatedAt ?? '')
+const bookPreviewCount = 3
 
 type ConversationTarget = { session: AgentSession; trigger: HTMLButtonElement }
 
@@ -127,15 +128,36 @@ function ConversationHistory({ novel, viewerId, archivedNovelIds, activeSessionI
   </div>
 }
 
-function ExpandedBookConversations({ novelId, viewerId, recent, activeSessionId, onSelect, onActions }: {
-  novelId: string; viewerId: string; recent: AgentSession[]; activeSessionId?: string | null
-  onSelect: (session: AgentSession) => void; onActions: (target: ConversationTarget) => void
+function BookConversations({ novelId, viewerId, recent, activeSessionId, showAll, onToggleAll, onSelect, onActions }: {
+  novelId: string; viewerId: string; recent: AgentSession[]; activeSessionId?: string | null; showAll: boolean
+  onToggleAll: () => void; onSelect: (session: AgentSession) => void; onActions: (target: ConversationTarget) => void
 }) {
-  const sessions = useQuery({ queryKey: ['agent', 'sessions', 'mobile-history', viewerId, novelId, false], queryFn: () => fetchAgentSessions(novelId, { includeArchived: false }), staleTime: 10_000 })
-  const items = (sessions.data?.items ?? recent).filter(item => item.userId === viewerId && item.novelId === novelId && item.status !== 'archived').sort(sortConversations)
+  // A short global list may omit older conversations from this particular work.
+  const loadWorkSessions = Boolean(viewerId) && (showAll || recent.length <= bookPreviewCount)
+  const sessions = useQuery({
+    queryKey: ['agent', 'sessions', 'mobile-history', viewerId, novelId, false],
+    queryFn: () => fetchAgentSessions(novelId, { includeArchived: false }),
+    enabled: loadWorkSessions,
+    staleTime: 10_000,
+  })
+  const items = loadWorkSessions && sessions.data
+    ? sessions.data.items.filter(item => item.userId === viewerId && item.novelId === novelId && item.status !== 'archived').sort(sortConversations)
+    : recent
+  const hasMore = items.length > bookPreviewCount
+  const visible = showAll ? items : items.slice(0, bookPreviewCount)
+  const active = items.find(item => item.id === activeSessionId)
+  if (!showAll && hasMore && active && !visible.includes(active)) {
+    visible[bookPreviewCount - 1] = active
+  }
   return <>
-    <ConversationRows items={items} nested onSelect={onSelect} onActions={onActions} activeSessionId={activeSessionId} />
-    {sessions.isPending ? <p role="status" className="px-2 py-3 text-xs text-[var(--text-tertiary)]">正在加载对话…</p> : sessions.isError ? <button type="button" className={rowClass} onClick={() => { void sessions.refetch() }}>加载失败，点击重试</button> : !items.length ? <p className="px-2 py-3 text-xs text-[var(--text-tertiary)]">暂无对话</p> : null}
+    <ConversationRows items={visible} nested onSelect={onSelect} onActions={onActions} activeSessionId={activeSessionId} />
+    {loadWorkSessions && sessions.isPending && (showAll || !items.length) && <p role="status" className="px-2 py-3 text-xs text-[var(--text-tertiary)]">正在加载对话…</p>}
+    {loadWorkSessions && sessions.isError && <button type="button" className={rowClass} onClick={() => { void sessions.refetch() }}>加载失败，点击重试</button>}
+    {!items.length && (!loadWorkSessions || sessions.isSuccess) && <p className="px-2 py-3 text-xs text-[var(--text-tertiary)]">暂无对话</p>}
+    {hasMore && <button type="button" aria-expanded={showAll} onClick={onToggleAll} className="flex min-h-11 w-full items-center gap-1 rounded-lg px-2 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]">
+      {showAll ? '收起全部对话' : '展开全部对话'}
+      <ChevronDown aria-hidden="true" className={cn('h-3.5 w-3.5 transition-transform motion-reduce:transition-none', showAll && 'rotate-180')} />
+    </button>}
   </>
 }
 
@@ -249,11 +271,7 @@ export default function StudioMobileMenu({ currentNovel, novels, loading, busy, 
       {loading && !novels.length ? <p role="status" className="px-3 py-2 text-xs text-[var(--text-tertiary)]">作品加载中…</p> : null}
       {books.map(novel => {
         const title = bookTitle(novel), active = novel.id === currentNovel.id, expanded = expandedBooks.has(novel.id), Icon = expanded ? FolderOpen : Folder
-        const sessions = ownedSessions.filter(item => item.novelId === novel.id).sort(sortConversations)
         const showAll = allConversationsBooks.has(novel.id)
-        const visibleSessions = sessions.slice(0, 5)
-        const activeSession = sessions.find(item => item.id === activeSessionId)
-        if (activeSession && !visibleSessions.includes(activeSession) && visibleSessions.length === 5) visibleSessions[4] = activeSession
         return <div key={novel.id}>
           <div className={cn('flex items-center rounded-lg', active && 'bg-[var(--surface-muted)]')}>
             <button type="button" aria-label={`选择作品：${title}`} aria-current={active ? 'page' : undefined} onClick={() => selectBookConversation(novel.id)} className="flex min-h-12 min-w-0 flex-1 items-center gap-2.5 py-2 pl-3 pr-1 text-left text-[15px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)]"><Icon aria-hidden="true" className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" /><span className="min-w-0 break-words font-medium">{title}</span></button>
@@ -262,8 +280,18 @@ export default function StudioMobileMenu({ currentNovel, novels, loading, busy, 
           </div>
           {expanded ? <div role="group" aria-label={`${title}的对话`} className="ml-5 border-l border-[var(--border-subtle)] pl-2">
             {onCreateSessionInNovel && <button type="button" onClick={() => { onClose(); onCreateSessionInNovel(novel.id) }} className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"><Plus aria-hidden="true" className="h-4 w-4" />新建对话</button>}
-            {showAll ? <ExpandedBookConversations novelId={novel.id} viewerId={viewerId} recent={visibleSessions} activeSessionId={activeSessionId} onSelect={selectSession} onActions={setConversationTarget} /> : <><ConversationRows items={visibleSessions} nested onSelect={selectSession} onActions={setConversationTarget} activeSessionId={activeSessionId} />{!sessions.length && <p className="px-3 py-3 text-xs text-[var(--text-tertiary)]">暂无对话</p>}</>}
-            <button type="button" aria-expanded={showAll} onClick={() => setAllConversationsBooks(previous => { const next = new Set(previous); if (showAll) next.delete(novel.id); else next.add(novel.id); return next })} className="flex min-h-11 w-full items-center gap-1 rounded-lg px-2 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]">{showAll ? '收起全部对话' : '查看全部对话'}<ChevronDown aria-hidden="true" className={cn('h-3.5 w-3.5 transition-transform motion-reduce:transition-none', showAll && 'rotate-180')} /></button>
+            <BookConversations
+              novelId={novel.id} viewerId={viewerId}
+              recent={ownedSessions.filter(item => item.novelId === novel.id).sort(sortConversations)}
+              activeSessionId={activeSessionId} showAll={showAll}
+              onToggleAll={() => setAllConversationsBooks(previous => {
+                const next = new Set(previous)
+                if (next.has(novel.id)) next.delete(novel.id)
+                else next.add(novel.id)
+                return next
+              })}
+              onSelect={selectSession} onActions={setConversationTarget}
+            />
           </div> : null}
         </div>
       })}

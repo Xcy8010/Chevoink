@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render as renderComponent, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ReactElement } from 'react'
 import { BookOpen } from 'lucide-react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import StudioMobileMenu from '@/features/studio/components/StudioMobileMenu'
@@ -15,7 +16,12 @@ vi.mock('@/features/studio/agent/agentApi', () => ({
   updateAgentSessionSettings: updateSession, deleteAgentSession: deleteSession, fetchSessionsRunStatus: readStatuses,
 }))
 
+beforeEach(() => { readSessions.mockReset().mockResolvedValue({ items: [] }) })
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); vi.unstubAllGlobals() })
+function render(ui: ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return renderComponent(ui, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> })
+}
 const defaults = { viewerId: 'owner', search: '', recentSessions: [], onSelectSession: () => {}, onSessionChange: () => {} }
 const book = (id: string, title: string) => ({ id, title, displayTitle: null, chapterCount: 7, wordCount: 18000 }) as Novel
 const one = book('one', '第一本作品'), two = book('two', '第二本作品')
@@ -42,6 +48,7 @@ describe('mobile book folders and categorized existing actions', () => {
 
   it('removes a work archived on another device even while it is open on mobile', () => {
     const session = { id: 'session-a', userId: 'owner', novelId: one.id, title: '已归档作品的对话', status: 'active', lastRunAt: '2026-11-01' } as AgentSession
+    readSessions.mockResolvedValue({ items: [session] })
     const props = {
       ...defaults, currentNovel: one, novels: [one, two], recentSessions: [session],
       loading: false, busy: false, view: 'assistant', actions: [],
@@ -88,17 +95,16 @@ describe('mobile book folders and categorized existing actions', () => {
       lastRunAt: new Date(Date.UTC(2026, 10, 1 + index)).toISOString(),
     })) as AgentSession[]
     const open = vi.fn(), change = vi.fn()
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    render(<QueryClientProvider client={client}><StudioMobileMenu
+    render(<StudioMobileMenu
       {...defaults} currentNovel={one} novels={[one]} loading={false} busy={false} view="assistant"
       actions={[]} recentSessions={items} onClose={vi.fn()} onSelectNovel={vi.fn()} onCreateNovel={vi.fn()}
       onSelectSession={open} onSessionChange={change}
-    /></QueryClientProvider>)
+    />)
     const recentRegion = within(screen.getByRole('region', { name: '最近对话' }))
     expect(recentRegion.getByRole('button', { name: '全部对话' })).toBeTruthy()
     expect(recentRegion.getAllByRole('button', { name: /^对话 \d$/ }).map(button => button.textContent)).toEqual(['对话 7', '对话 6', '对话 5', '对话 4', '对话 3', '对话 2'])
     const recent = within(screen.getByRole('group', { name: '第一本作品的对话' })).getAllByRole('button', { name: /^对话 \d$/ })
-    expect(recent.map(button => button.textContent)).toEqual(['对话 7', '对话 6', '对话 5', '对话 4', '对话 3'])
+    expect(recent.map(button => button.textContent)).toEqual(['对话 7', '对话 6', '对话 5'])
     fireEvent.pointerDown(recent[0], { button: 0, clientX: 50, clientY: 20 })
     fireEvent.pointerMove(recent[0], { clientX: 50, clientY: 50 })
     act(() => vi.advanceTimersByTime(520))
@@ -129,24 +135,41 @@ describe('mobile book folders and categorized existing actions', () => {
   })
 
   it('expands all conversations under the work without replacing the sidebar or opening a dialog', async () => {
-    const session = { id: 'old-task', userId: 'owner', novelId: one.id, title: '很早的对话', status: 'active' } as AgentSession
-    readSessions.mockResolvedValue({ items: [session] })
+    const items = Array.from({ length: 4 }, (_, index) => ({
+      id: `old-task-${index}`, userId: 'owner', novelId: one.id, title: `作品内对话 ${index + 1}`, status: 'active',
+    })) as AgentSession[]
+    const oldest = items[3]
+    readSessions.mockResolvedValue({ items })
     const select = vi.fn()
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const close = vi.fn()
-    render(<QueryClientProvider client={client}><StudioMobileMenu {...defaults} currentNovel={one} novels={[one, two]} loading={false} busy={false} view="assistant" actions={[]} onClose={close} onSelectNovel={vi.fn()} onSelectSession={select} onCreateNovel={vi.fn()} /></QueryClientProvider>)
-    fireEvent.click(screen.getByRole('button', { name: '查看全部对话' }))
-    const oldTask = await screen.findByRole('button', { name: '很早的对话' })
+    render(<StudioMobileMenu {...defaults} currentNovel={one} novels={[one, two]} recentSessions={items.slice(0, 1)} loading={false} busy={false} view="assistant" actions={[]} onClose={close} onSelectNovel={vi.fn()} onSelectSession={select} onCreateNovel={vi.fn()} />)
+    const group = within(screen.getByRole('group', { name: '第一本作品的对话' }))
+    const expand = await group.findByRole('button', { name: '展开全部对话' })
+    expect(group.getAllByRole('button', { name: /^作品内对话/ })).toHaveLength(3)
+    expect(group.queryByRole('button', { name: oldest.title })).toBeNull()
+    fireEvent.click(expand)
+    const oldTask = group.getByRole('button', { name: oldest.title })
     expect(screen.getByRole('button', { name: '选择作品：第二本作品' })).toBeTruthy()
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(screen.queryByRole('button', { name: '返回作品列表' })).toBeNull()
     expect(close).not.toHaveBeenCalled()
     expect(readSessions).toHaveBeenCalledWith(one.id, { includeArchived: false })
     fireEvent.click(oldTask)
-    expect(select).toHaveBeenCalledWith(session)
-    fireEvent.click(screen.getByRole('button', { name: '收起全部对话' }))
-    expect(screen.queryByRole('button', { name: '很早的对话' })).toBeNull()
-    expect(screen.getByRole('button', { name: '查看全部对话' }).getAttribute('aria-expanded')).toBe('false')
+    expect(select).toHaveBeenCalledWith(oldest)
+    fireEvent.click(group.getByRole('button', { name: '收起全部对话' }))
+    expect(group.queryByRole('button', { name: oldest.title })).toBeNull()
+    expect(group.getByRole('button', { name: '展开全部对话' }).getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('hides the inline expansion control when a work has at most three conversations', async () => {
+    const items = Array.from({ length: 3 }, (_, index) => ({
+      id: `short-list-${index}`, userId: 'owner', novelId: one.id, title: `三条以内 ${index + 1}`,
+    })) as AgentSession[]
+    readSessions.mockResolvedValue({ items })
+    render(<StudioMobileMenu {...defaults} currentNovel={one} novels={[one]} loading={false} busy={false} view="assistant" actions={[]} onClose={vi.fn()} onSelectNovel={vi.fn()} onCreateNovel={vi.fn()} />)
+    const group = within(screen.getByRole('group', { name: '第一本作品的对话' }))
+    expect(await group.findAllByRole('button', { name: /^三条以内/ })).toHaveLength(3)
+    expect(group.queryByRole('button', { name: /全部对话/ })).toBeNull()
   })
 
   it('returns from work actions to the same work with its conversations expanded', async ({ onTestFinished }) => {
@@ -155,8 +178,7 @@ describe('mobile book folders and categorized existing actions', () => {
     const session = { id: 'older', userId: 'owner', novelId: two.id, title: '第二本的旧对话', status: 'active' } as AgentSession
     readSessions.mockResolvedValue({ items: [session, { ...session, id: 'foreign', userId: 'someone-else', title: '非本人对话' }] })
     const close = vi.fn(), select = vi.fn()
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    render(<QueryClientProvider client={client}><StudioMobileMenu {...defaults} currentNovel={one} novels={[one, two]} loading={false} busy={false} view="assistant" actions={[]} onClose={close} onSelectNovel={select} onCreateNovel={vi.fn()} /></QueryClientProvider>)
+    render(<StudioMobileMenu {...defaults} currentNovel={one} novels={[one, two]} loading={false} busy={false} view="assistant" actions={[]} onClose={close} onSelectNovel={select} onCreateNovel={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: '作品操作：第二本作品' }))
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '查看全部对话' }))
     expect(await screen.findByRole('button', { name: '第二本的旧对话' })).toBeTruthy()
@@ -174,12 +196,11 @@ describe('mobile book folders and categorized existing actions', () => {
     const select = vi.fn()
     const action = vi.fn()
     const close = vi.fn()
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    render(<QueryClientProvider client={client}><StudioMobileMenu
+    render(<StudioMobileMenu
       {...defaults} currentNovel={one} novels={[one, two]} loading={false} busy={false} view="assistant"
       search="作品" actions={[{ key: 'meta', label: '作品设置', icon: BookOpen, action }]}
       onClose={close} onSelectNovel={select} onSelectSession={open} onCreateNovel={vi.fn()}
-    /></QueryClientProvider>)
+    />)
     const books = screen.getByRole('region', { name: '匹配作品' })
     const functions = screen.getByRole('region', { name: '匹配功能' })
     fireEvent.click(within(books).getByRole('button', { name: two.title }))

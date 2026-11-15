@@ -1720,7 +1720,7 @@ export function AgentPanel({
                   id={`agent-message-${message.id}`}
                   className={cn('flex min-w-0 max-w-full flex-col items-end gap-1.5', !message.delivery && message.id !== messages.filter(item => item.role === 'user').at(-1)?.id && 'agent-msg-cv')}
                 >
-                  <div className="group/message flex min-w-0 max-w-[82%] flex-col items-end gap-1.5"
+                  <div className="group/message flex min-w-0 max-w-[82%] flex-col items-end gap-1.5 mobile:gap-0.5"
                     onTouchStart={() => startLongPress(message.id)}
                     onTouchEnd={cancelLongPress}
                     onTouchMove={cancelLongPress}
