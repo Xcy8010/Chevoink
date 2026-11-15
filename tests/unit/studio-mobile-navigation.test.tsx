@@ -21,7 +21,7 @@ beforeEach(() => { vi.stubGlobal('innerWidth', 390) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.style.overflow = '' })
 
 describe('mobile workspace header', () => {
-  it('keeps two views and exits through the header without invoking chapter selection', () => {
+  it('keeps writing and the work tree directly reachable and exits independently', () => {
     const select = vi.fn()
     const open = vi.fn()
     const exit = vi.fn()
@@ -29,12 +29,13 @@ describe('mobile workspace header', () => {
     const menu = screen.getByRole('button', { name: '打开创作区导航' })
     expect(menu.getAttribute('aria-expanded')).toBe('false')
     expect(screen.getByRole('button', { name: '工作台' }).getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByRole('navigation', { name: '创作视图' }).querySelectorAll('button')).toHaveLength(2)
+    expect(screen.getByRole('navigation', { name: '创作视图' }).querySelectorAll('button')).toHaveLength(3)
     fireEvent.click(menu)
     fireEvent.click(screen.getByRole('button', { name: '写作' }))
+    fireEvent.click(screen.getByRole('button', { name: '作品树' }))
     fireEvent.click(screen.getByRole('button', { name: '退出创作区' }))
     expect(open).toHaveBeenCalledOnce()
-    expect(select.mock.calls).toEqual([['editor']])
+    expect(select.mock.calls).toEqual([['editor'], ['chapters']])
     expect(exit).toHaveBeenCalledOnce()
     expect(screen.queryByRole('button', { name: '卷章' })).toBeNull()
     view.rerender(<StudioMobileHeader view="editor" navigationOpen onOpenNavigation={open} onSelectView={select} onBack={vi.fn()} onExit={exit} />)
@@ -43,7 +44,7 @@ describe('mobile workspace header', () => {
     expect(menu.className).toContain('h-11 w-11')
   })
 
-  it.each<[MobileView, string]>([['chapters', '卷章'], ['cover', '封面工坊'], ['meta', '作品设置'], ['memory', '小说关系网'], ['context', '记忆'], ['skills', '作品技能']])('retains the %s auxiliary view and its return action', (view, title) => {
+  it.each<[MobileView, string]>([['cover', '封面工坊'], ['meta', '作品设置'], ['memory', '小说关系网'], ['context', '记忆'], ['skills', '作品技能']])('retains the %s auxiliary view and its return action', (view, title) => {
     const back = vi.fn()
     render(<StudioMobileHeader view={view} navigationOpen={false} onOpenNavigation={vi.fn()} onSelectView={vi.fn()} onBack={back} onExit={vi.fn()} />)
     expect(screen.getByRole('heading', { name: title })).toBeTruthy()
@@ -52,12 +53,14 @@ describe('mobile workspace header', () => {
     expect(back).toHaveBeenCalledOnce()
   })
 
-  it('announces the writing return destination when chapters were opened from writing', () => {
-    const back = vi.fn()
-    render(<StudioMobileHeader view="chapters" navigationOpen={false} onOpenNavigation={vi.fn()} onSelectView={vi.fn()} onBack={back} backLabel="返回写作" onExit={vi.fn()} />)
-    expect(screen.queryByRole('button', { name: '返回工作台' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '返回写作' }))
-    expect(back).toHaveBeenCalledOnce()
+  it('keeps navigation and writing available while the work tree is selected', () => {
+    const select = vi.fn(), open = vi.fn()
+    render(<StudioMobileHeader view="chapters" navigationOpen={false} onOpenNavigation={open} onSelectView={select} onBack={vi.fn()} backLabel="返回写作" onExit={vi.fn()} />)
+    expect(screen.getByRole('button', { name: '作品树' }).getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: '写作' }))
+    fireEvent.click(screen.getByRole('button', { name: '打开创作区导航' }))
+    expect(select).toHaveBeenCalledWith('editor')
+    expect(open).toHaveBeenCalledOnce()
   })
 })
 

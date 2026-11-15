@@ -19,7 +19,7 @@ const titles = {
 
 export default function StudioMobileHeader({ view, navigationOpen, onOpenNavigation, onSelectView, onBack, onExit, backLabel = '返回工作台' }: Props) {
   const systemSurfaceRef = useNativeSystemSurface<HTMLElement>()
-  const primary = view === 'assistant' || view === 'editor'
+  const primary = view === 'assistant' || view === 'editor' || view === 'chapters'
   const buttonClass = 'inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none'
   return (
     <header ref={systemSurfaceRef} data-studio-region="mobile-header" className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--app-bg)] pl-[max(8px,var(--safe-left,0px))] pr-[max(8px,var(--safe-right,0px))] pt-[var(--safe-top,0px)]">
@@ -32,8 +32,8 @@ export default function StudioMobileHeader({ view, navigationOpen, onOpenNavigat
           <button type="button" data-studio-mobile-primary-control aria-label={backLabel} onClick={onBack} className={buttonClass}><ChevronLeft className="h-5 w-5" /></button>
         )}
         {primary ? (
-          <nav aria-label="创作视图" className="flex h-full min-w-0 items-center justify-center gap-5">
-            {([{ key: 'assistant', label: '工作台' }, { key: 'editor', label: '写作' }] as const).map(({ key, label }) => (
+          <nav aria-label="创作视图" className="flex h-full min-w-0 items-center justify-center gap-4">
+            {([{ key: 'assistant', label: '工作台' }, { key: 'editor', label: '写作' }, { key: 'chapters', label: '作品树' }] as const).map(({ key, label }) => (
               <button key={key} type="button" aria-pressed={view === key} onClick={() => onSelectView(key)} className={cn('studio-mobile-view-tab relative h-full min-w-0 px-1 text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none', view === key ? 'font-semibold text-[var(--text-primary)]' : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]')}>{label}</button>
             ))}
           </nav>

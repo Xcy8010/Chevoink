@@ -993,6 +993,47 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 }
 
 .studio-mobile-drawer-search { background: var(--surface-muted); }
+.studio-mobile-sheet {
+  position: fixed;
+  inset: auto 0 var(--keyboard-inset, 0px);
+  width: 100%;
+  max-width: none;
+  max-height: min(88dvh, calc(100dvh - var(--keyboard-inset, 0px) - var(--safe-top, 0px) - 12px));
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 24px 24px 0 0;
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  box-shadow: 0 -12px 48px rgb(0 0 0 / 18%);
+}
+.studio-mobile-sheet[open] { display: flex; flex-direction: column; }
+.studio-mobile-sheet::backdrop { background: rgb(0 0 0 / 50%); }
+.studio-mobile-sheet-header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 12px;
+  min-height: 60px;
+  padding: 8px max(4px, var(--safe-right, 0px)) 8px max(20px, var(--safe-left, 0px));
+  border-bottom: 1px solid var(--border-subtle);
+}
+.studio-mobile-sheet-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px max(12px, var(--safe-right, 0px)) max(16px, var(--safe-bottom, 0px)) max(12px, var(--safe-left, 0px));
+  scrollbar-width: thin;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .studio-mobile-sheet[open] { animation: studio-sheet-in 320ms cubic-bezier(.22, 1, .36, 1) both; }
+  .studio-mobile-sheet[open]::backdrop { animation: studio-backdrop-in 240ms ease-out both; }
+  .studio-mobile-sheet[data-state='closing'] { pointer-events: none; animation: studio-sheet-out 200ms cubic-bezier(.4, 0, 1, 1) both; }
+  .studio-mobile-sheet[data-state='closing']::backdrop { animation: studio-backdrop-out 200ms ease-in both; }
+}
+@keyframes studio-sheet-in { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes studio-sheet-out { from { transform: translateY(0); } to { transform: translateY(100%); } }
 html.dark .studio-mobile-drawer-search { background: #242424; }
 html.dark .studio-mobile-backdrop { background: rgb(28 28 28 / 82%); }
 

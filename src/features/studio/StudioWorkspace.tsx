@@ -2708,7 +2708,7 @@ export default function StudioWorkspace() {
     })
   }
 
-  async function handleCreateLocalChapter() {
+  async function handleCreateLocalChapter(targetVolumeId?: string) {
     if (createChapterLockRef.current) {
       return
     }
@@ -2718,7 +2718,9 @@ export default function StudioWorkspace() {
     setChapterSaveMessage('正在创建新章节...')
 
     try {
-      const targetVolume = volumes.find((volume) => volume.id === activeChapterListItem?.volumeId) ?? volumes.at(-1)
+      const targetVolume = targetVolumeId
+        ? volumes.find(volume => volume.id === targetVolumeId)
+        : volumes.find((volume) => volume.id === activeChapterListItem?.volumeId) ?? volumes.at(-1)
       if (!targetVolume) throw new Error('请先新建一卷，再创建章节。')
       const nextOrderInVolume = chapters.filter((chapter) => chapter.volumeId === targetVolume.id).length + 1
       const savedChapter = await createChapterDraft(activeNovelId, buildLocalChapterCreateInput(targetVolume.id, nextOrderInVolume))
@@ -2786,6 +2788,20 @@ export default function StudioWorkspace() {
       tone: 'default',
       onConfirm: async () => {
         await handleCreateLocalChapter()
+      },
+    })
+  }
+
+  function handleRequestCreateChapterInVolume(volumeId: string) {
+    const target = volumes.find(volume => volume.id === volumeId)
+    if (!target) return
+    const owner = workspaceOwnerRef.current
+    setWorkspaceDialog({
+      title: '确认新建章节',
+      description: `将在「${target.title}」末尾新建章节草稿。`,
+      confirmLabel: '确认新建', cancelLabel: '取消', tone: 'default',
+      onConfirm: async () => {
+        if (workspaceOwnerRef.current === owner) await handleCreateLocalChapter(volumeId)
       },
     })
   }
@@ -4157,6 +4173,13 @@ export default function StudioWorkspace() {
                   onCreateChapter={handleRequestCreateChapter}
                   onCreateVolume={handleRequestCreateVolume}
                   onCreatePlan={handleRequestCreatePlan}
+                  onCreatePlanKind={(kind, parentPlanId) => { void handleCreatePlanFile(kind, parentPlanId).catch(() => {}) }}
+                  onCreateChapterInVolume={handleRequestCreateChapterInVolume}
+                  onOpenNovelSettings={() => { setActiveToolPanel('meta'); setMobileView('meta') }}
+                  onRequestDeleteChapter={handleRequestDeleteChapterById}
+                  onRequestDeletePlan={handleRequestDeletePlan}
+                  onRenameChapterTitle={(chapterId, title) => void handleRenameChapterById(chapterId, title)}
+                  onRenamePlanTitle={handleRenamePlan}
                   onMoveChapter={handleMoveChapterInTree}
                   onMovePlan={handleMovePlanInTree}
                 />
@@ -4231,6 +4254,8 @@ export default function StudioWorkspace() {
               search={search}
               viewerId={taskUiUserId ?? ''}
               recentSessions={navigationSessionsQuery.data?.items ?? []}
+              activeSessionId={agentSessionId ?? activeAgentTaskWindowId}
+              onCreateSessionInNovel={handleCreateTaskInNovel}
               onClose={() => setMobileMoreOpen(false)}
               onSelectNovel={handleSelectWorkspaceNovel}
               onSelectSession={session => {
@@ -4400,6 +4425,9 @@ export default function StudioWorkspace() {
                     onOpenVolumeSettings={handleOpenVolumeSettings}
                     onOpenPlanSettings={setPlanSettingsPlanId} onSelectCatalog={handleSelectCatalogFromTree}
                     onCreateVolume={handleRequestCreateVolume} onCreateChapter={handleRequestCreateChapter} onCreatePlan={handleRequestCreatePlan}
+                    onCreatePlanKind={(kind, parentPlanId) => { void handleCreatePlanFile(kind, parentPlanId).catch(() => {}) }}
+                    onCreateChapterInVolume={handleRequestCreateChapterInVolume}
+                    onOpenNovelSettings={() => { setActiveToolPanel('meta'); setMobileView('meta') }}
                     onRequestDeleteChapter={handleRequestDeleteChapterById} onRequestDeletePlan={handleRequestDeletePlan}
                     onRenameChapterTitle={(chapterId, title) => void handleRenameChapterById(chapterId, title)}
                     onRenamePlanTitle={handleRenamePlan}
@@ -4465,6 +4493,7 @@ export default function StudioWorkspace() {
                   panel={ideSidebarTab === 'work' ? <ChapterSidebar
                   taskScope={taskUiScope}
                     embedded
+                    showExtendedMenus={false}
                     chapters={chapters}
                     volumes={volumes}
                     savedPlans={savedPlanFiles}

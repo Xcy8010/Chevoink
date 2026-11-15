@@ -90,12 +90,13 @@ export function createPlanDocumentActions({
   }
 
   /** 手工新建空白计划：落到云端后直接选中，作者可在编辑区改名/补充内容 */
-  async function handleCreatePlanFile(planKind: 'outline' | 'detail' = 'outline') {
+  async function handleCreatePlanFile(planKind: 'outline' | 'detail' = 'outline', parentPlanId?: string) {
     setChapterSaveState('saving')
     setChapterSaveMessage('正在新建计划...')
 
     try {
-      const item = await createNovelPlanFile(activeNovelId, undefined, { planKind })
+      const parent = parentPlanId ? savedPlanFiles.find(plan => plan.backendArtifactId === parentPlanId && plan.planKind === 'outline') : undefined
+      const item = await createNovelPlanFile(activeNovelId, undefined, { planKind, ...(parent ? { parentPlanId, expectedParentPlanHash: parent.planHash } : {}) })
       if (!isCurrentNovel()) return
       const nextPlan = buildServerPlanFile(item)
       setServerPlanFiles((current) => [...current, nextPlan])

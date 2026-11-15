@@ -1,11 +1,12 @@
-import { useEffect, useLayoutEffect, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react'
-import { ChevronDown, ChevronRight, FilePlus2, FileText, FolderPlus, FolderTree, GripVertical, NotebookPen, NotebookText, PencilLine, ScrollText, Settings2, Trash2 } from 'lucide-react'
+import { useLayoutEffect, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { ChevronDown, ChevronRight, FilePlus2, FileText, FolderPlus, FolderTree, GripVertical, NotebookPen, NotebookText, PencilLine, ScrollText, Settings2, Trash2, type LucideIcon } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title'
 import type { StudioPayload } from '../../../../shared/contracts/index.js'
 import type { WorkspacePlanFile } from '../types'
 import { COMPOSER_REFERENCE_MIME, serializeComposerReferenceTransfer } from '../agent/composer-content'
+import TreeContextMenu, { TreeMenuButton, type TreeMenuAnchor, type TreeMenuItem } from './TreeContextMenu'
 
 function formatChapterTreeLabel(chapter: StudioPayload['chapters'][number]) {
   const normalizedTitle = plainChapterTitle(chapter.title) || chapter.title.trim()
@@ -22,11 +23,17 @@ function formatChapterTreeLabel(chapter: StudioPayload['chapters'][number]) {
   return `第 ${chapter.orderInVolume} 章 · ${normalizedTitle}`
 }
 
-/** 右键菜单目标；重命名弹窗内置在树内，删除/设置交给 workspace 层 */
-type TreeContextMenuTarget = { kind: 'chapter' | 'plan'; id: string; title: string; x: number; y: number }
-type TreeRenameTarget = { kind: 'chapter' | 'plan'; id: string }
+type CreatePlanKind = 'outline' | 'detail'
+type PlanFolderKind = CreatePlanKind | 'legacy'
+type TreeContextMenuTarget = { title: string } & (
+  | { kind: 'novel' | 'plan-folder' | 'chapter-folder'; id?: never }
+  | { kind: 'plan-kind'; id: CreatePlanKind }
+  | { kind: 'chapter' | 'plan' | 'volume'; id: string }
+)
+type TreeRenameTarget = { label: string; save: (title: string) => void; trigger: HTMLElement }
 
-const treeMenuItem = 'flex h-8 w-full items-center gap-2 rounded-[8px] px-2 text-left text-xs text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)]'
+const planKindLabels = { outline: '大纲', detail: '细纲', legacy: '历史未分类' }
+const rowActionsClass = 'flex shrink-0 items-center opacity-100 [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100'
 
 function TreeHeaderButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
   return (
@@ -68,8 +75,11 @@ type ChapterSidebarProps = {
   onSelectPlan: (planId: string) => void
   onSelectCatalog: () => void
   onCreateChapter: () => void
+  onCreateChapterInVolume?: (volumeId: string) => void
   onCreateVolume?: () => void
   onCreatePlan: () => void
+  onCreatePlanKind?: (kind: CreatePlanKind, parentPlanId?: string) => void
+  onOpenNovelSettings?: () => void
   onMoveChapter?: (chapterId: string, targetVolumeId: string, position: number) => void | Promise<void>
   onMovePlan?: (planId: string, position: number) => void | Promise<void>
   /** 打开章节设置抽屉（会先切到该章） */
@@ -82,14 +92,19 @@ type ChapterSidebarProps = {
   onRequestDeleteChapter?: (chapterId: string) => void
   /** 右键删除计划：确认弹窗与删除逻辑在 workspace 层 */
   onRequestDeletePlan?: (planId: string) => void
+  onRequestDeleteVolume?: (volumeId: string) => void
   /** 右键重命名提交：当前章改草稿，其它章走 API */
   onRenameChapterTitle?: (chapterId: string, title: string) => void
   /** 右键重命名提交 */
   onRenamePlanTitle?: (planId: string, title: string) => void
+  onRenameNovelTitle?: (title: string) => void
+  onRenameVolumeTitle?: (volumeId: string, title: string) => void
   embedded?: boolean
+  showExtendedMenus?: boolean
 }
 
 export default function ChapterSidebar({
+  showExtendedMenus = true,
   taskScope,
   chapters,
   volumes,
@@ -98,8 +113,11 @@ export default function ChapterSidebar({
   selectedTreeItemId,
   novelTitle,
   onCreateChapter,
+  onCreateChapterInVolume,
   onCreateVolume,
   onCreatePlan,
+  onCreatePlanKind,
+  onOpenNovelSettings,
   onMoveChapter,
   onMovePlan,
   onOpenChapterSettings,
@@ -107,8 +125,11 @@ export default function ChapterSidebar({
   onOpenPlanSettings,
   onRequestDeleteChapter,
   onRequestDeletePlan,
+  onRequestDeleteVolume,
   onRenameChapterTitle,
   onRenamePlanTitle,
+  onRenameNovelTitle,
+  onRenameVolumeTitle,
   onSelectCatalog,
   onSelectPlan,
   onSelectChapter,
@@ -117,44 +138,194 @@ export default function ChapterSidebar({
   const [volumeState, setVolumeState] = useState(() => ({ scope: taskScope, collapsed: readCollapsedVolumes(taskScope) }))
   const collapsedVolumes = volumeState.scope === taskScope ? volumeState.collapsed : readCollapsedVolumes(taskScope)
   useLayoutEffect(() => { setVolumeState({ scope: taskScope, collapsed: readCollapsedVolumes(taskScope) }) }, [taskScope])
-  function toggleVolume(volumeId: string) {
-    const next = new Set(collapsedVolumes)
-    if (next.has(volumeId)) next.delete(volumeId); else next.add(volumeId)
+  function updateCollapsedVolumes(next: Set<string>) {
     setVolumeState({ scope: taskScope, collapsed: next })
     if (taskScope) try { localStorage.setItem(`chevoink:volume-collapse:${taskScope}`, JSON.stringify([...next])) } catch { /* Memory state remains available. */ }
   }
+  function toggleVolume(volumeId: string) {
+    const next = new Set(collapsedVolumes)
+    if (next.has(volumeId)) next.delete(volumeId); else next.add(volumeId)
+    updateCollapsedVolumes(next)
+  }
   const [novelExpanded, setNovelExpanded] = useState(true)
   const [planFolderExpanded, setPlanFolderExpanded] = useState(false)
-  const [expandedPlanKinds, setExpandedPlanKinds] = useState<Record<string, boolean>>({ outline: true, detail: true, legacy: true })
+  const [expandedPlanKinds, setExpandedPlanKinds] = useState<Record<PlanFolderKind, boolean>>({ outline: true, detail: true, legacy: true })
   const [chapterFolderExpanded, setChapterFolderExpanded] = useState(true)
   const [draggedItem, setDraggedItem] = useState<{ kind: 'chapter' | 'plan'; id: string } | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
-  const [contextMenu, setContextMenu] = useState<TreeContextMenuTarget | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ target: TreeContextMenuTarget; anchor: TreeMenuAnchor } | null>(null)
   const [renameTarget, setRenameTarget] = useState<TreeRenameTarget | null>(null)
   const [renameValue, setRenameValue] = useState('')
 
-  useEffect(() => {
-    if (!contextMenu) return
-    const close = () => setContextMenu(null)
-    document.addEventListener('mousedown', close)
-    return () => document.removeEventListener('mousedown', close)
-  }, [contextMenu])
+  useLayoutEffect(() => {
+    setContextMenu(null)
+    setRenameTarget(null)
+    setRenameValue('')
+  }, [taskScope])
 
-  function openTreeContextMenu(event: MouseEvent, kind: 'chapter' | 'plan', id: string, title: string) {
+  function openTreeContextMenu(event: MouseEvent<HTMLElement>, target: TreeContextMenuTarget) {
+    if (!showExtendedMenus && target.kind !== 'chapter' && target.kind !== 'plan') return
     event.preventDefault()
     event.stopPropagation()
-    setContextMenu({ kind, id, title, x: event.clientX, y: event.clientY })
+    const row = event.currentTarget
+    const trigger = row.querySelector<HTMLElement>('[data-tree-menu-trigger]') ?? row
+    const rect = trigger.getBoundingClientRect()
+    const keyboard = event.clientX === 0 && event.clientY === 0
+    setContextMenu({ target, anchor: { x: keyboard ? rect.left : event.clientX, y: keyboard ? rect.bottom : event.clientY, trigger } })
+  }
+
+  function treeMenuButton(target: TreeContextMenuTarget) {
+    const expanded = contextMenu?.target.kind === target.kind && contextMenu.target.id === target.id
+    return <TreeMenuButton title={target.title} expanded={expanded} onClick={(event) => {
+      if (expanded) {
+        setContextMenu(null)
+        return
+      }
+      const trigger = event.currentTarget
+      const rect = trigger.getBoundingClientRect()
+      setContextMenu({ target, anchor: { x: rect.left, y: rect.bottom, trigger } })
+    }} />
+  }
+
+  function closeTreeRename() {
+    renameTarget?.trigger.focus({ preventScroll: true })
+    setRenameTarget(null)
+    setRenameValue('')
+  }
+
+  function handleRenameKeyDown(event: KeyboardEvent<HTMLFormElement>) {
+    if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
+      event.preventDefault()
+      event.stopPropagation()
+      closeTreeRename()
+    }
+    if (event.key !== 'Tab') return
+    const controls = event.currentTarget.querySelectorAll<HTMLElement>(':is(button, input):not(:disabled)')
+    const first = controls[0]
+    const last = controls[controls.length - 1]
+    if (event.target === (event.shiftKey ? first : last)) {
+      event.preventDefault()
+      const next = event.shiftKey ? last : first
+      next.focus()
+    }
   }
 
   function commitTreeRename() {
     const trimmed = renameValue.trim()
-    if (renameTarget && trimmed) {
-      if (renameTarget.kind === 'chapter') onRenameChapterTitle?.(renameTarget.id, trimmed)
-      else onRenamePlanTitle?.(renameTarget.id, trimmed)
-    }
-    setRenameTarget(null)
-    setRenameValue('')
+    if (!renameTarget || !trimmed) return
+    renameTarget.save(trimmed)
+    closeTreeRename()
   }
+
+  function setTreeExpanded(expanded: boolean) {
+    setNovelExpanded(expanded)
+    setPlanFolderExpanded(expanded)
+    setExpandedPlanKinds({ outline: expanded, detail: expanded, legacy: expanded })
+    setChapterFolderExpanded(expanded)
+    updateCollapsedVolumes(new Set(expanded ? [] : volumes.map((volume) => volume.id)))
+  }
+
+  function getTreeMenuItems({ target, anchor }: NonNullable<typeof contextMenu>): TreeMenuItem[] {
+    const items: TreeMenuItem[] = []
+    function add(label: string, icon: LucideIcon, onSelect: () => void, danger = false) {
+      items.push({ label, icon, onSelect, danger })
+    }
+    function addNewPlan() {
+      if (!onCreatePlanKind) {
+        add('新建计划', NotebookPen, onCreatePlan)
+        return
+      }
+      const create = onCreatePlanKind
+      items.push({
+        label: '新建计划',
+        icon: NotebookPen,
+        children: [
+          { label: '大纲', icon: FileText, onSelect: () => create('outline') },
+          { label: '细纲', icon: FileText, onSelect: () => create('detail') },
+        ],
+      })
+    }
+    function addToggle(expanded: boolean, toggle: () => void) {
+      add(expanded ? '折叠' : '展开', expanded ? ChevronRight : ChevronDown, toggle)
+    }
+    function addRename(label: string, save?: (title: string) => void, openSettings?: () => void) {
+      if (save) {
+        add('重命名', PencilLine, () => {
+          setRenameTarget({ label, save, trigger: anchor.trigger })
+          setRenameValue(target.title)
+        })
+      } else if (openSettings) add('重命名', PencilLine, openSettings)
+    }
+
+    switch (target.kind) {
+      case 'novel':
+        addNewPlan()
+        if (onCreateVolume) add('新建卷', FolderPlus, onCreateVolume)
+        add('新建章节', FilePlus2, onCreateChapter)
+        addRename('作品', onRenameNovelTitle, onOpenNovelSettings)
+        if (onOpenNovelSettings) add('作品设置', Settings2, onOpenNovelSettings)
+        add('全部展开', ChevronDown, () => setTreeExpanded(true))
+        add('全部折叠', ChevronRight, () => setTreeExpanded(false))
+        break
+      case 'plan-folder':
+        addNewPlan()
+        addToggle(planFolderExpanded, () => setPlanFolderExpanded((current) => !current))
+        break
+      case 'plan-kind': {
+        const kind = target.id
+        if (onCreatePlanKind) add(`新建${planKindLabels[kind]}`, FilePlus2, () => onCreatePlanKind(kind))
+        addToggle(expandedPlanKinds[kind], () => setExpandedPlanKinds((current) => ({ ...current, [kind]: !current[kind] })))
+        break
+      }
+      case 'chapter-folder':
+        if (onCreateVolume) add('新建卷', FolderPlus, onCreateVolume)
+        add('新建章节', FilePlus2, onCreateChapter)
+        addToggle(chapterFolderExpanded, () => setChapterFolderExpanded((current) => !current))
+        break
+      case 'volume': {
+        const id = target.id
+        const openSettings = onOpenVolumeSettings ? () => onOpenVolumeSettings(id) : undefined
+        if (onCreateChapterInVolume) add('在此卷新建章节', FilePlus2, () => onCreateChapterInVolume(id))
+        addRename('卷', onRenameVolumeTitle ? (title) => onRenameVolumeTitle(id, title) : undefined, openSettings)
+        if (openSettings) add('卷设置', Settings2, openSettings)
+        addToggle(!collapsedVolumes.has(id), () => toggleVolume(id))
+        if (onRequestDeleteVolume) add('删除', Trash2, () => onRequestDeleteVolume(id), true)
+        break
+      }
+      case 'chapter': {
+        const id = target.id
+        const openSettings = () => onOpenChapterSettings(id)
+        add('打开', FileText, () => onSelectChapter(id))
+        addRename('章节', onRenameChapterTitle ? (title) => onRenameChapterTitle(id, title) : undefined, openSettings)
+        add('设置', Settings2, openSettings)
+        if (onRequestDeleteChapter) add('删除', Trash2, () => onRequestDeleteChapter(id), true)
+        break
+      }
+      case 'plan': {
+        const id = target.id
+        const plan = savedPlans.find((item) => item.id === id)
+        const openSettings = () => onOpenPlanSettings(id)
+        add('打开', FileText, () => onSelectPlan(id))
+        addRename('计划', onRenamePlanTitle ? (title) => onRenamePlanTitle(id, title) : undefined, openSettings)
+        add('设置', Settings2, openSettings)
+        if (plan?.planKind === 'outline' && plan.backendArtifactId && onCreatePlanKind) {
+          const parentPlanId = plan.backendArtifactId
+          add('新建关联细纲', FilePlus2, () => onCreatePlanKind('detail', parentPlanId))
+        }
+        if (showExtendedMenus && plan?.planKind === 'detail' && plan.parentPlanId) {
+          const parent = savedPlans.find((item) => item.planKind === 'outline' && item.backendArtifactId === plan.parentPlanId)
+          if (parent) add('查看父大纲', FileText, () => onSelectPlan(parent.id))
+        }
+        if (onRequestDeletePlan) add('删除', Trash2, () => onRequestDeletePlan(id), true)
+        break
+      }
+    }
+    return items
+  }
+
+  const novelTarget = { kind: 'novel', title: novelTitle } as const
+  const planFolderTarget = { kind: 'plan-folder', title: '计划' } as const
+  const chapterFolderTarget = { kind: 'chapter-folder', title: '全部章节' } as const
   const volumeGroups = volumes.map((volume) => ({
     volume,
     chapters: chapters.filter((chapter) => chapter.volumeId === volume.id),
@@ -171,10 +342,11 @@ export default function ChapterSidebar({
       {/* 参考 IDE 资源管理器的顶栏结构：标题区移除，新建按钮浮在根节点行右侧；树整体贴近左侧边框 */}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pt-1 pb-2">
         <div className="space-y-0.5">
-          <div className="group/novel-row flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 transition hover:bg-[var(--surface-muted)]">
+          <div onContextMenu={(event) => openTreeContextMenu(event, novelTarget)} className="group/novel-row flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 transition hover:bg-[var(--surface-muted)]">
             <button
               type="button"
               onClick={() => setNovelExpanded((current) => !current)}
+              aria-expanded={novelExpanded}
               className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[13px] text-[var(--text-primary)]"
             >
               {novelExpanded ? (
@@ -186,10 +358,11 @@ export default function ChapterSidebar({
               <span className="truncate">{novelTitle}</span>
             </button>
             {/* 参考 IDE 资源管理器：悬停树区域时浮出图标按钮组，悬停按钮有提示字；手机端无 hover 常驻 */}
-            <div className="flex shrink-0 items-center gap-0.5 opacity-100 md:opacity-0 md:transition-opacity md:group-hover/tree:opacity-100">
+            <div className={cn('flex shrink-0 items-center gap-0.5 opacity-100 md:opacity-0 md:transition-opacity md:group-hover/tree:opacity-100', showExtendedMenus && 'md:group-focus-within/tree:opacity-100')}>
               {onCreateVolume ? <TreeHeaderButton label="新建卷" onClick={onCreateVolume}><FolderPlus className="h-3.5 w-3.5" /></TreeHeaderButton> : null}
               <TreeHeaderButton label="新建章节" onClick={onCreateChapter}><FilePlus2 className="h-3.5 w-3.5" /></TreeHeaderButton>
               <TreeHeaderButton label="新建计划" onClick={onCreatePlan}><NotebookPen className="h-3.5 w-3.5" /></TreeHeaderButton>
+              {showExtendedMenus && treeMenuButton(novelTarget)}
             </div>
           </div>
 
@@ -209,34 +382,42 @@ export default function ChapterSidebar({
                 <span className="truncate">目录</span>
               </button>
 
-              <button
-                type="button"
-                onClick={() => setPlanFolderExpanded((current) => !current)}
-                aria-expanded={planFolderExpanded}
-                className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)]"
-              >
-                {planFolderExpanded ? (
-                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
-                ) : (
-                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
-                )}
-                <NotebookText className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
-                <span className="truncate">计划</span>
-                <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)]">共{savedPlans.length}个</span>
-              </button>
+              <div onContextMenu={(event) => openTreeContextMenu(event, planFolderTarget)} className="group/row flex items-center rounded-[10px] transition hover:bg-[var(--surface-muted)]">
+                <button
+                  type="button"
+                  onClick={() => setPlanFolderExpanded((current) => !current)}
+                  aria-expanded={planFolderExpanded}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-primary)]"
+                >
+                  {planFolderExpanded ? (
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
+                  ) : (
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
+                  )}
+                  <NotebookText className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
+                  <span className="truncate">计划</span>
+                  <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)]">共{savedPlans.length}个</span>
+                </button>
+                {showExtendedMenus && <div className={cn(rowActionsClass, 'mr-1')}>{treeMenuButton(planFolderTarget)}</div>}
+              </div>
 
               {planFolderExpanded ? (
                 <div className="ml-3 border-l border-[var(--border-subtle)] pl-1.5 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
                   {(['outline', 'detail', 'legacy'] as const).map(kind => {
                     const plans = savedPlans.filter(plan => (plan.planKind ?? 'legacy') === kind)
                     if (kind === 'legacy' && plans.length === 0) return null
+                    const kindTarget = kind === 'legacy' ? null : { kind: 'plan-kind' as const, id: kind, title: planKindLabels[kind] }
                     return <div key={kind}>
-                      <button type="button" aria-expanded={expandedPlanKinds[kind]} onClick={() => setExpandedPlanKinds(current => ({ ...current, [kind]: !current[kind] }))} className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]">
-                        {expandedPlanKinds[kind] ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                        <span>{kind === 'outline' ? '大纲' : kind === 'detail' ? '细纲' : '历史未分类'}</span><span className="ml-auto text-[10px]">共{plans.length}个</span>
-                      </button>
+                      <div onContextMenu={kindTarget ? (event) => openTreeContextMenu(event, kindTarget) : undefined} className="group/row flex items-center rounded-[10px] hover:bg-[var(--surface-muted)]">
+                        <button type="button" aria-expanded={expandedPlanKinds[kind]} onClick={() => setExpandedPlanKinds(current => ({ ...current, [kind]: !current[kind] }))} className="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-secondary)]">
+                          {expandedPlanKinds[kind] ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+                          <span className="truncate">{planKindLabels[kind]}</span><span className="ml-auto shrink-0 text-[10px]">共{plans.length}个</span>
+                        </button>
+                        {showExtendedMenus && kindTarget ? <div className={cn(rowActionsClass, 'mr-1')}>{treeMenuButton(kindTarget)}</div> : null}
+                      </div>
                     {expandedPlanKinds[kind] ? plans.map((plan) => {
                       const index = savedPlans.findIndex(item => item.id === plan.id)
+                      const planTarget = { kind: 'plan', id: plan.id, title: plan.title.trim() || `计划 ${savedPlans.length - index}` } as const
                       return (
                       <div
                         key={plan.id}
@@ -268,9 +449,9 @@ export default function ChapterSidebar({
                           setDraggedItem(null)
                           setDropTarget(null)
                         }}
-                        onContextMenu={(event) => openTreeContextMenu(event, 'plan', plan.id, plan.title.trim() || `计划 ${savedPlans.length - index}`)}
+                        onContextMenu={(event) => openTreeContextMenu(event, planTarget)}
                         className={cn(
-                          'group flex items-center gap-1 rounded-[10px] border-t border-transparent transition',
+                          'group group/row flex items-center gap-1 rounded-[10px] border-t border-transparent transition',
                           selectedTreeItemId === `plan:${plan.id}` ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]',
                           dropTarget === `plan:${plan.id}` && 'border-t-[var(--text-primary)]',
                         )}
@@ -307,6 +488,7 @@ export default function ChapterSidebar({
                         >
                           <Settings2 className="h-3.5 w-3.5" />
                         </button>
+                        {showExtendedMenus && <div className={cn(rowActionsClass, 'mr-1')}>{treeMenuButton(planTarget)}</div>}
                       </div>
                     )}) : null}
                     </div>
@@ -314,25 +496,32 @@ export default function ChapterSidebar({
                 </div>
               ) : null}
 
-              <button
-                type="button"
-                onClick={() => setChapterFolderExpanded((current) => !current)}
-                className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)]"
-              >
-                {chapterFolderExpanded ? (
-                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
-                ) : (
-                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
-                )}
-                <span className="truncate">全部章节</span>
-                <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)]">共{volumes.length}卷{chapters.length}章</span>
-              </button>
+              <div onContextMenu={(event) => openTreeContextMenu(event, chapterFolderTarget)} className="group/row flex items-center rounded-[10px] transition hover:bg-[var(--surface-muted)]">
+                <button
+                  type="button"
+                  onClick={() => setChapterFolderExpanded((current) => !current)}
+                  aria-expanded={chapterFolderExpanded}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-primary)]"
+                >
+                  {chapterFolderExpanded ? (
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
+                  ) : (
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
+                  )}
+                  <span className="truncate">全部章节</span>
+                  <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)]">共{volumes.length}卷{chapters.length}章</span>
+                </button>
+                {showExtendedMenus && <div className={cn(rowActionsClass, 'mr-1')}>{treeMenuButton(chapterFolderTarget)}</div>}
+              </div>
 
               {chapterFolderExpanded ? (
                 <div className="ml-3.5 border-l border-[var(--border-subtle)] pl-1.5 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
-                  {volumeGroups.map(({ volume, chapters: volumeChapters }) => (
+                  {volumeGroups.map(({ volume, chapters: volumeChapters }) => {
+                    const volumeTarget = { kind: 'volume', id: volume.id, title: volume.title } as const
+                    return (
                     <div key={volume.id} className="py-0.5">
                       <div
+                        onContextMenu={(event) => openTreeContextMenu(event, volumeTarget)}
                         onDragOver={(event) => {
                           if (draggedItem?.kind !== 'chapter') return
                           event.preventDefault()
@@ -347,7 +536,7 @@ export default function ChapterSidebar({
                           setDropTarget(null)
                         }}
                         className={cn(
-                          'group/volume flex items-center gap-1.5 rounded-md border border-transparent px-2 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors',
+                          'group/volume group/row flex items-center gap-1.5 rounded-md border border-transparent px-2 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors',
                           dropTarget === `volume:${volume.id}` && 'border-[var(--border-strong)] bg-[var(--surface-muted)]',
                         )}
                       >
@@ -378,9 +567,11 @@ export default function ChapterSidebar({
                         ) : (
                           <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)]">共{volumeChapters.length}章</span>
                         )}
+                        {showExtendedMenus && <div className={rowActionsClass}>{treeMenuButton(volumeTarget)}</div>}
                       </div>
                       {!collapsedVolumes.has(volume.id) ? <div className="ml-2.5 border-l border-[var(--border-subtle)] pl-1 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
                   {volumeChapters.map((chapter) => {
+                    const chapterTarget = { kind: 'chapter', id: chapter.id, title: chapter.title.trim() || `第 ${chapter.orderInVolume} 章` } as const
                     const chapterActive =
                       selectedTreeItemId === `chapter:${chapter.id}` ||
                       (!selectedTreeItemId && selectedChapterId === chapter.id)
@@ -419,9 +610,9 @@ export default function ChapterSidebar({
                           setDraggedItem(null)
                           setDropTarget(null)
                         }}
-                        onContextMenu={(event) => openTreeContextMenu(event, 'chapter', chapter.id, chapter.title.trim() || `第 ${chapter.orderInVolume} 章`)}
+                        onContextMenu={(event) => openTreeContextMenu(event, chapterTarget)}
                         className={cn(
-                          'group flex items-center gap-1 rounded-[10px] border-t border-transparent transition',
+                          'group group/row flex items-center gap-1 rounded-[10px] border-t border-transparent transition',
                           chapterActive ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]',
                           dropTarget === `chapter:${chapter.id}` && 'border-t-[var(--text-primary)]',
                         )}
@@ -456,6 +647,7 @@ export default function ChapterSidebar({
                         >
                           <Settings2 className="h-3.5 w-3.5" />
                         </button>
+                        {showExtendedMenus && <div className={cn(rowActionsClass, 'mr-1')}>{treeMenuButton(chapterTarget)}</div>}
                       </div>
                     )
                   })}
@@ -464,7 +656,7 @@ export default function ChapterSidebar({
                         ) : null}
                       </div> : null}
                     </div>
-                  ))}
+                  )})}
                   {volumeGroups.length === 0 ? (
                     <p className="px-2 py-2 text-xs text-[var(--text-tertiary)]">暂未建立卷结构</p>
                   ) : null}
@@ -476,33 +668,16 @@ export default function ChapterSidebar({
       </div>
 
       {contextMenu ? (
-        <div
-          className="fixed z-[190] w-40 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)]"
-          style={{ left: Math.min(contextMenu.x, window.innerWidth - 176), top: Math.min(contextMenu.y, window.innerHeight - 200) }}
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <button type="button" className={treeMenuItem} onClick={() => { const target = contextMenu; setContextMenu(null); if (target.kind === 'chapter') onSelectChapter(target.id); else onSelectPlan(target.id) }}>
-            <FileText className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />打开
-          </button>
-          <button type="button" className={treeMenuItem} onClick={() => { const target = contextMenu; setContextMenu(null); setRenameTarget({ kind: target.kind, id: target.id }); setRenameValue(target.title) }}>
-            <PencilLine className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />重命名
-          </button>
-          <button type="button" className={treeMenuItem} onClick={() => { const target = contextMenu; setContextMenu(null); if (target.kind === 'chapter') onOpenChapterSettings(target.id); else onOpenPlanSettings(target.id) }}>
-            <Settings2 className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />设置
-          </button>
-          <button type="button" className={cn(treeMenuItem, 'text-rose-600')} onClick={() => { const target = contextMenu; setContextMenu(null); if (target.kind === 'chapter') onRequestDeleteChapter?.(target.id); else onRequestDeletePlan?.(target.id) }}>
-            <Trash2 className="h-3.5 w-3.5" />删除
-          </button>
-        </div>
+        <TreeContextMenu title={contextMenu.target.title} anchor={contextMenu.anchor} items={getTreeMenuItems(contextMenu)} onClose={() => setContextMenu(null)} />
       ) : null}
 
       {renameTarget ? (
-        <div className="fixed inset-0 z-[195] flex items-center justify-center bg-black/25 p-4" onMouseDown={() => { setRenameTarget(null); setRenameValue('') }}>
-          <form onSubmit={(event) => { event.preventDefault(); commitTreeRename() }} onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-2xl">
-            <h2 className="text-sm font-semibold text-[var(--text-primary)]">重命名{renameTarget.kind === 'chapter' ? '章节' : '计划'}</h2>
-            <input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} maxLength={160} className="mt-4 h-10 w-full rounded-[9px] border border-[var(--border-subtle)] bg-transparent px-3 text-sm outline-none focus:border-[var(--border-strong)]" />
+        <div className="fixed inset-0 z-[195] flex items-center justify-center bg-black/25 p-4" onMouseDown={closeTreeRename}>
+          <form role="dialog" aria-modal="true" aria-label={`重命名${renameTarget.label}`} onSubmit={(event) => { event.preventDefault(); commitTreeRename() }} onMouseDown={(event) => event.stopPropagation()} onKeyDown={handleRenameKeyDown} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-2xl">
+            <h2 className="text-sm font-semibold text-[var(--text-primary)]">重命名{renameTarget.label}</h2>
+            <input autoFocus aria-label="名称" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} maxLength={160} className="mt-4 h-10 w-full rounded-[9px] border border-[var(--border-subtle)] bg-transparent px-3 text-sm outline-none focus:border-[var(--border-strong)]" />
             <div className="mt-5 flex justify-end gap-2">
-              <button type="button" onClick={() => { setRenameTarget(null); setRenameValue('') }} className="h-9 rounded-[9px] px-3 text-xs hover:bg-[var(--surface-muted)]">取消</button>
+              <button type="button" onClick={closeTreeRename} className="h-9 rounded-[9px] px-3 text-xs hover:bg-[var(--surface-muted)]">取消</button>
               <button type="submit" disabled={!renameValue.trim()} className="h-9 rounded-[9px] bg-[var(--surface-contrast)] px-4 text-xs font-medium text-[var(--text-contrast)] disabled:opacity-45">保存</button>
             </div>
           </form>

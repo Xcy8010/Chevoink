@@ -7,11 +7,11 @@ import StudioMobileMenu from '@/features/studio/components/StudioMobileMenu'
 import type { AgentSession, Novel } from '../../shared/contracts/index.js'
 import { mockNativeDialog } from '../helpers/test-native-dialog'
 
-const { searchSessions, renameSession, updateSession, deleteSession, readStatuses } = vi.hoisted(() => ({
-  searchSessions: vi.fn(), renameSession: vi.fn(), updateSession: vi.fn(), deleteSession: vi.fn(), readStatuses: vi.fn(),
+const { searchSessions, readSessions, renameSession, updateSession, deleteSession, readStatuses } = vi.hoisted(() => ({
+  searchSessions: vi.fn(), readSessions: vi.fn(), renameSession: vi.fn(), updateSession: vi.fn(), deleteSession: vi.fn(), readStatuses: vi.fn(),
 }))
 vi.mock('@/features/studio/agent/agentApi', () => ({
-  searchAgentSessions: searchSessions, renameAgentSession: renameSession,
+  searchAgentSessions: searchSessions, fetchAgentSessions: readSessions, renameAgentSession: renameSession,
   updateAgentSessionSettings: updateSession, deleteAgentSession: deleteSession, fetchSessionsRunStatus: readStatuses,
 }))
 
@@ -27,7 +27,7 @@ describe('mobile book folders and categorized existing actions', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开作品：第二本作品' }))
     expect(select).not.toHaveBeenCalled()
     expect(close).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: '进入作品' }))
+    fireEvent.click(screen.getByRole('button', { name: '选择作品：第二本作品' }))
     expect(select.mock.calls).toEqual([['two']])
     expect(close).toHaveBeenCalledOnce()
   })
@@ -49,31 +49,36 @@ describe('mobile book folders and categorized existing actions', () => {
     }
     const { rerender } = render(<StudioMobileMenu {...props} />)
     expect(screen.getByRole('button', { name: '选择作品：第一本作品' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: session.title })).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: session.title })).toHaveLength(2)
     rerender(<StudioMobileMenu {...props} novels={[{ ...one, status: 'archived' }, two]} />)
     expect(screen.queryByRole('button', { name: '选择作品：第一本作品' })).toBeNull()
     expect(screen.queryByRole('button', { name: session.title })).toBeNull()
     expect(screen.getByRole('button', { name: '选择作品：第二本作品' })).toBeTruthy()
   })
-  it('expands categories and delegates an existing action exactly once, keeping disabled and future actions', () => {
+  it('keeps existing work actions in the work menu with disabled and future actions intact', ({ onTestFinished }) => {
+    const restore = mockNativeDialog()
+    onTestFinished(() => { cleanup(); restore() })
     const action = vi.fn(), unavailable = vi.fn()
     render(<StudioMobileMenu {...defaults} currentNovel={one} novels={[one]} loading={false} busy={false} view="assistant" actions={[
       { key: 'meta', label: '作品设置', icon: BookOpen, action },
       { key: 'delete-novel', label: '删除作品', icon: BookOpen, action: unavailable, disabled: true, danger: true },
       { key: 'future-action', label: '扩展入口', icon: BookOpen, action: vi.fn() },
     ]} onClose={vi.fn()} onSelectNovel={vi.fn()} onCreateNovel={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: '作品操作：第一本作品' }))
     fireEvent.click(screen.getByText('创作资料'))
     fireEvent.click(screen.getByRole('button', { name: '作品设置' }))
     expect(action).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: '作品操作：第一本作品' }))
     fireEvent.click(screen.getByText('作品操作'))
     expect(screen.getByRole('button', { name: '删除作品' }).hasAttribute('disabled')).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: '删除作品' }))
     expect(unavailable).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '关闭作品操作' }))
     fireEvent.click(screen.getByText('其他操作'))
     expect(screen.getByRole('button', { name: '扩展入口' })).toBeTruthy()
   })
 
-  it('sorts the latest six conversations and opens a long-press menu without also navigating', ({ onTestFinished }) => {
+  it('shows conversations inside their work and opens long-press actions without also navigating', ({ onTestFinished }) => {
     const restore = mockNativeDialog()
     onTestFinished(() => { cleanup(); restore() })
     vi.useFakeTimers()
@@ -89,8 +94,11 @@ describe('mobile book folders and categorized existing actions', () => {
       actions={[]} recentSessions={items} onClose={vi.fn()} onSelectNovel={vi.fn()} onCreateNovel={vi.fn()}
       onSelectSession={open} onSessionChange={change}
     /></QueryClientProvider>)
-    const recent = within(screen.getByRole('region', { name: '最近对话' })).getAllByRole('button')
-    expect(recent.map(button => button.textContent)).toEqual(['对话 7', '对话 6', '对话 5', '对话 4', '对话 3', '对话 2'])
+    const recentRegion = within(screen.getByRole('region', { name: '最近对话' }))
+    expect(recentRegion.getByRole('button', { name: '全部对话' })).toBeTruthy()
+    expect(recentRegion.getAllByRole('button', { name: /^对话 \d$/ }).map(button => button.textContent)).toEqual(['对话 7', '对话 6', '对话 5', '对话 4', '对话 3', '对话 2'])
+    const recent = within(screen.getByRole('group', { name: '第一本作品的对话' })).getAllByRole('button', { name: /^对话 \d$/ })
+    expect(recent.map(button => button.textContent)).toEqual(['对话 7', '对话 6', '对话 5', '对话 4', '对话 3'])
     fireEvent.pointerDown(recent[0], { button: 0, clientX: 50, clientY: 20 })
     fireEvent.pointerMove(recent[0], { clientX: 50, clientY: 50 })
     act(() => vi.advanceTimersByTime(520))
@@ -108,6 +116,55 @@ describe('mobile book folders and categorized existing actions', () => {
     fireEvent.click(screen.getByRole('button', { name: '返回' }))
     fireEvent.click(actions.getByRole('button', { name: '取消' }))
     expect(document.activeElement).toBe(recent[0])
+  })
+
+  it('opens the current work conversation without toggling the folder and retains an older active task', () => {
+    const items = Array.from({ length: 8 }, (_, index) => ({ id: `s-${index}`, userId: 'owner', novelId: one.id, title: `对话 ${index}`, lastRunAt: new Date(Date.UTC(2026, 10, 1 + index)).toISOString() })) as AgentSession[]
+    const select = vi.fn()
+    render(<StudioMobileMenu {...defaults} currentNovel={one} novels={[one]} loading={false} busy={false} view="assistant" actions={[]} recentSessions={items} activeSessionId="s-0" onClose={vi.fn()} onSelectNovel={vi.fn()} onSelectSession={select} onCreateNovel={vi.fn()} />)
+    expect(screen.getByRole('button', { name: '对话 0' }).getAttribute('aria-current')).toBe('page')
+    fireEvent.click(screen.getByRole('button', { name: '选择作品：第一本作品' }))
+    expect(select).toHaveBeenCalledWith(items[0])
+    expect(screen.getByRole('button', { name: '收起作品：第一本作品' }).getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('expands all conversations under the work without replacing the sidebar or opening a dialog', async () => {
+    const session = { id: 'old-task', userId: 'owner', novelId: one.id, title: '很早的对话', status: 'active' } as AgentSession
+    readSessions.mockResolvedValue({ items: [session] })
+    const select = vi.fn()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const close = vi.fn()
+    render(<QueryClientProvider client={client}><StudioMobileMenu {...defaults} currentNovel={one} novels={[one, two]} loading={false} busy={false} view="assistant" actions={[]} onClose={close} onSelectNovel={vi.fn()} onSelectSession={select} onCreateNovel={vi.fn()} /></QueryClientProvider>)
+    fireEvent.click(screen.getByRole('button', { name: '查看全部对话' }))
+    const oldTask = await screen.findByRole('button', { name: '很早的对话' })
+    expect(screen.getByRole('button', { name: '选择作品：第二本作品' })).toBeTruthy()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('button', { name: '返回作品列表' })).toBeNull()
+    expect(close).not.toHaveBeenCalled()
+    expect(readSessions).toHaveBeenCalledWith(one.id, { includeArchived: false })
+    fireEvent.click(oldTask)
+    expect(select).toHaveBeenCalledWith(session)
+    fireEvent.click(screen.getByRole('button', { name: '收起全部对话' }))
+    expect(screen.queryByRole('button', { name: '很早的对话' })).toBeNull()
+    expect(screen.getByRole('button', { name: '查看全部对话' }).getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('returns from work actions to the same work with its conversations expanded', async ({ onTestFinished }) => {
+    const restore = mockNativeDialog()
+    onTestFinished(() => { cleanup(); restore() })
+    const session = { id: 'older', userId: 'owner', novelId: two.id, title: '第二本的旧对话', status: 'active' } as AgentSession
+    readSessions.mockResolvedValue({ items: [session, { ...session, id: 'foreign', userId: 'someone-else', title: '非本人对话' }] })
+    const close = vi.fn(), select = vi.fn()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={client}><StudioMobileMenu {...defaults} currentNovel={one} novels={[one, two]} loading={false} busy={false} view="assistant" actions={[]} onClose={close} onSelectNovel={select} onCreateNovel={vi.fn()} /></QueryClientProvider>)
+    fireEvent.click(screen.getByRole('button', { name: '作品操作：第二本作品' }))
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '查看全部对话' }))
+    expect(await screen.findByRole('button', { name: '第二本的旧对话' })).toBeTruthy()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByText('非本人对话')).toBeNull()
+    expect(screen.getByRole('button', { name: '收起作品：第二本作品' }).getAttribute('aria-expanded')).toBe('true')
+    expect(close).not.toHaveBeenCalled()
+    expect(select).not.toHaveBeenCalled()
   })
 
   it('groups matches from titles, available functions, and persisted conversations and opens the correct object', async () => {
