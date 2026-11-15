@@ -10,8 +10,8 @@ afterEach(cleanup)
 function voice(overrides: Partial<VoiceInputController> = {}): VoiceInputController {
   return {
     state: 'idle', status: 'idle', active: false, modelReady: true, disabled: false,
-    error: null, progress: 0, elapsed: 0, levels: [0, 0.5, 1],
-    start: vi.fn(), cancel: vi.fn(), stop: vi.fn(), download: vi.fn(), removeModel: vi.fn(), deleteModel: vi.fn(),
+    error: null, progress: 0, packProgress: null, elapsed: 0, levels: [0, 0.5, 1],
+    start: vi.fn(), cancel: vi.fn(), stop: vi.fn(), download: vi.fn(), cancelDownload: vi.fn(), removeModel: vi.fn(), deleteModel: vi.fn(),
     ...overrides,
   }
 }

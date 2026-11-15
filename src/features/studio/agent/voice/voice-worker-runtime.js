@@ -1,12 +1,10 @@
 import { VOICE_MANIFEST, VOICE_CACHE_NAME, VOICE_MODEL_DOWNLOAD_BYTES } from './voice-manifest';
+import { hasCachedVoicePack, voiceAssetUrl, voicePackFingerprint } from './voice-cache';
 import { resampleVoicePcm } from './voice-pcm';
 
 let recognizer;
 let vad;
-let queue = Promise.resolve();
-const assetUrl = file => new URL(VOICE_MANIFEST.baseUrl + file.name, self.location.origin).href;
-const markerUrl = new URL(VOICE_MANIFEST.baseUrl + '.verified', self.location.origin).href;
-const fingerprint = VOICE_MANIFEST.files.map(file => file.sha256).join(':');
+const markerUrl = voiceAssetUrl('.verified');
 
 async function verify(buffer, file) {
   if (buffer.byteLength !== file.bytes) return false;
@@ -15,45 +13,35 @@ async function verify(buffer, file) {
 }
 
 async function cachedFile(cache, file) {
-  const response = await cache.match(assetUrl(file));
+  const response = await cache.match(voiceAssetUrl(file.name));
   if (!response) return undefined;
   const buffer = await response.arrayBuffer();
   if (await verify(buffer, file)) return buffer;
-  await cache.delete(assetUrl(file));
+  await cache.delete(voiceAssetUrl(file.name));
   await cache.delete(markerUrl);
   return undefined;
 }
 
-async function status() {
-  if (!(await caches.has(VOICE_CACHE_NAME))) return false;
-  const cache = await caches.open(VOICE_CACHE_NAME);
-  const marker = await cache.match(markerUrl);
-  if (!marker || await marker.text() !== fingerprint) return false;
-  for (const file of VOICE_MANIFEST.files) {
-    const response = await cache.match(assetUrl(file));
-    if (!response || response.headers.get('Content-Length') !== String(file.bytes) || response.headers.get('X-Voice-Sha256') !== file.sha256) return false;
-  }
-  return true;
-}
-
-async function prepare(id) {
+async function prepare() {
   if (!globalThis.caches || !crypto?.subtle) throw new Error('浏览器不支持离线模型缓存，请更新浏览器或应用');
   const simd = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11]);
   if (!globalThis.WebAssembly || !WebAssembly.validate(simd)) throw new Error('浏览器不支持 WASM SIMD，请更新浏览器或 Android 应用');
+  if (await hasCachedVoicePack()) return;
   if (navigator.storage?.estimate) {
     let estimate;
     try { estimate = await navigator.storage.estimate(); } catch { /* Unsupported/private browsing: let cache writes report quota errors. */ }
-    if (estimate?.quota !== undefined && estimate?.usage !== undefined && estimate.quota - estimate.usage < VOICE_MODEL_DOWNLOAD_BYTES * 2 && !await status()) {
+    if (estimate?.quota !== undefined && estimate?.usage !== undefined && estimate.quota - estimate.usage < VOICE_MODEL_DOWNLOAD_BYTES * 2) {
       throw new Error('离线模型至少需要约 505 MB 可用浏览器存储空间，请清理空间后重试');
     }
   }
   const cache = await caches.open(VOICE_CACHE_NAME);
   let completed = 0;
-  const progress = loaded => self.postMessage({ id, progress: Math.min(0.99, loaded / VOICE_MODEL_DOWNLOAD_BYTES) });
+  const progress = loaded => self.postMessage({ progress: Math.min(0.99, loaded / VOICE_MODEL_DOWNLOAD_BYTES) });
   progress(0);
   for (const file of VOICE_MANIFEST.files) {
     if (!await cachedFile(cache, file)) {
-      const response = await fetch(assetUrl(file), { credentials: 'omit', cache: 'no-store', redirect: 'error' });
+      const url = voiceAssetUrl(file.name);
+      const response = await fetch(url, { credentials: 'omit', cache: 'no-store', redirect: 'error' });
       if (!response.ok || !response.body) throw new Error(`语音资源未部署或下载失败 (${response.status}): ${file.name}`);
       const reader = response.body.getReader();
       const bytes = new Uint8Array(file.bytes);
@@ -69,13 +57,13 @@ async function prepare(id) {
         }
       } finally { await reader.cancel(); }
       if (offset !== file.bytes || !await verify(bytes.buffer, file)) throw new Error(`语音资源 SHA-256 校验失败: ${file.name}`);
-      await cache.put(assetUrl(file), new Response(bytes, { headers: { 'Content-Type': file.type, 'Content-Length': String(file.bytes), 'X-Voice-Sha256': file.sha256 } }));
+      await cache.put(url, new Response(bytes, { headers: { 'Content-Type': file.type, 'Content-Length': String(file.bytes), 'X-Voice-Sha256': file.sha256 } }));
     }
     completed += file.bytes;
     progress(completed);
   }
-  await cache.put(markerUrl, new Response(fingerprint));
-  self.postMessage({ id, progress: 1 });
+  await cache.put(markerUrl, new Response(voicePackFingerprint));
+  self.postMessage({ progress: 1 });
 }
 
 async function initialize() {
@@ -170,30 +158,23 @@ async function transcribe(samples, sampleRate) {
   return result.trim();
 }
 
-self.onmessage = ({ data }) => {
-  queue = queue.then(async () => {
-    const { id, operation } = data;
-    try {
-      let value;
-      if (operation === 'status') value = await status();
-      else if (operation === 'prepare') await prepare(id);
-      else if (operation === 'transcribe') value = await transcribe(data.samples, data.sampleRate);
-      else if (operation === 'prepare-native') {
-        const pcm = resampleVoicePcm(data.samples, data.sampleRate);
-        const bytes = new Uint8Array(pcm.length * 4);
-        const view = new DataView(bytes.buffer);
-        for (let index = 0; index < pcm.length; index++) view.setFloat32(index * 4, pcm[index], true);
-        let binary = '';
-        for (let index = 0; index < bytes.length; index += 8192) binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
-        value = { pcmBase64: btoa(binary), sampleRate: 16000 };
-      }
-      else if (operation === 'delete') {
-        recognizer?.free(); recognizer = undefined; vad?.free(); vad = undefined;
-        for (const name of await caches.keys()) if (name.startsWith('chevoink-voice-')) await caches.delete(name);
-      } else throw new Error('未知语音操作');
-      self.postMessage({ id, value });
-    } catch (error) {
-      self.postMessage({ id, error: error.message || String(error), name: error.name });
+self.onmessage = async ({ data }) => {
+  try {
+    let value;
+    if (data.operation === 'prepare') await prepare();
+    else if (data.operation === 'transcribe') value = await transcribe(data.samples, data.sampleRate);
+    else if (data.operation === 'prepare-native') {
+      const pcm = resampleVoicePcm(data.samples, data.sampleRate);
+      const bytes = new Uint8Array(pcm.length * 4);
+      const view = new DataView(bytes.buffer);
+      for (let index = 0; index < pcm.length; index++) view.setFloat32(index * 4, pcm[index], true);
+      let binary = '';
+      for (let index = 0; index < bytes.length; index += 8192) binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+      value = { pcmBase64: btoa(binary), sampleRate: 16000 };
     }
-  });
+    else throw new Error('未知语音操作');
+    self.postMessage({ value });
+  } catch (error) {
+    self.postMessage({ error: error.message || String(error), name: error.name });
+  }
 };

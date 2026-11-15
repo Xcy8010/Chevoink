@@ -1,12 +1,18 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { registerDesktopSave } from '@/lib/desktop-lifecycle'
 import {
   deleteVoiceModel,
-  disposeVoiceEngine,
   getVoiceModelStatus,
-  prepareVoiceModel,
   transcribeAudio,
 } from '../voice/speech-engine'
+import {
+  CAPTURE_WORKLET_URL,
+  VOICE_PACK_CHANGED,
+  cancelVoicePackDownload,
+  downloadVoicePack,
+  subscribeVoicePackProgress,
+  voicePackProgress,
+} from '../voice/voice-pack-download'
 
 export type VoiceInputStatus = 'checking' | 'idle' | 'needs-download' | 'downloading' | 'requesting-permission' | 'recording' | 'transcribing' | 'deleting' | 'error'
 export type VoiceInputOptions = { scopeKey: string; disabled: boolean; onTranscript: (text: string) => void; onNotice?: (message: string) => void }
@@ -17,6 +23,7 @@ export type VoiceInputController = {
   active: boolean
   error: string | null
   progress: number
+  packProgress: number | null
   elapsed: number
   levels: number[]
   modelReady: boolean
@@ -25,6 +32,7 @@ export type VoiceInputController = {
   stop: () => Promise<void>
   cancel: () => void
   download: () => Promise<void>
+  cancelDownload: () => void
   removeModel: () => Promise<void>
   /** Composer compatibility alias of removeModel. */
   deleteModel: () => Promise<void>
@@ -46,20 +54,6 @@ type Capture = {
 
 const MAX_SECONDS = 60
 const EMPTY_LEVELS = Array<number>(28).fill(0)
-const CAPTURE_WORKLET_URL = `${import.meta.env.BASE_URL}voice-capture-worklet.js?v=1`
-// Bump the URL version and digest together whenever the public worklet changes.
-const CAPTURE_WORKLET_SHA256 = '4b2fa0df2f96f020da5808431b16a71866c834e5364282e784007f13657dcd62'
-
-async function prepareCaptureWorklet(signal: AbortSignal, cache: RequestCache = 'force-cache') {
-  // The exact URL has immutable HTTP caching at the production origin. Do not use
-  // Blob URLs (CSP), or rely on the model's CacheStorage to cache addModule requests.
-  const response = await fetch(CAPTURE_WORKLET_URL, { cache, mode: 'same-origin', credentials: 'same-origin', signal })
-  if (!response.ok) throw new Error('录音组件下载失败，请联网重试。')
-  const bytes = await response.arrayBuffer()
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
-  const hash = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('')
-  if (hash !== CAPTURE_WORKLET_SHA256) throw new Error('录音组件校验失败，请刷新页面并重新下载。')
-}
 
 function stopTracks(capture: Capture) {
   capture.stream?.getTracks().forEach((track) => {
@@ -103,9 +97,9 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
   const [status, setStatus] = useState<VoiceInputStatus>('checking')
   const desktopStatus = useRef(status)
   desktopStatus.current = status
-  useEffect(() => registerDesktopSave(() => !['requesting-permission', 'recording', 'transcribing', 'downloading', 'deleting'].includes(desktopStatus.current)), [])
+  useEffect(() => registerDesktopSave(() => voicePackProgress() === null && !['requesting-permission', 'recording', 'transcribing', 'deleting'].includes(desktopStatus.current)), [])
   const [error, setError] = useState<string | null>(null)
-  const [progress, setProgress] = useState(0)
+  const packProgress = useSyncExternalStore(subscribeVoicePackProgress, voicePackProgress)
   const [elapsed, setElapsed] = useState(0)
   const [levels, setLevels] = useState(EMPTY_LEVELS)
   const [modelReady, setModelReady] = useState(false)
@@ -115,7 +109,6 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
   const phase = useRef<VoiceInputStatus>('checking')
   const ready = useRef(false)
   const controller = useRef<AbortController | null>(null)
-  const ownsEngine = useRef(false)
   const capture = useRef<Capture | null>(null)
   const stopRef = useRef<() => Promise<void>>(async () => undefined)
 
@@ -129,22 +122,24 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
     const active = controller.current
     controller.current = null
     active?.abort()
-    if (ownsEngine.current) disposeVoiceEngine()
-    ownsEngine.current = false
     if (capture.current) releaseCapture(capture.current)
     capture.current = null
   }, [])
 
-  const cancel = useCallback(() => {
+  const resetInput = useCallback(() => {
     invalidate()
     transition('idle')
     if (mounted.current) {
       setError(null)
-      setProgress(0)
       setElapsed(0)
       setLevels(EMPTY_LEVELS)
     }
   }, [invalidate, transition])
+
+  const cancel = useCallback(() => {
+    if (phase.current === 'downloading') cancelVoicePackDownload()
+    resetInput()
+  }, [resetInput])
 
   const valid = useCallback((id: number, scope: string) => mounted.current && generation.current === id && latest.current.scopeKey === scope && !latest.current.disabled, [])
 
@@ -163,8 +158,7 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
 
   useLayoutEffect(() => {
     mounted.current = true
-    cancel()
-    const cacheCheck = new AbortController()
+    resetInput()
     transition('checking')
     // Cache inspection never downloads model assets or requests microphone access.
     let refreshSequence = 0
@@ -173,69 +167,52 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
       if (!['idle', 'checking', 'needs-download', 'error'].includes(phase.current)) return
       const id = generation.current
       const refresh = ++refreshSequence
-      void getVoiceModelStatus().then(async (available) => {
-      if (!mounted.current || id !== generation.current || refresh !== refreshSequence) return
-      // HTTP cache can be evicted independently from the engine's CacheStorage.
-      // only-if-cached guarantees mount/scope changes never silently download.
-      if (available) {
-        try { await prepareCaptureWorklet(cacheCheck.signal, 'only-if-cached') } catch { available = false }
-      }
-      if (!mounted.current || id !== generation.current || refresh !== refreshSequence) return
-      ready.current = available
-      setModelReady(available)
-      if (phase.current === 'checking' || (available && phase.current === 'needs-download')) transition('idle')
-    }).catch((cause: unknown) => {
-      if (mounted.current && id === generation.current) fail(cause)
-    })
+      void getVoiceModelStatus().then((available) => {
+        if (!mounted.current || id !== generation.current || refresh !== refreshSequence) return
+        ready.current = available
+        setModelReady(available)
+        if (phase.current === 'checking' || (available && phase.current === 'needs-download')) transition('idle')
+      }).catch((cause: unknown) => {
+        if (mounted.current && id === generation.current && refresh === refreshSequence) fail(cause)
+      })
     }
     refreshModel()
-    window.addEventListener('chevoink:voice-pack-changed', refreshModel)
-    const onHidden = () => { if (document.hidden) cancel() }
-    const onPageHide = () => cancel()
+    window.addEventListener(VOICE_PACK_CHANGED, refreshModel)
+    const onHidden = () => { if (document.hidden) resetInput() }
+    const onPageHide = () => resetInput()
     document.addEventListener('visibilitychange', onHidden)
     window.addEventListener('pagehide', onPageHide)
     return () => {
       mounted.current = false
-      cacheCheck.abort()
       invalidate()
       document.removeEventListener('visibilitychange', onHidden)
       window.removeEventListener('pagehide', onPageHide)
-      window.removeEventListener('chevoink:voice-pack-changed', refreshModel)
+      window.removeEventListener(VOICE_PACK_CHANGED, refreshModel)
     }
-  }, [options.scopeKey, options.disabled, cancel, fail, invalidate, transition])
+  }, [options.scopeKey, options.disabled, fail, invalidate, resetInput, transition])
 
   const download = useCallback(async () => {
-    if (latest.current.disabled || document.hidden || !['idle', 'needs-download', 'error'].includes(phase.current)) return
+    if (latest.current.disabled || document.hidden || !['checking', 'idle', 'needs-download', 'error'].includes(phase.current)) return
     invalidate()
     const id = generation.current
     const scope = latest.current.scopeKey
-    const abort = new AbortController()
-    controller.current = abort
-    ownsEngine.current = true
     setError(null)
-    setProgress(0)
     transition('downloading')
     try {
-      await prepareVoiceModel((value) => {
-        if (valid(id, scope) && Number.isFinite(value)) setProgress(Math.min(1, Math.max(0, value)))
-      }, abort.signal)
-      if (!valid(id, scope)) return
-      await prepareCaptureWorklet(abort.signal)
+      await downloadVoicePack()
       if (!valid(id, scope)) return
       ready.current = true
       setModelReady(true)
-      setProgress(1)
-      controller.current = null
-      ownsEngine.current = false
       transition('idle')
-      window.dispatchEvent(new CustomEvent('chevoink:voice-pack-changed', { detail: modelEventSource.current }))
     } catch (cause) {
-      if (valid(id, scope)) fail(cause)
+      if (!valid(id, scope)) return
+      if (cause instanceof DOMException && cause.name === 'AbortError') resetInput()
+      else fail(cause)
     }
-  }, [fail, invalidate, transition, valid])
+  }, [fail, invalidate, resetInput, transition, valid])
 
   const deleteModel = useCallback(async () => {
-    if (latest.current.disabled || phase.current === 'deleting') return
+    if (latest.current.disabled || phase.current === 'deleting' || voicePackProgress() !== null) return
     invalidate()
     const id = generation.current
     const scope = latest.current.scopeKey
@@ -244,12 +221,10 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
     setError(null)
     transition('deleting')
     try {
-      disposeVoiceEngine()
       await deleteVoiceModel()
+      window.dispatchEvent(new CustomEvent(VOICE_PACK_CHANGED, { detail: modelEventSource.current }))
       if (!valid(id, scope)) return
-      setProgress(0)
       transition('needs-download')
-      window.dispatchEvent(new CustomEvent('chevoink:voice-pack-changed', { detail: modelEventSource.current }))
     } catch (cause) {
       if (valid(id, scope)) fail(cause)
     }
@@ -281,12 +256,9 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
       capture.current = null
       setLevels(EMPTY_LEVELS)
       if (!samples.length) throw new Error('没有录到音频，请重新录制。')
-      ownsEngine.current = true
       const text = await transcribeAudio(samples, sampleRate, controller.current?.signal)
       if (!valid(id, scope) || document.hidden) return
       controller.current = null
-      disposeVoiceEngine()
-      ownsEngine.current = false
       transition('idle')
       setElapsed(0)
       if (text.trim()) latest.current.onTranscript(text.trim())
@@ -301,6 +273,7 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
 
   const start = useCallback(async () => {
     if (latest.current.disabled || document.hidden || !['checking', 'idle', 'error', 'needs-download'].includes(phase.current)) return
+    if (voicePackProgress() !== null) { await download(); return }
     if (!ready.current) { setError(null); transition('needs-download'); return }
     invalidate()
     const id = generation.current
@@ -321,7 +294,9 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
       // resume must be initiated during the original click, before awaiting permission (iOS).
       await Promise.all([
         context.resume(),
-        context.audioWorklet.addModule(CAPTURE_WORKLET_URL, { credentials: 'same-origin' }),
+        context.audioWorklet.addModule(CAPTURE_WORKLET_URL, { credentials: 'same-origin' }).catch(() => {
+          throw new Error('录音组件加载失败，请联网后重试。')
+        }),
         navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }, video: false }).then((stream) => {
           if (!valid(id, scope)) { stream.getTracks().forEach((track) => track.stop()); return }
           recording.stream = stream
@@ -373,7 +348,11 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
     } catch (cause) {
       if (valid(id, scope)) fail(cause)
     }
-  }, [cancel, fail, invalidate, transition, valid])
+  }, [cancel, download, fail, invalidate, transition, valid])
 
-  return { state: status, status, active: status !== 'idle', error, progress, elapsed, levels, modelReady, disabled: options.disabled, start, stop, cancel, download, removeModel: deleteModel, deleteModel }
+  return {
+    state: status, status, active: status !== 'idle', error, progress: packProgress ?? (modelReady ? 1 : 0), packProgress,
+    elapsed, levels, modelReady, disabled: options.disabled, start, stop, cancel, download,
+    cancelDownload: cancelVoicePackDownload, removeModel: deleteModel, deleteModel,
+  }
 }

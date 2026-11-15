@@ -13,10 +13,10 @@ const asyncNoop = async () => undefined
 function controller(state: VoiceInputStatus): VoiceInputController {
   return {
     state, status: state, active: state !== 'idle', modelReady: state !== 'needs-download', disabled: false,
-    error: null, progress: 0.42, elapsed: 12,
+    error: null, progress: 0.42, packProgress: state === 'downloading' ? 0.42 : null, elapsed: 12,
     // Fixed synthetic amplitudes for layout QA, not microphone measurements.
     levels: [0, 0.1, 0.2, 0.4, 0.2, 0.1, 0, 0.1, 0.3, 0.8, 0.6, 0.2, 0.4, 0.7, 0.4, 0.2, 0, 0.2, 0.5, 0.8, 0.6, 0.2, 0.1, 0, 0.2, 0.5, 0.3, 0.1],
-    start: asyncNoop, stop: asyncNoop, cancel: noop, download: asyncNoop, removeModel: asyncNoop, deleteModel: asyncNoop,
+    start: asyncNoop, stop: asyncNoop, cancel: noop, download: asyncNoop, cancelDownload: noop, removeModel: asyncNoop, deleteModel: asyncNoop,
   }
 }
 

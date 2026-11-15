@@ -8,7 +8,6 @@ type NativeSpeech = {
   deleteModel(): Promise<{ ready: boolean }>;
   addListener(event: 'progress', listener: (event: { progress: number }) => void): Promise<Listener>;
 };
-let plugin: NativeSpeech | undefined;
 let detection: Promise<NativeSpeech | undefined> | undefined;
 
 export function getNativeSpeech(): Promise<NativeSpeech | undefined> {
@@ -18,7 +17,7 @@ export function getNativeSpeech(): Promise<NativeSpeech | undefined> {
     // Capacitor's Proxy synthesizes a function for EVERY unknown property, including
     // `then`. Resolving that proxy through a Promise invokes a nonexistent native
     // then() method and never settles. Return an explicit non-thenable facade.
-    plugin = {
+    return {
       status: () => proxy.status(),
       download: () => proxy.download(),
       transcribe: options => proxy.transcribe(options),
@@ -26,12 +25,9 @@ export function getNativeSpeech(): Promise<NativeSpeech | undefined> {
       deleteModel: () => proxy.deleteModel(),
       addListener: (event, listener) => proxy.addListener(event, listener),
     };
-    return plugin;
   });
   return detection;
 }
-
-export function cancelNativeSpeech(): void { void plugin?.cancel().catch(() => {}); }
 
 export async function nativeOperation<T>(native: NativeSpeech, action: () => Promise<T>, signal?: AbortSignal, timeoutMs = 180_000, cancelOnTimeout = true): Promise<T> {
   if (signal?.aborted) throw new DOMException('语音操作已取消', 'AbortError');

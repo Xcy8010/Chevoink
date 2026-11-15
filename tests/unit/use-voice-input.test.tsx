@@ -238,7 +238,7 @@ describe('useVoiceInput local PCM lifecycle', () => {
     expect(tracks[0].stop).toHaveBeenCalledOnce()
   })
 
-  it.each(['cancel', 'scope', 'disabled', 'unmount'] as const)('invalidates old transcriptions on %s and aborts owned engine', async (action) => {
+  it.each(['cancel', 'scope', 'disabled', 'unmount'] as const)('invalidates old transcriptions on %s and aborts their signal', async (action) => {
     const pending = deferred<string>()
     vi.mocked(engine.transcribeAudio).mockReturnValue(pending.promise)
     const { result, onTranscript, rerender, unmount } = await record()
@@ -250,7 +250,6 @@ describe('useVoiceInput local PCM lifecycle', () => {
     if (action === 'disabled') rerender({ scopeKey: 'user:novel:task1', disabled: true })
     if (action === 'unmount') unmount()
     expect(signal.aborted).toBe(true)
-    expect(engine.disposeVoiceEngine).toHaveBeenCalled()
     await act(async () => { pending.resolve('迟到旧结果'); await stopping })
     expect(onTranscript).not.toHaveBeenCalled()
   })
@@ -262,6 +261,7 @@ describe('useVoiceInput local PCM lifecycle', () => {
     const { result } = await setup()
     let downloading!: Promise<void>
     act(() => { downloading = result.current.download() })
+    await waitFor(() => expect(engine.prepareVoiceModel).toHaveBeenCalledOnce())
     const [progress, signal] = vi.mocked(engine.prepareVoiceModel).mock.calls[0]
     act(() => progress(0.5))
     expect(result.current.progress).toBe(0.5)
@@ -337,14 +337,44 @@ describe('useVoiceInput local PCM lifecycle', () => {
     expect(onTranscript).not.toHaveBeenCalled()
   })
 
-  it('requires repair when worklet HTTP cache was evicted, without downloading on mount', async () => {
-    vi.mocked(fetch).mockResolvedValue(new Response('', { status: 504 }))
-    const { result } = await setup()
-    expect(fetch).toHaveBeenCalledWith('/voice-capture-worklet.js?v=1', expect.objectContaining({ cache: 'only-if-cached', mode: 'same-origin' }))
-    expect(result.current.modelReady).toBe(false)
+  it('reuses the installed pack across A→B→A even when the worklet HTTP cache is unavailable', async () => {
+    vi.mocked(fetch).mockRejectedValue(new TypeError('HTTP cache unavailable'))
+    const { result, rerender } = await setup()
+    for (const scopeKey of ['user:novel:task2', 'user:novel:task1']) {
+      rerender({ scopeKey, disabled: false })
+      await waitFor(() => expect(result.current.state).toBe('idle'))
+      expect(result.current.modelReady).toBe(true)
+    }
+    expect(fetch).not.toHaveBeenCalled()
     expect(engine.prepareVoiceModel).not.toHaveBeenCalled()
+    addModule.mockRejectedValueOnce(new Error('worklet unavailable'))
     await act(async () => result.current.start())
-    expect(result.current.state).toBe('needs-download')
+    expect(result.current.error).toContain('录音组件加载失败')
+    expect(result.current.modelReady).toBe(true)
+  })
+
+  it('continues one download after a task unmount and lets the next task join it', async () => {
+    vi.mocked(engine.getVoiceModelStatus).mockResolvedValue(false)
+    const pending = deferred<void>()
+    vi.mocked(engine.prepareVoiceModel).mockReturnValue(pending.promise)
+    const first = await setup()
+    let firstDownload!: Promise<void>
+    act(() => { firstDownload = first.result.current.download() })
+    await waitFor(() => expect(engine.prepareVoiceModel).toHaveBeenCalledOnce())
+    const [onProgress, signal] = vi.mocked(engine.prepareVoiceModel).mock.calls[0]
+    first.unmount()
+    expect(signal?.aborted).toBe(false)
+    const next = renderHook(() => useVoiceInput({ scopeKey: 'user:novel:task2', disabled: false, onTranscript: vi.fn() }))
+    let joined!: Promise<void>
+    act(() => { joined = next.result.current.start() })
+    act(() => onProgress(0.6))
+    expect(next.result.current.state).toBe('downloading')
+    expect(next.result.current.progress).toBe(0.6)
+    expect(engine.prepareVoiceModel).toHaveBeenCalledOnce()
+    await act(async () => { pending.resolve(); await Promise.all([firstDownload, joined]) })
+    expect(next.result.current.modelReady).toBe(true)
+    expect(next.result.current.state).toBe('idle')
+    expect(fetch).toHaveBeenCalledOnce()
     expect(permission).not.toHaveBeenCalled()
   })
 

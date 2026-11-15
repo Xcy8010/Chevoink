@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resampleVoicePcm } from '../src/features/studio/agent/voice/voice-pcm';
 import { VOICE_MANIFEST, VOICE_MODEL_DOWNLOAD_BYTES } from '../src/features/studio/agent/voice/voice-manifest';
+import { voiceAssetUrl, voicePackFingerprint } from '../src/features/studio/agent/voice/voice-cache';
 import { deleteVoiceModel, disposeVoiceEngine, getVoiceModelStatus, prepareVoiceModel, transcribeAudio } from '../src/features/studio/agent/voice/speech-engine';
 vi.mock('../src/features/studio/agent/voice/native-speech', () => ({
-  getNativeSpeech: vi.fn(async () => undefined), cancelNativeSpeech: vi.fn(), nativeOperation: vi.fn(), prepareNativeSpeech: vi.fn(), transcribeNativeSpeech: vi.fn(),
+  getNativeSpeech: vi.fn(async () => undefined), nativeOperation: vi.fn(), prepareNativeSpeech: vi.fn(), transcribeNativeSpeech: vi.fn(),
 }));
 
 describe('voice PCM resampling', () => {
@@ -36,27 +37,30 @@ class WorkerMock {
   terminate = vi.fn();
   postMessage = vi.fn();
   constructor() { WorkerMock.instances.push(this); }
-  reply(value: unknown) { const id = this.postMessage.mock.calls.at(-1)![0].id; this.onmessage?.({ data: { id, value } }); }
+  reply(value: unknown) { this.onmessage?.({ data: { value } }); }
 }
 describe('voice main-thread contract', () => {
   beforeEach(() => {
     vi.stubGlobal('Worker', WorkerMock);
+    vi.stubGlobal('location', new URL('https://chevoink.test'));
     vi.stubGlobal('isSecureContext', true);
-    vi.stubGlobal('caches', { keys: vi.fn(async () => ['chevoink-voice-old', 'unrelated-cache']), delete: vi.fn(async () => true) });
+    vi.stubGlobal('caches', {
+      has: vi.fn(async () => false),
+      open: vi.fn(),
+      keys: vi.fn(async () => ['chevoink-voice-old', 'unrelated-cache']),
+      delete: vi.fn(async () => true),
+    });
     WorkerMock.instances = [];
   });
   afterEach(() => { disposeVoiceEngine(); vi.unstubAllGlobals(); vi.useRealTimers(); });
-  it('a metadata timeout does not cancel an in-flight transcription', async () => {
-    vi.useFakeTimers();
+  it('checks metadata without queueing behind an in-flight transcription', async () => {
     const transcription = transcribeAudio(new Float32Array([0.25]), 16000);
     await Promise.resolve();
     const worker = WorkerMock.instances[0];
-    const transcriptionId = worker.postMessage.mock.calls[0][0].id;
-    const status = getVoiceModelStatus();
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(await status).toBe(false);
+    expect(await getVoiceModelStatus()).toBe(false);
+    expect(WorkerMock.instances).toHaveLength(1);
     expect(worker.terminate).not.toHaveBeenCalled();
-    worker.onmessage?.({ data: { id: transcriptionId, value: '你好' } });
+    worker.reply('你好');
     expect(await transcription).toBe('你好');
   });
   it('pins all sizes/hashes and total download', () => {
@@ -69,9 +73,17 @@ describe('voice main-thread contract', () => {
     }
     for (const file of VOICE_MANIFEST.files) expect(file.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
-  it('returns status from worker', async () => {
-    const status = getVoiceModelStatus(); await Promise.resolve(); WorkerMock.instances[0].reply(true);
-    expect(await status).toBe(true);
+  it('reads the verified installation marker and metadata without a worker', async () => {
+    const files = new Map(VOICE_MANIFEST.files.map(file => [voiceAssetUrl(file.name), new Response(null, {
+      headers: { 'Content-Length': String(file.bytes), 'X-Voice-Sha256': file.sha256 },
+    })]));
+    files.set(voiceAssetUrl('.verified'), new Response(voicePackFingerprint));
+    vi.mocked(caches.has).mockResolvedValue(true);
+    vi.mocked(caches.open).mockResolvedValue({ match: async (url: string) => files.get(url)?.clone() } as Cache);
+    expect(await getVoiceModelStatus()).toBe(true);
+    files.delete(voiceAssetUrl(VOICE_MANIFEST.files.at(-1)!.name));
+    expect(await getVoiceModelStatus()).toBe(false);
+    expect(WorkerMock.instances).toHaveLength(0);
   });
   it('does not detach caller buffer', async () => {
     const samples = new Float32Array([0.25]);
@@ -98,10 +110,13 @@ describe('voice main-thread contract', () => {
     expect(WorkerMock.instances).toHaveLength(0);
   });
   it('deletion terminates old worker and preserves unrelated caches', async () => {
-    const status = getVoiceModelStatus(); await Promise.resolve(); WorkerMock.instances[0].reply(true); await status;
+    const pending = transcribeAudio(new Float32Array([0.25]), 16000);
+    const cancelled = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await Promise.resolve();
     const deletion = deleteVoiceModel();
     expect(WorkerMock.instances[0].terminate).toHaveBeenCalled();
     await deletion;
+    await cancelled;
     expect(caches.delete).toHaveBeenCalledWith('chevoink-voice-old');
     expect(caches.delete).not.toHaveBeenCalledWith('unrelated-cache');
   });
