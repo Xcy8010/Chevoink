@@ -734,8 +734,8 @@ export default function SettingsPage() {
     <section id="settings-policies">
       <SectionTitle>协议与政策</SectionTitle>
       <SettingsGroup>
-        <SettingsRow icon={<FileText className="h-[18px] w-[18px]" />} title="用户协议" chevron="right" onClick={() => navigate('/legal?kind=terms')} />
-        <SettingsRow icon={<ShieldCheck className="h-[18px] w-[18px]" />} title="隐私政策" chevron="right" onClick={() => navigate('/legal?kind=privacy')} />
+        <SettingsRow icon={<FileText className="h-[18px] w-[18px]" />} title="用户协议" chevron="right" onClick={() => navigate('/legal?kind=terms', { state: { fromSettings: true } })} />
+        <SettingsRow icon={<ShieldCheck className="h-[18px] w-[18px]" />} title="隐私政策" chevron="right" onClick={() => navigate('/legal?kind=privacy', { state: { fromSettings: true } })} />
       </SettingsGroup>
     </section>
   )

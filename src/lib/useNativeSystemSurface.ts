@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
-import { readNativeSystemSurface, registerNativeSystemSurface, restoreNativeSystemBarsToTheme } from './native-app'
+import { isNativeApp, readNativeSystemSurface, registerNativeSystemSurface, restoreNativeSystemBarsToTheme } from './native-app'
 
-/** Attach to the actual mobile header. Hidden desktop headers yield to the root theme. */
-export function useNativeSystemSurface<T extends HTMLElement>() {
+/** Attach to the visible surface that meets the requested system bar. */
+export function useNativeSystemSurface<T extends HTMLElement>(edge: 'top' | 'bottom' = 'top') {
   const [element, setElement] = useState<T | null>(null)
   const ref = useCallback((node: T | null) => setElement(node), [])
   useEffect(() => {
-    if (!element) return
+    if (!element || (edge === 'bottom' && !isNativeApp())) return
     const release = registerNativeSystemSurface(() => (
       element.isConnected && element.getClientRects().length > 0 ? readNativeSystemSurface(element) : null
-    ))
+    ), edge)
     let frame: number | undefined
     let forceNative = false
     const refresh = (force = false) => {
@@ -44,6 +44,6 @@ export function useNativeSystemSurface<T extends HTMLElement>() {
       if (frame !== undefined) cancelAnimationFrame(frame)
       release()
     }
-  }, [element])
+  }, [edge, element])
   return ref
 }

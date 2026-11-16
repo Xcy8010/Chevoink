@@ -48,6 +48,7 @@ import PublishNovelDialog from './components/PublishNovelDialog'
 import StudioCommandBar from './components/StudioCommandBar'
 import StudioMobileAccountCard from './components/StudioMobileAccountCard'
 import StudioMobileHeader from './components/StudioMobileHeader'
+import { useNativeSystemSurface } from '@/lib/useNativeSystemSurface'
 import StudioMobileNavigation from './components/StudioMobileNavigation'
 import StudioMobileMenu from './components/StudioMobileMenu'
 import CreateNovelDialog from './components/CreateNovelDialog'
@@ -205,6 +206,7 @@ export default function StudioWorkspace() {
   const [novelLastSavedAt, setNovelLastSavedAt] = useState<string | null>(null)
   const [novelMessage, setNovelMessage] = useState('作品设置支持自动保存，也可以手动点击保存。')
   const [mobileView, setMobileView] = useState<MobileView>('assistant')
+  const mobileBottomSurfaceRef = useNativeSystemSurface<HTMLDivElement>('bottom')
   const mobilePrimaryViewRef = useRef<'assistant' | 'editor'>('assistant')
   if (mobileView === 'assistant' || mobileView === 'editor') mobilePrimaryViewRef.current = mobileView
   const mobileBackView = mobileView === 'chapters' ? mobilePrimaryViewRef.current : 'assistant'
@@ -4133,7 +4135,7 @@ export default function StudioWorkspace() {
               if (view === 'editor' || view === 'chapters') setWorkspacePerspective('ide')
             }}
           />
-          <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col pb-[var(--safe-bottom,0px)] pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]">
+          <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]">
 
             {mobileView === 'editor' ? (
               <div className="flex min-h-0 flex-1 flex-col">
@@ -4237,6 +4239,12 @@ export default function StudioWorkspace() {
             ) : null}
           </div>
 
+          <div
+            aria-hidden="true"
+            ref={mobileBottomSurfaceRef}
+            className={cn('h-[var(--safe-bottom,0px)] shrink-0',
+              mobileView === 'assistant' ? 'bg-[var(--studio-composer-bg)]' : 'bg-[var(--app-bg)]')}
+          />
           <StudioMobileNavigation
             open={mobileMoreOpen}
             onClose={() => setMobileMoreOpen(false)}

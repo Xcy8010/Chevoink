@@ -1537,7 +1537,7 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
     provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
     weightedRoute: modelRuntime.weightedRoute, signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route => {
     return generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, signal: route.signal, modelRuntime: { ...modelRuntime,
-      physicalRouteId: route.physicalRouteId, provider: route.provider ?? modelRuntime.provider, modelName: route.model ?? modelRuntime.modelName,
+      weightedRoute: route.weightedRoute, physicalRouteId: route.physicalRouteId, provider: route.provider ?? modelRuntime.provider, modelName: route.model ?? modelRuntime.modelName,
       baseUrl: route.providerBaseUrl ?? modelRuntime.baseUrl, apiKey: route.providerApiKey ?? modelRuntime.apiKey } })
   })
 }

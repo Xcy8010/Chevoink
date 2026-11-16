@@ -12,8 +12,8 @@ const navigation = vi.fn(async () => {})
 const enter = vi.fn(async () => ({ top: 40, bottom: 0, immersive: true }))
 const exit = vi.fn(async () => ({ top: 0, bottom: 0, immersive: false }))
 
-function Surface({ background = '#ffffff', hidden = false, text = '工作台' }: { background?: string; hidden?: boolean; text?: string }) {
-  const ref = useNativeSystemSurface<HTMLElement>()
+function Surface({ background = '#ffffff', hidden = false, text = '工作台', edge = 'top' }: { background?: string; hidden?: boolean; text?: string; edge?: 'top' | 'bottom' }) {
+  const ref = useNativeSystemSurface<HTMLElement>(edge)
   return <header ref={ref} style={{ backgroundColor: background, display: hidden ? 'none' : 'block' }}>{text}</header>
 }
 
@@ -69,6 +69,17 @@ describe('current system-bar surface ownership', () => {
     await waitFor(() => expect(color).toHaveBeenLastCalledWith({ color: '#ffffff' }))
     expect(style).toHaveBeenLastCalledWith({ style: 'LIGHT' })
     expect(appearance).toHaveBeenCalledOnce()
+  })
+
+  it('sends the visible lower surface independently and releases its color when hidden', async () => {
+    const appearance = vi.fn(async () => {})
+    Object.assign((window as unknown as { Capacitor: { Plugins: { ImmersiveMode: object } } }).Capacitor.Plugins.ImmersiveMode, { setSystemBarAppearance: appearance })
+    const view = render(<><Surface /><Surface edge="bottom" background="#161a21" /></>)
+    await waitFor(() => expect(appearance).toHaveBeenLastCalledWith({
+      color: '#ffffff', dark: false, navigationColor: '#161a21', navigationDark: true,
+    }))
+    view.rerender(<><Surface /><Surface edge="bottom" background="#161a21" hidden /></>)
+    await waitFor(() => expect(appearance).toHaveBeenLastCalledWith({ color: '#ffffff', dark: false }))
   })
   it('uses actual studio white/black rather than the different root palette and restores on leaving', async () => {
     const view = render(<Surface />)

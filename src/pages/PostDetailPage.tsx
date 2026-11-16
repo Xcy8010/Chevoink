@@ -13,6 +13,7 @@ import { formatCompactCount, formatRelativeTime } from '@/features/community/uti
 import CommentList from '@/features/community/components/CommentList'
 import PostCard from '@/features/community/components/PostCard'
 import { useDeviceType } from '@/hooks/useDeviceType'
+import { useNativeSystemSurface } from '@/lib/useNativeSystemSurface'
 
 /**
  * 帖子详情页：正文平铺为页面主体，评论线程与输入框保持单层结构，
@@ -29,6 +30,7 @@ export default function PostDetailPage() {
   // 手机端回复目标：非空时底部评论栏切换为「回复 @xx」模式（桌面端仍用评论列表内联回复框）
   const [replyTarget, setReplyTarget] = useState<{ id: string; nickname: string } | null>(null)
   const mobileComposerRef = useRef<HTMLTextAreaElement>(null)
+  const bottomSurfaceRef = useNativeSystemSurface<HTMLDivElement>('bottom')
   const isDesktop = useDeviceType() === 'desktop'
 
   const detailQuery = useQuery({
@@ -225,7 +227,7 @@ export default function PostDetailPage() {
           不依赖滚动 JS）；键盘收起时避开底部导航悬浮在列表上方。
           形态为横向胶囊输入框 + 发表按钮，无背景卡片层；
           data-kb-reveal="off" 让 reveal 补滚跳过它（齐平贴底会被误判为遮挡） */}
-      <div className="post-composer-bar sticky z-20 mt-4 px-4 pb-[calc(10px+var(--safe-bottom))] pt-2 xl:hidden">
+      <div ref={bottomSurfaceRef} className="post-composer-bar sticky z-20 mt-4 bg-[var(--app-bg)] px-4 pb-[calc(10px+var(--safe-bottom))] pt-2 xl:hidden">
         {replyTarget ? (
           <div className="mb-2 flex w-fit max-w-full items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-solid)] px-3 py-1 text-xs text-[var(--text-secondary)] shadow-[0_2px_8px_rgba(0,0,0,0.12)]">
             <span className="truncate">

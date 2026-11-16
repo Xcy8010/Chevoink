@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { modelRoutesInputSchema, type ModelRouteInput } from '../../shared/contracts/model-routes.js'
+import type { WeightedRouteSelection } from '../../shared/contracts/model-weighted-routes.js'
 import { encryptSecret, decryptSecret } from './secret-box.js'
 import { DataAccessError, prisma } from './prisma.js'
 import type { ChatWithToolsParams } from './ai-service.js'
 import { env } from '../config/env.js'
 import { readModelRoutes } from './model-route-config.js'
+import { readWeightedRoutes } from './model-weighted-config.js'
 
 export { readModelRoutes } from './model-route-config.js'
 export function presentModelRoutes(metadata: unknown) {
@@ -36,7 +38,7 @@ export class ModelRouteRejected extends DataAccessError {
   constructor(readonly upstreamStatus: number, retryAfter?: string | null, message = '模型服务暂时不可用。',
     readonly modelAccessDenied = false) {
     super(502, upstreamStatus === 504 ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR', upstreamStatus === 429
-      ? '模型服务触发了每分钟请求或 Token 限制。系统将等待限流窗口后安全重试一次。'
+      ? '当前模型过于繁忙，请稍后重试或切换别的模型'
       : message)
     const delay = retryAfter ? /^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now() : 0
     // 没有 Retry-After 时，TPM/RPM 的滑动窗口通常至少要等一分钟；30 秒会在
@@ -54,9 +56,9 @@ export const routeRejectionMayRetry = (status: number, prompt: number | undefine
   routeRetryableStatus(status, modelAccessDenied) && (![403, 404].includes(status) || Boolean(physicalRouteId))
   && (prompt == null && completion == null || prompt === 0 && completion === 0)
 const cursors = new Map<string, number>()
-const cooldowns = new Map<string, number>()
+const cooldowns = new Map<string, { until: number; status: number }>()
 const exactRouteCooldowns = new Map<string, number>()
-type Route = { id: string; provider: string; modelName: string; baseUrl: string; apiKey: string }
+type Route = { id: string; provider: string; modelName: string; baseUrl: string; apiKey: string; weightedRoute?: WeightedRouteSelection }
 
 function waitForRetry(signal: AbortSignal, delayMs: number): Promise<void> {
   signal.throwIfAborted()
@@ -112,6 +114,7 @@ export async function invokeExactRouteWithRateLimitRetry<T>(params: ChatWithTool
     } catch (retryError) {
       if (retryError instanceof ModelRouteRejected && retryError.upstreamStatus === 429) {
         exactRouteCooldowns.set(key, Date.now() + retryError.cooldownMs)
+        if (params.usageLog.modelTier === 'lite') throw retryError
         throw new DataAccessError(502, 'AI_PROVIDER_ERROR', '模型服务仍受每分钟请求或 Token 限制。系统已等待后安全重试一次；未执行工具或重复扣费。请约一分钟后继续，或提高该供应商账号的 TPM/RPM 限额。')
       }
       throw retryError
@@ -124,41 +127,66 @@ export async function invokeExactRouteWithRateLimitRetry<T>(params: ChatWithTool
 export async function withModelRoutePool<T>(params: ChatWithToolsParams, invoke: (params: ChatWithToolsParams) => Promise<T>): Promise<T> {
   const tier = params.usageLog.modelTier
   if (!tier || params.durableExecution) return invoke(params)
-  if (params.weightedRoute?.source === 'candidate') return invokeExactRouteWithRateLimitRetry(params, invoke)
+  const lite = tier === 'lite'
+  const selectedCandidateId = params.weightedRoute?.source === 'candidate' ? params.weightedRoute.candidateId : undefined
+  if (selectedCandidateId && !lite) return invokeExactRouteWithRateLimitRetry(params, invoke)
   // A confirmed no-charge 429 can retry once on the exact same route, including
   // single-route built-ins and explicitly bound auxiliary models/accounts.
   if (tier === 'custom') return invokeExactRouteWithRateLimitRetry(params, invoke)
   const config = await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier, enabled: true } })
   if (!config) return invokeExactRouteWithRateLimitRetry(params, invoke)
-  const configured = readModelRoutes(config.metadata).filter(route => route.enabled)
-  if (!configured.length) return invokeExactRouteWithRateLimitRetry(params, invoke)
-  const primary = { id: config.id, provider: config.provider, modelName: config.modelName, baseUrl: config.baseUrl ?? env.aiTextBaseUrl, apiKey: config.apiKeyCiphertext ? decryptSecret(config.apiKeyCiphertext) : env.aiTextApiKey }
+  const primary: Route = { id: config.id, provider: config.provider, modelName: config.modelName, baseUrl: config.baseUrl ?? env.aiTextBaseUrl,
+    apiKey: config.apiKeyCiphertext ? decryptSecret(config.apiKeyCiphertext) : env.aiTextApiKey,
+    weightedRoute: params.weightedRoute ? { source: 'primary' } : undefined }
+  const weighted = lite && params.weightedRoute ? readWeightedRoutes(config.metadata) : undefined
+  const weightedCandidates = (weighted?.candidates ?? []).filter(route => route.enabled !== false && route.weight > 0)
+    .map(({ apiKeyCiphertext, ...route }): Route => ({ ...route, apiKey: decryptSecret(apiKeyCiphertext),
+      weightedRoute: { source: 'candidate', candidateId: route.id } }))
+  const selected = selectedCandidateId ? weightedCandidates.find(route => route.id === selectedCandidateId) : primary
   // An auxiliary caller with an explicit different model must not be rerouted by its billing label.
-  if ((params.provider ?? env.aiTextProvider) !== primary.provider || (params.model ?? env.aiTextModel) !== primary.modelName
-    || (params.providerBaseUrl ?? env.aiTextBaseUrl) !== primary.baseUrl || (params.providerApiKey ?? env.aiTextApiKey) !== primary.apiKey) return invokeExactRouteWithRateLimitRetry(params, invoke)
-  const routes: Route[] = [primary, ...configured.map(({ apiKeyCiphertext, ...route }) => ({ ...route, apiKey: decryptSecret(apiKeyCiphertext) }))]
+  if (!selected || (params.provider ?? env.aiTextProvider) !== selected.provider || (params.model ?? env.aiTextModel) !== selected.modelName
+    || (params.providerBaseUrl ?? env.aiTextBaseUrl) !== selected.baseUrl || (params.providerApiKey ?? env.aiTextApiKey) !== selected.apiKey) {
+    return invokeExactRouteWithRateLimitRetry(params, invoke)
+  }
+  const primaryRoutes: Route[] = selectedCandidateId && !weighted?.primaryWeight ? [] : [primary,
+    ...readModelRoutes(config.metadata).filter(route => route.enabled).map(({ apiKeyCiphertext, ...route }) =>
+      ({ ...route, apiKey: decryptSecret(apiKeyCiphertext), weightedRoute: primary.weightedRoute }))]
+  const preferred = selectedCandidateId ? [selected] : primaryRoutes
+  const alternates = weightedCandidates.filter(route => route.id !== selectedCandidateId).concat(selectedCandidateId ? primaryRoutes : [])
+  if (preferred.length + alternates.length === 1) return invokeExactRouteWithRateLimitRetry(params, invoke)
+
   if (cursors.size > 64) cursors.clear()
-  for (const [id, until] of cooldowns) if (until <= Date.now()) cooldowns.delete(id)
+  for (const [id, cooldown] of cooldowns) if (cooldown.until <= Date.now()) cooldowns.delete(id)
   const cursor = cursors.get(tier) ?? 0
-  cursors.set(tier, (cursor + 1) % routes.length)
-  const ordered = routes.map((_, index) => routes[(index + cursor) % routes.length])
+  if (!selectedCandidateId) cursors.set(tier, (cursor + 1) % preferred.length)
+  const ordered = preferred.map((_, index) => preferred[(index + cursor) % preferred.length])
   const ready = ordered.filter(route => !cooldowns.has(route.id))
-  const candidates = (ready.length ? ready : ordered.slice(0, 1)).slice(0, 3)
+  // A weighted choice stays first in normal operation. Only a known 429 (or
+  // its still-active cooldown) admits its alternates or extends the lite pool
+  // beyond the ordinary three attempts.
+  let rateLimited = lite && ready.length === 0 && ordered.some(route => cooldowns.get(route.id)?.status === 429)
+  const initial = ready.length || rateLimited ? ready : ordered.slice(0, 1)
+  const candidates = [...initial, ...alternates.filter(route => !cooldowns.has(route.id))]
   const signal = params.boundedReview ? params.signal ?? new AbortController().signal
     : AbortSignal.any([...(params.signal ? [params.signal] : []), AbortSignal.timeout(360_000)])
-  let failure: unknown
-  for (const route of candidates) {
+  signal.throwIfAborted()
+  let failure: ModelRouteRejected | undefined
+  for (const [index, route] of candidates.entries()) {
+    if (!rateLimited && index >= Math.min(3, initial.length)) break
     signal.throwIfAborted()
     try {
-      return await invoke({ ...params, signal, provider: route.provider, model: route.modelName, providerBaseUrl: route.baseUrl, providerApiKey: route.apiKey, physicalRouteId: route.id })
+      return await invoke({ ...params, signal, provider: route.provider, model: route.modelName, providerBaseUrl: route.baseUrl,
+        providerApiKey: route.apiKey, physicalRouteId: route.id, weightedRoute: route.weightedRoute })
     } catch (error) {
       if (!(error instanceof ModelRouteRejected)
-        || !routeRetryableStatus(error.upstreamStatus, tier === 'lite' && error.modelAccessDenied)
+        || !routeRetryableStatus(error.upstreamStatus, lite && error.modelAccessDenied)
+        || (selectedCandidateId && !rateLimited && error.upstreamStatus !== 429)
         || signal.aborted) throw error
       failure = error
+      if (lite && error.upstreamStatus === 429) rateLimited = true
       if (cooldowns.size > 512) cooldowns.clear()
-      cooldowns.set(route.id, Date.now() + error.cooldownMs)
+      cooldowns.set(route.id, { until: Date.now() + error.cooldownMs, status: error.upstreamStatus })
     }
   }
-  throw failure
+  throw failure ?? new ModelRouteRejected(429)
 }

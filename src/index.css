@@ -8,6 +8,16 @@
 .app-main-content > [data-app-state]:not([data-compact='true']) { flex: 1; min-height: 0; margin-top: 0 !important; }
 
 .app-bottom-nav .app-bottom-link, .app-bottom-nav .app-bottom-create { color: #77818d; transition: color 180ms ease; }
+.app-bottom-nav {
+  --native-system-surface: var(--surface-solid);
+  background: var(--surface-solid);
+}
+@supports (backdrop-filter: blur(1px)) {
+  .app-bottom-nav {
+    background: color-mix(in srgb, var(--surface-solid) 78%, transparent);
+    backdrop-filter: blur(24px) saturate(135%);
+  }
+}
 .app-bottom-nav .app-bottom-link.is-selected { color: #15212d; }
 .app-bottom-link.is-selected svg { stroke-width: 2.4; }
 html.dark .app-bottom-nav .app-bottom-link, html.dark .app-bottom-nav .app-bottom-create { color: #88909c; }

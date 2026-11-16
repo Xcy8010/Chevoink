@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import AppShell from '../../src/components/layout/AppShell'
+import LegalPage from '../../src/features/site-content/LegalPage'
 import FeedbackDialog from '../../src/features/feedback/components/FeedbackDialog'
 import { useShellStore } from '../../src/store/useShellStore'
 import type { PublicSiteContent } from '../../shared/contracts/site-content'
@@ -22,9 +23,24 @@ vi.mock('../../src/features/feedback/feedback-media',()=>({
 }))
 function data():PublicSiteContent{return{serverNow:new Date().toISOString(),nextBoundaryAt:null,announcements:[],help:{},legal:{terms:null,privacy:null,registrationAvailable:false},settings:{name:'配置后的站点',logoUrl:'https://example.com/published-logo.png',footer:'Footer',about:'About',docsLabel:'Docs',contact:{label:'Support',url:'https://example.com/contact',details:''},navigation:[{label:'精选分类',url:'/discover'},{label:'官方支持',url:'https://example.com/support'}]}}}
 function Probe(){const location=useLocation();return <output data-testid="current-route">{location.pathname}</output>}
-function mount(content?: React.ReactNode){const client=new QueryClient({defaultOptions:{queries:{retry:false,gcTime:Infinity}}});render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/']}><AppShell title="首页" description="页面说明"><Probe/><SiteInformation/>{content}</AppShell></MemoryRouter></QueryClientProvider>);return client}
+function mount(content?: React.ReactNode, entries: NonNullable<React.ComponentProps<typeof MemoryRouter>['initialEntries']> = ['/']){const client=new QueryClient({defaultOptions:{queries:{retry:false,gcTime:Infinity}}});render(<QueryClientProvider client={client}><MemoryRouter initialEntries={entries}><AppShell title="首页" description="页面说明"><Probe/><SiteInformation/>{content}</AppShell></MemoryRouter></QueryClientProvider>);return client}
 beforeEach(()=>{vi.clearAllMocks();useShellStore.setState({authStatus:'guest',sessionUser:null,quickCreateOpen:false});vi.stubGlobal('ResizeObserver',class{observe(){}disconnect(){}});vi.spyOn(window,'scrollTo').mockImplementation(()=>{});Object.defineProperty(HTMLElement.prototype,'scrollTo',{configurable:true,value:vi.fn()});mocks.request.mockResolvedValue(data())})
 afterEach(()=>{cleanup();vi.restoreAllMocks();vi.unstubAllGlobals()})
+
+it('hides the mobile bottom bar and its reserved space on either policy, returning to settings or the public home', async () => {
+  mount(<LegalPage />, ['/settings', { pathname: '/legal', search: '?kind=privacy', state: { fromSettings: true } }])
+  expect(screen.queryByRole('heading', { name: '首页' })).toBeNull()
+  expect(document.querySelector('.app-bottom-nav')?.classList.contains('hidden')).toBe(true)
+  expect(document.querySelector('.app-main-content')?.classList.contains('mobile:pb-[calc(24px+var(--safe-bottom))]')).toBe(true)
+  expect(await screen.findByRole('heading', { name: '隐私政策' })).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '返回' }))
+  expect(screen.getByTestId('current-route').textContent).toBe('/settings')
+  cleanup()
+  mount(<LegalPage />, ['/legal?kind=terms'])
+  expect(await screen.findByRole('heading', { name: '用户协议' })).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '返回' }))
+  expect(screen.getByTestId('current-route').textContent).toBe('/')
+})
 it('renders published identity and safe configured desktop links before search without a mobile menu', async () => {
   mount()
   await screen.findByRole('img', {name: '配置后的站点 Logo'})

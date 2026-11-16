@@ -18,6 +18,7 @@ import { getInteractionBadges, listConversations } from '@/features/community/ap
 import GlobalSearchBox from '@/features/search/GlobalSearchBox'
 import { enterImmersiveFullscreen } from '@/lib/immersive-fullscreen'
 import { isNativeApp } from '@/lib/native-app'
+import { useNativeSystemSurface } from '@/lib/useNativeSystemSurface'
 import { isWindowsDesktopApp } from '@/lib/desktop-app'
 import { cn } from '@/lib/utils'
 import { useDeviceType } from '@/hooks/useDeviceType'
@@ -87,10 +88,12 @@ export default function AppShell({ title, description, children }: AppShellProps
   const isProfileRoute = location.pathname === '/me'
   // 设置页改用页面内返回按钮（与帖子详情同款），壳层大标题一并隐藏
   const isSettingsRoute = location.pathname === '/settings'
+  const isLegalRoute = /^\/legal\/?$/.test(location.pathname)
   const isAuthRoute = location.pathname === '/login' || location.pathname === '/register'
   const isAuthenticated = authStatus === 'authenticated' && !!sessionUser
   const accountRoute = authStatus === 'guest' ? '/login?redirect=%2Fme' : '/me'
   const mainScrollRef = useRef<HTMLDivElement | null>(null)
+  const bottomNavSurfaceRef = useNativeSystemSurface<HTMLElement>('bottom')
   // 各路由离开时的滚动位置：目前仅社区页返回时恢复上次浏览位置，其余页面仍回顶
   const scrollPositionsRef = useRef(new Map<string, number>())
   const queryClient = useQueryClient()
@@ -723,11 +726,12 @@ export default function AppShell({ title, description, children }: AppShellProps
                 // 作品详情页手机端底栏已隐藏，底部留白交给页面自己的贴底操作栏控制
                 isNovelDetailRoute && 'mobile:pb-4',
                 // 帖子详情/设置/关注粉丝/获赞明细：底栏隐藏后不再为它预留 88px 底部占位
-                (isPostDetailRoute || isSettingsRoute || isMeListRoute) && 'mobile:pb-6',
+                (isSettingsRoute || isMeListRoute || isLegalRoute) && 'mobile:pb-[calc(24px+var(--safe-bottom))]',
+                isPostDetailRoute && 'mobile:pb-0',
               )}
               style={{ '--app-header-height': `${headerHeight}px` } as CSSProperties}
             >
-              {!isHome ? (
+              {!isHome && !isLegalRoute ? (
                 <section
                   className={cn(
                     'app-route-heading space-y-2 px-0.5 pt-1 md:space-y-3 md:pt-2',
@@ -762,8 +766,9 @@ export default function AppShell({ title, description, children }: AppShellProps
       </div>
 
       <nav
+        ref={bottomNavSurfaceRef}
         className={cn(
-          'app-bottom-nav fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border-subtle)] bg-[color:var(--surface-default)]/96 px-4 pb-[calc(12px+var(--safe-bottom))] pt-3 backdrop-blur md:hidden',
+          'app-bottom-nav fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(12px+var(--safe-bottom))] pt-3 md:hidden',
           isReaderRoute && 'hidden',
           // 创作区有自己的底部导航（对话/写作/章节/更多），隐藏全局底栏
           isStudioRoute && 'hidden',
@@ -774,7 +779,7 @@ export default function AppShell({ title, description, children }: AppShellProps
           // 帖子详情以正文为中心：底部评论栏自带贴底入口，隐藏全局底栏
           isPostDetailRoute && 'hidden',
           // 设置页为全屏表单动线，隐藏底栏
-          isSettingsRoute && 'hidden',
+          (isSettingsRoute || isLegalRoute) && 'hidden',
           // 关注粉丝/获赞明细（互动消息）为紧凑列表页，隐藏底栏
           isMeListRoute && 'hidden',
         )}

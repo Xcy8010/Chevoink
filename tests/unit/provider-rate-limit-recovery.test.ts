@@ -13,7 +13,7 @@ vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) =
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
   resolveTokenPrice: mocks.price }))
 
-import { chatWithTools, generateTextCompletion } from '../../api/lib/ai-service.js'
+import { chatWithTools, generateTextCompletion, type ChatWithToolsParams } from '../../api/lib/ai-service.js'
 import { ModelRouteRejected } from '../../api/lib/model-route-pool.js'
 import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
 
@@ -168,6 +168,92 @@ describe('configured model route HTTP 404 failover', () => {
     expect(rows.get('usage-1')).toMatchObject({ modelName: first.model, billingStatus: 'provider_rejected', reservedCreditMilli: 0, creditChargeMilli: 0 })
     expect(rows.get('usage-2')).toMatchObject({ modelName: second.model, billingStatus: 'settled' })
     expect(mocks.charge).toHaveBeenCalledOnce()
+  })
+})
+
+describe('lightweight Agent route rate limits', () => {
+  const userMessage = { role: 'user' as const, content: 'synthetic' }
+  const request: ChatWithToolsParams = {
+    messages: [userMessage], tools: [], model: runtime.modelName, provider: runtime.provider,
+    providerBaseUrl: runtime.baseUrl, providerApiKey: runtime.apiKey,
+    usageLog: { userId: 'lite-owner', action: 'agentLoopTurn', modelTier: 'lite', multiplierBps: 0 },
+  }
+  const route = (id: string, modelName: string) => ({
+    id, label: modelName, modelName, provider: runtime.provider, baseUrl: `https://${modelName}.test/v1`,
+    apiKeyCiphertext: `key-${modelName}`, enabled: true,
+  })
+  function configurePool(caseId: number) {
+    const routes = Array.from({ length: 4 }, (_, index) =>
+      route(`10000000-0000-4000-8000-0000000000${caseId}${index}`, `lite-backup-${index}`))
+    routes[3].enabled = false
+    mocks.findModel.mockResolvedValue({ id: `lite-primary-${caseId}`, ...runtime, apiKeyCiphertext: runtime.apiKey, metadata: { routes } })
+    return [runtime.modelName, ...routes.filter(candidate => candidate.enabled).map(candidate => candidate.modelName)]
+  }
+
+  it('continues the same turn on the fourth enabled route after three zero-charge 429s', async () => {
+    const enabled = configurePool(1)
+    const fetcher = vi.fn().mockImplementation(async () => rejection())
+      .mockImplementationOnce(async () => rejection())
+      .mockImplementationOnce(async () => rejection({ prompt_tokens: 0, completion_tokens: 0 }))
+      .mockImplementationOnce(async () => rejection())
+      .mockImplementationOnce(async () => response())
+    vi.stubGlobal('fetch', fetcher)
+
+    await expect(chatWithTools(request)).resolves.toMatchObject({ content: 'complete' })
+    expect(fetcher).toHaveBeenCalledTimes(4)
+    const bodies = fetcher.mock.calls.map(([, init]) => JSON.parse(init.body))
+    expect(bodies.map(body => body.model).sort()).toEqual(enabled.sort())
+    for (const body of bodies) expect(body).toEqual({ ...bodies[0], model: body.model })
+    expect([...rows.values()].slice(0, 3).map(row => row.billingStatus)).toEqual(['provider_rejected', 'settled', 'provider_rejected'])
+    for (const row of [...rows.values()].slice(0, 3)) {
+      expect(row).toMatchObject({ creditChargeMilli: 0, reservedCreditMilli: 0, billingSnapshot: rows.get('usage-4')!.billingSnapshot })
+    }
+    expect(rows.get('usage-4')).toMatchObject({ modelName: bodies[3].model, billingStatus: 'settled' })
+    expect(mocks.price).toHaveBeenCalledOnce()
+  })
+
+  it('reports a busy model after all enabled routes reject and skips them during cooldown', async () => {
+    const enabled = configurePool(2)
+    const fetcher = vi.fn(async () => rejection())
+    vi.stubGlobal('fetch', fetcher)
+    const busy = { code: 'AI_PROVIDER_ERROR', message: '当前模型过于繁忙，请稍后重试或切换别的模型' }
+
+    await expect(chatWithTools(request)).rejects.toMatchObject(busy)
+    expect(fetcher).toHaveBeenCalledTimes(enabled.length)
+    await expect(chatWithTools(request)).rejects.toMatchObject(busy)
+    expect(fetcher).toHaveBeenCalledTimes(enabled.length)
+    expect([...rows.values()].every(row => row.billingStatus === 'provider_rejected')).toBe(true)
+    expect(mocks.charge).not.toHaveBeenCalled()
+  })
+
+  it('keeps the original attempt for reconciliation when a 429 only reports partial usage', async () => {
+    configurePool(3)
+    const fetcher = vi.fn(async () => rejection({ prompt_tokens: 3 }))
+    vi.stubGlobal('fetch', fetcher)
+
+    await expect(chatWithTools(request)).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR' })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(rows.get('usage-1')).toMatchObject({ billingStatus: 'pending_usage', requestTokens: 3, responseTokens: null })
+  })
+
+  it('uses the selected weighted line first, then another positive-weight lightweight line after 429', async () => {
+    const selected = { ...route('selected-weighted-lite', 'weighted-selected'), weight: 60 }
+    const backup = { ...route('backup-weighted-lite', 'weighted-backup'), weight: 40 }
+    const disabled = { ...route('disabled-weighted-lite', 'weighted-disabled'), weight: 40, enabled: false }
+    const zero = { ...route('zero-weighted-lite', 'weighted-zero'), weight: 0 }
+    mocks.findModel.mockResolvedValue({ id: 'weighted-lite-primary', ...runtime, apiKeyCiphertext: runtime.apiKey,
+      metadata: { weightedRoutes: { primaryWeight: 0, candidates: [disabled, zero, backup, selected] } } })
+    const fetcher = vi.fn().mockImplementationOnce(async () => rejection()).mockImplementationOnce(async () => response())
+    vi.stubGlobal('fetch', fetcher)
+
+    await expect(chatWithTools({ ...request, model: selected.modelName, providerBaseUrl: selected.baseUrl,
+      providerApiKey: selected.apiKeyCiphertext,
+      weightedRoute: { source: 'candidate', candidateId: selected.id } })).resolves.toMatchObject({ content: 'complete' })
+    expect(fetcher.mock.calls.map(([url, init]) => [url, JSON.parse(init.body).model, init.headers.Authorization])).toEqual(
+      [selected, backup].map(candidate => [`${candidate.baseUrl}/chat/completions`, candidate.modelName, `Bearer ${candidate.apiKeyCiphertext}`]))
+    expect(rows.get('usage-1')).toMatchObject({ modelName: selected.modelName, billingStatus: 'provider_rejected', creditChargeMilli: 0 })
+    expect(rows.get('usage-2')).toMatchObject({ modelName: backup.modelName, billingStatus: 'settled',
+      billingEvidence: { weightedRoute: { source: 'candidate', candidateId: backup.id, model: backup.modelName } } })
   })
 })
 

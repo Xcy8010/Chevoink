@@ -56,7 +56,7 @@ type NavigationBarPlugin = {
  * enter 返回沉浸态下页面需要避让的安全区（CSS px，含挖孔）。
  */
 type ImmersiveModePlugin = {
-  setSystemBarAppearance?: (options: { color: string; dark: boolean }) => Promise<void>
+  setSystemBarAppearance?: (options: { color: string; dark: boolean; navigationColor?: string; navigationDark?: boolean }) => Promise<void>
   enter?: () => Promise<ImmersiveInsets>
   exit?: () => Promise<ImmersiveInsets | void>
   enableEdgeToEdge?: () => Promise<ImmersiveInsets>
@@ -169,16 +169,17 @@ function queueNativeSystemSurface(resolve: () => NativeSystemSurfaceAppearance |
   })
 }
 
-export type NativeSystemSurfaceAppearance = { backgroundColor: string; dark: boolean }
-const systemSurfaces = new Map<symbol, () => NativeSystemSurfaceAppearance | null>()
+export type NativeSystemSurfaceAppearance = { backgroundColor: string; dark: boolean; navigationColor?: string; navigationDark?: boolean }
+type SystemSurfaceEdge = 'top' | 'bottom'
+const systemSurfaces = new Map<symbol, { edge: SystemSurfaceEdge; resolve: () => NativeSystemSurfaceAppearance | null }>()
 let appearanceRevision = 0
 let appliedAppearance = ''
 let appliedBridge: ReturnType<typeof nativePlugins>
 
 /** Register a mounted surface; a hidden surface returns null and yields to the next owner. */
-export function registerNativeSystemSurface(resolve: () => NativeSystemSurfaceAppearance | null): () => void {
+export function registerNativeSystemSurface(resolve: () => NativeSystemSurfaceAppearance | null, edge: SystemSurfaceEdge = 'top'): () => void {
   const owner = Symbol('system-surface')
-  systemSurfaces.set(owner, resolve)
+  systemSurfaces.set(owner, { edge, resolve })
   restoreNativeSystemBarsToTheme()
   return () => {
     systemSurfaces.delete(owner)
@@ -203,17 +204,22 @@ export function normalizeSystemSurfaceColor(value: string): string | null {
 
 export function readNativeSystemSurface(element: HTMLElement): NativeSystemSurfaceAppearance | null {
   const style = getComputedStyle(element)
-  const backgroundColor = normalizeSystemSurfaceColor(style.backgroundColor)
+  const backgroundColor = normalizeSystemSurfaceColor(style.getPropertyValue('--native-system-surface'))
+    ?? normalizeSystemSurfaceColor(style.backgroundColor)
     ?? normalizeSystemSurfaceColor(style.getPropertyValue('--app-bg'))
   return backgroundColor ? { backgroundColor, dark: isDarkColor(backgroundColor) } : null
 }
 
 function currentSystemSurface(): NativeSystemSurfaceAppearance | null {
-  for (const resolve of Array.from(systemSurfaces.values()).reverse()) {
-    const surface = resolve()
-    if (surface) return surface
+  let top: NativeSystemSurfaceAppearance | null = null
+  let bottom: NativeSystemSurfaceAppearance | null = null
+  for (const { edge, resolve } of Array.from(systemSurfaces.values()).reverse()) {
+    if (edge === 'top') top ??= resolve()
+    else bottom ??= resolve()
+    if (top && bottom) break
   }
-  return typeof document === 'undefined' ? null : readNativeSystemSurface(document.documentElement)
+  top ??= typeof document === 'undefined' ? null : readNativeSystemSurface(document.documentElement)
+  return top && bottom ? { ...top, navigationColor: bottom.backgroundColor, navigationDark: bottom.dark } : top
 }
 
 function syncBrowserThemeColor(surface: NativeSystemSurfaceAppearance) {
@@ -229,11 +235,12 @@ async function applyNativeSystemBars(surface: NativeSystemSurfaceAppearance, for
   if (!plugins) return
   const capabilities = [plugins.ImmersiveMode?.setSystemBarAppearance, plugins.StatusBar?.setBackgroundColor, plugins.StatusBar?.setStyle, plugins.NavigationBar?.setNavigationBarColor]
   if (!capabilities.some(method => typeof method === 'function')) return
-  const key = `${surface.backgroundColor}:${surface.dark}:${capabilities.map(method => typeof method === 'function').join(':')}`
+  const key = `${surface.backgroundColor}:${surface.dark}:${surface.navigationColor}:${surface.navigationDark}:${capabilities.map(method => typeof method === 'function').join(':')}`
   if (!force && appliedBridge === plugins && appliedAppearance === key) return
   if (plugins.ImmersiveMode?.setSystemBarAppearance) {
     try {
-      await plugins.ImmersiveMode.setSystemBarAppearance({ color: surface.backgroundColor, dark: surface.dark })
+      const { backgroundColor: color, dark, navigationColor, navigationDark } = surface
+      await plugins.ImmersiveMode.setSystemBarAppearance({ color, dark, ...(navigationColor === undefined ? {} : { navigationColor, navigationDark }) })
       appliedBridge = plugins
       appliedAppearance = key
       return
@@ -242,7 +249,7 @@ async function applyNativeSystemBars(surface: NativeSystemSurfaceAppearance, for
   const writes = [
     () => plugins.StatusBar?.setBackgroundColor?.({ color: surface.backgroundColor }),
     () => plugins.StatusBar?.setStyle?.({ style: surface.dark ? 'DARK' : 'LIGHT' }),
-    () => plugins.NavigationBar?.setNavigationBarColor?.({ color: surface.backgroundColor, darkButtons: !surface.dark }),
+    () => plugins.NavigationBar?.setNavigationBarColor?.({ color: surface.navigationColor ?? surface.backgroundColor, darkButtons: !(surface.navigationDark ?? surface.dark) }),
   ]
   const success = await Promise.all(writes.map(async write => {
     try { await write(); return true } catch { return false }
