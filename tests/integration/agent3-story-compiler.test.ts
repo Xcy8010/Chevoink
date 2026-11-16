@@ -324,7 +324,10 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     await recordStoryCompilerWrite({ userId, novelId, runId, chapterId: repaired.id, chapterOrderIndex: 3, chapterRevision: repaired.revision })
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).stage).toBe('repair')
   })
-  it('blocks unchecked text, reuses the checked terminal, and rechecks a corrected revision on the same compiler', async () => {
+  it.each([
+    ['delivers the checked text by author intent and reuses the terminal', 'delivery'],
+    ['rechecks changed text and a corrected revision on the same compiler', 'revision'],
+  ] as const)('%s', async (_name, scenario) => {
     const sessionId = (await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).sessionId
     const chapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId, orderIndex: 4, orderInVolume: 4,
       title: '第四章 停在门前', content: '她握住门把手，停在询问价格之前。', wordCount: 17, status: 'draft', visibility: 'private' } })
@@ -358,26 +361,28 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       expect(first.chapterRevision).toBe(chapter.revision)
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
       expect(saved.validation).toMatchObject({ checkedRevision: chapter.revision, independentCheck: 'complete', errorCount: 0 })
-      expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toMatchObject({
+      const checkedDelivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
+      expect(checkedDelivery).toMatchObject({
         text: `${chapter.title}\n\n${chapter.content}`, chapters: [{ id: chapter.id, revision: chapter.revision }] })
       expect(await prisma.chapterQualityReport.count({ where: { compilationId: compilation.id } })).toBe(1)
-      const fullCapture = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
-      const originalSaved = await prisma.agentRun.findUniqueOrThrow({ where: { id: run.id }, select: { startRequest: true, taskSpec: true } })
-      for (const [prompt, fullText] of [['不要重复正文，只保存章节。', false], ['现在请贴出全文。', true]] as const) {
-        const source = await prisma.agentRun.create({ data: { sessionId, userId, novelId, chapterId: chapter.id, mode: 'act', action: 'workspaceAgent',
-          agentType: 'writingOrchestrator', status: 'completed', engine: 'loop', taskSpec: spec,
-          startRequest: withHumanAdmission({ sessionId, novelId, chapterId: chapter.id, mode: 'build', prompt }) } })
-        displayRuns.push(source.id)
-        await prisma.agentMessage.create({ data: { runId: source.id, sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
-        const delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
-        expect(delivery?.text).toBe(fullText ? `${chapter.title}\n\n${chapter.content}` : `已保存《${chapter.title}》。`)
-        if (!fullText) await expect(prisma.$transaction(tx => assertCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }, fullCapture!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+      if (scenario === 'delivery') {
+        const originalSaved = await prisma.agentRun.findUniqueOrThrow({ where: { id: run.id }, select: { startRequest: true, taskSpec: true } })
+        for (const [prompt, fullText] of [['不要重复正文，只保存章节。', false], ['现在请贴出全文。', true]] as const) {
+          const source = await prisma.agentRun.create({ data: { sessionId, userId, novelId, chapterId: chapter.id, mode: 'act', action: 'workspaceAgent',
+            agentType: 'writingOrchestrator', status: 'completed', engine: 'loop', taskSpec: spec,
+            startRequest: withHumanAdmission({ sessionId, novelId, chapterId: chapter.id, mode: 'build', prompt }) } })
+          displayRuns.push(source.id)
+          await prisma.agentMessage.create({ data: { runId: source.id, sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+          const delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
+          expect(delivery?.text).toBe(fullText ? `${chapter.title}\n\n${chapter.content}` : `已保存《${chapter.title}》。`)
+          if (!fullText) await expect(prisma.$transaction(tx => assertCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }, checkedDelivery!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+        }
+        expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: run.id }, select: { startRequest: true, taskSpec: true } })).toEqual(originalSaved)
+        const repeated = await commitChapterBridge(terminal)
+        expect(repeated).toEqual(first)
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).bridge?.committedAt).toEqual(saved.bridge?.committedAt)
+        return
       }
-      expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: run.id }, select: { startRequest: true, taskSpec: true } })).toEqual(originalSaved)
-      const repeated = await commitChapterBridge(terminal)
-      expect(repeated).toEqual(first)
-      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).bridge?.committedAt).toEqual(saved.bridge?.committedAt)
-      const captured = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
       const readMemories = () => prisma.projectMemoryEntry.findMany({ where: { sourceChapterId: chapter.id },
         orderBy: { id: 'asc' }, include: { evidence: { orderBy: { id: 'asc' } } } })
       const originalMemories = await readMemories()
@@ -388,7 +393,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       ]))
       await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '同版本号下作者改变了正文。' } })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
-      await expect(prisma.$transaction(tx => assertCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }, captured!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+      await expect(prisma.$transaction(tx => assertCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }, checkedDelivery!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
       await commitWithAdvisoryReviewFacts(terminal)
       await completeChecks()
       await commitChapterBridge(terminal)
