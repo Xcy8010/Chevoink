@@ -30,8 +30,8 @@ powershell -File scripts/prepare-android-source.ps1 -InstallDependencies
 powershell -File scripts/build-android-release.ps1
 ```
 
-当前版本的构建文件：`android/app/build/outputs/apk/release/chevoink-v1.0.14.apk`（code 17）；验证后复制为
-`artifacts/android/chevoink-v1.0.14-<sha256前12位>.apk`。这些脚本不会上传或发布。
+当前版本的构建文件：`android/app/build/outputs/apk/release/chevoink-v1.0.15.apk`（code 18）；验证后复制为
+`artifacts/android/chevoink-v1.0.15-<sha256前12位>.apk`。这些脚本不会上传或发布。
 旧 `app-release.apk` 是签名基线，不能覆盖。完整前置条件见 `release/ANDROID-HANDOFF.md`。
 
 1.0.8 修复阅读全屏切换的系统栏恢复，并按 WebView 实际剩余安全区处理挖孔、横竖屏及系统栏变化；
@@ -58,6 +58,8 @@ CSS fallback，不改其 listener；保留自定义、IME 与相对方向 paddin
 
 1.0.14 统一开屏和加载时的窗口底色与系统栏配色。网页切换到已保存的深色主题后，开屏退出时保留正确的系统栏图标颜色。
 
+1.0.15 支持网页分别同步顶部状态栏和底部导航栏配色。边到边布局中系统手势栏保持可见并透明叠在网页底部背景上，保留三键导航对比度。
+
 ## 签名配置（不入库）
 
 release 签名从被 gitignore 的 `android/keystore.properties` 读取，模板：
@@ -71,6 +73,7 @@ keyPassword=***
 
 `*.keystore` / `keystore.properties` / `.env` / `plan/` / `cert/` 等敏感与内部文件均已被 `.gitignore` 排除。
 release 缺少签名配置、必填字段或 keystore 时直接失败，禁止回退 debug；普通 debug 构建仍可使用 debug 签名。
+受控发布可通过 `CHEVOINK_ANDROID_SIGNING_PROPERTIES` 指向专用签名目录中的既有 `keystore.properties`，避免把签名文件复制到源码工作树。
 
 ## 离线语音
 

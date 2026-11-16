@@ -1,11 +1,14 @@
 apply plugin: 'com.android.application'
 
 // release 签名参数从 gitignore 的 keystore.properties 读取（密码/密钥绝不入库）
-def keystorePropertiesFile = rootProject.file("keystore.properties")
+def signingPropertiesPath = providers.environmentVariable('CHEVOINK_ANDROID_SIGNING_PROPERTIES').orNull
+def keystorePropertiesFile = rootProject.file(signingPropertiesPath ?: "keystore.properties")
 def keystoreProperties = new Properties()
 if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
 }
+def releaseStoreFile = keystoreProperties['storeFile']?.trim() ?
+        new File(keystorePropertiesFile.parentFile, 'app').toPath().resolve(keystoreProperties['storeFile']).normalize().toFile() : null
 
 android {
     // Versioned licenses are source files, independent of generated Capacitor assets.
@@ -16,8 +19,8 @@ android {
         applicationId "com.chevoink.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 17
-        versionName "1.0.14"
+        versionCode 18
+        versionName "1.0.15"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -28,7 +31,7 @@ android {
     signingConfigs {
         release {
             if (keystorePropertiesFile.exists()) {
-                storeFile file(keystoreProperties['storeFile'])
+                storeFile releaseStoreFile
                 storePassword keystoreProperties['storePassword']
                 keyAlias keystoreProperties['keyAlias']
                 keyPassword keystoreProperties['keyPassword']
@@ -96,7 +99,7 @@ tasks.register('verifyReleaseSigning') {
             ['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].any { !keystoreProperties[it]?.trim() }) {
             throw new GradleException('Release signing configuration missing or incomplete. Debug fallback is forbidden.')
         }
-        if (!file(keystoreProperties['storeFile']).isFile()) {
+        if (!releaseStoreFile?.isFile()) {
             throw new GradleException('Release keystore does not exist.')
         }
     }
@@ -109,7 +112,7 @@ tasks.register('verifyShellVersion') {
         if (!source.contains("appendUserAgent: '${expectedUa}'") || packaged.appendUserAgent != expectedUa) {
             throw new GradleException('Source, packaged UA and Android versionName must match. Sync the Capacitor config before building.')
         }
-        if (android.defaultConfig.versionCode <= 16) throw new GradleException('versionCode must exceed published code 16.')
+        if (android.defaultConfig.versionCode <= 17) throw new GradleException('versionCode must exceed published code 17.')
     }
 }
 tasks.configureEach { task ->

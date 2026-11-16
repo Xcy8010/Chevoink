@@ -16,7 +16,8 @@ if (!$sdkRoot) { throw 'ANDROID_HOME is required.' }
 $buildTools = Join-Path $sdkRoot 'build-tools/36.0.0'
 $signer = Join-Path $buildTools 'apksigner.bat'
 $aapt = Join-Path $buildTools 'aapt.exe'
-foreach ($required in @($signer, $aapt, (Join-Path $androidRoot 'keystore.properties'))) {
+$signingProperties = if ($env:CHEVOINK_ANDROID_SIGNING_PROPERTIES) { $env:CHEVOINK_ANDROID_SIGNING_PROPERTIES } else { Join-Path $androidRoot 'keystore.properties' }
+foreach ($required in @($signer, $aapt, $signingProperties)) {
     if (!(Test-Path -LiteralPath $required)) { throw 'Required SDK tool or private signing configuration is missing.' }
 }
 
@@ -50,22 +51,22 @@ if (!$VerifyOnly) {
     Check-Command
 }
 
-$newApk = Join-Path $androidRoot 'app/build/outputs/apk/release/chevoink-v1.0.14.apk'
+$newApk = Join-Path $androidRoot 'app/build/outputs/apk/release/chevoink-v1.0.15.apk'
 if ((Get-Certificate $newApk) -ne $expectedCert) { throw 'New APK certificate differs from the published baseline.' }
 $badging = & $aapt dump badging $newApk
 Check-Command
-if (!($badging | Select-String "^package: name='com.chevoink.app' versionCode='17' versionName='1.0.14'")) {
+if (!($badging | Select-String "^package: name='com.chevoink.app' versionCode='18' versionName='1.0.15'")) {
     throw 'Packaged applicationId/version differs from release contract.'
 }
 & (Join-Path $buildTools 'zipalign.exe') -c -P 16 4 $newApk
 Check-Command
 $packageHash = (Get-FileHash -LiteralPath $newApk -Algorithm SHA256).Hash.ToLowerInvariant()
-$finalApk = Join-Path $outputRoot "chevoink-v1.0.14-$($packageHash.Substring(0,12)).apk"
+$finalApk = Join-Path $outputRoot "chevoink-v1.0.15-$($packageHash.Substring(0,12)).apk"
 if (Test-Path -LiteralPath $finalApk) {
     if ((Get-FileHash -LiteralPath $finalApk).Hash -ne (Get-FileHash -LiteralPath $newApk).Hash) {
         throw 'A different handoff APK already exists; retained, not overwritten. Use the verified Gradle output.'
     }
 } else { Copy-Item -LiteralPath $newApk -Destination $finalApk }
-Write-Output 'Verified release: com.chevoink.app 1.0.14/code17; certificate matches v1.0.5.1.'
+Write-Output 'Verified release: com.chevoink.app 1.0.15/code18; certificate matches v1.0.5.1.'
 Write-Output "Certificate SHA256: $expectedCert"
 Get-FileHash -LiteralPath $finalApk -Algorithm SHA256 | Format-List

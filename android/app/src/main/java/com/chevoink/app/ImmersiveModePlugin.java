@@ -45,8 +45,11 @@ public class ImmersiveModePlugin extends Plugin {
     public void setSystemBarAppearance(PluginCall call) {
         String color = call.getString("color");
         Boolean dark = call.getBoolean("dark");
-        if (!SystemBarAppearancePolicy.validColor(color) || dark == null) {
-            call.reject("Expected color #RRGGBB and boolean dark", "INVALID_APPEARANCE");
+        String navigationColor = call.getString("navigationColor", color);
+        Boolean navigationDark = call.getBoolean("navigationDark", dark);
+        if (!SystemBarAppearancePolicy.validColor(color) || dark == null
+                || !SystemBarAppearancePolicy.validColor(navigationColor) || navigationDark == null) {
+            call.reject("Expected system bar colors #RRGGBB and boolean icon styles", "INVALID_APPEARANCE");
             return;
         }
         Activity activity = getActivity();
@@ -59,7 +62,8 @@ public class ImmersiveModePlugin extends Plugin {
                 return;
             }
             try {
-                BarAppearance next = new BarAppearance(Color.parseColor(color), dark);
+                BarAppearance next = new BarAppearance(Color.parseColor(color), dark,
+                        Color.parseColor(navigationColor), navigationDark);
                 next.apply(window, webViewParent(), fittedState != null);
                 appearanceWindow = window;
                 desiredAppearance = next;
@@ -88,8 +92,8 @@ public class ImmersiveModePlugin extends Plugin {
         if (appearanceWindow == window && desiredAppearance != null && canSetOpaqueBars(window)) {
             desiredAppearance.apply(window, webViewParent(), fittedState != null);
         } else if (fittedState != null) {
-            new BarAppearance(getActivity().getColor(R.color.splashBackground), false)
-                    .apply(window, webViewParent(), true);
+            int splashColor = getActivity().getColor(R.color.splashBackground);
+            new BarAppearance(splashColor, false, splashColor, false).apply(window, webViewParent(), true);
         }
     }
 
@@ -418,10 +422,18 @@ public class ImmersiveModePlugin extends Plugin {
     private static final class BarAppearance {
         final int color;
         final boolean dark;
-        BarAppearance(int color, boolean dark) { this.color = color; this.dark = dark; }
+        final int navigationColor;
+        final boolean navigationDark;
+
+        BarAppearance(int color, boolean dark, int navigationColor, boolean navigationDark) {
+            this.color = color;
+            this.dark = dark;
+            this.navigationColor = navigationColor;
+            this.navigationDark = navigationDark;
+        }
 
         void apply(Window window, View webViewParent, boolean edgeToEdge) {
-            SystemBarAppearanceTransaction.apply(color, dark, new BarTarget(window, edgeToEdge),
+            SystemBarAppearanceTransaction.apply(color, dark, new BarTarget(window, edgeToEdge, navigationColor, navigationDark),
                     new CanvasTarget(window.getDecorView()), new CanvasTarget(webViewParent));
         }
     }
@@ -430,11 +442,18 @@ public class ImmersiveModePlugin extends Plugin {
     private static final class BarTarget implements SystemBarAppearanceTransaction.Part {
         private final Window window;
         private final boolean edgeToEdge;
+        private final int navigationColor;
+        private final boolean navigationDark;
         private static final int FITTED_BAR_FLAGS = WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
                 | WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS;
         private static final int BAR_FLAGS = FITTED_BAR_FLAGS | WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION;
 
-        BarTarget(Window window, boolean edgeToEdge) { this.window = window; this.edgeToEdge = edgeToEdge; }
+        BarTarget(Window window, boolean edgeToEdge, int navigationColor, boolean navigationDark) {
+            this.window = window;
+            this.edgeToEdge = edgeToEdge;
+            this.navigationColor = navigationColor;
+            this.navigationDark = navigationDark;
+        }
 
         @Override public Runnable snapshot() {
             int oldFlags = window.getAttributes().flags;
@@ -457,12 +476,12 @@ public class ImmersiveModePlugin extends Plugin {
                     edgeToEdge ? BAR_FLAGS : FITTED_BAR_FLAGS);
             window.setStatusBarColor(edgeToEdge ? Color.TRANSPARENT : color);
             // API 24–25 cannot use dark navigation buttons on a light surface.
-            int edgeNavigationColor = Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1 && !dark ? 0x99000000 : Color.TRANSPARENT;
-            int fittedNavigationColor = Build.VERSION.SDK_INT < Build.VERSION_CODES.O && !dark ? Color.BLACK : color;
+            int edgeNavigationColor = Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1 && !navigationDark ? 0x99000000 : Color.TRANSPARENT;
+            int fittedNavigationColor = Build.VERSION.SDK_INT < Build.VERSION_CODES.O && !navigationDark ? Color.BLACK : navigationColor;
             window.setNavigationBarColor(edgeToEdge ? edgeNavigationColor : fittedNavigationColor);
             WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
             controller.setAppearanceLightStatusBars(!dark);
-            controller.setAppearanceLightNavigationBars(!dark);
+            controller.setAppearanceLightNavigationBars(!navigationDark);
         }
     }
 

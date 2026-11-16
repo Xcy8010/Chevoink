@@ -44,8 +44,10 @@ public class EdgeToEdgePresentationTest {
                     a.getWindow().setNavigationBarContrastEnforced(fittedContrast.get());
                 }
                 assertFalse(read(a).optBoolean("edgeToEdge"));
-                plugin(a).setSystemBarAppearance(new ResultCall(new JSObject().put("color", "#575757").put("dark", true)));
+                plugin(a).setSystemBarAppearance(new ResultCall(new JSObject().put("color", "#575757").put("dark", true)
+                        .put("navigationColor", "#20242b").put("navigationDark", true)));
                 assertEquals(0xff575757, a.getWindow().getStatusBarColor());
+                assertEquals(0xff20242b, a.getWindow().getNavigationBarColor());
                 plugin(a).enter(new ResultCall());
             });
             await(scenario, "legacy reader bars hidden", EdgeToEdgePresentationTest::barsHidden);
@@ -58,10 +60,12 @@ public class EdgeToEdgePresentationTest {
                 assertTrue(enable.result.optInt("top") > 0);
                 assertEquals("remaining", enable.result.optString("measurement"));
                 plugin(a).enableEdgeToEdge(new ResultCall());
-                plugin(a).setSystemBarAppearance(new ResultCall(new JSObject().put("color", "#FCFAF6").put("dark", false)));
+                plugin(a).setSystemBarAppearance(new ResultCall(new JSObject().put("color", "#FCFAF6").put("dark", false)
+                        .put("navigationColor", "#20242b").put("navigationDark", true)));
                 assertEquals(Color.TRANSPARENT, a.getWindow().getStatusBarColor());
                 assertEquals(Color.TRANSPARENT, a.getWindow().getNavigationBarColor());
                 assertTrue(WindowCompat.getInsetsController(a.getWindow(), a.getWindow().getDecorView()).isAppearanceLightStatusBars());
+                assertFalse(WindowCompat.getInsetsController(a.getWindow(), a.getWindow().getDecorView()).isAppearanceLightNavigationBars());
             });
             await(scenario, "visible edge-to-edge bars", a -> barsVisible(a) && topInWindow(webView(a)) == 0);
             scenario.onActivity(a -> {
