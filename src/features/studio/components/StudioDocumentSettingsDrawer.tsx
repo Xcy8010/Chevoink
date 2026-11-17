@@ -94,7 +94,7 @@ export default function StudioDocumentSettingsDrawer({
         <div data-studio-settings-scroll className="min-h-0 flex-1 space-y-4 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
           {children}
         </div>
-        <footer className="flex shrink-0 justify-end border-t border-[var(--border-subtle)] px-4 pb-[calc(var(--safe-bottom,0px)+0.75rem)] pt-3 sm:px-5">
+        <footer className="flex shrink-0 justify-end border-t border-[var(--border-subtle)] px-4 pb-[calc(var(--bottom-bar-inset,0px)+0.75rem)] pt-3 sm:px-5">
           {footer}
         </footer>
       </section>

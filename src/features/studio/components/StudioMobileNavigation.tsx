@@ -138,7 +138,7 @@ export default function StudioMobileNavigation({ open, onClose, onCreateNovel, c
           {!search.trim() && novelSwitcher ? <div className="px-3 pb-3">{novelSwitcher}</div> : null}
           {children(composing ? '' : search.trim())}
         </div>
-        <footer className="relative flex shrink-0 items-center gap-1 border-t border-[var(--border-subtle)] bg-[var(--app-bg)] px-3 pt-2 pb-[max(8px,var(--safe-bottom,0px))]">
+        <footer className="relative flex shrink-0 items-center gap-1 border-t border-[var(--border-subtle)] bg-[var(--app-bg)] px-3 pt-2 pb-[max(8px,var(--bottom-bar-inset,0px))]">
           {accountCard}
           <div className="ml-auto flex shrink-0 items-center">
             <AnnouncementBell placement="studio-mobile" />
