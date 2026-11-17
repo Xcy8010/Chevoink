@@ -30,8 +30,8 @@ powershell -File scripts/prepare-android-source.ps1 -InstallDependencies
 powershell -File scripts/build-android-release.ps1
 ```
 
-当前版本的构建文件：`android/app/build/outputs/apk/release/chevoink-v1.0.15.apk`（code 18）；验证后复制为
-`artifacts/android/chevoink-v1.0.15-<sha256前12位>.apk`。这些脚本不会上传或发布。
+当前版本的构建文件：`android/app/build/outputs/apk/release/chevoink-v1.0.16.apk`（code 19）；验证后复制为
+`artifacts/android/chevoink-v1.0.16-<sha256前12位>.apk`。这些脚本不会上传或发布。
 旧 `app-release.apk` 是签名基线，不能覆盖。完整前置条件见 `release/ANDROID-HANDOFF.md`。
 
 1.0.8 修复阅读全屏切换的系统栏恢复，并按 WebView 实际剩余安全区处理挖孔、横竖屏及系统栏变化；
@@ -59,6 +59,8 @@ CSS fallback，不改其 listener；保留自定义、IME 与相对方向 paddin
 1.0.14 统一开屏和加载时的窗口底色与系统栏配色。网页切换到已保存的深色主题后，开屏退出时保留正确的系统栏图标颜色。
 
 1.0.15 支持网页分别同步顶部状态栏和底部导航栏配色。边到边布局中系统手势栏保持可见并透明叠在网页底部背景上，保留三键导航对比度。
+
+1.0.16 随线上网页更新改善 Android 底部安全区布局，调整移动端作品记忆界面。安卓壳同步应用内更新的版本标识。
 
 ## 签名配置（不入库）
 
