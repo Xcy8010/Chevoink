@@ -1,9 +1,9 @@
 package com.chevoink.app;
 
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.SystemClock;
-import android.provider.Settings;
 import android.view.MotionEvent;
 import android.view.View;
 import android.webkit.WebView;
@@ -39,8 +39,8 @@ public class EdgeToEdgePresentationTest {
             AtomicBoolean fittedContrast = new AtomicBoolean();
             scenario.onActivity(a -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    // Set the fitted value opposite to opt-in so reload must restore the snapshot.
-                    fittedContrast.set(!usesButtonNavigation(a));
+                    // The old fitted document can choose contrast independently of edge-to-edge.
+                    fittedContrast.set(true);
                     a.getWindow().setNavigationBarContrastEnforced(fittedContrast.get());
                 }
                 assertFalse(read(a).optBoolean("edgeToEdge"));
@@ -69,7 +69,7 @@ public class EdgeToEdgePresentationTest {
             });
             await(scenario, "visible edge-to-edge bars", a -> barsVisible(a) && topInWindow(webView(a)) == 0);
             scenario.onActivity(a -> {
-                assertNavigationBarContrast(a);
+                assertTransparentNavigationSurface(a);
                 assertTrue(read(a).optInt("top") > 0);
                 ResultCall enter = new ResultCall();
                 plugin(a).enter(enter);
@@ -81,7 +81,7 @@ public class EdgeToEdgePresentationTest {
             scenario.onActivity(a -> plugin(a).exit(new ResultCall()));
             await(scenario, "edge-to-edge reader exit", a -> barsVisible(a) && read(a).optBoolean("edgeToEdge") && topInWindow(webView(a)) == 0);
             scenario.onActivity(a -> {
-                assertNavigationBarContrast(a);
+                assertTransparentNavigationSurface(a);
                 plugin(a).enter(new ResultCall());
                 webView(a).reload();
             });
@@ -91,34 +91,56 @@ public class EdgeToEdgePresentationTest {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
                 assertEquals(fittedContrast.get(), a.getWindow().isNavigationBarContrastEnforced());
 
-                // Model an in-place rotation or navigation setting change on the existing attached view.
+                // Reapplying the page appearance must remove an opaque system treatment.
                 plugin(a).enableEdgeToEdge(new ResultCall());
-                EdgeToEdgeLayout layout = a.findViewById(R.id.edgeToEdgeLayout);
-                int nav = WindowInsetsCompat.Type.navigationBars();
-                int tappable = WindowInsetsCompat.Type.tappableElement();
-                WindowInsetsCompat landscapeButtons = new WindowInsetsCompat.Builder()
-                        .setInsetsIgnoringVisibility(nav, Insets.of(0, 0, 40, 0))
-                        .setInsetsIgnoringVisibility(tappable, Insets.of(0, 0, 40, 0)).build();
-                layout.applyInsets(landscapeButtons);
-                assertTrue(a.getWindow().isNavigationBarContrastEnforced());
-                WindowInsetsCompat gestureBar = new WindowInsetsCompat.Builder(landscapeButtons)
-                        .setInsetsIgnoringVisibility(nav, Insets.of(0, 0, 0, 24))
-                        .setInsetsIgnoringVisibility(tappable, Insets.of(0, 0, 0, 0)).build();
-                layout.applyInsets(gestureBar);
-                assertFalse(a.getWindow().isNavigationBarContrastEnforced());
+                a.getWindow().setNavigationBarContrastEnforced(true);
+                a.getWindow().setNavigationBarDividerColor(Color.WHITE);
+                plugin(a).setSystemBarAppearance(new ResultCall(new JSObject().put("color", "#FCFAF6").put("dark", false)));
+                assertTransparentNavigationSurface(a);
             });
         }
     }
 
-    private static boolean usesButtonNavigation(EdgeToEdgeTestActivity a) {
-        int mode = Settings.Secure.getInt(a.getContentResolver(), "navigation_mode", -1);
-        if (mode >= 0) return mode != 2;
-        return !Insets.NONE.equals(rootInsets(a).getInsets(WindowInsetsCompat.Type.tappableElement()));
+    private static void assertTransparentNavigationSurface(EdgeToEdgeTestActivity a) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            assertFalse(a.getWindow().isNavigationBarContrastEnforced());
+            assertEquals(Color.TRANSPARENT, a.getWindow().getNavigationBarDividerColor());
+            assertEquals(Color.TRANSPARENT, a.getWindow().getNavigationBarColor());
+        }
     }
 
-    private static void assertNavigationBarContrast(EdgeToEdgeTestActivity a) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            assertEquals(usesButtonNavigation(a), a.getWindow().isNavigationBarContrastEnforced());
+    @Test public void webViewBackgroundReachesBelowTheVisibleSystemNavigation() {
+        try (ActivityScenario<EdgeToEdgeTestActivity> scenario = ActivityScenario.launch(EdgeToEdgeTestActivity.class)) {
+            await(scenario, "fixture loaded", EdgeToEdgePresentationTest::hasLoaded);
+            scenario.onActivity(a -> {
+                plugin(a).enableEdgeToEdge(new ResultCall());
+                webView(a).evaluateJavascript(
+                        "document.documentElement.style.backgroundColor = '#d06b9f'", null);
+            });
+            await(scenario, "visible bottom navigation over the WebView",
+                    a -> barsVisible(a) && read(a).optInt("bottom") > 0
+                            && webView(a).getHeight() == a.getWindow().getDecorView().getHeight());
+            int[] bottom = new int[1];
+            scenario.onActivity(a -> bottom[0] = rootInsets(a)
+                    .getInsets(WindowInsetsCompat.Type.navigationBars()).bottom);
+            assertTrue("Run this portrait test with visible bottom navigation", bottom[0] > 4);
+            int expected = Color.rgb(208, 107, 159);
+            long deadline = SystemClock.uptimeMillis() + 4_000;
+            int below = Color.TRANSPARENT;
+            int above = Color.TRANSPARENT;
+            do {
+                Bitmap frame = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();
+                assertNotNull(frame);
+                // Avoid the system icons and compare pixels on both sides of the navigation boundary.
+                int x = frame.getWidth() / 12;
+                below = frame.getPixel(x, frame.getHeight() - bottom[0] / 2);
+                above = frame.getPixel(x, frame.getHeight() - bottom[0] - 8);
+                frame.recycle();
+                if (below == expected && above == expected) return;
+                SystemClock.sleep(50);
+            } while (SystemClock.uptimeMillis() < deadline);
+            assertEquals("WebView background above system navigation", expected, above);
+            assertEquals("System navigation must not add a second background", expected, below);
         }
     }
 

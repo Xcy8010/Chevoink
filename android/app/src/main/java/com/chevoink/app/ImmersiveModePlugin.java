@@ -151,31 +151,10 @@ public class ImmersiveModePlugin extends Plugin {
         return getActivity().findViewById(R.id.edgeToEdgeLayout);
     }
 
-    @SuppressWarnings("deprecation")
     private void applyEdgeToEdge(Window window) {
         layoutAtWindowEdges(window);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) window.setNavigationBarDividerColor(Color.TRANSPARENT);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.setStatusBarContrastEnforced(false);
-        updateNavigationBarContrast(window, ViewCompat.getRootWindowInsets(window.getDecorView()));
         edgeLayout().setPresentation(true, normalState != null);
         reapplyAppearance(window);
-    }
-
-    @SuppressWarnings("deprecation")
-    private static void updateNavigationBarContrast(Window window, WindowInsetsCompat insets) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
-        boolean buttonBar = false;
-        if (insets != null) {
-            Insets navigation = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.navigationBars());
-            Insets tappable = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.tappableElement());
-            // A button bar reserves a tappable inset on the same edge. Gesture bars let taps through.
-            buttonBar = (navigation.bottom > 0 && tappable.bottom > 0)
-                    || (navigation.left > 0 && tappable.left > 0)
-                    || (navigation.right > 0 && tappable.right > 0);
-        }
-        if (window.isNavigationBarContrastEnforced() != buttonBar) {
-            window.setNavigationBarContrastEnforced(buttonBar);
-        }
     }
 
     private View webViewParent() {
@@ -203,7 +182,6 @@ public class ImmersiveModePlugin extends Plugin {
         getActivity().runOnUiThread(() -> {
             Window window = getActivity().getWindow();
             observedDecor = window.getDecorView();
-            edgeLayout().setEdgeInsetsListener(insets -> updateNavigationBarContrast(window, insets));
             // Capacitor SystemBars and Keyboard keep their own apply-insets listeners.
             observedDecor.getViewTreeObserver().addOnGlobalLayoutListener(layoutListener);
             ViewCompat.requestApplyInsets(observedDecor);
@@ -459,6 +437,10 @@ public class ImmersiveModePlugin extends Plugin {
             int oldFlags = window.getAttributes().flags;
             int oldStatus = window.getStatusBarColor();
             int oldNavigation = window.getNavigationBarColor();
+            int oldDivider = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? window.getNavigationBarDividerColor() : Color.TRANSPARENT;
+            boolean oldStatusContrast = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && window.isStatusBarContrastEnforced();
+            boolean oldNavigationContrast = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && window.isNavigationBarContrastEnforced();
             WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
             boolean oldLightStatus = controller.isAppearanceLightStatusBars();
             boolean oldLightNavigation = controller.isAppearanceLightNavigationBars();
@@ -466,6 +448,15 @@ public class ImmersiveModePlugin extends Plugin {
                 Runnable[] restores = { () -> controller.setAppearanceLightNavigationBars(oldLightNavigation),
                         () -> controller.setAppearanceLightStatusBars(oldLightStatus),
                         () -> window.setNavigationBarColor(oldNavigation), () -> window.setStatusBarColor(oldStatus),
+                        () -> {
+                            if (edgeToEdge && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) window.setNavigationBarDividerColor(oldDivider);
+                        },
+                        () -> {
+                            if (edgeToEdge && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.setStatusBarContrastEnforced(oldStatusContrast);
+                        },
+                        () -> {
+                            if (edgeToEdge && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.setNavigationBarContrastEnforced(oldNavigationContrast);
+                        },
                         () -> window.setFlags(oldFlags, BAR_FLAGS) };
                 SystemBarAppearanceTransaction.restore(restores, restores.length, null);
             };
@@ -479,6 +470,13 @@ public class ImmersiveModePlugin extends Plugin {
             int edgeNavigationColor = Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1 && !navigationDark ? 0x99000000 : Color.TRANSPARENT;
             int fittedNavigationColor = Build.VERSION.SDK_INT < Build.VERSION_CODES.O && !navigationDark ? Color.BLACK : navigationColor;
             window.setNavigationBarColor(edgeToEdge ? edgeNavigationColor : fittedNavigationColor);
+            if (edgeToEdge && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) window.setNavigationBarDividerColor(Color.TRANSPARENT);
+            if (edgeToEdge && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // The WebView owns the entire background below visible system controls.
+                // A system contrast scrim would split that surface at the bottom edge.
+                window.setStatusBarContrastEnforced(false);
+                window.setNavigationBarContrastEnforced(false);
+            }
             WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
             controller.setAppearanceLightStatusBars(!dark);
             controller.setAppearanceLightNavigationBars(!navigationDark);

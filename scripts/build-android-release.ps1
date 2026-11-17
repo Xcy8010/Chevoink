@@ -51,22 +51,22 @@ if (!$VerifyOnly) {
     Check-Command
 }
 
-$newApk = Join-Path $androidRoot 'app/build/outputs/apk/release/chevoink-v1.0.16.apk'
+$newApk = Join-Path $androidRoot 'app/build/outputs/apk/release/chevoink-v1.0.17.apk'
 if ((Get-Certificate $newApk) -ne $expectedCert) { throw 'New APK certificate differs from the published baseline.' }
 $badging = & $aapt dump badging $newApk
 Check-Command
-if (!($badging | Select-String "^package: name='com.chevoink.app' versionCode='19' versionName='1.0.16'")) {
+if (!($badging | Select-String "^package: name='com.chevoink.app' versionCode='20' versionName='1.0.17'")) {
     throw 'Packaged applicationId/version differs from release contract.'
 }
 & (Join-Path $buildTools 'zipalign.exe') -c -P 16 4 $newApk
 Check-Command
 $packageHash = (Get-FileHash -LiteralPath $newApk -Algorithm SHA256).Hash.ToLowerInvariant()
-$finalApk = Join-Path $outputRoot "chevoink-v1.0.16-$($packageHash.Substring(0,12)).apk"
+$finalApk = Join-Path $outputRoot "chevoink-v1.0.17-$($packageHash.Substring(0,12)).apk"
 if (Test-Path -LiteralPath $finalApk) {
     if ((Get-FileHash -LiteralPath $finalApk).Hash -ne (Get-FileHash -LiteralPath $newApk).Hash) {
         throw 'A different handoff APK already exists; retained, not overwritten. Use the verified Gradle output.'
     }
 } else { Copy-Item -LiteralPath $newApk -Destination $finalApk }
-Write-Output 'Verified release: com.chevoink.app 1.0.16/code19; certificate matches v1.0.5.1.'
+Write-Output 'Verified release: com.chevoink.app 1.0.17/code20; certificate matches v1.0.5.1.'
 Write-Output "Certificate SHA256: $expectedCert"
 Get-FileHash -LiteralPath $finalApk -Algorithm SHA256 | Format-List
