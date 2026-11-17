@@ -3,8 +3,15 @@ import { isNativeApp, observeNativeInsets, refreshNativeInsets, type ImmersiveIn
 const EDGES = ['top', 'bottom', 'left', 'right'] as const
 let applyFn: (() => void) | null = null
 let nativeImmersive = false
+let nativeReader = false
 let nativeHint: ImmersiveInsets | null = null
 let measured: ImmersiveInsets | null = null
+
+/** Reading retains page insets, including while comments temporarily show system bars. */
+export function setNativeReaderSafeArea(active: boolean) {
+  nativeReader = active
+  applyFn?.()
+}
 
 export function setNativeImmersiveSafeArea(active: boolean, insets?: ImmersiveInsets | null) {
   nativeImmersive = active
@@ -40,7 +47,11 @@ export function setupSafeAreaFallback(): (() => void) | undefined {
       for (const edge of EDGES) {
         const fallback = nativeImmersive ? inset(nativeHint?.[edge], edge === 'top' ? 32 : edge === 'bottom' ? 24 : 0) : 0
         const property = `--safe-${edge}`
-        const value = `${inset(current?.[edge], fallback)}px`
+        const pixels = inset(current?.[edge], fallback)
+        if (edge === 'bottom') style.setProperty('--bottom-bar-inset', `${pixels}px`)
+        // Ordinary pages draw to the bottom. Fixed controls own their inset as
+        // internal padding, so there is no separate page-colored strip.
+        const value = `${edge === 'bottom' && !nativeReader && !nativeImmersive ? 0 : pixels}px`
         if (style.getPropertyValue(property) !== value) style.setProperty(property, value)
       }
       root.toggleAttribute('data-native-edge-to-edge', current?.edgeToEdge === true && !nativeImmersive)
@@ -74,7 +85,9 @@ export function setupSafeAreaFallback(): (() => void) | undefined {
     measured = null
     nativeHint = null
     nativeImmersive = false
+    nativeReader = false
     root.removeAttribute('data-native-edge-to-edge')
+    root.style.removeProperty('--bottom-bar-inset')
     for (const edge of EDGES) root.style.removeProperty(`--safe-${edge}`)
   }
 }

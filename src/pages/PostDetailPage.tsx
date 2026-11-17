@@ -227,7 +227,7 @@ export default function PostDetailPage() {
           不依赖滚动 JS）；键盘收起时避开底部导航悬浮在列表上方。
           形态为横向胶囊输入框 + 发表按钮，无背景卡片层；
           data-kb-reveal="off" 让 reveal 补滚跳过它（齐平贴底会被误判为遮挡） */}
-      <div ref={bottomSurfaceRef} className="post-composer-bar sticky z-20 mt-4 bg-[var(--app-bg)] px-4 pb-[calc(10px+var(--safe-bottom))] pt-2 xl:hidden">
+      <div ref={bottomSurfaceRef} className="post-composer-bar sticky z-20 mt-4 bg-[var(--app-bg)] px-4 pb-[calc(10px+var(--bottom-bar-inset))] pt-2 xl:hidden">
         {replyTarget ? (
           <div className="mb-2 flex w-fit max-w-full items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-solid)] px-3 py-1 text-xs text-[var(--text-secondary)] shadow-[0_2px_8px_rgba(0,0,0,0.12)]">
             <span className="truncate">

@@ -14,6 +14,8 @@ import { useNavigate } from 'react-router-dom'
 
 import BottomSheet from '@/components/layout/BottomSheet'
 import { useDevice } from '@/components/layout/device-context'
+import { isNativeApp } from '@/lib/native-app'
+import { setNativeReaderSafeArea } from '@/lib/safe-area'
 import { cn } from '@/lib/utils'
 import ReaderArticle from '../components/ReaderArticle'
 import ReaderCommentsPanel from '../components/ReaderCommentsPanel'
@@ -50,6 +52,12 @@ export default function ReaderTablet({ state }: ReaderTabletProps) {
 
   const tone = state.toneOption
   const { activePanel, activeParagraphIndex } = state
+
+  useEffect(() => {
+    if (!isNativeApp()) return
+    setNativeReaderSafeArea(true)
+    return () => setNativeReaderSafeArea(false)
+  }, [])
 
   // 段评气泡打开评论时同步打开对应方向的评论面板
   useEffect(() => {

@@ -99,7 +99,7 @@ export function PendingConversationHeader({ onBack, person }: {
 
 export function ChatInputSkeleton() {
   return (
-    <div className="flex items-end gap-1.5 bg-[var(--surface-default)] px-2.5 pb-[calc(var(--safe-bottom)+10px)] pt-2 md:border-t md:border-[var(--border-subtle)] md:px-3 md:pb-3 md:pt-3" aria-hidden="true">
+    <div className="flex items-end gap-1.5 bg-[var(--surface-default)] px-2.5 pb-[calc(var(--bottom-bar-inset)+10px)] pt-2 md:border-t md:border-[var(--border-subtle)] md:px-3 md:pb-3 md:pt-3" aria-hidden="true">
       <SkeletonAvatar size={40} />
       <Skeleton className="h-10 flex-1 rounded-[20px]" />
       <SkeletonAvatar size={40} />

@@ -68,8 +68,7 @@ type SetCardsState = {
 
 /**
  * 创作记忆卡片集画廊：一个类型一叠牌，默认封面墙全收起（一屏看全记忆版图）；
- * 点击封面进入覆层手牌模式——整叠牌在模糊覆层中扇形摊开，← → 拨牌、点击翻面读全文、Esc 收叠。
- * 单卡保留右键编辑/引用入口。
+ * 点击封面打开牌组，桌面扇形摊开，窄屏每次展示一张。单卡保留右键编辑/引用入口。
  */
 export default function AgentMemoryCards({ novelId }: Props) {
   const userId = useShellStore(state => state.sessionUser?.id ?? 'anonymous')
@@ -170,7 +169,9 @@ export default function AgentMemoryCards({ novelId }: Props) {
     }
   }, [novelId])
 
-  const openSet = (memoryType: string) => {
+  const [overlayTrigger, setOverlayTrigger] = useState<HTMLButtonElement | null>(null)
+  const openSet = (memoryType: string, trigger: HTMLButtonElement) => {
+    setOverlayTrigger(trigger)
     setOverlayType(memoryType)
     if (!setCards[memoryType]) void loadSetCards(memoryType, 1)
   }
@@ -278,6 +279,18 @@ export default function AgentMemoryCards({ novelId }: Props) {
         .fan-flipped { transform: rotateY(180deg); }
         .fan-face { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; }
         .fan-back { transform: rotateY(180deg); }
+        @media (max-width: 767px), (pointer: coarse) {
+          .memory-fan-stage { perspective: none; }
+          .fan-card { display: none; }
+          .fan-card[data-current] { display: block; position: relative; width: min(100%, 30rem); height: min(100%, 31rem); }
+          .fan-card .fan-flip { width: 100%; height: 100%; transform: none; transform-style: flat; }
+          .fan-card .fan-face { backface-visibility: visible; transform: none; }
+          .fan-flip:not(.fan-flipped) .fan-back, .fan-flipped .fan-front { display: none; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .memory-stack, .memory-overlay { animation: none !important; }
+          .memory-stack::before, .memory-stack::after, .memory-card, .fan-card, .fan-flip { transition: none; }
+        }
       `}</style>
 
       <div className="flex items-baseline justify-between gap-3">
@@ -288,7 +301,7 @@ export default function AgentMemoryCards({ novelId }: Props) {
         <p className="text-right text-[9px] text-[var(--text-tertiary)]">点封面审阅 · 待审核候选不参与事实召回</p>
       </div>
 
-      {loading ? (
+      {loading && sets.length === 0 ? (
         <div className="flex items-center justify-center gap-2 py-10 text-xs text-[var(--text-secondary)]"><LoaderCircle className="h-4 w-4 animate-spin" />读取创作记忆…</div>
       ) : error ? (
         <div className="py-8 text-center">
@@ -298,31 +311,29 @@ export default function AgentMemoryCards({ novelId }: Props) {
       ) : sets.length === 0 ? (
         <p className="py-8 text-center text-[11px] leading-6 text-[var(--text-secondary)]">Agent 工作时会把人物设定、世界观、伏笔等沉淀为记忆卡片集，集中显示在这里。</p>
       ) : (
-        <div className="mt-4 grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-x-3 gap-y-5">
+        <div className="mt-4 grid grid-cols-[repeat(auto-fill,minmax(min(100%,136px),1fr))] gap-x-3 gap-y-5">
           {sets.map((set, index) => {
             const meta = typeMeta(set.memoryType)
             const Icon = meta.icon
             return (
               <div key={set.memoryType} className="memory-stack" data-thick={thicknessTier(set.count)} style={{ animationDelay: `${Math.min(index, 11) * 40}ms` }}>
-                <article
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => openSet(set.memoryType)}
-                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openSet(set.memoryType) } }}
-                  className="memory-card group flex h-[136px] cursor-pointer flex-col overflow-hidden rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3.5 pb-3 pt-2.5"
+                <button
+                  type="button"
+                  onClick={(event) => openSet(set.memoryType, event.currentTarget)}
+                  className="memory-card group flex h-[136px] w-full cursor-pointer flex-col overflow-hidden rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 pb-3 pt-2.5 text-left"
                   title={`${meta.label} ${set.count} 张 · 点击摊开手牌`}
                   aria-label={`${meta.label}卡片集 ${set.count} 张，点击摊开手牌`}
                 >
-                  <p className="relative truncate text-[10px] text-[var(--text-tertiary)]">{set.previews[0] ?? '暂无卡片'}</p>
+                  <span className="relative w-full truncate text-[10px] text-[var(--text-tertiary)]">{set.previews[0] ?? '暂无卡片'}</span>
                   <span className="relative mx-auto mt-2 flex h-11 w-11 items-center justify-center rounded-full border border-[var(--border-subtle)] text-[var(--text-secondary)] transition-colors duration-300 group-hover:border-[var(--text-tertiary)]">
                     <Icon className="h-[18px] w-[18px] opacity-70" strokeWidth={1.5} />
                   </span>
-                  <div className="relative mt-auto flex items-baseline justify-between gap-2">
+                  <span className="relative mt-auto flex w-full items-baseline justify-between gap-2">
                     <span className="truncate text-xs font-medium text-[var(--text-primary)]">{meta.label}</span>
                     <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-tertiary)]">{set.count} 张</span>
-                  </div>
-                  <p className="relative mt-0.5 text-[9px] text-[var(--text-tertiary)]">更新于 {formatMemoryDate(set.latestUpdatedAt)}</p>
-                </article>
+                  </span>
+                  <span className="relative mt-0.5 text-[9px] text-[var(--text-tertiary)]">更新于 {formatMemoryDate(set.latestUpdatedAt)}</span>
+                </button>
               </div>
             )
           })}
@@ -331,7 +342,9 @@ export default function AgentMemoryCards({ novelId }: Props) {
 
       {overlaySet ? (
         <MemoryFanOverlay
+          key={overlaySet.memoryType}
           set={overlaySet}
+          trigger={overlayTrigger}
           state={setCards[overlaySet.memoryType]}
           spotlight={fanSpotlight}
           suspended={overlaySuspended}
@@ -424,6 +437,7 @@ export default function AgentMemoryCards({ novelId }: Props) {
 
 type FanOverlayProps = {
   set: StoryMemorySet
+  trigger: HTMLButtonElement | null
   state: SetCardsState | undefined
   /** 工具卡定位请求：打开后聚焦到该张并闪一下 */
   spotlight: { index: number; nonce: number } | null
@@ -445,13 +459,19 @@ function MemoryCardActions({ onEdit, onDelete }: { onEdit: () => void; onDelete:
   </div>
 }
 
-function MemoryFanOverlay({ set, state, spotlight, suspended, onClose, onLoadMore, onMenu, onQuote, onEdit, onDelete }: FanOverlayProps) {
+function MemoryFanOverlay({ set, trigger, state, spotlight, suspended, onClose, onLoadMore, onMenu, onQuote, onEdit, onDelete }: FanOverlayProps) {
   const meta = typeMeta(set.memoryType)
   const Icon = meta.icon
   const items = state?.items ?? []
   const [focus, setFocus] = useState(0)
   const [flipped, setFlipped] = useState(false)
   const [flash, setFlash] = useState<{ index: number; nonce: number } | null>(null)
+  const closeButton = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    closeButton.current?.focus({ preventScroll: true })
+    return () => { if (trigger?.isConnected) trigger.focus({ preventScroll: true }) }
+  }, [trigger])
 
   // 工具卡定位：聚焦到沉淀卡并闪一下
   useEffect(() => {
@@ -498,37 +518,39 @@ function MemoryFanOverlay({ set, state, spotlight, suspended, onClose, onLoadMor
 
   return createPortal(
     <div
-      className="studio-workspace fixed inset-0 z-[165] flex flex-col bg-[rgba(15,23,42,0.5)] backdrop-blur-md"
+      role="dialog"
+      aria-label={`${meta.label}卡片集`}
+      className="memory-overlay studio-workspace fixed inset-0 z-[165] flex flex-col bg-[rgba(15,23,42,0.5)] pb-[var(--bottom-bar-inset,var(--safe-bottom))] pl-[var(--safe-left)] pr-[var(--safe-right)] pt-[var(--safe-top)] backdrop-blur-md"
       style={{ animation: 'memory-fade-in 200ms ease-out' }}
     >
-      <header className="flex shrink-0 items-center gap-2.5 px-5 pb-1 pt-4" onClick={(event) => event.stopPropagation()}>
+      <header className="flex shrink-0 items-center gap-2.5 px-3 py-2 sm:px-5" onClick={(event) => event.stopPropagation()}>
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/25 text-white/85">
           <Icon className="h-4 w-4" strokeWidth={1.5} />
         </span>
         <span className="text-sm font-medium text-white">{meta.label}</span>
         <span className="text-[10px] tabular-nums text-white/60">{set.count} 张</span>
-        <span className="ml-auto text-[10px] tabular-nums text-white/60">{items.length ? focus + 1 : 0} / {state?.total ?? 0}</span>
         <button
+          ref={closeButton}
           type="button"
           onClick={onClose}
           aria-label="收叠手牌"
-          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+          className="ml-auto inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[9px] text-white/80 transition-colors hover:bg-white/10 hover:text-white"
         ><X className="h-4 w-4" /></button>
       </header>
 
       <div className="relative min-h-0 flex-1 overflow-hidden" onClick={(event) => event.stopPropagation()}>
         {!state || state.loading ? (
           <div className="flex h-full items-center justify-center gap-2 text-xs text-white/70"><LoaderCircle className="h-4 w-4 animate-spin" />摊开手牌…</div>
-        ) : state.error ? (
+        ) : state.error && items.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2">
             <p className="text-xs text-white/70">{state.error}</p>
-            <button type="button" onClick={onLoadMore} className="text-[11px] text-white underline underline-offset-4">重试</button>
+            <button type="button" onClick={onLoadMore} className="min-h-11 px-4 text-xs text-white underline underline-offset-4">重试</button>
           </div>
         ) : items.length === 0 ? (
           <p className="flex h-full items-center justify-center text-xs text-white/60">这一集暂时没有卡片。</p>
         ) : (
           <>
-            <div className="flex h-full items-center justify-center [perspective:1400px]">
+            <div className="memory-fan-stage flex h-full items-center justify-center px-3 [perspective:1400px] sm:px-5">
               {items.map((card, index) => {
                 const offset = index - focus
                 const away = Math.abs(offset) > 3
@@ -540,27 +562,29 @@ function MemoryFanOverlay({ set, state, spotlight, suspended, onClose, onLoadMor
                 return (
                   <div
                     key={isFlash ? `${card.id}-f${flash?.nonce}` : card.id}
-                    className="fan-card absolute cursor-pointer"
+                    className="fan-card absolute"
+                    data-current={offset === 0 ? '' : undefined}
+                    aria-hidden={offset !== 0 ? true : undefined}
                     style={isFlash ? { ...style, animation: 'fan-flash 1.6s cubic-bezier(0.22,1,0.36,1)' } : style}
                     onContextMenu={(event) => onMenu(event, card)}
                   >
                     <div className={`fan-flip relative h-[min(440px,68dvh)] w-[min(300px,calc(100vw-40px))] [transform-style:preserve-3d] ${flipped && offset === 0 ? 'fan-flipped' : ''}`}>
-                      <article ref={el => { if (el) el.inert = offset !== 0 || flipped }} className="fan-face flex flex-col overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-5 pb-4 pt-4 shadow-[0_24px_64px_rgba(15,23,42,0.35)]">
+                      <article aria-hidden={flipped || undefined} ref={el => { if (el) el.inert = offset !== 0 || flipped }} className="fan-face fan-front flex flex-col overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-4 pb-3 pt-3 shadow-[0_24px_64px_rgba(15,23,42,0.35)] sm:px-5">
                         <div className="flex min-h-11 items-center gap-1.5 pr-24">
                           <span className="truncate text-[9px] tracking-wide text-[var(--text-tertiary)]">{cardMeta.label}</span>
                           {card.version > 1 ? <span className="shrink-0 text-[9px] tabular-nums text-[var(--text-tertiary)]">v{card.version}</span> : null}
                         </div>
                         <h4 className="mt-2.5 line-clamp-2 break-words text-sm font-semibold leading-6 text-[var(--text-primary)]">{card.title}</h4>
                         <span className="text-[10px] text-[var(--text-tertiary)]">{card.reviewStatus === 'pending' ? '待作者审核 · 未生效' : card.status === 'inferred' ? '推断/摘录 · 需核对原文' : '已确认'}</span>
-                        <p className="mt-2 line-clamp-[11] text-xs leading-6 text-[var(--text-secondary)]">{card.content}</p>
+                        <p className="mt-2 min-h-0 overflow-hidden break-words text-sm leading-6 text-[var(--text-secondary)]">{card.content}</p>
                         <button type="button" className="mt-auto min-h-11 shrink-0 px-2 text-xs" onClick={() => { setFocus(index); setFlipped(true) }}>查看全文</button>
                         <div className="flex items-center justify-between pt-3 text-[9px] text-[var(--text-tertiary)]">
                           <span>重要性 {card.importance}</span>
                           <span>{formatMemoryDate(card.updatedAt)}</span>
                         </div>
                       </article>
-                      <article ref={el => { if (el) el.inert = offset !== 0 || !flipped }} className="fan-face fan-back flex flex-col overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_24px_64px_rgba(15,23,42,0.35)]">
-                        <header className="shrink-0 px-5 pb-2.5 pt-4">
+                      <article aria-hidden={!flipped || undefined} ref={el => { if (el) el.inert = offset !== 0 || !flipped }} className="fan-face fan-back flex flex-col overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_24px_64px_rgba(15,23,42,0.35)]">
+                        <header className="shrink-0 px-4 pb-2.5 pt-3 sm:px-5">
                           <p className="flex min-h-11 flex-wrap items-center gap-2 pr-24 text-[9px] tracking-wide text-[var(--text-tertiary)]">
                             {cardMeta.label}
                             {card.version > 1 ? <span className="tabular-nums">v{card.version}</span> : null}
@@ -569,11 +593,11 @@ function MemoryFanOverlay({ set, state, spotlight, suspended, onClose, onLoadMor
                           <h4 className="mt-1.5 line-clamp-2 break-words text-sm font-semibold leading-6 text-[var(--text-primary)]">{card.title}</h4>
                         </header>
                         <div className="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain border-t border-[var(--border-subtle)] px-5 py-3.5">
-                          <p className="whitespace-pre-wrap break-words text-xs leading-6 text-[var(--text-secondary)]">{card.content}</p>
+                          <p className="whitespace-pre-wrap break-words text-sm leading-6 text-[var(--text-secondary)]">{card.content}</p>
                         </div>
                         <footer className="flex shrink-0 flex-wrap items-center justify-end gap-1 border-t border-[var(--border-subtle)] px-3 py-2">
                           <button type="button" className="min-h-11 px-2 text-xs text-[var(--text-secondary)]" onClick={() => setFlipped(false)}>返回摘要</button>
-                          <button type="button" onClick={() => onQuote(card)} className="inline-flex h-8 items-center gap-1.5 rounded-[9px] px-2.5 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"><Quote className="h-3.5 w-3.5" />引用到对话</button>
+                          <button type="button" onClick={() => onQuote(card)} className="inline-flex min-h-11 items-center gap-1.5 rounded-[9px] px-2.5 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"><Quote className="h-3.5 w-3.5" />引用到对话</button>
                         </footer>
                       </article>
                     </div>
@@ -582,27 +606,31 @@ function MemoryFanOverlay({ set, state, spotlight, suspended, onClose, onLoadMor
                 )
               })}
             </div>
-            <button
-              type="button"
-              onClick={() => step(-1)}
-              disabled={focus <= 0}
-              aria-label="上一张"
-              className="absolute left-5 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/20 text-white/70 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-25"
-            ><ChevronLeft className="h-4 w-4" /></button>
-            <button
-              type="button"
-              onClick={() => step(1)}
-              disabled={focus >= items.length - 1}
-              aria-label="下一张"
-              className="absolute right-5 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/20 text-white/70 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-25"
-            ><ChevronRight className="h-4 w-4" /></button>
           </>
         )}
       </div>
 
-      <footer className="flex shrink-0 flex-col items-center gap-1.5 px-5 pb-5 pt-1" onClick={(event) => event.stopPropagation()}>
-        <p className="text-[10px] text-white/50">← → 翻阅 · 右上角编辑/删除 · 滚动不翻面</p>
-      </footer>
+      {items.length > 0 && !state?.loading ? <footer className="shrink-0 px-3 py-2 sm:py-4">
+        {state?.error ? <div className="mx-auto flex max-w-md items-center justify-between gap-2 text-xs text-white">
+          <p role="alert" className="min-w-0 break-words">{state.error}</p>
+          <button type="button" onClick={onLoadMore} className="min-h-11 shrink-0 px-3 underline underline-offset-4">重试</button>
+        </div> : null}
+        <nav aria-label="卡片切换" className="mx-auto grid max-w-md grid-cols-[1fr_auto_1fr] items-center gap-3">
+          <button
+            type="button"
+            onClick={() => step(-1)}
+            disabled={focus <= 0}
+            className="inline-flex min-h-11 items-center justify-center gap-1 rounded-[10px] border border-white/25 bg-black/15 px-2 text-sm text-white hover:bg-white/10 disabled:opacity-40"
+          ><ChevronLeft aria-hidden="true" className="h-4 w-4" />上一张</button>
+          <p aria-live="polite" className="text-xs tabular-nums text-white/80">{focus + 1} / {state?.total ?? 0}</p>
+          <button
+            type="button"
+            onClick={() => step(1)}
+            disabled={focus >= items.length - 1}
+            className="inline-flex min-h-11 items-center justify-center gap-1 rounded-[10px] border border-white/25 bg-black/15 px-2 text-sm text-white hover:bg-white/10 disabled:opacity-40"
+          >下一张<ChevronRight aria-hidden="true" className="h-4 w-4" /></button>
+        </nav>
+      </footer> : null}
     </div>,
     document.body,
   )

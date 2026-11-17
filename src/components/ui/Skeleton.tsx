@@ -254,7 +254,7 @@ export function StudioSkeleton() {
           <Skeleton className="h-11 w-11 shrink-0 rounded-xl" />
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden pb-[calc(16px_+_var(--safe-bottom,0px))] pl-[calc(16px_+_var(--safe-left,0px))] pr-[calc(16px_+_var(--safe-right,0px))] pt-4" data-studio-region="mobile-conversation">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden pb-[calc(16px_+_var(--bottom-bar-inset,0px))] pl-[calc(16px_+_var(--safe-left,0px))] pr-[calc(16px_+_var(--safe-right,0px))] pt-4" data-studio-region="mobile-conversation">
           <div className="min-h-0 flex-1 space-y-5 overflow-hidden py-2">
             <StudioMessageLines compact />
             <div className="ml-auto w-2/3 rounded-[22px] bg-[var(--surface-muted)] p-4">

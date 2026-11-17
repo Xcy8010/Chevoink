@@ -16,7 +16,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute('open') } })
 })
 afterEach(() => {
-  cleanup(); vi.restoreAllMocks()
+  cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals()
   if (originalShow) Object.defineProperty(HTMLDialogElement.prototype, 'showModal', originalShow); else Reflect.deleteProperty(HTMLDialogElement.prototype, 'showModal')
   if (originalClose) Object.defineProperty(HTMLDialogElement.prototype, 'close', originalClose); else Reflect.deleteProperty(HTMLDialogElement.prototype, 'close')
 })
@@ -64,6 +64,29 @@ it('save errors retain draft and successful versioned save clears it', async () 
   await waitFor(() => expect(view.onSaved).toHaveBeenCalledOnce())
   expect(updateStoryMemory).toHaveBeenLastCalledWith('c', expect.objectContaining({ expectedVersion: 1, content: '修改' }))
   expect(sessionStorage.length).toBe(0)
+})
+it('repositions the editor with the visual viewport without losing the edited field', () => {
+  const viewport = Object.assign(new EventTarget(), { height: 780, offsetTop: 0 })
+  vi.stubGlobal('visualViewport', viewport)
+  const view = setup()
+  const dialog = screen.getByRole('dialog')
+  expect(dialog.style.getPropertyValue('--memory-viewport-height')).toBe('780px')
+  const content = screen.getByLabelText('内容')
+  content.focus()
+  fireEvent.change(content, { target: { value: '键盘打开后的草稿' } })
+  viewport.height = 315
+  viewport.offsetTop = 70
+  viewport.dispatchEvent(new Event('resize'))
+  viewport.dispatchEvent(new Event('scroll'))
+  expect(dialog.style.getPropertyValue('--memory-viewport-height')).toBe('315px')
+  expect(dialog.style.getPropertyValue('--memory-viewport-top')).toBe('70px')
+  expect(document.activeElement).toBe(content)
+  expect((content as HTMLTextAreaElement).value).toBe('键盘打开后的草稿')
+  expect(screen.getByRole('button', { name: '保存修订' }).closest('footer')).toBeTruthy()
+  view.unmount()
+  viewport.height = 340
+  viewport.dispatchEvent(new Event('resize'))
+  expect(dialog.style.getPropertyValue('--memory-viewport-height')).toBe('315px')
 })
 it('delete requires explicit confirmation, cannot be repeated or dismissed while pending, errors retain card', async () => {
   const onClose = vi.fn(), onDeleted = vi.fn()

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { X } from 'lucide-react'
 import type { StoryMemoryCard } from '../../../../../shared/contracts/index.js'
 import { deleteStoryMemory, updateStoryMemory } from '../agentApi'
 import { useShellStore } from '@/store/useShellStore'
@@ -7,22 +8,51 @@ import { useShellStore } from '@/store/useShellStore'
 const button = 'min-h-11 rounded-xl border border-[var(--border-subtle)] px-4 py-2 text-sm disabled:opacity-40'
 
 /** Native top-layer focus trap: no backdrop-dismiss and no keyboard events leaking to the card fan. */
-export function MemoryModal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+export function MemoryModal({ title, onClose, children, footer, busy = false }: {
+  title: string
+  onClose: () => void
+  children: ReactNode
+  footer: ReactNode
+  busy?: boolean
+}) {
   const ref = useRef<HTMLDialogElement>(null)
+  const heading = useRef<HTMLHeadingElement>(null)
   useEffect(() => {
     const dialog = ref.current!
     const focus = document.activeElement as HTMLElement | null
     const overflow = document.body.style.overflow
+    const viewport = window.visualViewport
+    const resize = () => {
+      if (!viewport) return
+      dialog.style.setProperty('--memory-viewport-height', `${viewport.height}px`)
+      dialog.style.setProperty('--memory-viewport-top', `${viewport.offsetTop}px`)
+    }
     document.body.style.overflow = 'hidden'
+    resize()
+    viewport?.addEventListener('resize', resize)
+    viewport?.addEventListener('scroll', resize)
     dialog.showModal()
-    return () => { dialog.close(); document.body.style.overflow = overflow; if (focus?.isConnected) focus.focus() }
+    heading.current?.focus({ preventScroll: true })
+    return () => {
+      viewport?.removeEventListener('resize', resize)
+      viewport?.removeEventListener('scroll', resize)
+      dialog.close()
+      document.body.style.overflow = overflow
+      if (focus?.isConnected) focus.focus({ preventScroll: true })
+    }
   }, [])
-  return createPortal(<dialog ref={ref} aria-label={title} onCancel={event => { event.preventDefault(); onClose() }}
+  return createPortal(<dialog ref={ref} aria-label={title} aria-busy={busy || undefined} data-native-back-dismiss
+    onCancel={event => { event.preventDefault(); event.stopPropagation(); if (!busy) onClose() }}
     onKeyDown={event => event.stopPropagation()}
-    className="studio-workspace m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-lg overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-4 text-[var(--text-primary)] shadow-xl backdrop:bg-black/40 sm:p-6">
-    <div className="mb-4 flex items-center justify-between gap-3"><h3 className="text-base font-semibold">{title}</h3>
-      <button className={button} type="button" aria-label={`关闭${title}`} onClick={onClose}>关闭</button></div>
-    {children}
+    className="studio-workspace fixed inset-x-0 bottom-auto top-[calc(var(--memory-viewport-top,0px)+var(--memory-viewport-height,100dvh)/2)] m-auto max-h-[min(90dvh,calc(var(--memory-viewport-height,100dvh)-16px))] w-[calc(100%-1.5rem)] max-w-lg -translate-y-1/2 overflow-hidden rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-xl backdrop:bg-black/40 open:flex open:flex-col">
+    <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-4 py-1 sm:px-6">
+      <h3 ref={heading} tabIndex={-1} className="text-base font-semibold outline-none">{title}</h3>
+      <button type="button" aria-label={`关闭${title}`} disabled={busy} onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-[var(--surface-muted)] disabled:opacity-40">
+        <X aria-hidden="true" className="h-5 w-5" />
+      </button>
+    </header>
+    <div className="min-h-0 overflow-y-auto overscroll-contain px-4 py-3 sm:px-6 sm:py-4">{children}</div>
+    <footer className="shrink-0 border-t border-[var(--border-subtle)] px-4 py-2 sm:px-6 sm:py-3">{footer}</footer>
   </dialog>, document.body)
 }
 
@@ -49,11 +79,12 @@ export function MemoryCardDeleteDialog({ card, onClose, onDeleted }: { card: Sto
     catch (reason) { setError(reason instanceof Error ? reason.message : '删除失败，请重试。') }
     finally { pending.current = false; setBusy(false) }
   }
-  return <MemoryModal title="删除记忆卡片" onClose={() => { if (!pending.current) onClose() }}>
+  return <MemoryModal title="删除记忆卡片" busy={busy} onClose={() => { if (!pending.current) onClose() }} footer={
+    <div className="flex flex-wrap justify-end gap-2"><button type="button" className={button} disabled={busy} onClick={onClose}>取消</button>
+      <button type="button" className={`${button} bg-rose-700 text-white`} disabled={busy} onClick={() => void remove()}>{busy ? '删除中…' : '确认删除'}</button></div>
+  }>
     <p className="break-words text-sm leading-6">确定删除「{card.title}」？删除后不再参与后续记忆召回，不修改章节正文或历史对话。系统保留修订记录，不自动重建同名卡片。</p>
     {error && <p role="alert" className="mt-3 text-sm text-rose-500">{error}</p>}
-    <div className="mt-5 flex flex-wrap justify-end gap-2"><button type="button" className={button} disabled={busy} onClick={onClose}>取消</button>
-      <button type="button" className={`${button} bg-rose-700 text-white`} disabled={busy} onClick={() => void remove()}>{busy ? '删除中…' : '确认删除'}</button></div>
   </MemoryModal>
 }
 
@@ -97,28 +128,30 @@ export default function MemoryCardEditor({ card, novelId, onClose, onSaved }: { 
     } catch (reason) { setError(reason instanceof Error ? reason.message : '保存失败，你的草稿仍保留。') }
     finally { pending.current = false; setSaving(false) }
   }
-  return <MemoryModal title="编辑记忆卡片" onClose={requestClose}>
-    <p className="mb-3 text-xs leading-5 text-[var(--text-secondary)]">草稿保留在当前浏览器标签页，保存后才生效。{card.reviewStatus === 'pending' ? '这是待审核候选；保存修订即确认此设定。' : '模型候选不会直接覆盖作者修订。'}</p>
+  return <MemoryModal title="编辑记忆卡片" busy={saving} onClose={requestClose} footer={
+    <>
+      {error && <p role="alert" className="mb-2 text-sm text-rose-500">{error}</p>}
+      {confirmClose ? <section aria-label="未保存修改">
+        <p className="text-sm">修改尚未保存。可继续编辑，或保留草稿稍后再改。</p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button type="button" className={button} onClick={() => setConfirmClose(false)}>继续编辑</button>
+          <button type="button" className={button} disabled={storageError} onClick={onClose}>保留草稿并关闭</button>
+          <button type="button" className={`${button} text-rose-500`} onClick={() => { removeDraft(key); onClose() }}>放弃修改</button>
+        </div>
+      </section> : <div className="flex justify-end gap-2"><button type="button" className={button} disabled={saving} onClick={requestClose}>取消</button>
+        <button type="button" className={`${button} bg-[var(--surface-contrast)] text-[var(--text-contrast)]`} disabled={saving || stale} onClick={() => void save()}>{saving ? '保存中…' : '保存修订'}</button></div>}
+    </>
+  }>
+    <p className="mb-3 text-xs leading-5 text-[var(--text-secondary)]">{card.reviewStatus === 'pending' ? '这是待审核候选；保存修订即确认此设定。' : '模型候选不会直接覆盖作者修订。'}</p>
     {['relationshipState', 'timelineEvent'].includes(card.memoryType) && <p className="mb-3 text-xs leading-5 text-[var(--text-secondary)]">原样确认会同步工具提供的结构化关系/事件；修改标题或正文后，仅以修订后的卡片参与记忆召回，不沿用旧结构化字段。</p>}
     {storageError && <p role="alert" className="mb-3 text-sm text-amber-600">浏览器无法暂存草稿，请勿刷新或离开，先保存修订。</p>}
     {stale && <div className="mb-3 rounded-xl border p-3 text-sm">草稿基于旧版卡片。请与最新内容核对后再保存。
       <details><summary className="cursor-pointer py-2">查看服务器最新内容</summary><p className="whitespace-pre-wrap break-words">{card.title}{'\n'}{card.content}</p></details>
       <button type="button" className={button} onClick={() => change({ ...draft, expectedVersion: card.version })}>已核对，以当前版本继续编辑</button></div>}
-    <fieldset disabled={saving} className="space-y-3">
-      <label className="block text-sm">标题<input value={draft.title} maxLength={160} onChange={e => change({ ...draft, title: e.target.value })} className="mt-1 min-h-11 w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3" /></label>
-      <label className="block text-sm">内容<textarea value={draft.content} maxLength={8000} rows={9} onChange={e => change({ ...draft, content: e.target.value })} className="mt-1 w-full resize-y rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-3 text-base leading-6" /></label>
-      <label className="block text-sm">重要性 {draft.importance}<input type="range" min={1} max={100} value={draft.importance} onChange={e => change({ ...draft, importance: Number(e.target.value) })} className="mt-2 min-h-8 w-full" /></label>
+    <fieldset disabled={saving || confirmClose} className="space-y-3">
+      <label className="block text-sm">标题<input value={draft.title} maxLength={160} onChange={e => change({ ...draft, title: e.target.value })} className="mt-1 min-h-11 w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 text-base" /></label>
+      <label className="block text-sm">内容<textarea value={draft.content} maxLength={8000} rows={6} onChange={e => change({ ...draft, content: e.target.value })} className="mt-1 w-full resize-y rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-3 text-base leading-6" /></label>
+      <label className="block text-sm">重要性 {draft.importance}<input type="range" min={1} max={100} value={draft.importance} onChange={e => change({ ...draft, importance: Number(e.target.value) })} className="mt-1 min-h-11 w-full" /></label>
     </fieldset>
-    {error && <p role="alert" className="mt-3 text-sm text-rose-500">{error}</p>}
-    {confirmClose ? <section aria-label="未保存修改" className="mt-4 rounded-xl border border-amber-600/40 p-3">
-      <p className="text-sm">修改尚未保存。可继续编辑，或保留草稿稍后再改。</p>
-      <div className="mt-3 flex flex-wrap gap-2">
-        <button type="button" className={button} onClick={() => setConfirmClose(false)}>继续编辑</button>
-        <button type="button" className={button} disabled={storageError} onClick={onClose}>保留草稿并关闭</button>
-        <button type="button" className={`${button} text-rose-500`} onClick={() => { removeDraft(key); onClose() }}>放弃修改</button>
-      </div>
-    </section> : null}
-    <div className="mt-4 flex justify-end gap-2"><button type="button" className={button} disabled={saving} onClick={requestClose}>取消</button>
-      <button type="button" className={`${button} bg-[var(--surface-contrast)] text-[var(--text-contrast)]`} disabled={saving || stale} onClick={() => void save()}>{saving ? '保存中…' : '保存修订'}</button></div>
   </MemoryModal>
 }

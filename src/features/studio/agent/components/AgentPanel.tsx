@@ -1934,7 +1934,7 @@ export function AgentPanel({
         onClose={() => setQuotaDialogOpen(false)}
       />
       {workConversation.collapsed ? <WorkConversationRestore onExpand={workConversation.expand} recentMessage={recentConversationText} /> : null}
-      <div data-agent-composer className="px-4 pb-4">
+      <div data-agent-composer className={cn('px-4 pb-4', mobileIntegratedHeader && 'pb-[calc(16px+var(--bottom-bar-inset))]')}>
       {sessionId ? <AgentQueueTray key={sessionId} items={queueQuery.data?.items ?? []} onAction={async (item, action, prompt) => {
         const result = await actOnAgentQueue(sessionId, item.id, action, item.revision, prompt)
         await queueQuery.refetch()

@@ -192,7 +192,7 @@ export default function NovelDetailMobile({ state }: NovelDetailMobileProps) {
       </div>
 
       {/* 全局底栏在本路由隐藏：操作栏直接贴底（含安全区），不再为底栏让位 */}
-      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border-subtle)] bg-[color:var(--surface-default)]/96 px-4 pb-[calc(10px+var(--safe-bottom))] pt-2.5 backdrop-blur">
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border-subtle)] bg-[color:var(--surface-default)]/96 px-4 pb-[calc(10px+var(--bottom-bar-inset))] pt-2.5 backdrop-blur">
         <DetailCtaRow state={state} compact />
       </div>
 

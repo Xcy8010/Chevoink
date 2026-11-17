@@ -884,7 +884,7 @@ export default function ImmersiveComposer({
         <div
           className={cn(
             'fixed inset-x-0 z-20 border-t border-[var(--border-subtle)] bg-[var(--app-bg)] px-3 pt-2',
-            keyboardInset > 0 ? 'pb-2' : 'pb-[max(var(--safe-bottom),8px)]',
+            keyboardInset > 0 ? 'pb-2' : 'pb-[calc(var(--bottom-bar-inset)+8px)]',
           )}
           style={{ bottom: keyboardInset }}
         >

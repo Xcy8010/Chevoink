@@ -335,7 +335,7 @@ export default function PostComposer({ onSubmit, isSubmitting, initialShare }: P
         aria-label="发帖"
         title="发帖"
         data-community-compose
-        className="press-feedback touch-target fixed bottom-[calc(var(--safe-bottom)+82px)] right-[calc(env(safe-area-inset-right,0px)+16px)] z-[41] grid h-14 w-14 place-items-center rounded-full bg-[var(--color-brand)] text-[var(--text-contrast)] shadow-[0_4px_18px_rgba(0,0,0,0.18)] transition-colors hover:bg-[var(--color-brand-hover)] md:bottom-[calc(var(--safe-bottom)+24px)] md:right-[calc(env(safe-area-inset-right,0px)+24px)] md:border md:border-[var(--border-subtle)] md:bg-[var(--surface-default)] md:text-[var(--text-primary)] md:hover:bg-[var(--surface-muted)]"
+        className="press-feedback touch-target fixed bottom-[calc(var(--bottom-bar-inset)+82px)] right-[calc(env(safe-area-inset-right,0px)+16px)] z-[41] grid h-14 w-14 place-items-center rounded-full bg-[var(--color-brand)] text-[var(--text-contrast)] shadow-[0_4px_18px_rgba(0,0,0,0.18)] transition-colors hover:bg-[var(--color-brand-hover)] md:bottom-[calc(var(--bottom-bar-inset)+24px)] md:right-[calc(env(safe-area-inset-right,0px)+24px)] md:border md:border-[var(--border-subtle)] md:bg-[var(--surface-default)] md:text-[var(--text-primary)] md:hover:bg-[var(--surface-muted)]"
       >
         <Plus className="h-7 w-7 md:hidden" aria-hidden />
         <PenSquare className="hidden h-6 w-6 md:block" aria-hidden />

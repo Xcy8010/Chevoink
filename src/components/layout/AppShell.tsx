@@ -711,7 +711,7 @@ export default function AppShell({ title, description, children }: AppShellProps
           >
             <div
               className={cn(
-                'app-main-content space-y-4 pb-[calc(88px+var(--safe-bottom))] pr-0.5 pt-[calc(var(--app-header-height)+12px)] md:space-y-6 md:pb-8',
+                'app-main-content space-y-4 pb-[calc(88px+var(--bottom-bar-inset))] pr-0.5 pt-[calc(var(--app-header-height)+12px)] md:space-y-6 md:pb-8',
                 // 手机端隐藏顶部导航栏的页面：内容顶上去，只留安全区间距（studio 保持原行为）
                 hideMobileHeader && !isStudioRoute && 'mobile:pt-[calc(var(--safe-top)+12px)]',
                 isCommunityRoute && 'space-y-0 md:space-y-0 mobile:pr-0 mobile:pt-0',
@@ -720,9 +720,9 @@ export default function AppShell({ title, description, children }: AppShellProps
                 isStudioRoute && 'flex h-full min-h-0 flex-col space-y-4 md:space-y-4 pb-0 md:pb-0',
                 isStudioRoute && '!space-y-0 !pt-0',
                 // 消息页：列式铺满剩余高度，手机端避让底部导航，桌面端留少量底边距；app-messages-main 供键盘打开时收紧底部留白
-                isMessagesRoute && 'app-messages-main flex h-full min-h-0 flex-col space-y-0 pb-[calc(76px+var(--safe-bottom))] md:pb-6',
-                // 聊天详情态：底栏已隐藏，手机端只留安全区，输入框贴底
-                isMessagesChatRoute && 'mobile:pb-[var(--safe-bottom)]',
+                isMessagesRoute && 'app-messages-main flex h-full min-h-0 flex-col space-y-0 pb-[calc(76px+var(--bottom-bar-inset))] md:pb-6',
+                // 聊天详情态：输入栏自己承接底部高度，外层不重复留白
+                isMessagesChatRoute && 'mobile:pb-0',
                 // 作品详情页手机端底栏已隐藏，底部留白交给页面自己的贴底操作栏控制
                 isNovelDetailRoute && 'mobile:pb-4',
                 // 帖子详情/设置/关注粉丝/获赞明细：底栏隐藏后不再为它预留 88px 底部占位
@@ -768,7 +768,7 @@ export default function AppShell({ title, description, children }: AppShellProps
       <nav
         ref={bottomNavSurfaceRef}
         className={cn(
-          'app-bottom-nav fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(12px+var(--safe-bottom))] pt-3 md:hidden',
+          'app-bottom-nav fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border-subtle)] px-4 pb-[calc(8px+var(--bottom-bar-inset))] pt-3 backdrop-blur md:hidden',
           isReaderRoute && 'hidden',
           // 创作区有自己的底部导航（对话/写作/章节/更多），隐藏全局底栏
           isStudioRoute && 'hidden',

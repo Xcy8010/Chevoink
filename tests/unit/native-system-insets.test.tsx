@@ -124,10 +124,12 @@ describe('native system-bar safe-area ownership', () => {
     enable(current)
     await waitFor(() => expect(root.hasAttribute('data-native-edge-to-edge')).toBe(true))
     expect(root.style.getPropertyValue('--safe-top')).toBe('28px')
-    expect(root.style.getPropertyValue('--safe-bottom')).toBe('24px')
+    expect(root.style.getPropertyValue('--safe-bottom')).toBe('0px')
+    expect(root.style.getPropertyValue('--bottom-bar-inset')).toBe('24px')
 
     notify({ ...current, bottom: 0 })
     expect(root.style.getPropertyValue('--safe-bottom')).toBe('0px')
+    expect(root.style.getPropertyValue('--bottom-bar-inset')).toBe('0px')
     expect(enableEdgeToEdge).toHaveBeenCalledOnce()
     setNativeImmersiveSafeArea(true, { top: 48, bottom: 0 })
     notify({ ...current, top: 42, bottom: 0, immersive: true })
@@ -140,6 +142,23 @@ describe('native system-bar safe-area ownership', () => {
     stop = undefined
     expect(root.hasAttribute('data-native-edge-to-edge')).toBe(false)
     expect(root.style.getPropertyValue('--safe-top')).toBe('')
+    expect(root.style.getPropertyValue('--bottom-bar-inset')).toBe('')
+  })
+
+  it('retains reader bottom geometry during comments and clears only page padding on departure', async () => {
+    stop = setupSafeAreaFallback()
+    const view = render(<StrictMode><Reader comments /></StrictMode>)
+    await waitFor(() => expect(exit).toHaveBeenCalled())
+    current = { ...normal, edgeToEdge: true, top: 28, bottom: 24 }
+    notify(current)
+    const root = document.documentElement
+    expect(root.style.getPropertyValue('--safe-bottom')).toBe('24px')
+    expect(root.style.getPropertyValue('--bottom-bar-inset')).toBe('24px')
+    view.unmount()
+    await waitFor(() => expect(current.bottom).toBe(0))
+    notify({ ...normal, edgeToEdge: true, top: 28, bottom: 24 })
+    expect(root.style.getPropertyValue('--safe-bottom')).toBe('0px')
+    expect(root.style.getPropertyValue('--bottom-bar-inset')).toBe('24px')
   })
 
   it('keeps the fitted layout when an older proxy rejects edge-to-edge', async () => {

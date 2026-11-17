@@ -12,11 +12,12 @@
   --native-system-surface: var(--surface-solid);
   background: var(--surface-solid);
 }
-@supports (backdrop-filter: blur(1px)) {
-  .app-bottom-nav {
-    background: color-mix(in srgb, var(--surface-solid) 78%, transparent);
-    backdrop-filter: blur(24px) saturate(135%);
-  }
+@supports (backdrop-filter: blur(8px)) {
+  /* The original bar blurred the content beneath it without an opaque tint. */
+  .app-bottom-nav { background: transparent; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .app-bottom-nav { background: var(--surface-solid); backdrop-filter: none; }
 }
 .app-bottom-nav .app-bottom-link.is-selected { color: #15212d; }
 .app-bottom-link.is-selected svg { stroke-width: 2.4; }
@@ -30,6 +31,8 @@ html.dark .app-bottom-nav .app-bottom-link.is-selected { color: #fff; }
      沉浸式全屏时 env 恒为 0，由 lib/safe-area.ts 探测后注入状态栏高度兑底值 */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* Fixed bars include this space in their own background, independent of page padding. */
+  --bottom-bar-inset: var(--safe-bottom);
   --safe-left: env(safe-area-inset-left, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
   font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -659,7 +662,7 @@ html.dark .studio-workspace :is(
 
 @media (max-width: 767px) {
   [data-app-shell]:has([data-message-pending-chat]) .app-bottom-nav { display: none; }
-  .app-messages-main:has([data-message-pending-chat]) { padding-bottom: var(--safe-bottom); }
+  .app-messages-main:has([data-message-pending-chat]) { padding-bottom: 0; }
 }
 
 @keyframes agent-fade-out {
