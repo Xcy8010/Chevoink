@@ -544,7 +544,7 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       await persistHumanityQualityReport({ ...f, compilationId, chapterId: chapter.id, chapterRevision: chapter.revision, mode: 'balanced',
         criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
       await commitWithAdvisoryReviewFacts({ ...f, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '收束' })
-      expect(await prisma.projectMemoryEntry.findMany({ where: { novelId: f.novelId } })).toMatchObject([expect.objectContaining({ status: 'inferred', reviewStatus: 'pending' }), expect.objectContaining({ status: 'inferred', reviewStatus: 'pending' })])
+      expect(await prisma.projectMemoryEntry.findMany({ where: { novelId: f.novelId } })).toMatchObject([expect.objectContaining({ status: 'inferred', reviewStatus: 'none' }), expect.objectContaining({ status: 'inferred', reviewStatus: 'none' })])
     })
   })
   it.each(['unavailable', 'stale-critic', 'stale-commit', 'source-commit', 'commit-rollback', 'commit', 'tool-unavailable', 'tool-stale', 'repair-race'] as const)('%s never certifies another revision or partially commits memory', async scenario => {

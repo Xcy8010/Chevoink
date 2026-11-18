@@ -959,10 +959,10 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-conversation-scroll { grid-area: 1 / 1; padding: 16px 0 calc(var(--agent-footer-height, 180px) + 16px); scroll-padding-bottom: calc(var(--agent-footer-height, 180px) + 16px); }
 .agent-conversation-scroll > .agent-conversation-width { min-height: 100%; padding-inline: 16px; overflow-wrap: anywhere; }
 
-/* Center the chat column with the conversation rail where the available width permits it. */
+/* With both right panels collapsed, center the conversation in the space before the task dock. */
 .work-agent-frame {
   --work-agent-column-width: min(54rem, calc(var(--work-agent-chat-width, 100vw) + var(--work-agent-rail-width, 0px) - 2 * var(--work-agent-dock-reserve, 0px)));
-  --work-agent-column-shift: clamp(0px, calc((var(--work-agent-chat-width, 0px) - var(--work-agent-column-width) - 32px) / 2), calc(var(--work-agent-rail-width, 0px) / 2));
+  --work-agent-column-shift: clamp(0px, calc((var(--work-agent-chat-width, 0px) - var(--work-agent-column-width) - 32px) / 2), calc((var(--work-agent-rail-width, 0px) + var(--work-agent-center-reserve, 0px)) / 2));
 }
 .work-agent-frame .work-agent-compact {
   --work-agent-column-width: 54rem;

@@ -4,7 +4,7 @@ import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionStateInTransaction } from './runtime-state.js'
 import { collectDurableToolEvidence } from './runtime-evidence.js'
 import { prepareOperationInTransaction, commitOperationEffectInTransaction } from './runtime-operations.js'
-import { applyMemoryExtractionJob } from './story-memory.js'
+import { applyMemoryExtractionJob, findAvailableStoryMemory } from './story-memory.js'
 import type { ProjectMemoryEntry } from '@prisma/client'
 import type { ToolContext, AgentTool, ToolResult } from './tools/types.js'
 import { prepareToolCursorOperation } from './runtime-tool-cursor.js'
@@ -13,6 +13,7 @@ import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { normalizeToolInput } from './tools/input-validation.js'
 import { reduceExecutionReceipt, failedToolResultSchema } from './runtime-reducer.js'
 import { DataAccessError } from '../prisma.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 
 export function memoryTargetHash(item: ProjectMemoryEntry) {
   return runtimeJson({ id: item.id, novelId: item.novelId, title: item.title, content: item.content, version: item.version,
@@ -20,8 +21,7 @@ export function memoryTargetHash(item: ProjectMemoryEntry) {
     sourceChapterId: item.sourceChapterId, importance: item.importance, confidence: item.confidence }).hash
 }
 
-/** Explicit memory_save shares the same fenced transaction as its receipt.
- * Existing cards must have been observed by this task before replacement. */
+/** Explicit memory_save shares the same fenced transaction as its receipt. */
 export async function executeDurableMemorySave(ctx: ToolContext, tool: AgentTool, args: Record<string, unknown>): Promise<ToolResult> {
   const capability = ctx.durableMemory
   if (!capability || capability.lease.userId !== ctx.userId || capability.lease.runId !== ctx.runId || !['memory_save', 'memory_event_save', 'memory_relation_save'].includes(tool.name)) return runtimeError('RUNTIME_SCOPE_MISMATCH', '记忆保存缺少原任务能力。')
@@ -36,20 +36,25 @@ export async function executeDurableMemorySave(ctx: ToolContext, tool: AgentTool
     ctx.signal.throwIfAborted()
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '记忆保存不属于原作品和会话。')
+    await lockNovelActiveScope(tx, root.novelId)
     const memoryId = typeof effective.memoryId === 'string' ? effective.memoryId : null
     const title = tool.name === 'memory_relation_save' ? `${effective.fromName}→${effective.toName}:${effective.relationType}` : String(effective.title).trim()
     const memoryType = tool.name === 'memory_relation_save' ? 'relationshipState' : tool.name === 'memory_event_save' ? 'timelineEvent' : effective.memoryType as ProjectMemoryEntry['memoryType']
-    const target = await tx.projectMemoryEntry.findFirst({ where: { novelId: root.novelId,
-      ...(memoryId ? { id: memoryId } : { title, memoryType, status: { notIn: ['superseded', 'invalid'] } }) }, orderBy: { updatedAt: 'desc' } })
+    const sourceChapterId = typeof effective.sourceChapterId === 'string' ? effective.sourceChapterId : undefined
+    const target = await findAvailableStoryMemory(tx, { novelId: root.novelId, memoryType, title, memoryId, sourceChapterId })
     if (memoryId && !target) return runtimeError('MEMORY_TARGET_MISSING', '原卡片不存在或不属于本作品，不能改为新建。')
     if (target) {
       const observed = await readObservedBaseline(tx, root.id, cursor.expectedRevision, { kind: 'memory', id: target.id })
-      if (observed?.kind !== 'memory' || observed.hash !== memoryTargetHash(target)) return runtimeError('MEMORY_BASELINE_REQUIRED', '请先检索并读取原记忆最新内容，再保存修改；未覆盖当前卡片。')
+      if (observed?.kind === 'memory' && observed.hash !== memoryTargetHash(target)) {
+        return runtimeError('MEMORY_VERSION_CONFLICT', '卡片在本轮读取后已更新，请读取新版本再保存。')
+      }
     }
-    if (typeof effective.sourceChapterId === 'string') {
-      const chapter = await tx.chapter.findFirst({ where: { id: effective.sourceChapterId, novelId: root.novelId, authorId: root.userId } })
-      const observed = chapter ? await readObservedBaseline(tx, root.id, cursor.expectedRevision, { kind: 'chapter', id: chapter.id }) : null
-      if (!chapter || observed?.kind !== 'chapter' || observed.revision !== chapter.revision) return runtimeError('MEMORY_SOURCE_REQUIRED', '来源正文缺失或已变化，请先读取当前正文再沉淀记忆。')
+    if (sourceChapterId) {
+      const observed = await readObservedBaseline(tx, root.id, cursor.expectedRevision, { kind: 'chapter', id: sourceChapterId })
+      if (observed?.kind === 'chapter') {
+        const source = await tx.chapter.findFirst({ where: { id: sourceChapterId, novelId: root.novelId }, select: { revision: true } })
+        if (source?.revision !== observed.revision) return runtimeError('MEMORY_SOURCE_REQUIRED', '来源章节在本轮读取后已变化，请读取新版本再保存。')
+      }
     }
     const result = await tool.execute({ ...ctx, durableMemory: undefined, transaction: tx }, effective)
     const saved = result.savedMemoryId ? await tx.projectMemoryEntry.findFirst({ where: { id: result.savedMemoryId, novelId: root.novelId } }) : null
@@ -58,7 +63,7 @@ export async function executeDurableMemorySave(ctx: ToolContext, tool: AgentTool
     return runtimeJson({ toolResult: { ...result, summary: result.summary ?? '记忆已保存',
       observedMemories: [{ kind: 'memory', id: saved.id, hash: memoryTargetHash(saved) }] } }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['MEMORY_TARGET_MISSING', 'MEMORY_BASELINE_REQUIRED', 'MEMORY_SOURCE_REQUIRED', 'MEMORY_DELETED', 'MEMORY_EVIDENCE_MISMATCH'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !['MEMORY_TARGET_MISSING', 'MEMORY_SOURCE_REQUIRED', 'MEMORY_DELETED', 'MEMORY_TITLE_CONFLICT', 'MEMORY_VERSION_CONFLICT'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '记忆未写入' })
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })

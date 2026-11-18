@@ -137,7 +137,7 @@ describe('compiler continuity report dependencies', () => {
     expect(f.update).toHaveBeenCalledOnce(); expect(f.bridgeWrite).toHaveBeenCalledOnce(); expect(f.scenesWrite).toHaveBeenCalledOnce()
     expect(f.compilation.validation).toMatchObject(historical)
     expect(f.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ stage: 'commit', status: 'completed' }) }))
-    expect(f.proposal.mock.calls[0]?.[0]).toMatchObject({ memoryType: 'chapterSummary', content: '章节摘要', agentGenerated: true })
+    expect(f.proposal.mock.calls[0]?.[0]).toMatchObject({ memoryType: 'chapterSummary', content: '章节摘要', systemDerived: true })
     expect(f.proposal.mock.calls[0]?.[1] === prisma).toBe(true)
     expect(f.chapterWrite).not.toHaveBeenCalled()
   })

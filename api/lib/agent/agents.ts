@@ -54,7 +54,7 @@ export const agentRegistry: AgentDefinition[] = [
     type: 'lore',
     title: '设定 Agent',
     model: env.agentModel,
-    tools: ['novel_get_context', 'chapter_read', 'chapter_list_summaries', 'memory_search', 'memory_review_list', 'memory_relation_save', 'memory_event_save', 'memory_save', 'story_charter_get', 'character_voice_get', 'experience_anchor_get'],
+    tools: ['novel_get_context', 'chapter_read', 'chapter_list_summaries', 'memory_search', 'memory_relation_save', 'memory_event_save', 'memory_save', 'story_charter_get', 'character_voice_get', 'experience_anchor_get'],
     modes: ['plan', 'review'],
   },
 ]
@@ -70,7 +70,8 @@ export function getToolsForAgent(
   featureFlags?: Agent2FeatureFlags,
   options: { goalOwned?: boolean; taskResponse?: boolean } = {},
 ): AgentTool[] {
-  let modeTools = getToolsForMode(mode).filter(tool => tool.name !== 'task_respond' || options.taskResponse === true)
+  let modeTools = getToolsForMode(mode)
+    .filter(tool => tool.name !== 'memory_review_list' && (tool.name !== 'task_respond' || options.taskResponse === true))
   modeTools = filterGoalToolsForExecution(modeTools, options.goalOwned === true)
 
   if (featureFlags) {
@@ -82,7 +83,7 @@ export function getToolsForAgent(
       ;['project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'bulk_replace_preview', 'entity_rename_preview', 'changeset_apply', 'changeset_rollback'].forEach((name) => disabled.add(name))
     }
     if (!featureFlags.memory2) {
-      ;['memory_review_list', 'memory_relation_save', 'memory_event_save'].forEach((name) => disabled.add(name))
+      ;['memory_relation_save', 'memory_event_save'].forEach((name) => disabled.add(name))
     }
     if (!featureFlags.skill2) {
       ;['skill_catalog', 'skill_load', 'skill_run_explain', 'skill_shared_invites', 'skill_create_draft', 'skill_test', 'skill_enable', 'skill_install_shared', 'skill_rollback', 'skill_publish', 'creative_critique', 'creative_revision_draft'].forEach((name) => disabled.add(name))

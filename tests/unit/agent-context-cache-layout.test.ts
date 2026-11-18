@@ -49,6 +49,7 @@ vi.mock('../../api/lib/agent/context-engine.js', async (importOriginal) => {
 })
 
 vi.mock('../../api/lib/agent/story-memory.js', () => ({
+  currentStoryMemoryWhere: vi.fn(async (_db, novelId) => ({ novelId })),
   searchStoryMemory: vi.fn(),
 }))
 
@@ -185,7 +186,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(text).toContain('cover-1')
     expect(String(messages.at(-1)?.content)).toContain(input.prompt)
   })
-  it('keeps inferred fallback memory visibly unconfirmed with its actual source revision for legacy tasks', async () => {
+  it('includes legacy inferred cards as current fallback writing memory', async () => {
     vi.mocked(searchStoryMemory).mockResolvedValueOnce([])
     vi.mocked(prisma.projectMemoryEntry.findMany).mockImplementation(args => {
       const pending = Promise.resolve(args?.take === 12 ? [{
@@ -197,21 +198,30 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     })
     const { messages } = await assembleContext(buildInput())
     const text = JSON.stringify(messages)
-    expect(text).toContain('[角色/inferred] 待核人物动机')
-    expect(text).toContain('chapter:source-chapter@r8')
-    expect(text).toContain('inferred 需按证据核实')
+    expect(text).toContain('[角色] 待核人物动机')
+    expect(text).toContain('尚未证实的推断')
+    expect(text).not.toContain('inferred 需按证据核实')
   })
-  it('avoids arbitrary fallback preload after no relevant memory match for a fresh interpreted task without dropping compiler obligations', async () => {
+  it('includes current memory on a fresh writing task with no query match and keeps compiler obligations', async () => {
     const input = buildInput()
     input.taskSpec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: true, structure: false }
     vi.mocked(searchStoryMemory).mockResolvedValueOnce([])
     vi.mocked(isAgent2FeatureEnabled).mockImplementation(flag => flag === 'storyCompiler')
     vi.mocked(buildStoryCompilerDigest).mockResolvedValueOnce('当前章节检查未完成；原事实与待核提议保留。')
     const { messages } = await assembleContext(input)
-    expect(prisma.projectMemoryEntry.findMany).not.toHaveBeenCalledWith(expect.objectContaining({ take: 12 }))
+    expect(prisma.projectMemoryEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 12 }))
     expect(buildStoryCompilerDigest).toHaveBeenCalledWith(input.userId, input.novelId, input.chapterId, input.runId)
     expect(JSON.stringify(messages)).toContain('当前章节检查未完成；原事实与待核提议保留。')
     expect(String(messages.at(-1)?.content)).toContain(input.prompt)
+  })
+  it('does not preload unrelated memory for a fresh discussion with no query match', async () => {
+    const input = buildInput()
+    input.prompt = '如何区分第一人称和第三人称？'
+    input.taskSpec = buildTaskSpec({ runId: input.runId, novelId: input.novelId, chapterId: input.chapterId, prompt: input.prompt, mode: 'build' })
+    input.taskSpec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: false, structure: false }
+    vi.mocked(searchStoryMemory).mockResolvedValueOnce([])
+    await assembleContext(input)
+    expect(prisma.projectMemoryEntry.findMany).not.toHaveBeenCalledWith(expect.objectContaining({ take: 12 }))
   })
   it('overlaps the owned goal read with workspace waits while preserving the original request', async () => {
     let release!: () => void

@@ -26,7 +26,7 @@ import {
 } from './context-engine.js'
 import { renderTaskSpec, requiresManuscriptDelivery } from './task-spec.js'
 import { effectiveWritingTaskSpec } from './writing-scope.js'
-import { searchStoryMemory } from './story-memory.js'
+import { currentStoryMemoryWhere, searchStoryMemory } from './story-memory.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { buildStoryCompilerDigest } from './story-compiler.js'
 import { getLearnedStyleDigest } from './style-learning.js'
@@ -84,8 +84,8 @@ const DECISION_STRATEGIES = `决策策略（每条都是原则，不是流程规
 2. 写前必读：改写或续写任何章节之前，先读取相关正文与记忆，禁止盲写。普通“写下一章”围绕前章结尾、当前卷目标及对应大纲细纲核对，随后尽早准备本章；准备步骤会集中召回前章终态、故事记忆和近期首尾，直接复用返回资料。只有影响本章的明确事实缺口才补读更早章节，不能将局部承接无限扩成全书检索或逐章通读；必要核实、提纲一致性与最终质量检查仍须完成。
 3. 模式自适应：轻量诉求直接做，重决策先给方案；不要把简单任务复杂化。
 4. 由你按交付规模判断是否属于长任务或复杂任务，只有这类任务才需要待办。普通“写下一章”是一个交付单元，常规读取资料、编译、写作、检查及提交都是内部步骤，不因调用工具多而机械拆成三项待办。每真实完成一项立即更新其原 id，不等最后统一补勾。仅长任务、复杂任务需要待办：如连写多章、跨章节批量整改、多个独立交付步骤，开工前用 todo_write 拆成至少两项可执行工作；简短答复、单处修改或简单单步任务直接执行，不为每次请求机械建清单。清单只记录本任务真实进度，真实交付后及时更新，已完成项保留且不回退。有未完成项必须继续执行；禁止仅因续跑或收尾而补造全 completed 清单、空清单或覆盖旧任务清单。没有创建过清单的任务，完成后直接交付，不需要补写待办。
-5. 记忆沉淀有时机：新设定、新角色、关键转折确立后及时用 memory_save 沉淀，试写内容不沉淀。
-6. 一致性防线前移：写作前先用 memory_search 校对人名、设定与时间线，而不是写完再检查。
+5. 写作沿用当前作品记忆。作者本轮明确更改设定、风格或约束时，以新要求为准，并用 memory_save 更新原卡（优先传 memoryId），供后续创作延续。试写、待定想法和仅本轮要求按其原本范围处理。
+6. 用已有记忆延续人名、设定与时间线。上下文未覆盖当前目标时，用 memory_search 补齐细节。
 6.1 质量复核沿用同一判断标准：新增意见先区分原问题仍存、修改引入的具体回归和首轮遗漏，核对当前正文与报告证据，不把建议改法当作必改事实。按原作者合同集中判断和局部修复；同段多条建议先检查组合后的语义、事实、因果与衔接，避免逐条消评论把正文拆碎，也不删掉原本必要的信息。真实新问题继续处理，不用固定轮数或假通过结束。
 7. 卷章结构先核对再动笔：作者用「第 M 卷第 N 章」指称目标时，先用 novel_get_context 核对，然后 chapter_create 一次传 volumeOrder=M + positionInVolume=N 原子创建；「全书第 N 章」才使用 position=N。两个坐标系禁止混用，禁止先建错卷再移动，创建成功后必须复用返回的 chapterId。插章、跨卷移动、拆分、合并完成后调用 structure_validate，禁止靠逐章改数字维持顺序。
 8. 短答复先对齐上一轮：作者发「好的」「可以」「继续」「嗯」这类短消息时，先核对上一条真实待答问题和原授权。纯可选下一步建议不是待答问题，简短认可不自动选择多个建议之一或增加写作、封面权限。只有对应明确问题且原请求已授权的操作才继续；没有待答问题时按原任务真实未完成事项理解“继续”，不能接管已结束任务的附带建议。确有影响执行范围的歧义时用 ask_user 确认。
@@ -127,6 +127,7 @@ const TAG_LIBRARY_DIGEST = [
  * bootstrap 初始化协议留在 system 维持规则权威；作品数据进入尾部快照。 */
 async function buildNovelRuleBundle(
   novelId: string,
+  currentMemories: ReturnType<typeof currentStoryMemoryWhere>,
 ): Promise<{ bootstrapPrompt: string | null; novelDataBundle: string | null; tagNames: string[] }> {
   const novel = await prisma.novel.findUnique({
     where: { id: novelId },
@@ -138,8 +139,8 @@ async function buildNovelRuleBundle(
   }
 
   const rules = await prisma.projectMemoryEntry.findMany({
-    where: { novelId, status: { in: ['confirmed', 'inferred'] }, reviewStatus: { in: ['none', 'accepted'] }, memoryType: { in: ['stylePreference', 'continuityRule'] } },
-    orderBy: { importance: 'desc' },
+    where: { ...await currentMemories, memoryType: { in: ['stylePreference', 'continuityRule'] } },
+    orderBy: [{ importance: 'desc' }, { updatedAt: 'desc' }],
     take: 6,
     select: { memoryType: true, title: true, content: true },
   })
@@ -167,23 +168,20 @@ async function buildNovelRuleBundle(
 }
 
 /** L2/L3：角色卡 + 时间线 + 伏笔摘要（≤1200 字） */
-async function buildStoryMemoryDigest(userId: string, novelId: string, query: string, relevantOnly = false): Promise<string | null> {
-  const retrieved = await searchStoryMemory({ userId, novelId, query, limit: 12 })
+async function buildStoryMemoryDigest(userId: string, novelId: string, query: string, currentMemories: ReturnType<typeof currentStoryMemoryWhere>, relevantOnly: boolean): Promise<string | null> {
+  const where = await currentMemories
+  const retrieved = await searchStoryMemory({ userId, novelId, query, limit: 12 }, undefined, where)
   if (retrieved.length > 0) {
-    return `与本轮任务相关的故事记忆（RRF 混合召回；confirmed 可作事实，inferred 需按证据核实）：\n${retrieved
-      .map((entry) => `[${entry.memoryType}/${entry.status}] ${entry.title}：${clip(entry.content, 180)}（依据：${entry.evidence.map((item) => `${item.sourceType}:${item.sourceId}${item.revision ? `@r${item.revision}` : ''}`).join('、') || '无'}）`)
+    return `与本轮相关的当前创作记忆：\n${retrieved
+      .map((entry) => `[${entry.memoryType}] ${entry.title}：${clip(entry.content, 180)}`)
       .join('\n')}`
   }
-  // Fresh interpreted tasks already get global rules and the compiler's real
-  // obligations separately. Do not preload arbitrary memories after no match.
-  // Historical task views keep their fallback without relabelling inference.
   if (relevantOnly) return null
   const entries = await prisma.projectMemoryEntry.findMany({
-    where: { novelId, status: { in: ['confirmed', 'inferred'] }, reviewStatus: { in: ['none', 'accepted'] }, memoryType: { in: ['characterCard', 'timelineEvent', 'foreshadowing', 'worldbuilding', 'storyBible', 'volumeSummary', 'sceneState', 'relationshipState'] } },
-    orderBy: { importance: 'desc' },
+    where: { ...where, memoryType: { notIn: ['stylePreference', 'continuityRule'] } },
+    orderBy: [{ importance: 'desc' }, { updatedAt: 'desc' }],
     take: 12,
-    select: { memoryType: true, status: true, title: true, content: true,
-      evidence: { orderBy: { createdAt: 'desc' }, take: 3, select: { sourceType: true, sourceId: true, revision: true } } },
+    select: { memoryType: true, title: true, content: true },
   })
 
   if (entries.length === 0) {
@@ -197,8 +195,8 @@ async function buildStoryMemoryDigest(userId: string, novelId: string, query: st
     worldbuilding: '设定',
   }
 
-  const lines = entries.map((entry) => `[${label[entry.memoryType] ?? entry.memoryType}/${entry.status}] ${entry.title}：${clip(entry.content, 90)}（依据：${entry.evidence.map(item => `${item.sourceType}:${item.sourceId}${item.revision != null ? `@r${item.revision}` : ''}`).join('、') || '无'}）`)
-  return `故事记忆摘要（confirmed 可作事实，inferred 需按证据核实；详情用 memory_search 检索）：\n${lines.join('\n')}`
+  const lines = entries.map((entry) => `[${label[entry.memoryType] ?? entry.memoryType}] ${entry.title}：${clip(entry.content, 90)}`)
+  return `当前创作记忆摘要（详情用 memory_search 检索）：\n${lines.join('\n')}`
 }
 
 /** 计划文件夹清单：让模型拿到既有计划的 planId，支持跨会话就地修订/重命名/删除 */
@@ -526,9 +524,11 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const frozenWriting = requiresManuscriptDelivery(input.taskSpec)
     && input.taskSpec.scope.writing?.kind === 'bounded'
   const writingTaskRunIds = frozenWriting ? new Set(await getTaskRunIds(input.sessionId, input.runId)) : undefined
+  const currentMemories = currentStoryMemoryWhere(prisma, input.novelId)
   const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, storyCompilerDigest, goalMessages, localWritingContext] = await Promise.all([
-    buildNovelRuleBundle(input.novelId),
-    buildStoryMemoryDigest(input.userId, input.novelId, input.prompt, input.taskSpec.scope.authorEffects !== undefined),
+    buildNovelRuleBundle(input.novelId, currentMemories),
+    buildStoryMemoryDigest(input.userId, input.novelId, input.prompt, currentMemories,
+      input.taskSpec.scope.authorEffects !== undefined && !writingTargets.length && !requiresManuscriptDelivery(input.taskSpec)),
     (!focused || catalog.kind === 'writing') && hasCapability('plan_read', 'plan_save') ? buildPlanFolderDigest(input.userId, input.novelId) : Promise.resolve(null),
     hasCapability('cover_generate', 'cover_apply') ? buildCoverCandidateDigest(input) : Promise.resolve(null),
     hasCapability('todo_write') ? buildTodoDigest(input.sessionId, input.taskSpec?.runId ?? input.runId) : Promise.resolve(null),

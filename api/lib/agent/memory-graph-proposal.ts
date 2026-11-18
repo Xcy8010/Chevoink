@@ -11,12 +11,12 @@ export const memoryGraphProposalSchema = z.discriminatedUnion('kind', [
 export type MemoryGraphProposal = z.infer<typeof memoryGraphProposalSchema>
 const savedProposalSchema = z.object({ title: z.string(), content: z.string(), proposal: memoryGraphProposalSchema })
 
-/** Reviewed text and structured payload must match; never project stale fields after a free-text edit. */
+/** Text and structured payload must match; never project stale fields after a free-text edit. */
 export async function projectReviewedMemoryGraph(tx: Prisma.TransactionClient, memory: {
   id: string; novelId: string; title: string; content: string; memoryType: ProjectMemoryType; graphProposal: Prisma.JsonValue | null
 }, replacesTitle?: string) {
   const previous = replacesTitle === undefined ? [] : await tx.projectMemoryEntry.findMany({ where: {
-    novelId: memory.novelId, memoryType: memory.memoryType, title: replacesTitle, id: { not: memory.id }, status: { in: ['confirmed', 'inferred'] },
+    novelId: memory.novelId, memoryType: memory.memoryType, title: replacesTitle, id: { not: memory.id }, status: { in: ['confirmed', 'inferred', 'conflicted'] },
   }, select: { id: true } })
   const sourceIds = [memory.id, ...previous.map(item => item.id)]
   await tx.storyEvent.updateMany({ where: { novelId: memory.novelId, sourceId: { in: sourceIds } }, data: { status: 'invalid' } })

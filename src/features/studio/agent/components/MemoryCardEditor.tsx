@@ -4,10 +4,11 @@ import { X } from 'lucide-react'
 import type { StoryMemoryCard } from '../../../../../shared/contracts/index.js'
 import { deleteStoryMemory, updateStoryMemory } from '../agentApi'
 import { useShellStore } from '@/store/useShellStore'
+import './memory-catalog.css'
 
 const button = 'min-h-11 rounded-xl border border-[var(--border-subtle)] px-4 py-2 text-sm disabled:opacity-40'
 
-/** Native top-layer focus trap: no backdrop-dismiss and no keyboard events leaking to the card fan. */
+/** Native top-layer focus trap keeps card editor shortcuts within the editor. */
 export function MemoryModal({ title, onClose, children, footer, busy = false }: {
   title: string
   onClose: () => void
@@ -81,10 +82,10 @@ export function MemoryCardDeleteDialog({ card, onClose, onDeleted }: { card: Sto
   }
   return <MemoryModal title="删除记忆卡片" busy={busy} onClose={() => { if (!pending.current) onClose() }} footer={
     <div className="flex flex-wrap justify-end gap-2"><button type="button" className={button} disabled={busy} onClick={onClose}>取消</button>
-      <button type="button" className={`${button} bg-rose-700 text-white`} disabled={busy} onClick={() => void remove()}>{busy ? '删除中…' : '确认删除'}</button></div>
+      <button type="button" className={`${button} text-[var(--color-error)]`} disabled={busy} onClick={() => void remove()}>{busy ? '删除中…' : '确认删除'}</button></div>
   }>
-    <p className="break-words text-sm leading-6">确定删除「{card.title}」？删除后不再参与后续记忆召回，不修改章节正文或历史对话。系统保留修订记录，不自动重建同名卡片。</p>
-    {error && <p role="alert" className="mt-3 text-sm text-rose-500">{error}</p>}
+    <p className="break-words text-sm leading-6">删除「{card.title}」？这张卡片将从创作记忆中移除。</p>
+    {error && <p role="alert" className="mt-3 text-sm text-[var(--color-error)]">{error}</p>}
   </MemoryModal>
 }
 
@@ -130,28 +131,26 @@ export default function MemoryCardEditor({ card, novelId, onClose, onSaved }: { 
   }
   return <MemoryModal title="编辑记忆卡片" busy={saving} onClose={requestClose} footer={
     <>
-      {error && <p role="alert" className="mb-2 text-sm text-rose-500">{error}</p>}
+      {error && <p role="alert" className="mb-2 text-sm text-[var(--color-error)]">{error}</p>}
       {confirmClose ? <section aria-label="未保存修改">
         <p className="text-sm">修改尚未保存。可继续编辑，或保留草稿稍后再改。</p>
         <div className="mt-2 flex flex-wrap gap-2">
           <button type="button" className={button} onClick={() => setConfirmClose(false)}>继续编辑</button>
           <button type="button" className={button} disabled={storageError} onClick={onClose}>保留草稿并关闭</button>
-          <button type="button" className={`${button} text-rose-500`} onClick={() => { removeDraft(key); onClose() }}>放弃修改</button>
+          <button type="button" className={`${button} text-[var(--color-error)]`} onClick={() => { removeDraft(key); onClose() }}>放弃修改</button>
         </div>
       </section> : <div className="flex justify-end gap-2"><button type="button" className={button} disabled={saving} onClick={requestClose}>取消</button>
-        <button type="button" className={`${button} bg-[var(--surface-contrast)] text-[var(--text-contrast)]`} disabled={saving || stale} onClick={() => void save()}>{saving ? '保存中…' : '保存修订'}</button></div>}
+        <button type="button" className={`${button} memory-editor-save`} disabled={saving || stale} onClick={() => void save()}>{saving ? '保存中…' : '保存修订'}</button></div>}
     </>
   }>
-    <p className="mb-3 text-xs leading-5 text-[var(--text-secondary)]">{card.reviewStatus === 'pending' ? '这是待审核候选；保存修订即确认此设定。' : '模型候选不会直接覆盖作者修订。'}</p>
-    {['relationshipState', 'timelineEvent'].includes(card.memoryType) && <p className="mb-3 text-xs leading-5 text-[var(--text-secondary)]">原样确认会同步工具提供的结构化关系/事件；修改标题或正文后，仅以修订后的卡片参与记忆召回，不沿用旧结构化字段。</p>}
-    {storageError && <p role="alert" className="mb-3 text-sm text-amber-600">浏览器无法暂存草稿，请勿刷新或离开，先保存修订。</p>}
+    {storageError && <p role="alert" className="mb-3 text-sm text-[var(--color-warning)]">浏览器无法暂存草稿，请勿刷新或离开，先保存修订。</p>}
     {stale && <div className="mb-3 rounded-xl border p-3 text-sm">草稿基于旧版卡片。请与最新内容核对后再保存。
       <details><summary className="cursor-pointer py-2">查看服务器最新内容</summary><p className="whitespace-pre-wrap break-words">{card.title}{'\n'}{card.content}</p></details>
       <button type="button" className={button} onClick={() => change({ ...draft, expectedVersion: card.version })}>已核对，以当前版本继续编辑</button></div>}
     <fieldset disabled={saving || confirmClose} className="space-y-3">
-      <label className="block text-sm">标题<input value={draft.title} maxLength={160} onChange={e => change({ ...draft, title: e.target.value })} className="mt-1 min-h-11 w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 text-base" /></label>
-      <label className="block text-sm">内容<textarea value={draft.content} maxLength={8000} rows={6} onChange={e => change({ ...draft, content: e.target.value })} className="mt-1 w-full resize-y rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-3 text-base leading-6" /></label>
-      <label className="block text-sm">重要性 {draft.importance}<input type="range" min={1} max={100} value={draft.importance} onChange={e => change({ ...draft, importance: Number(e.target.value) })} className="mt-1 min-h-11 w-full" /></label>
+      <label className="block text-sm">标题<input value={draft.title} maxLength={160} onChange={e => change({ ...draft, title: e.target.value })} className="memory-editor-field mt-1.5 min-h-11 w-full rounded-xl border border-[var(--border-subtle)] px-3 text-base" /></label>
+      <label className="block text-sm">内容<textarea value={draft.content} maxLength={8000} rows={7} onChange={e => change({ ...draft, content: e.target.value })} className="memory-editor-field mt-1.5 w-full resize-y rounded-xl border border-[var(--border-subtle)] p-3 text-base leading-7" /></label>
+      <label className="block text-sm">重要性 {draft.importance}<input type="range" min={1} max={100} value={draft.importance} onChange={e => change({ ...draft, importance: Number(e.target.value) })} className="memory-editor-range mt-1 min-h-11 w-full" /></label>
     </fieldset>
   </MemoryModal>
 }

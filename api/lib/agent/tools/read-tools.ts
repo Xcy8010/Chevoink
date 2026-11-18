@@ -308,7 +308,8 @@ export const memorySearchTool = defineTool({
     }
 
     const lines = entries.map(
-      (entry) => `[${entry.memoryType}/${entry.layer}/${entry.status}] ${entry.title}（ID：${entry.id}；融合分 ${entry.score.toFixed(4)}）：${ctx.transaction ? entry.content : clip(entry.content, 400)}\n  依据：${entry.evidence.map((item) => `${item.sourceType}:${item.sourceId}${item.revision ? `@r${item.revision}` : ''}`).join('、') || '无来源（仅作低可信参考）'}`,
+      (entry) => `[${entry.memoryType}] ${entry.title}（ID：${entry.id}）：${ctx.transaction ? entry.content : clip(entry.content, 400)}${entry.evidence.length
+        ? `\n  来源：${entry.evidence.map((item) => `${item.sourceType}:${item.sourceId}${item.revision ? `@r${item.revision}` : ''}`).join('、')}` : ''}`,
     )
 
     return {

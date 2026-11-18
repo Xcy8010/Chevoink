@@ -155,13 +155,13 @@ describe.runIf(available)('durable explicit memory save', () => {
       if (scenario === 'stopped' || scenario === 'rollback') await expect(invoke()).rejects.toThrow()
       else {
         const result = await invoke()
-        expect(result).toMatchObject({ kind: 'tool', result: ['unread', 'stale', 'missing'].includes(scenario) ? { outcome: 'failed' } : { savedMemoryId: expect.any(String) } })
+        expect(result).toMatchObject({ kind: 'tool', result: ['stale', 'missing'].includes(scenario) ? { outcome: 'failed' } : { savedMemoryId: seeded?.id ?? expect.any(String) } })
       }
       const cards = await prisma.projectMemoryEntry.findMany({ where: { novelId: f.novelId, title } })
-      expect(cards).toHaveLength(scenario === 'missing' ? 0 : scenario === 'update' ? 2 : 1)
-      if (scenario === 'create' || scenario === 'update') {
-        expect(cards).toEqual(expect.arrayContaining([expect.objectContaining({ content: '新的角色事实', status: 'inferred', reviewStatus: 'pending' })]))
-        if (scenario === 'update') expect(cards).toEqual(expect.arrayContaining([expect.objectContaining({ id: seeded!.id, content: '原角色事实' })]))
+      expect(cards).toHaveLength(scenario === 'missing' ? 0 : 1)
+      if (scenario === 'create' || scenario === 'update' || scenario === 'unread') {
+        expect(cards[0]).toMatchObject({ content: '新的角色事实', status: 'inferred', reviewStatus: 'none' })
+        if (seeded) expect(cards[0].id).toBe(seeded.id)
       } else if (cards.length) expect(cards[0].content).toBe(scenario === 'stale' ? '作者刚更新' : '原角色事实')
     })
   })

@@ -371,7 +371,7 @@ describe.runIf(available)('durable compiler dispatch', () => {
           }
           const memories = await prisma.projectMemoryEntry.findMany({ where: { novelId: f.novelId }, include: { evidence: true } })
           expect(memories.map(item => item.memoryType).sort()).toEqual(['chapterSummary', 'sceneState'])
-          for (const memory of memories) expect(memory).toMatchObject({ status: 'inferred', reviewStatus: 'pending', sourceChapterId: f.chapterId,
+          for (const memory of memories) expect(memory).toMatchObject({ status: 'inferred', reviewStatus: 'none', sourceChapterId: f.chapterId,
             evidence: expect.arrayContaining([expect.objectContaining({ sourceType: 'chapter', sourceId: f.chapterId, revision: 2 })]) })
           const count = memories.length
           expect(count).toBe(2)

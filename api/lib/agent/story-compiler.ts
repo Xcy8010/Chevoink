@@ -17,7 +17,7 @@ import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeTargetOrderIndex, readTailVolumeBinding } from './writing-volume.js'
 import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
 import { readReviewCycle } from './review-cycle.js'
-import { saveStoryMemory } from './story-memory.js'
+import { currentStoryMemoryWhere, saveStoryMemory } from './story-memory.js'
 import { readWritingContinuityReference, type WritingContinuityReference } from './writing-continuity-reference.js'
 
 type PreparedBridge = {
@@ -243,9 +243,7 @@ export async function prepareStoryCompilation(input: {
   }
   const memory = await db.projectMemoryEntry.findMany({
     where: {
-      novelId: input.novelId,
-      status: { in: ['confirmed', 'inferred'] },
-      reviewStatus: { in: ['none', 'accepted'] },
+      ...await currentStoryMemoryWhere(db, input.novelId),
       memoryType: { in: ['sceneState', 'relationshipState', 'timelineEvent', 'foreshadowing'] },
     },
     orderBy: [{ importance: 'desc' }, { updatedAt: 'desc' }],
@@ -691,22 +689,16 @@ export async function commitChapterBridge(input: {
   await db.sceneTask.updateMany({ where: { compilationId: compilation.id }, data: { status: 'completed' } })
   await db.storyCompilation.update({ where: { id: compilation.id }, data: { stage: 'commit', status: 'completed', completedAt: now,
     preparedContext: runtimeJson({ ...prepared, terminalContentHash: hash }).value } })
-  // These are the existing editorial memory proposals, not certified facts.
-  // Keep the author's tombstones and the exact source revision while allowing
-  // delivery independently of whether a proposal is later accepted.
   let skippedMemoryCount = 0
-  const saveProposal = async (memory: Parameters<typeof saveStoryMemory>[0]) => {
-    try { await saveStoryMemory({ ...memory, agentGenerated: true }, db) }
-    catch (error) {
-      if (!(error instanceof DataAccessError) || error.code !== 'MEMORY_DELETED') throw error
-      skippedMemoryCount++
-    }
+  const saveChapterMemory = async (memory: Parameters<typeof saveStoryMemory>[0]) => {
+    const result = await saveStoryMemory({ ...memory, systemDerived: true }, db)
+    if (result.status === 'invalid') skippedMemoryCount++
   }
   const evidence = { sourceType: 'chapter' as const, sourceId: chapter.id, revision: chapter.revision, confidence: 1 }
-  await saveProposal({ userId: input.userId, novelId: input.novelId, runId, sourceChapterId: chapter.id,
+  await saveChapterMemory({ userId: input.userId, novelId: input.novelId, runId, sourceChapterId: chapter.id,
     memoryType: 'chapterSummary', layer: 'L2', title: chapter.title, content: input.chapterSummary,
     importance: 75, confidence: 1, status: 'inferred', evidence })
-  await saveProposal({ userId: input.userId, novelId: input.novelId, runId, sourceChapterId: chapter.id,
+  await saveChapterMemory({ userId: input.userId, novelId: input.novelId, runId, sourceChapterId: chapter.id,
     memoryType: 'sceneState', layer: 'L2', title: `${chapter.title}终态`,
     content: [input.exitState.action, input.exitState.location, input.exitState.storyTime, input.lastUnfinishedAction,
       ...input.exitState.knowledge, ...input.exitState.emotion, ...input.exitState.body, ...input.exitState.objects,

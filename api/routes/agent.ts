@@ -506,7 +506,8 @@ router.get('/novels/:novelId/memories', async (req: Request, res: Response): Pro
     const page = queryPositiveInt(req.query.page, 1)
     const pageSize = Math.min(50, queryPositiveInt(req.query.pageSize, 12))
     const title = typeof req.query.title === 'string' ? z.string().trim().min(1).max(160).parse(req.query.title) : undefined
-    const payload = await listStoryMemories(userId, req.params.novelId, { memoryType, title, page, pageSize })
+    const query = typeof req.query.query === 'string' ? z.string().trim().max(160).parse(req.query.query) : undefined
+    const payload = await listStoryMemories(userId, req.params.novelId, { memoryType, title, query, page, pageSize })
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

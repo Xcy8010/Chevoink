@@ -196,6 +196,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       '--work-agent-chat-width': `${motion.chat}px`,
       '--work-agent-rail-width': `${motion.rail}px`,
       '--work-agent-dock-reserve': `${dockVisible ? motion.dock + WORK_ACTIVITY_DOCK_EDGE_GAP : 0}px`,
+      '--work-agent-center-reserve': `${dockVisible && !inspectorOpen && !viewerOpen ? motion.dock + WORK_ACTIVITY_DOCK_EDGE_GAP : 0}px`,
     } as CSSProperties}>{conversation}</main>
     <aside aria-hidden={!dockVisible} {...(!dockVisible ? { inert: '' } : {})} className={cn('work-activity-dock absolute top-0 z-40 h-full min-h-0 overflow-hidden', dockVisible && 'is-visible')} style={{ width: motion.dock, right: motion.inspector + motion.viewer + WORK_ACTIVITY_DOCK_EDGE_GAP }}><div className="h-full px-3 py-4" style={{ width: WORK_ACTIVITY_DOCK_WIDTH }}>{activityDock}</div></aside>
     <section data-studio-panel="workViewer" aria-hidden={!viewerOpen} {...(!viewerOpen ? { inert: '' } : {})} className="work-split-column h-full min-h-0 shrink-0 overflow-hidden border-[var(--border-subtle)]" style={{ width: motion.viewer, borderLeftWidth: motion.viewer > 0 ? 1 : 0 }}><div className="h-full" style={{ minWidth: WORK_SPLIT.viewer }}>{viewer ?? (retainedViewer.scopeKey === scopeKey ? retainedViewer.viewer : undefined)}</div></section>

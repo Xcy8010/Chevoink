@@ -276,7 +276,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     expect(result.skippedMemoryCount).toBe(1)
     expect(await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: deletedMemory.id } })).toMatchObject({ status: 'invalid' })
     expect(await prisma.projectMemoryEntry.count({ where: { novelId, memoryType: 'chapterSummary', title: chapter2.title } })).toBe(1)
-    expect(await prisma.projectMemoryEntry.findFirstOrThrow({ where: { novelId, title: `${chapter2.title}终态` } })).toMatchObject({ reviewStatus: 'pending', status: 'inferred' })
+    expect(await prisma.projectMemoryEntry.findFirstOrThrow({ where: { novelId, title: `${chapter2.title}终态` } })).toMatchObject({ reviewStatus: 'none', status: 'inferred' })
     const committed = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: true } })
     expect(committed).toMatchObject({ stage: 'commit', status: 'completed' })
     expect(committed.bridge?.targetRevision).toBe(chapter2.revision)
@@ -388,8 +388,8 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       const originalMemories = await readMemories()
       expect(originalMemories).toHaveLength(2)
       expect(originalMemories).toEqual(expect.arrayContaining([
-        expect.objectContaining({ memoryType: 'chapterSummary', content: terminal.chapterSummary, status: 'inferred', reviewStatus: 'pending' }),
-        expect.objectContaining({ memoryType: 'sceneState', content: chapter.content, status: 'inferred', reviewStatus: 'pending' }),
+        expect.objectContaining({ memoryType: 'chapterSummary', content: terminal.chapterSummary, status: 'inferred', reviewStatus: 'none' }),
+        expect.objectContaining({ memoryType: 'sceneState', content: chapter.content, status: 'inferred', reviewStatus: 'none' }),
       ]))
       await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '同版本号下作者改变了正文。' } })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
@@ -398,14 +398,13 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       await completeChecks()
       await commitChapterBridge(terminal)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext).toMatchObject({ terminalContentHash: runtimeJson({ content: '同版本号下作者改变了正文。' }).hash })
-      // A changed body creates an editorial proposal; it does not overwrite or
-      // certify the earlier scene. Identical summary proposals remain deduplicated.
       const editedMemories = await readMemories()
-      expect(editedMemories.filter(memory => originalMemories.some(original => original.id === memory.id))).toEqual(originalMemories)
-      const newProposals = editedMemories.filter(memory => !originalMemories.some(original => original.id === memory.id))
-      expect(newProposals).toHaveLength(1)
-      expect(newProposals[0]).toMatchObject({ runId: run.id, sourceChapterId: chapter.id, memoryType: 'sceneState',
-        content: '同版本号下作者改变了正文。', status: 'inferred', reviewStatus: 'pending', confidence: 0.8,
+      expect(editedMemories.map(memory => memory.id)).toEqual(originalMemories.map(memory => memory.id))
+      expect(editedMemories.find(memory => memory.memoryType === 'chapterSummary')).toEqual(originalMemories.find(memory => memory.memoryType === 'chapterSummary'))
+      const originalScene = originalMemories.find(memory => memory.memoryType === 'sceneState')!
+      expect(editedMemories.find(memory => memory.memoryType === 'sceneState')).toMatchObject({ id: originalScene.id, version: originalScene.version + 1,
+        runId: run.id, sourceChapterId: chapter.id, memoryType: 'sceneState',
+        content: '同版本号下作者改变了正文。', status: 'inferred', reviewStatus: 'none', confidence: 1,
         evidence: [{ sourceType: 'chapter', sourceId: chapter.id, revision: chapter.revision }] })
       await commitChapterBridge(terminal)
       expect(await readMemories()).toEqual(editedMemories)
