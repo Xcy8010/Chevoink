@@ -6,8 +6,13 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { createHash } from 'node:crypto'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { probeChapterReviewRevision, readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import type { ChatMessage } from '../../api/lib/ai-service.js'
 
 const mocks = vi.hoisted(() => ({ original: vi.fn(), preference: vi.fn(), committed: vi.fn(), lease: vi.fn(), state: vi.fn(), save: vi.fn(), todos: vi.fn(async () => [] as import('../../shared/contracts').AgentTodoItem[]) }))
+const memoryGrants = vi.hoisted(() => vi.fn(() => ({ toolAuthority: ['memory_search', 'memory_save'].map(name => ({ name, permission: 'allow', alwaysConfirm: false })) })))
+vi.mock('../../api/lib/agent/native-tool-policy.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/native-tool-policy.js')>(), readEffectiveNativeTooling: memoryGrants,
+}))
 vi.mock('../../api/lib/agent/humanity-quality.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/humanity-quality.js')>(), hasCommittedTaskChapter: mocks.committed,
 }))
@@ -59,7 +64,8 @@ async function fixture(prompt = '完成第一章，只输出标题与正文。',
     agentOperation: { count: vi.fn(async () => 0) }, agentProviderAttempt: { count: vi.fn(async () => 0) },
     agentExecutionOutbox: { create: vi.fn(async () => ({})) } }
   mocks.lease.mockImplementation(async (_token, work) => work(db))
-  const state = { originalSpec: spec, frame: { revision: 7, snapshotHash: 'a'.repeat(64), state: { phase: 'idle', messages: [{ role: 'user', content: prompt }] } } }
+  const state = { originalSpec: spec, configuration: { mode: 'build', agentType: 'orchestrator' },
+    frame: { revision: 7, snapshotHash: 'a'.repeat(64), state: { phase: 'idle', messages: [{ role: 'user', content: prompt }] as ChatMessage[] } } }
   mocks.state.mockResolvedValue(state)
   mocks.save.mockImplementation(async (_db, _token, input) => { state.frame = { revision: 8, snapshotHash: 'b'.repeat(64), state: input.snapshot }; return state.frame })
   const refreshContinuity = () => currentReviewReadinessFixture(db as unknown as Prisma.TransactionClient, subject, terminal)
@@ -67,6 +73,35 @@ async function fixture(prompt = '完成第一章，只输出标题与正文。',
   return { db: db as unknown as Prisma.TransactionClient, mocks: db, chapter, terminal, quality, spec, state, refreshContinuity }
 }
 beforeEach(() => { vi.clearAllMocks(); mocks.preference.mockResolvedValue(null); mocks.todos.mockResolvedValue([]); mocks.committed.mockResolvedValue(true) })
+
+it('checks relevant cards after chapter commit and before projecting the exact prose', async () => {
+  const f = await fixture()
+  const observe = (name: string) => f.state.frame.state.messages.push(
+    { role: 'assistant', content: null, toolCalls: [{ id: name, name, arguments: '{}' }] },
+    { role: 'tool', toolCallId: name, content: '完成' },
+  )
+  observe('chapter_bridge_commit')
+  expect(await advanceDurableWritingDelivery(token as never)).toMatchObject({ revision: 8 })
+  expect(f.state.frame.state.messages.at(-1)?.content).toEqual(expect.stringContaining('[本章补记'))
+  expect(f.mocks.agentExecutionOutbox.create).not.toHaveBeenCalled()
+  observe('memory_search')
+  expect(await advanceDurableWritingDelivery(token as never)).toBeNull()
+  observe('memory_save')
+  expect(await advanceDurableWritingDelivery(token as never)).toBeNull()
+  f.state.frame.state.messages.push({ role: 'assistant', content: '补记完成' })
+  expect(await advanceDurableWritingDelivery(token as never)).not.toBeNull()
+  expect(f.state.frame.state.messages.at(-1)).toMatchObject({ role: 'assistant', content: expect.stringContaining(f.chapter.content) })
+  expect(f.state.frame.state.messages.filter(message => message.role === 'system' && message.content.startsWith('[本章补记'))).toHaveLength(1)
+})
+
+it('projects the saved chapter directly when the memory tool requires confirmation', async () => {
+  memoryGrants.mockReturnValueOnce({ toolAuthority: [{ name: 'memory_search', permission: 'allow', alwaysConfirm: false },
+    { name: 'memory_save', permission: 'ask', alwaysConfirm: true }] })
+  const f = await fixture()
+  f.state.frame.state.messages.push({ role: 'tool', toolCallId: 'chapter-commit', content: '本章已提交' })
+  expect(await advanceDurableWritingDelivery(token as never)).not.toBeNull()
+  expect(f.state.frame.state.messages.at(-1)).toMatchObject({ role: 'assistant', content: expect.stringContaining(f.chapter.content) })
+})
 
 it('requires a real existing todo update before projecting an already committed chapter, without changing the manuscript', async () => {
   const f = await fixture(), before = structuredClone(f.chapter)

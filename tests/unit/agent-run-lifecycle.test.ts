@@ -4025,6 +4025,42 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
 
 
 describe('recovered committed writing uses the ordinary creative wrap-up', () => {
+  it('lets an older title-and-body task look up and save memory before delivering the recovered chapter', async () => {
+    const prompt = '续写本章，只输出标题与正文。'
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt })
+    mocks.currentOriginal = { prompt, taskSpec }
+    mocks.chapters[0].title = '旧碗'
+    mocks.chapters[0].content = '林辰把旧碗放回柜中，决定去寻找收据。'
+    mocks.committedChapter.mockResolvedValue(true)
+    const search = tool('memory_search', async () => ({ output: '物品卡：旧碗（ID：bowl）' }))
+    const save = tool('memory_save', async () => ({ output: '已更新旧碗（memoryId=bowl）', savedMemoryId: 'bowl' }), false)
+    const unrelated = tool('web_search', async () => ({ output: '无关查询' }))
+    mocks.tools = [search, save, unrelated]
+    mocks.openAITools.mockImplementation(items => items.map(item => ({ type: 'function', function: { name: item.name,
+      description: item.description, parameters: { type: 'object', properties: {} } } })))
+    queue(
+      response('', [call('find-bowl', 'memory_search', '{"query":"旧碗"}'), call('unrelated-search', 'web_search', '{"query":"天气"}')]),
+      response('', [call('update-bowl', 'memory_save', '{"memoryId":"bowl","section":"存放位置","content":"柜中"}')]),
+      response('已补记。'),
+    )
+    const writing = await import('../../api/lib/agent/writing-scope.js')
+    const delivery = vi.spyOn(writing, 'readCompletedWritingDelivery').mockImplementation(async (tx, subject) => {
+      const actual = await writing.readCompletedWritingPresentation(tx, subject)
+      if (!actual) return actual
+      return { ...actual, titleAndBodyOnly: true, presentationKind: 'auto' as const,
+        text: actual.chapters.map(chapter => `${chapter.title}\n\n${chapter.content}`).join('\n\n') }
+    })
+    try {
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
+    } finally { delivery.mockRestore() }
+    expect(mocks.chat.mock.calls[0][0].messages.some(message => message.content?.includes('默认在本章正文保存后、交付前补记'))).toBe(true)
+    expect(search.execute).toHaveBeenCalledOnce()
+    expect(save.execute).toHaveBeenCalledOnce()
+    expect(unrelated.execute).not.toHaveBeenCalled()
+    const text = events().filter((event): event is Extract<AgentStreamEventBody, { type: 'text.final' }> => event.type === 'text.final' && !event.asReasoning).at(-1)?.text
+    expect(text).toBe(`旧碗\n\n${mocks.chapters[0].content}`)
+  })
+
   it.each(['summary', 'empty', 'length', 'unused-tool', 'no-summary', 'only-prose', 'auto-saved-only', 'batch-only-prose'] as const)('%s preserves delivery without another chapter effect or summary retry', async scenario => {
     const prompt = ['only-prose', 'auto-saved-only', 'batch-only-prose'].includes(scenario) ? '修改本章，只输出标题与正文。'
       : scenario === 'no-summary' ? '修改本章，不要总结。' : '修改本章。'

@@ -15,6 +15,8 @@ import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { withRunLease } from '../../api/lib/agent/runtime-lease.js'
 import { finalizeDurableTask,pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
+import { advanceDurableContext } from '../../api/lib/agent/runtime-checkpoint-step.js'
+import { CHAPTER_MEMORY_GUIDANCE } from '../../api/lib/agent/tool-execution-guidance.js'
 import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import { prepareOperation } from '../../api/lib/agent/runtime-operations.js'
 import { evaluateTaskPostconditions } from '../../api/lib/agent/runtime-postconditions.js'
@@ -178,6 +180,12 @@ describe.runIf(available)('durable explicit memory save', () => {
     expect(await prisma.agentOperation.findMany({ where })).toMatchObject([{ id: prepared.id, inputHash: prepared.inputHash, status: 'succeeded' }])
     expect((await loadExecutionState(f.userId, f.runId)).frame.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'old-call' })
     if (save) expect(await prisma.projectMemoryEntry.findFirstOrThrow({ where: { novelId: f.novelId, title: '摆渡人' } })).toMatchObject({ content: args.content })
+    if (save) {
+      const next = await advanceDurableContext(lease)
+      expect(next?.state.messages).toContainEqual({ role: 'system', content: CHAPTER_MEMORY_GUIDANCE })
+      expect(next?.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'old-call' })
+      expect(await prisma.agentOperation.findMany({ where })).toMatchObject([{ id: prepared.id, inputHash: prepared.inputHash, status: 'succeeded' }])
+    }
   }))
 
   it.each(['create', 'update', 'unread', 'stale', 'missing', 'rollback', 'stopped'] as const)('%s fences explicit card writes', async scenario => {

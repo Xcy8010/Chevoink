@@ -25,6 +25,7 @@ import { advanceDurableContinuation, advanceDurableCompletionObligations, advanc
 import { pauseDurableTaskForAttention, finalizeDurableTask } from './runtime-lifecycle.js'
 import { collectDurableCompletionEvidence } from './runtime-completion-evidence.js'
 import { advanceDurableWritingDelivery } from './runtime-writing-delivery.js'
+import { CHAPTER_MEMORY_MARKER, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { advanceDurableMemory } from './runtime-memory.js'
 import { estimateChatMessageTokens, estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurableInputLimit } from './context-budget.js'
 import { readDurableImportBoundary, waitForDurableImport } from './runtime-import.js'
@@ -355,7 +356,11 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     const compacted = await advanceDurableContext(lease, Math.max(1, inputLimit - overhead))
     if (compacted) return { kind: 'context' as const, frame: compacted }
   }
-  const tools = prepared?.preparedTools ?? await currentNativeToolViews(effectiveTools!.tools, originalSpec.scope)
+  const memoryCheck = [...frame.state.messages].reverse().find(message => message.role === 'user'
+    || message.role === 'system' && message.content.startsWith(CHAPTER_MEMORY_MARKER))
+  const finishingMemory = memoryCheck?.role === 'system'
+  const tools = prepared?.preparedTools ?? (await currentNativeToolViews(effectiveTools!.tools, originalSpec.scope))
+    .filter(({ function: { name } }) => !finishingMemory || CHAPTER_MEMORY_TOOLS.includes(name) || name === 'chapter_read' || name === 'execution_context_read')
   const requestMessages = prepared ? frame.state.messages : projectPersonalizedMessages(frame.state.messages, personalization)
   if (estimateChatMessagesTokens(requestMessages) + estimateToolDefinitionTokens(tools) > inputLimit) {
     return runtimeError('RUNTIME_CONTEXT_LIMIT', '原请求、工具定义或不可再归档内容超过模型输入预算；已保留完整原文，不截掉要求或盲目重试模型。')

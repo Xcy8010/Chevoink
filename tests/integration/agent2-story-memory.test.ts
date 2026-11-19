@@ -194,6 +194,33 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P4 故事记忆与混合召回（需 DB
     await expect(saveStoryMemory({ ...item, section: '秘密', content: '线索', knownBy: ['some-other-novel'] })).rejects.toMatchObject({ code: 'MEMORY_TARGET_MISSING' })
   })
 
+  it('continues a legacy story line by its original card and deduplicates a replay by alias', async () => {
+    const intro = '查明封港的幕后原因。'
+    const previous = '岑野查到了旧港的出船名单。'
+    const next = '岑野发现船长篡改了出船名单。'
+    const [firstChapter, nextChapter] = chapterIds.slice(8, 10)
+    const legacy = await prisma.projectMemoryEntry.create({ data: {
+      novelId, memoryType: 'storyArc', layer: 'L2', title: '封港调查', content: intro + '\n\n## 当前进展\n\n' + previous,
+      importance: 75, confidence: 1, status: 'confirmed', sourceChapterId: firstChapter,
+    } })
+    const input = {
+      userId, novelId, memoryType: 'storyArc' as const, layer: 'L2' as const, importance: 75,
+      confidence: 0.8, status: 'inferred' as const, explicitSave: true, sourceChapterId: nextChapter,
+      section: '当前进展', content: next, evidence: { sourceType: 'chapter' as const, sourceId: nextChapter, revision: 1, confidence: 0.8 },
+    }
+    expect(await saveStoryMemory({ ...input, memoryId: legacy.id, title: legacy.title, aliases: ['旧港追查'] })).toMatchObject({ id: legacy.id, action: 'updated' })
+    expect(await saveStoryMemory({ ...input, title: '旧港追查' })).toMatchObject({ id: legacy.id, action: 'updated' })
+    expect(await prisma.projectMemoryEntry.findMany({ where: { novelId, memoryType: 'storyArc' } })).toMatchObject([
+      { id: legacy.id, title: legacy.title, content: intro + '\n\n## 当前进展\n\n' + next, version: legacy.version + 1 },
+    ])
+    const recall = (atChapterId: string) => searchStoryMemory({ userId, novelId, query: legacy.title, memoryType: 'storyArc', atChapterId })
+    expect((await recall(firstChapter))[0].content).toContain(previous)
+    expect((await recall(nextChapter))[0].content).toContain(next)
+    const replacement = '封港调查已经结案。'
+    await saveStoryMemory({ ...input, section: undefined, title: legacy.title, content: replacement, memoryId: legacy.id })
+    expect((await recall(nextChapter))[0].content).toBe(replacement)
+  })
+
   it('links appearances only to chapters containing the profile or its verified source span', async () => {
     const read = () => listStoryMemories(userId, novelId, { title: '湾桥亭', page: 1, pageSize: 10 })
     const c = await prisma.chapter.update({ where: { id: chapterIds[24] }, data: { content: '他们经过湾桥亭。', revision: { increment: 1 } } })

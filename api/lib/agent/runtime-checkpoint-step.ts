@@ -6,7 +6,7 @@ import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinit
 import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { randomUUID } from 'node:crypto'
-import { AGENT_TOOL_EXECUTION_POLICY } from './tool-execution-guidance.js'
+import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE } from './tool-execution-guidance.js'
 import { COLLABORATION_MARKER, readWritingCollaborationDigest } from './writing-collaboration.js'
 
 /** Storage-pressure compaction is NOT a budget checkpoint and grants no tokens.
@@ -20,15 +20,20 @@ export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: n
     if (frame.state.phase !== 'idle') return null
     // Only a new model boundary can receive current guidance. Never alter a
     // paid assistant call awaiting execution, or an already prepared request.
-    if (frame.state.messages.at(-1)?.role !== 'assistant'
-      && !frame.state.messages.some(message => message.role === 'system' && message.content.includes(AGENT_TOOL_EXECUTION_POLICY))) {
-      const messages = [...frame.state.messages]
-      const position = messages.findIndex(message => message.role !== 'system')
-      messages.splice(position < 0 ? messages.length : position, 0, { role: 'system', content: AGENT_TOOL_EXECUTION_POLICY })
-      return saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
-        snapshot: { ...frame.state, messages } })
-    }
     if (frame.state.messages.at(-1)?.role !== 'assistant') {
+      const policies = [AGENT_TOOL_EXECUTION_POLICY]
+      if (!lease.parent && configuration.mode === 'build' && configuration.agentType === 'orchestrator'
+        && configuration.toolAuthority.some(grant => grant.name === 'memory_save' && grant.permission !== 'deny')) {
+        policies.push(CHAPTER_MEMORY_GUIDANCE)
+      }
+      const missing = policies.filter(policy => !frame.state.messages.some(message => message.role === 'system' && message.content.includes(policy)))
+      if (missing.length) {
+        const messages = [...frame.state.messages]
+        const position = messages.findIndex(message => message.role !== 'system')
+        messages.splice(position < 0 ? messages.length : position, 0, ...missing.map(content => ({ role: 'system' as const, content })))
+        return saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+          snapshot: { ...frame.state, messages } })
+      }
       const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId }, select: { novelId: true } })
       const digest = await readWritingCollaborationDigest(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
       const messages = frame.state.messages.filter(message => !(message.role === 'system' && message.content.startsWith(COLLABORATION_MARKER)))

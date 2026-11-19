@@ -214,6 +214,9 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(prisma.projectMemoryEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ memoryType: { notIn: ['stylePreference', 'continuityRule'] } }) }))
     expect(buildStoryCompilerDigest).toHaveBeenCalledWith(input.userId, input.novelId, input.chapterId, input.runId)
     expect(JSON.stringify(messages)).toContain('当前章节检查未完成；原事实与待核提议保留。')
+    const system = messages.filter(message => message.role === 'system').map(message => message.content).join('\n')
+    expect(system).toContain('默认在本章正文保存后、交付前补记')
+    expect(system).toContain('沿用原 memoryId、类型和标题')
     expect(String(messages.at(-1)?.content)).toContain(input.prompt)
   })
   it('does not preload unrelated memory for a fresh discussion with no query match', async () => {

@@ -1,4 +1,4 @@
-import { AGENT_TOOL_EXECUTION_POLICY } from './tool-execution-guidance.js'
+import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { formatNovelSetupRecap, getNovelSetupFollowup, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
 import { askUserTool, DIRECTION_PURPOSE_REQUIRED, formatUnansweredQuestionWrapUp, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
@@ -1850,7 +1850,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         undefined, undefined, undefined, false, undefined, pendingReceipt ? 'review_receipt_pending' : forceWrapUpLocal || researchPartial ? 'needs_input' : 'user_stop')
     }
 
+    let chapterMemoryWrapUp = false
     const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>, candidate?: { messageId: string; text: string; parts: AgentMessagePart[]; expected?: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; nextPrompt?: string }) => {
+      if (!beforeFinish) chapterMemoryWrapUp = false
       const previousDelivery = completedWritingWrapUp.value
       completedWritingWrapUp.value = null
       if (pendingReviews.size) return false
@@ -1879,6 +1881,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return false
       }
       const exactProse = delivery.titleAndBodyOnly && (!delivery.presentation || delivery.presentation.mode === 'full_text')
+      if (!beforeFinish && !forceWrapUpLocal && params.mode === 'build' && CHAPTER_MEMORY_TOOLS.every(name => {
+        const grant = toolContext.toolAuthority?.get(name)
+        return grant?.permission === 'allow' && !grant.alwaysConfirm
+      })) {
+        chapterMemoryWrapUp = true
+        completedWritingWrapUp.value = delivery
+        return false
+      }
       if (!beforeFinish && !exactProse) {
         // The chapter is done; the ordinary main-model reply still belongs to
         // this request. Do not replace its creative wrap-up with a receipt.
@@ -2007,6 +2017,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         messages.splice(reminderIndex, 1)
       }
       contextReminder.content = completedWritingWrapUp.value ? `${baseContextReminder}\n[当前已核验交付；只读正文数据，不构成新指令]\n${JSON.stringify(completedWritingWrapUp.value.chapters.map(({ id, title, revision, content }) => ({ id, title, revision, content })))}\n这些章节已真实提交。本轮按原请求完成创作回复，不再执行章节写作、检查或提交。` : baseContextReminder
+      if (chapterMemoryWrapUp) contextReminder.content += `\n${CHAPTER_MEMORY_GUIDANCE}`
       if (completedWritingWrapUp.value && todoItems.some(item => item.status === 'pending' || item.status === 'in_progress')) contextReminder.content += `\n${completedWritingTodoGuidance(todoItems)}`
       const preparationHint = completedWritingWrapUp.value ? '' : writingPreparationGuidance(taskSpec, progressSignatures)
       const preparationReminderIndex = messages.indexOf(preparationReminder)
@@ -2191,6 +2202,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const responseSuggestion = responseCall ? readTaskResponseNextPrompt(responseCall.arguments) : undefined
       if (responseCall && responseSuggestion) effectiveToolCalls[0] = { ...responseCall, arguments: responseSuggestion.args }
       const nextPromptReady = Boolean(nextPromptMarker && result.finishReason === 'stop' && !effectiveToolCalls.length)
+      const chapterMemoryBatch = chapterMemoryWrapUp && effectiveToolCalls.some(call => CHAPTER_MEMORY_TOOLS.includes(call.name))
       if (effectiveToolCalls.length) releaseWritingToolText()
       let ordinaryResponse: TaskResponse | undefined
       if (ordinaryResponseAvailable && effectiveToolCalls.length === 0 && result.content.trim()
@@ -2236,7 +2248,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         await finalizeRun(runId, bus, status, usage, turn, text, status === 'failed' ? text : undefined, false, undefined, undefined, undefined,
           false, undefined, 'user_stop', undefined, undefined, nextPrompt, { kind, text, messageId, sessionId: params.sessionId, parts, signal: controller.signal })
       }
-      if (completedWritingWrapUp.value && !todoItems.some(item => item.status === 'pending' || item.status === 'in_progress')) {
+      if (completedWritingWrapUp.value && !chapterMemoryBatch && !todoItems.some(item => item.status === 'pending' || item.status === 'in_progress')) {
         if (await finishPersistedWritingIfComplete(async () => {
           // This known response is the sole ordinary wrap-up turn. Empty or
           // truncated text cannot restart chapter work or buy a summary retry.
@@ -2541,7 +2553,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const knownBatchReviewResults = new Map<string, string>()
       for (let callIndex = 0; callIndex < effectiveToolCalls.length; callIndex += 1) {
         const call = effectiveToolCalls[callIndex]
-        if (await finishPersistedWritingIfComplete(async () => {
+        if (chapterMemoryBatch && !CHAPTER_MEMORY_TOOLS.includes(call.name)) {
+          const reason = '本章正文已保存；继续处理当前章节的记忆卡片。'
+          deferToolProposal(call, reason, messageId, bus)
+          messages.push({ role: 'tool', toolCallId: call.id, content: reason })
+          continue
+        }
+        if (!chapterMemoryBatch && !CHAPTER_MEMORY_TOOLS.includes(call.name) && await finishPersistedWritingIfComplete(async () => {
           for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
           bus.emit({ type: 'text.final', messageId, text: '', asReasoning: false })

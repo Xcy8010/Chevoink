@@ -4,7 +4,7 @@ import type { AgentTool } from './tools/types.js'
 import { retainedFindingSchema } from './tools/chapter-arguments.js'
 import { durableChatResultSchema, runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame } from './runtime-state.js'
-import { toOpenAIParameters, toOpenAIToolPresentation } from './tool-schema.js'
+import { originalToolParameterSchemas, toOpenAIParameters, toOpenAIToolPresentation } from './tool-schema.js'
 import { novelImportArguments } from './tools/import-arguments.js'
 import { isResponsesToolRequest } from '../ai-responses-route.js'
 import { PERSONALIZATION_TOOL_NAMES } from './personalization-operations.js'
@@ -50,6 +50,12 @@ export function projectNativeToolViews(frozen: readonly NativeToolView[], curren
       // their exact saved definitions and are verified against the old schema.
       const { parameters } = toOpenAIToolPresentation(tool, scope)
       return { ...definition, function: { ...definition.function, parameters } }
+    }
+    if (tool && (tool.name === 'memory_save' || tool.name === 'memory_search') && definition.function.strict === false
+      && originalToolParameterSchemas(tool, scope).slice(1).some(schema => runtimeJson(schema).hash === runtimeJson(definition.function.parameters).hash)) {
+      // New requests on a built-in legacy contract can use sections and item
+      // cards. History still uses the exact definition from its own request.
+      return { ...definition, function: { ...definition.function, ...toOpenAIToolPresentation(tool, scope) } }
     }
     if (!tool || !simplified.has(tool.name)) return definition
     const next = toOpenAIToolPresentation(tool, scope), original = definition.function.parameters

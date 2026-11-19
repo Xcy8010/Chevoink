@@ -10,11 +10,30 @@ import { readExecutionFrame } from '../../api/lib/agent/runtime-state.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { getToolByName } from '../../api/lib/agent/tools/registry.js'
+import { legacyMemorySaveParameters, legacyMemorySearchParameters } from '../../api/lib/agent/memory-tool-parameters.js'
 
 vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionFrame: vi.fn() }))
 const view = (name: string, parameters: Record<string, unknown>, description = '旧平台说明'): NativeToolView => ({ type: 'function', function: { name, parameters, description } })
 
 describe('current native built-in presentation', () => {
+  it.each([
+    ['memory_save', legacyMemorySaveParameters, { memoryType: 'itemCard', title: '灯', content: '岑野持有。', importance: 70, section: '持有人' }],
+    ['memory_search', legacyMemorySearchParameters, { query: '灯', memoryType: 'itemCard', atChapterId: 'chapter' }],
+  ] as const)('publishes current %s for new turns of old built-in tasks', async (name, legacy, args) => {
+    const parameters = toOpenAIParameters(legacy)
+    const original = view(name, parameters)
+    const custom = view(name, { ...parameters, additionalProperties: false }, '作者自定义约束')
+    const originalHash = runtimeJson(original).hash
+    const [current] = await currentNativeToolViews([original], { novelId: 'n' })
+    const [customResult] = await currentNativeToolViews([custom], { novelId: 'n' })
+    const tool = getToolByName(name)!
+
+    expect(toolWithNativeView(tool, current).parameters.parse(args)).toEqual(args)
+    expect(legacy.safeParse(args).success).toBe(false)
+    expect(customResult.function.parameters).toEqual(custom.function.parameters)
+    expect(runtimeJson(original).hash).toBe(originalHash)
+  })
+
   it.each(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit'])('does not require a new provider source frame for metadata-only %s clarification', async action => {
     const tool = getToolByName(action)!, scope = { novelId: 'n' }
     const { strict: _strict, ...implicit } = (await currentNativeToolViews([view(action, toOpenAIParameters(tool.parameters))], scope))[0].function

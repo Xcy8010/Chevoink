@@ -8,6 +8,8 @@ import { readCompletedWritingDelivery } from './writing-scope.js'
 import { readLimitedWritingDelivery } from './writing-delivery-limitations.js'
 import { readDurableTodoItems } from './tools/durable-todo.js'
 import { completedWritingTodoGuidance } from './tools/todo-tools.js'
+import { CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_MARKER, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
+import { readEffectiveNativeTooling } from './native-tool-policy.js'
 
 /** Append a server-projected candidate; immutable prior model frames/calls and
  * usage remain in place. No pending operation or unknown outcome is skipped. */
@@ -44,7 +46,24 @@ export async function advanceDurableWritingDelivery(token: RunLeaseToken) {
     }
     if (!delivery) return null
     if (latest?.role === 'assistant' && !latest.toolCalls?.length && latest.content === delivery.text) return null
-    const proof = runtimeJson({ version: 1, chapters: delivery.chapters.map(({ id, revision, contentHash }) => ({ id, revision, contentHash })), text: delivery.text,
+    const chapters = delivery.chapters.map(({ id, revision, contentHash }) => ({ id, revision, contentHash }))
+    if (!token.parent && state.configuration.mode === 'build' && state.configuration.agentType === 'orchestrator') {
+      const content = `${CHAPTER_MEMORY_MARKER}${runtimeJson(chapters).hash}] 以下章节已保存：${JSON.stringify(chapters.map(({ id, revision }) => ({ id, revision })))}。只处理这些章涉及的记忆，然后交付现有稿件。\n${CHAPTER_MEMORY_GUIDANCE}`
+      const messages = state.frame.state.messages
+      const hasCheck = messages.some(message => message.role === 'system' && message.content === content)
+      const needsCheck = !hasCheck && latest?.role === 'tool'
+      if (needsCheck || (hasCheck && latest?.role !== 'assistant')) {
+        const { toolAuthority } = await readEffectiveNativeTooling(tx, token, state.configuration, taskSpecSchema.parse(state.originalSpec))
+        if (CHAPTER_MEMORY_TOOLS.every(name => toolAuthority.some(grant => grant.name === name && grant.permission === 'allow' && !grant.alwaysConfirm))) {
+          if (needsCheck) return saveExecutionStateInTransaction(tx, token, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
+            snapshot: { ...state.frame.state, messages: [...messages, { role: 'system', content }] } })
+          // Allow lookup, saves and any needed correction before presenting
+          // the exact prose. Only an ordinary final model response ends the check.
+          return null
+        }
+      }
+    }
+    const proof = runtimeJson({ version: 1, chapters, text: delivery.text,
       ...(limited ? { limitedWritingDelivery: limited } : {}) })
     const next = await saveExecutionStateInTransaction(tx, token, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
       snapshot: { ...state.frame.state, messages: [...state.frame.state.messages, { role: 'assistant', content: delivery.text }] } })

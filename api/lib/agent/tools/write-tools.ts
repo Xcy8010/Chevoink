@@ -24,7 +24,7 @@ export const memorySaveTool = defineTool({
   name: 'memory_save',
   title: '沉淀创作记忆',
   description:
-    '每个人物、物品、地点和具体场景分别建档。人物卡用 Markdown 写小传：以一段话交代此人是谁、从何而来、想得到什么。在「## 人物设定」中把作者确定的外貌、经历、性格矛盾、说话习惯或行事底线写成具体的人物简介，只写已有依据的细节。用「## 当前处境」「## 关键经历」记录后续变化。更新原卡用 memoryId、section 并注明起效章节，保留其他段落。仅作者知情的段落传 knownBy=[]，揭晓后更新。作者明确改设定时按要求追溯。试写和待定情节保持原本范围。',
+    '每个人物、物品、地点、具体场景和故事线分别建档。续写后先查原卡，有卡用 memoryId 与 section 只更新变化的小节，确认缺卡才新建。人物卡用 Markdown 写一段小传交代身份、来历和愿望，在「## 人物设定」写已有依据的外貌、习惯、性格或行事底线，后续更新「当前处境」或「关键经历」。物品记录「持有人」，故事线记录「当前进展」，同一故事线跨章沿用原卡。标明正文来源章节，必要时另标起效章。仅作者知情的段落传 knownBy=[]，揭晓后更新。作者明确改设定时按要求追溯。试写和待定情节保持原本范围。',
   parameters: memorySaveParameters,
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw

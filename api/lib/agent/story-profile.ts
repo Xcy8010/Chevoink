@@ -2,7 +2,7 @@ import type { Prisma, ProjectMemoryEntry, ProjectMemoryType } from '@prisma/clie
 import { activeChapterScope } from '../data/internal.js'
 import { DataAccessError } from '../prisma.js'
 
-export const isStoryProfile = (type: ProjectMemoryType) => ['characterCard', 'itemCard', 'locationCard', 'sceneCard'].includes(type)
+export const isStoryProfile = (type: ProjectMemoryType) => ['characterCard', 'itemCard', 'locationCard', 'sceneCard', 'storyArc'].includes(type)
 
 export type ProfileWrite = {
   identityKey?: string

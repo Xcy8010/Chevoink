@@ -294,6 +294,7 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
   let title = input.title.trim()
   let content = input.content.trim()
   const profile = isStoryProfile(input.memoryType)
+  const storyArc = input.memoryType === 'storyArc'
   const requested = { title, memoryType: input.memoryType, sourceChapterId: input.sourceChapterId, identityKey: profile ? input.identityKey : undefined }
   const rebuildingRollup = !!input.systemDerived && !!memoryRollup(requested)
   const current = await currentStoryMemoryWhere(db, input.novelId, rebuildingRollup)
@@ -315,8 +316,10 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
   if (input.memoryType === 'chapterSummary' && existing?.sourceChapterId && input.sourceChapterId && existing.sourceChapterId !== input.sourceChapterId) {
     throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '该摘要属于其他章节，请使用来源章节对应的卡片 ID。')
   }
+  const tracksSections = (profile && (!storyArc || Boolean(input.identityKey || input.aliases?.length)))
+    || existing?.profileTracked || input.section !== undefined || input.knownBy !== undefined || input.effectiveFromChapterId !== undefined
   const identity = { ...requested, title, identityKey: existing?.identityKey ?? requested.identityKey,
-    sourceChapterId: profile ? null : input.sourceChapterId ?? (input.memoryType === 'chapterSummary' ? existing?.sourceChapterId ?? null : null) }
+    sourceChapterId: profile && tracksSections ? null : input.sourceChapterId ?? (input.memoryType === 'chapterSummary' ? existing?.sourceChapterId ?? null : null) }
   const deleted = await db.projectMemoryEntry.findFirst({
     where: { ...deletedMemoryWhere(input.novelId), OR: [memoryIdentityWhere(identity), ...(existing ? [memoryIdentityWhere(existing)] : []),
       ...(profile && !existing && !input.identityKey ? [{ memoryType: input.memoryType, OR: [{ title }, { aliases: { has: title } }] }] : [])] },
@@ -340,8 +343,6 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
     } })
     if (explicit || covered) return { id: existing.id, action: 'updated', status: existing.status }
   }
-  // Existing categories can also receive a Markdown section or scoped fact without replacing the rest of the card.
-  const tracksSections = profile || existing?.profileTracked || input.section !== undefined || input.knownBy !== undefined || input.effectiveFromChapterId !== undefined
   if (input.knownBy?.length) {
     const ids = [...new Set(input.knownBy)]
     const valid = await db.projectMemoryEntry.count({ where: { AND: [current, { memoryType: 'characterCard', id: { in: ids } }] } })
@@ -350,7 +351,8 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
   const prepared = tracksSections ? await prepareProfileUpdate(db, input.novelId, existing, {
     ...input, title, content, sourceChapterId: input.sourceChapterId ?? (input.evidence.sourceType === 'chapter' ? input.evidence.sourceId : null),
     manual: input.explicitSave || input.evidence.sourceType === 'author_input',
-    mergeSections: profile && input.explicitSave === true,
+    // Older storyArc calls without section explicitly replaced the whole card.
+    mergeSections: profile && !storyArc && input.explicitSave === true,
   }) : undefined
   if (prepared) { content = prepared.content; title = prepared.title ?? title }
   const aliases = profile ? [...new Set([...(existing?.aliases ?? []), ...(input.aliases ?? []).map(a => a.trim()),
