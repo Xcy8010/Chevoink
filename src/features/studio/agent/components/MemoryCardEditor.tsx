@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import type { StoryMemoryCard } from '../../../../../shared/contracts/index.js'
 import { deleteStoryMemory, updateStoryMemory } from '../agentApi'
 import { useShellStore } from '@/store/useShellStore'
+import { MemoryMarkdown } from './MemoryMarkdown'
 import './memory-catalog.css'
 
 const button = 'min-h-11 rounded-xl border border-[var(--border-subtle)] px-4 py-2 text-sm disabled:opacity-40'
@@ -93,6 +94,8 @@ export default function MemoryCardEditor({ card, novelId, onClose, onSaved }: { 
   const userId = useShellStore(state => state.sessionUser?.id ?? 'anonymous')
   const key = `chevoink:memory-draft:${userId}:${novelId}:${card.id}`
   const [draft, setDraft] = useState(() => readDraft(key, card))
+  const [preview, setPreview] = useState(false)
+  const contentId = useId()
   const [confirmClose, setConfirmClose] = useState(false)
   const [saving, setSaving] = useState(false)
   const pending = useRef(false)
@@ -149,7 +152,20 @@ export default function MemoryCardEditor({ card, novelId, onClose, onSaved }: { 
       <button type="button" className={button} onClick={() => change({ ...draft, expectedVersion: card.version })}>已核对，以当前版本继续编辑</button></div>}
     <fieldset disabled={saving || confirmClose} className="space-y-3">
       <label className="block text-sm">标题<input value={draft.title} maxLength={160} onChange={e => change({ ...draft, title: e.target.value })} className="memory-editor-field mt-1.5 min-h-11 w-full rounded-xl border border-[var(--border-subtle)] px-3 text-base" /></label>
-      <label className="block text-sm">内容<textarea value={draft.content} maxLength={8000} rows={7} onChange={e => change({ ...draft, content: e.target.value })} className="memory-editor-field mt-1.5 w-full resize-y rounded-xl border border-[var(--border-subtle)] p-3 text-base leading-7" /></label>
+      <div>
+        <div className="memory-editor-mode">
+          <label htmlFor={contentId}>内容</label>
+          <div role="group" aria-label="正文显示方式">
+            <button type="button" aria-pressed={!preview} onClick={() => setPreview(false)}>Markdown</button>
+            <button type="button" aria-pressed={preview} onClick={() => setPreview(true)}>预览</button>
+          </div>
+        </div>
+        <textarea id={contentId} hidden={preview} value={draft.content} rows={8} onChange={e => change({ ...draft, content: e.target.value })}
+          className="memory-editor-field memory-editor-source w-full resize-y rounded-xl border border-[var(--border-subtle)] p-3 text-base leading-7" />
+        {preview && <section className="memory-editor-preview" aria-label="正文预览">
+          {draft.content.trim() ? <MemoryMarkdown title={draft.title} content={draft.content} /> : <p>暂无内容</p>}
+        </section>}
+      </div>
       <label className="block text-sm">重要性 {draft.importance}<input type="range" min={1} max={100} value={draft.importance} onChange={e => change({ ...draft, importance: Number(e.target.value) })} className="memory-editor-range mt-1 min-h-11 w-full" /></label>
     </fieldset>
   </MemoryModal>

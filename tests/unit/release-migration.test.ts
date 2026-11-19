@@ -12,6 +12,7 @@ import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex,
   userNotificationsMigrationName, userNotificationsMigrationChecksum,
   emailAccountMigrationName, emailAccountMigrationChecksum,
   agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum,
+  storyProfilesMigrationName, storyProfilesMigrationChecksum, readStoryProfilesState, assertStoryProfilesState,
   assertAgentPersonalizationState, readAgentPersonalizationState } from '../../scripts/verify-release-migration.mjs'
 
 // Static catalog captured after the four frozen SQL files in isolated PostgreSQL.
@@ -453,6 +454,61 @@ model AgentPersonalizationMemory {
     expect(readFileSync('deploy/deploy-production.sh', 'utf8')).toContain(`"$MIGRATION_PLAN" == "${agentPersonalizationMigrationName}"`)
     rmSync(path.dirname(f.candidate), { recursive: true })
   })
+
+  it('allows only the frozen story profile schema pair, unmodified SQL and API-only deployment', () => {
+    const v1 = personalizationFixture()
+    const f = fixture()
+    const file = (root: string) => path.join(root, 'prisma/schema.prisma')
+    const delta = JSON.parse(readFileSync(new URL('../fixtures/release-story-profile-schema-additions.json', import.meta.url), 'utf8'))
+    const insert = (schema: string, additions: [string, string][]) => additions.reduce(
+      (text, [anchor, addition]) => text.replace(anchor, addition + anchor), schema)
+    const baseline = insert(readFileSync(file(v1.candidate), 'utf8').replaceAll('\r\n', '\n'), delta.baseline)
+    const candidate = insert(baseline, delta.candidate)
+    const relative = `prisma/migrations/${storyProfilesMigrationName}/migration.sql`
+    const target = path.join(f.candidate, relative)
+    try {
+      writeFileSync(file(f.baseline), baseline)
+      writeFileSync(file(f.candidate), candidate)
+      mkdirSync(path.dirname(target))
+      const sql = readFileSync(relative, 'utf8').replaceAll('\r\n', '\n')
+      writeFileSync(target, sql)
+      expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(storyProfilesMigrationName)
+      const sh = readFileSync('deploy/deploy-production.sh', 'utf8')
+      const guard = sh.indexOf(`"$MIGRATION_PLAN" == "${storyProfilesMigrationName}" && "$PUBLICATION" != api-only`)
+      expect(guard).toBeGreaterThan(0)
+      expect(guard).toBeLessThan(sh.indexOf('phase preparing'))
+      expect(sh.slice(sh.indexOf('phase prepared'), sh.indexOf('phase migrating'))).toContain(`"$MIGRATION_PLAN" == "${storyProfilesMigrationName}"`)
+      expect(sh.slice(sh.indexOf('phase prepared'), sh.indexOf('phase migrated'))).toMatch(
+        /verify-release-migration\.mjs before[^\n]*\s+phase migrating\s+npx prisma migrate deploy\s+[^\n]*verify-release-migration\.mjs after/)
+      for (const [filename, value] of [[file(f.baseline), baseline], [file(f.candidate), candidate], [target, sql],
+        [path.join(f.candidate, 'prisma/migrations/old/migration.sql'), 'SELECT 1;\n']]) {
+        writeFileSync(filename, value + '\n')
+        expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+        writeFileSync(filename, value)
+      }
+      writeFileSync(path.join(path.dirname(target), 'unreviewed.sql'), 'SELECT 1;')
+      expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+    } finally {
+      for (const root of [f.candidate, v1.candidate]) rmSync(path.dirname(root), { recursive: true })
+    }
+  })
+  it('reads the story profile preflight using only catalog metadata and rejects partially installed objects', async () => {
+    const labels = ['novelSummary','worldbuilding','characterCard','chapterSummary','timelineEvent','foreshadowing','stylePreference',
+      'continuityRule','volumeSummary','storyArc','sceneState','relationshipState','storyBible','authorProfile']
+    const queries: string[] = []
+    const query = (sql: string) => {
+      queries.push(sql.trim())
+      if (sql.includes('FROM pg_enum')) return labels.map(label => ({ label }))
+      if (sql.includes('current_schema() AS schema')) return [{ schema: 'public', identityIndex: false, ownedSequence: false }]
+      return []
+    }
+    const state = await readStoryProfilesState({ $queryRawUnsafe: query, $queryRaw: ([sql]: TemplateStringsArray) => query(sql) }, 'before')
+    assertStoryProfilesState(state, 'before')
+    expect(queries.every(sql => sql.startsWith('SELECT ') && /\bFROM pg_/.test(sql))).toBe(true)
+    expect(() => assertStoryProfilesState({ ...state, kinds: [...labels, 'itemCard'] }, 'before')).toThrow(/enum/)
+    expect(() => assertStoryProfilesState({ ...state, objects: [{ name: 'story_profile_changes_id_seq', kind: 'S' }] }, 'before')).toThrow(/sequence/)
+    expect(() => assertStoryProfilesState({ ...state, columns: [{ name: 'profile_tracked' }] }, 'before')).toThrow(/columns/)
+  })
   it.each(['baseline', 'schema', 'history', 'sql', 'extra'])('rejects personalization %s outside its exact approval', change => {
     const f = personalizationFixture()
     if (change === 'baseline') writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), '// unrelated')
@@ -489,6 +545,7 @@ model AgentPersonalizationMemory {
     [userNotificationsMigrationName, userNotificationsMigrationChecksum],
     [emailAccountMigrationName, emailAccountMigrationChecksum],
     [agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum],
+    [storyProfilesMigrationName, storyProfilesMigrationChecksum],
   ])('requires only %s pending, one exact successful row afterwards and unchanged full history', (migration, checksum) => {
     const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1, historyHash: 'a'.repeat(32) }
     const target = { ...old, migration_name: migration, checksum }

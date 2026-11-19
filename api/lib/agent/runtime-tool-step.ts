@@ -10,6 +10,7 @@ import { accountProfileTool, accountPreferencesGetTool, accountPreferencesUpdate
 import { readEffectiveNativeTooling, readNativeToolAdmission, type NativeToolAdmission } from './native-tool-policy.js'
 import { z } from 'zod'
 import { originalToolParameterSchemas } from './tool-schema.js'
+import { legacyMemorySaveParameters, legacyMemorySearchParameters } from './memory-tool-parameters.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { env } from '../../config/env.js'
 import { requestToolApproval, pollToolApproval, readCommitReviewApproval, readToolApprovalOutcome } from './runtime-approval.js'
@@ -246,6 +247,14 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     if (!historicalWriter && current.frame.state.phase !== 'awaiting_operation' && hasRetiredNativeArguments(call.name, raw)) return { reject: { cursor, callId: call.id, tool } }
     const frozenArgs = await readPreparedLiteraryArguments(tx, lease, { action: call.name, callId: call.id, rawArguments: call.arguments, cursor })
     const normalized = normalizeToolInput(tool, frozenArgs ?? raw)
+    if (call.name === 'memory_save' || call.name === 'memory_search') {
+      const fields = published.function.parameters.properties as Record<string, unknown>
+      const isSave = call.name === 'memory_save'
+      if (!((isSave ? 'section' : 'atChapterId') in fields)) {
+        // Old parsers stripped unknown fields. Reuse that behavior for both initial admission and prepared receipts.
+        tool = { ...tool, parameters: isSave ? legacyMemorySaveParameters : legacyMemorySearchParameters }
+      }
+    }
     if (!historicalWriter && (sourceContract || published !== definition || call.name === 'agent_configure') && !validateToolInput(toolWithNativeView(tool, published), normalized).success) {
       return { reject: { cursor, callId: call.id, tool } }
     }
@@ -265,7 +274,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
         provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }
     ctx.modelAssignments = current.configuration.modelAssignments
-    if (historicalWriter || originalScope.volumeCreateIntent || ['ask_user', 'quality_analyze', 'continuity_validate'].includes(call.name)) ctx.writingScope = originalScope
+    if (historicalWriter || originalScope.volumeCreateIntent || ['ask_user', 'quality_analyze', 'continuity_validate', 'memory_search'].includes(call.name)) ctx.writingScope = originalScope
     ctx.inlineChild = Boolean(lease.parent)
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
     if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
@@ -401,9 +410,10 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   if (selected.tool.name === 'novel_import') return executeDurableImport(selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'goal_enable') return { kind: 'tool' as const, result: await selected.tool.execute(selected.ctx, selected.args) }
   if (selected.tool.name === 'goal_read' || selected.tool.name === 'goal_report') return executeDurableGoalTool(selected.ctx, selected.tool, selected.args)
-  if (historyAction) {
+  const storedReadAction = historyAction ?? (selected.tool.name === 'memory_search' ? 'memory_search' : undefined)
+  if (storedReadAction) {
     const normalize = (raw: unknown) => Object.fromEntries(Object.entries(selected.tool.parameters.parse(normalizeToolInput(selected.tool, raw)) as Record<string, unknown>).filter(([, value]) => value !== undefined))
-    return { kind: 'tool' as const, result: await executeDurableRead(selected.ctx, historyAction, selected.args, normalize,
+    return { kind: 'tool' as const, result: await executeDurableRead(selected.ctx, storedReadAction, selected.args, normalize,
       tx => selected.tool.execute({ ...selected.ctx, durableRead: undefined, transaction: tx }, selected.args)) }
   }
   if (selected.ctx.durableTask) return { kind: 'tool' as const, result: selected.tool.name === 'todo_write'

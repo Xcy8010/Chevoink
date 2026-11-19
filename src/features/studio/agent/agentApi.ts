@@ -240,8 +240,15 @@ export function fetchStoryMemories(
 }
 
 /** 记忆卡片集封面墙：每类型一叠牌的数量/最近更新/标题预览，一次拿全 */
-export function fetchStoryMemorySets(novelId: string): Promise<StoryMemorySets> {
-  return requestData<StoryMemorySets>(`/api/agent/novels/${novelId}/memory-sets`)
+export async function fetchStoryMemorySets(novelId: string): Promise<StoryMemorySets> {
+  const path = `/api/agent/novels/${novelId}/memory-sets`
+  try {
+    return await requestData<StoryMemorySets>(path, { method: 'POST' })
+  } catch (error) {
+    if (error instanceof AgentApiError && (error.status === 405
+      || error.status === 404 && (!error.code || error.code === 'NOT_FOUND'))) return requestData<StoryMemorySets>(path)
+    throw error
+  }
 }
 
 /** 记忆中心：作者就地编辑卡片（后端记录修订历史并重算向量，后续写作按最新设定召回） */

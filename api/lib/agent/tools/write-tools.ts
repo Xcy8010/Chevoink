@@ -1,3 +1,4 @@
+import { memorySaveParameters } from '../memory-tool-parameters.js'
 import { lockNovelActiveScope } from '../../data/novel-write-lock.js'
 import { planMetadataPatchSchema } from '../../../../shared/contracts/novel-plans.js'
 import { applyPlanMetadataPatch, findPlanByIdentity, planKind, novelPlanHash } from '../novel-plan-contract.js'
@@ -23,35 +24,8 @@ export const memorySaveTool = defineTool({
   name: 'memory_save',
   title: '沉淀创作记忆',
   description:
-    '保存本作品当前创作记忆，随后写作可直接使用。作者明确更改设定、风格或约束时更新原卡；已知卡片 ID 时传 memoryId，也可按同类型同标题更新。试写与待定情节按其原有范围处理。来源可选。',
-  parameters: z.object({
-    memoryType: z
-      .enum([
-        'novelSummary',
-        'worldbuilding',
-        'characterCard',
-        'chapterSummary',
-        'timelineEvent',
-        'foreshadowing',
-        'stylePreference',
-        'continuityRule',
-        'volumeSummary',
-        'storyArc',
-        'sceneState',
-        'relationshipState',
-        'storyBible',
-        'authorProfile',
-      ])
-      .describe('记忆类型'),
-    title: z.string().min(1).max(120).describe('记忆标题（如角色名、章节名、设定名）'),
-    content: z.string().min(1).max(4000).describe('记忆内容，事实化、结构化表述，最多4000字符；不同主题分别保存，不截断事实'),
-    importance: z.number().int().min(1).max(100).describe('重要性 1-100：核心主角/主线设定 80+，一般设定 50-70'),
-    sourceChapterId: z.string().optional().describe('可选的真实来源章节 ID'),
-    revision: z.number().int().positive().optional().describe('读取到的来源章节版本'),
-    sourceQuote: z.string().trim().min(1).max(4000).optional().describe('可选的逐字章节引文。能在来源章节中定位时附为证据'),
-    memoryId: z.string().optional().describe('已知时传要就地修订的既有卡片 ID，改标题时使用原卡 ID'),
-    overwrite: z.boolean().optional().describe('兼容旧调用，同类型同标题的卡片会就地更新'),
-  }),
+    '每个人物、物品、地点和具体场景分别建档。人物卡用 Markdown 写小传：以一段话交代此人是谁、从何而来、想得到什么。在「## 人物设定」中把作者确定的外貌、经历、性格矛盾、说话习惯或行事底线写成具体的人物简介，只写已有依据的细节。用「## 当前处境」「## 关键经历」记录后续变化。更新原卡用 memoryId、section 并注明起效章节，保留其他段落。仅作者知情的段落传 knownBy=[]，揭晓后更新。作者明确改设定时按要求追溯。试写和待定情节保持原本范围。',
+  parameters: memorySaveParameters,
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
     let source = raw as Record<string, unknown>
@@ -107,6 +81,8 @@ export const memorySaveTool = defineTool({
       title: args.title, content: args.content, importance: args.importance,
       confidence: evidence.confidence, status: 'inferred', explicitSave: true,
       memoryId: args.memoryId ?? null,
+      identityKey: args.identityKey, aliases: args.aliases, section: args.section,
+      effectiveFromChapterId: args.effectiveFromChapterId, knownBy: args.knownBy,
       overwrite: args.overwrite === true,
       evidence,
     }, ctx.transaction)

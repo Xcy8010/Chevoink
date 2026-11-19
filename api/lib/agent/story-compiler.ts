@@ -17,7 +17,8 @@ import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeTargetOrderIndex, readTailVolumeBinding } from './writing-volume.js'
 import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
 import { readReviewCycle } from './review-cycle.js'
-import { currentStoryMemoryWhere, saveStoryMemory } from './story-memory.js'
+import { currentStoryMemoryWhere, projectStoryMemoryAt, saveStoryMemory, searchStoryMemory } from './story-memory.js'
+import { selectProfileExcerpt } from './story-profile.js'
 import { readWritingContinuityReference, type WritingContinuityReference } from './writing-continuity-reference.js'
 
 type PreparedBridge = {
@@ -197,7 +198,7 @@ export async function prepareStoryCompilation(input: {
   intentSummary: string
   detailPlanId?: string
   volumeDecision?: WritingVolumeDecision
-}, transaction?: Prisma.TransactionClient): Promise<{ compilation: Prisma.StoryCompilationGetPayload<{ include: { bridge: true } }>; charter: StoryCharter | null; promises: ReaderPromise[]; bridge: PreparedBridge; preparedFirstForTarget: boolean; continuityReference: WritingContinuityReference | null }> {
+}, transaction?: Prisma.TransactionClient): Promise<{ compilation: Prisma.StoryCompilationGetPayload<{ include: { bridge: true } }>; charter: StoryCharter | null; promises: ReaderPromise[]; bridge: PreparedBridge; profiles: { id: string; title: string; type: string; content: string }[]; preparedFirstForTarget: boolean; continuityReference: WritingContinuityReference | null }> {
   if (!transaction) return prisma.$transaction(tx => prepareStoryCompilation(input, tx))
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
@@ -241,15 +242,21 @@ export async function prepareStoryCompilation(input: {
       reusedTailVolume = { id: volume.id, proposalHash: binding.proposalHash, targetOrderIndex: target.targetOrderIndex }
     } else await assertWritingVolumeBoundary(db, input, target.targetOrderIndex, volumeDecision.newVolume)
   }
-  const memory = await db.projectMemoryEntry.findMany({
+  const currentMemories = await currentStoryMemoryWhere(db, input.novelId)
+  const memoryScope = { atChapterOrder: target.targetOrderIndex, publicOnly: true }
+  const candidates = await db.projectMemoryEntry.findMany({
     where: {
-      ...await currentStoryMemoryWhere(db, input.novelId),
+      ...currentMemories,
       memoryType: { in: ['sceneState', 'relationshipState', 'timelineEvent', 'foreshadowing'] },
     },
     orderBy: [{ importance: 'desc' }, { updatedAt: 'desc' }],
-    take: 16,
-    select: { memoryType: true, title: true, content: true, confidence: true },
+    select: { id: true, memoryType: true, title: true, content: true, confidence: true, sourceChapterId: true, profileTracked: true },
   })
+  const memory = (await projectStoryMemoryAt(db, input.novelId, candidates, memoryScope)).slice(0, 16)
+  const profileQuery = [input.intentSummary, target.chapter?.title, previousChapter?.title, lastParagraph(previousChapter?.content ?? '')].filter(Boolean).join(' ')
+  const profiles = await searchStoryMemory({ userId: input.userId, novelId: input.novelId, query: profileQuery, ...memoryScope, limit: 12 }, db,
+    { AND: [currentMemories, { memoryType: { in: ['characterCard', 'itemCard', 'locationCard', 'sceneCard'] } }] })
+  const preparedProfiles = profiles.map(item => ({ id: item.id, type: item.memoryType, title: item.title, content: selectProfileExcerpt(item.content, profileQuery, 400) }))
 
   const bridge: PreparedBridge = {
     lastUnfinishedAction: '',
@@ -314,7 +321,10 @@ export async function prepareStoryCompilation(input: {
     previousChapter: previousChapter
       ? { id: previousChapter.id, title: previousChapter.title, orderIndex: previousChapter.orderIndex, revision: previousChapter.revision, ending: lastParagraph(previousChapter.content) }
       : null,
-    memory: memory.map((item) => ({ type: item.memoryType, title: item.title, content: clip(item.content, 300), confidence: item.confidence })),
+    memory: [
+      ...memory.map((item) => ({ type: item.memoryType, title: item.title, content: clip(item.content, 300), confidence: item.confidence })),
+      ...preparedProfiles,
+    ],
   }
   const compilation = await db.storyCompilation.create({
     data: {
@@ -352,7 +362,7 @@ export async function prepareStoryCompilation(input: {
     },
     include: { bridge: true },
   })
-  return { compilation, charter: bundle.charter, promises: bundle.promises, bridge, preparedFirstForTarget: priorRepairStates.length === 0, continuityReference }
+  return { compilation, charter: bundle.charter, promises: bundle.promises, bridge, profiles: preparedProfiles, preparedFirstForTarget: priorRepairStates.length === 0, continuityReference }
 }
 
 export async function saveSceneTasks(input: {

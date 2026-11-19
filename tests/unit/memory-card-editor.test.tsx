@@ -88,6 +88,26 @@ it('repositions the editor with the visual viewport without losing the edited fi
   viewport.dispatchEvent(new Event('resize'))
   expect(dialog.style.getPropertyValue('--memory-viewport-height')).toBe('315px')
 })
+
+it('previews the actual Markdown draft and preserves it verbatim when switching back or saving a long profile', async () => {
+  const source = '## 当前处境\n\n她将**铜钥匙**交给船工。\n\n' + '在渡口等信。'.repeat(1600)
+  vi.mocked(updateStoryMemory).mockResolvedValueOnce({ memory: { ...card, content: source, version: 2 } })
+  const { onSaved } = setup()
+  const input = screen.getByLabelText<HTMLTextAreaElement>('内容')
+  expect(input.maxLength).toBe(-1)
+  fireEvent.change(input, { target: { value: source } })
+  fireEvent.click(screen.getByRole('button', { name: '预览' }))
+  const preview = screen.getByRole('region', { name: '正文预览' })
+  expect(preview.querySelector('h4')?.textContent).toBe('当前处境')
+  expect(preview.querySelector('strong')?.textContent).toBe('铜钥匙')
+  expect(input.hidden).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Markdown' }))
+  expect(input.hidden).toBe(false)
+  expect(input.value).toBe(source)
+  fireEvent.click(screen.getByRole('button', { name: '保存修订' }))
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+  expect(updateStoryMemory).toHaveBeenCalledWith(card.id, { title: card.title, content: source, importance: 80, expectedVersion: 1 })
+})
 it('delete requires explicit confirmation, cannot be repeated or dismissed while pending, errors retain card', async () => {
   const onClose = vi.fn(), onDeleted = vi.fn()
   let reject!: (reason: Error) => void

@@ -2,12 +2,13 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 
 import { createPortal } from 'react-dom'
 import {
   ArrowLeft, ArrowUpRight, BookMarked, BookOpen, ChevronLeft, ChevronRight, Clapperboard,
-  Feather, Globe, HeartHandshake, History, Library, LoaderCircle, PenLine, PencilLine,
+  Feather, Globe, HeartHandshake, History, Library, LoaderCircle, MapPin, Package, PenLine, PencilLine,
   Quote, Route, ScrollText, Search, ShieldCheck, Telescope, Trash2, UserRound, X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { fetchStoryMemories, fetchStoryMemorySets } from '../agentApi'
 import MemoryCardEditor, { MemoryCardDeleteDialog } from './MemoryCardEditor'
+import { MemoryMarkdown, MemorySnippet } from './MemoryMarkdown'
 import { useAgentStore } from '../agentStore'
 import { useShellStore } from '@/store/useShellStore'
 import type { StoryMemoryCard, StoryMemorySet } from '../../../../../shared/contracts/index.js'
@@ -20,6 +21,9 @@ const MEMORY_TYPE_META: Record<string, { label: string; icon: LucideIcon }> = {
   volumeSummary: { label: '卷摘要', icon: Library },
   chapterSummary: { label: '章节摘要', icon: ScrollText },
   characterCard: { label: '人物', icon: UserRound },
+  itemCard: { label: '物品', icon: Package },
+  locationCard: { label: '地点', icon: MapPin },
+  sceneCard: { label: '场景', icon: Clapperboard },
   relationshipState: { label: '人物关系', icon: HeartHandshake },
   worldbuilding: { label: '世界观', icon: Globe },
   storyBible: { label: '设定集', icon: BookMarked },
@@ -178,6 +182,7 @@ type CatalogProps = {
 }
 
 function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, onChanged, onQuote }: CatalogProps) {
+  const navigate = useAgentStore(state => state.requestToolNavigation)
   const { card: startCard } = location
   const [memoryType, setMemoryType] = useState(location.memoryType)
   const { label } = typeMeta(memoryType)
@@ -239,6 +244,12 @@ function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, on
   }, [reading])
 
   const selected = selection ? page.items.find(card => card.id === selection.id) ?? selection : page.items[0]
+  const appearances = selected?.appearances ?? []
+  const sourceChapter = selected?.sourceChapter ?? (appearances.length === 1 ? appearances[0] : undefined)
+  const openChapter = (id: string) => {
+    onClose()
+    navigate('chapter_read', { chapterId: id })
+  }
   const selectedIndex = page.items.findIndex(item => item.id === selected?.id)
   const canLoadMore = page.items.length < page.total
   useEffect(() => {
@@ -318,7 +329,7 @@ function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, on
       }}
       onKeyDown={event => {
         if (event.key === 'Escape') { event.stopPropagation(); return }
-        if (editing || deleting || (event.target instanceof HTMLElement && event.target.closest('input, textarea, [contenteditable], .memory-categories'))) return
+        if (editing || deleting || (event.target instanceof HTMLElement && event.target.closest('input, textarea, [contenteditable], .memory-categories, .memory-markdown'))) return
         if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
           event.preventDefault()
           event.stopPropagation()
@@ -353,9 +364,10 @@ function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, on
               : page.items.length === 0 && !page.error && <p className="memory-notice">{query ? '没有找到匹配的记忆。' : '这个分类还没有记忆。'}</p>}
             {page.items.length > 0 && <ul className="memory-card-list">
               {page.items.map(card => <li key={card.id}>
-                <button type="button" onClick={() => select(card)} aria-current={selected?.id === card.id || undefined}>
+                <button type="button" onClick={() => select(card)} aria-current={selected?.id === card.id || undefined}
+                  aria-label={card.title} aria-describedby={`${titleId}-snippet-${card.id}`}>
                   <span className="memory-card-list-title">{card.title}</span>
-                  <span className="memory-card-list-snippet">{card.content}</span>
+                  <span id={`${titleId}-snippet-${card.id}`} className="memory-card-list-snippet"><MemorySnippet title={card.title} content={card.content} /></span>
                   <ChevronRight size={16} aria-hidden="true" />
                 </button>
               </li>)}
@@ -372,7 +384,19 @@ function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, on
               <div className="memory-note">
                 <h3 ref={readerHeading} tabIndex={-1}>{selected.title}</h3>
                 <p className="memory-note-date">更新于 {formatMemoryDate(selected.updatedAt)}</p>
-                <p className="memory-note-text">{selected.content}</p>
+                <div className="memory-note-text"><MemoryMarkdown title={selected.title} content={selected.content} /></div>
+                {sourceChapter && (appearances.length < 2 || !appearances.some(chapter => chapter.id === sourceChapter.id)) &&
+                  <button type="button" className="memory-note-source" onClick={() => openChapter(sourceChapter.id)}>
+                    来源章节 · 《{sourceChapter.title}》<ArrowUpRight aria-hidden="true" size={15} />
+                  </button>}
+                {appearances.length > 1 && <details className="memory-appearances">
+                  <summary>出场记录 · {appearances.length} 章</summary>
+                  <ul>{appearances.map(chapter => <li key={chapter.id}>
+                    <button type="button" className="memory-note-source" onClick={() => openChapter(chapter.id)}>
+                      {chapter.title}<ArrowUpRight aria-hidden="true" size={15} />
+                    </button>
+                  </li>)}</ul>
+                </details>}
               </div>
             </article>
             <footer className="memory-reader-actions">

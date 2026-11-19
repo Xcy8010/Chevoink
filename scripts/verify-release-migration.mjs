@@ -34,6 +34,9 @@ const personalizationRulesCandidateSchema = 'fc3dfaaaf9c3d9bc4515e7ac380817bf87b
 export const personalizationRuleTextsMigrationName = '20261115003000_personalization_rule_texts'
 export const personalizationRuleTextsMigrationChecksum = '824fddcfd9d96458709b0b2e00448307d381ce967678cf5077ff139b6da45d18'
 const personalizationRuleTextsCandidateSchema = 'cc3c8a349ef54e3baf3e7881202e3c49b6f46b979b9a76163202b801f94ab91c'
+export const storyProfilesMigrationName = '20261119090000_story_profiles'
+export const storyProfilesMigrationChecksum = 'dec7e25ff65d8d191d277c3477587cede647dd31673ad61eaff86ead7cc58bc6'
+const storyProfilesCandidateSchema = 'e2f391cb7853325160d21ef619b0cc94e2ef60e10fcdd5df75050c673ef686a1'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -57,7 +60,8 @@ reviewed.set(emailAccountMigrationName, emailAccountMigrationChecksum)
 reviewed.set(agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum)
 reviewed.set(personalizationRulesMigrationName, personalizationRulesMigrationChecksum)
 reviewed.set(personalizationRuleTextsMigrationName, personalizationRuleTextsMigrationChecksum)
-const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName, personalizationRuleTextsMigrationName])
+reviewed.set(storyProfilesMigrationName, storyProfilesMigrationChecksum)
+const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName, personalizationRuleTextsMigrationName, storyProfilesMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -81,6 +85,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const profileTarget = `${storyProfilesMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === personalizationRuleTextsCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === storyProfilesCandidateSchema
+    && !oldFiles.some(([name]) => name === profileTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== profileTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === profileTarget)?.[1] === storyProfilesMigrationChecksum) return storyProfilesMigrationName
   const ruleTextsTarget = `${personalizationRuleTextsMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === personalizationRulesCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === personalizationRuleTextsCandidateSchema
@@ -698,6 +708,77 @@ export function assertFindingIndex(rows, phase) {
     || JSON.stringify(rows[0].columns) !== JSON.stringify(columns)) throw Error('Quality finding index mismatch')
 }
 
+const storyChangeTable = 'story_profile_changes'
+const profileIdentityIndex = 'project_memory_entries_novel_id_memory_type_identity_key_key'
+const profileSequence = 'story_profile_changes_id_seq'
+const previousMemoryKinds = ['novelSummary', 'worldbuilding', 'characterCard', 'chapterSummary', 'timelineEvent', 'foreshadowing',
+  'stylePreference', 'continuityRule', 'volumeSummary', 'storyArc', 'sceneState', 'relationshipState', 'storyBible', 'authorProfile']
+const profileEntryColumns = [
+  ['identity_key', 'character varying(160)', false, null], ['aliases', 'text[]', true, "'{}'::text[]"], ['profile_tracked', 'boolean', true, 'false'],
+]
+const storyChangeCatalog = {
+  tables: [{ name: storyChangeTable, kind: 'r' }],
+  columns: [
+    ['id', 'bigint', true, "nextval('story_profile_changes_id_seq'::regclass)"],
+    ['memory_id', 'character varying(64)', true], ['chapter_id', 'character varying(64)', false],
+    ['section', 'text', true], ['body', 'text', false], ['restricted', 'boolean', true, 'false'],
+    ['manual', 'boolean', true, 'false'], ['known_by', 'text[]', true, "'{}'::text[]"],
+  ].map(([name, type, required, defaultValue = null]) => ({ name, type, required, defaultValue })),
+  indexes: [
+    ['pkey', true, ['id']], ['memory_id_id_idx', false, ['memory_id', 'id']], ['chapter_id_idx', false, ['chapter_id']],
+  ].map(([suffix, unique, columns]) => {
+    const name = `${storyChangeTable}_${suffix}`
+    return { name, unique, columns, valid: true, ready: true, partial: false, expression: false,
+      definition: `CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${name} ON public.${storyChangeTable} USING btree (${columns.join(', ')})` }
+  }),
+  constraints: [
+    { name: 'story_profile_changes_pkey', kind: 'p', definition: 'PRIMARY KEY (id)', valid: true },
+    ...[['chapter_id', 'chapters'], ['memory_id', 'project_memory_entries']].map(([column, target]) => ({
+      name: `story_profile_changes_${column}_fkey`, kind: 'f', valid: true,
+      definition: `FOREIGN KEY (${column}) REFERENCES ${target}(id) ON UPDATE CASCADE ON DELETE CASCADE`,
+    })),
+  ],
+  rowCount: 0,
+}
+
+export function assertStoryProfilesState(state, phase, before) {
+  assertAddedTableState(state.changes, phase, before?.changes, storyChangeCatalog, 'Story profile changes')
+  if (phase === 'after') assertStoryProfilesState(before, 'before')
+  const after = phase === 'after'
+  const kinds = after ? [...previousMemoryKinds, 'itemCard', 'locationCard', 'sceneCard'] : previousMemoryKinds
+  if (JSON.stringify(state.kinds) !== JSON.stringify(kinds)) throw Error('Story profile enum mismatch')
+  if (!sameRows(state.columns.map(c => [c.name, c.type, c.required, c.defaultValue]), after ? profileEntryColumns : [])) throw Error('Story profile entry columns mismatch')
+  if (!sameRows(state.objects.map(o => [o.name, o.kind]), after ? [
+    ...storyChangeCatalog.indexes.map(i => [i.name, 'i']), [profileIdentityIndex, 'i'], [profileSequence, 'S'],
+  ] : [])) throw Error('Story profile index or sequence mismatch')
+  if (state.identityIndex !== after || state.ownedSequence !== after) throw Error('Story profile identity index or sequence ownership mismatch')
+}
+
+/** Catalog only, apart from the initial count of the new changes table. Do not inspect existing cards. */
+export async function readStoryProfilesState(tx, phase) {
+  const changes = await readAddedTableState(tx, phase, storyChangeTable)
+  const enums = await tx.$queryRaw`SELECT e.enumlabel::text AS label FROM pg_enum e
+    WHERE e.enumtypid = '"ProjectMemoryType"'::regtype ORDER BY e.enumsortorder`
+  const columns = await tx.$queryRaw`SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, a.attnotnull AS required,
+    pg_get_expr(d.adbin, d.adrelid) AS "defaultValue" FROM pg_attribute a
+    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+    WHERE a.attrelid='project_memory_entries'::regclass AND NOT a.attisdropped AND a.attname IN ('identity_key','aliases','profile_tracked')`
+  const objects = await tx.$queryRaw`SELECT c.relname AS name, c.relkind::text AS kind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname=current_schema() AND c.relname IN ('story_profile_changes_id_seq','story_profile_changes_pkey',
+      'story_profile_changes_memory_id_id_idx','story_profile_changes_chapter_id_idx','project_memory_entries_novel_id_memory_type_identity_key_key')`
+  const [meta] = await tx.$queryRaw`SELECT current_schema() AS schema,
+    EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid='project_memory_entries'::regclass
+      AND i.indexrelid=to_regclass('project_memory_entries_novel_id_memory_type_identity_key_key') AND i.indisvalid AND i.indisready
+      AND pg_get_indexdef(i.indexrelid) = format('CREATE UNIQUE INDEX project_memory_entries_novel_id_memory_type_identity_key_key ON %I.project_memory_entries USING btree (novel_id, memory_type, identity_key)', current_schema())) AS "identityIndex",
+    EXISTS (SELECT 1 FROM pg_depend d JOIN pg_attribute a ON a.attrelid=d.refobjid AND a.attnum=d.refobjsubid
+      JOIN pg_sequence s ON s.seqrelid=d.objid WHERE d.classid='pg_class'::regclass AND d.refclassid='pg_class'::regclass AND d.deptype='a'
+      AND d.objid=to_regclass('story_profile_changes_id_seq') AND d.refobjid=to_regclass('story_profile_changes') AND a.attname='id'
+      AND s.seqtypid='bigint'::regtype) AS "ownedSequence"`
+  // pg_get_indexdef qualifies the table even when it is on the active search_path.
+  for (const index of changes.indexes) index.definition = index.definition.replace(` ON ${meta.schema}.`, ' ON public.')
+  return { changes, kinds: enums.map(e => e.label), columns, objects, identityIndex: meta.identityIndex, ownedSequence: meta.ownedSequence }
+}
+
 export async function readPersonalizationRulesMigrationState(tx, phase) {
   const [catalog] = await tx.$queryRaw`
     SELECT
@@ -782,6 +863,11 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === storyProfilesMigrationName) {
+        const profiles = await readStoryProfilesState(tx, phase)
+        assertStoryProfilesState(profiles, phase, before?.profiles)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, profiles }
+      }
       if (plan === personalizationRuleTextsMigrationName) {
         const personalization = await readPersonalizationRuleTextsState(tx, phase)
         return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, personalization }

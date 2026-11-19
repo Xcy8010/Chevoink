@@ -28,6 +28,7 @@ export const memoryReviewStatusSchema = z.enum(['none', 'pending', 'accepted', '
 
 export const memorySearchHitSchema = z.object({
   id: z.string().min(1),
+  identityKey: z.string().optional(),
   memoryType: z.string().min(1),
   layer: z.enum(['L0', 'L1', 'L2', 'L3']),
   status: storyMemoryStatusSchema,
@@ -77,7 +78,7 @@ export type MemoryGraph = z.infer<typeof memoryGraphSchema>
 
 export const storyMemoryPatchSchema = z.object({
   title: z.string().trim().min(1).max(160).optional(),
-  content: z.string().trim().min(1).max(8000).optional(),
+  content: z.string().trim().min(1).optional(),
   importance: z.number().int().min(1).max(100).optional(),
   expectedVersion: z.number().int().positive(),
 })
@@ -89,6 +90,8 @@ export type MemoryGraphJobStatus = z.infer<typeof memoryGraphJobStatusSchema>
 /** 记忆中心卡片：Agent 沉淀的创作记忆（人物/世界观/情节等）的只读投影 + 作者就地编辑入口。 */
 export const storyMemoryCardSchema = z.object({
   id: z.string().min(1),
+  sourceChapter: z.object({ id: z.string().min(1), title: z.string() }).optional(),
+  appearances: z.array(z.object({ id: z.string().min(1), title: z.string() })).optional(),
   memoryType: z.string().min(1),
   layer: z.enum(['L0', 'L1', 'L2', 'L3']),
   title: z.string(),

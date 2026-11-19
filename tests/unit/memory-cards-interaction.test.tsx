@@ -5,7 +5,7 @@ import AgentMemoryCards from '../../src/features/studio/agent/components/AgentMe
 import { fetchStoryMemories, fetchStoryMemorySets, updateStoryMemory } from '../../src/features/studio/agent/agentApi'
 import type { StoryMemoryCard } from '../../shared/contracts'
 
-const store = vi.hoisted(() => ({ addComposerReference: vi.fn(), composerDraft: '', memorySpotlight: null as null | { nonce: number; memoryType: string; title: string } }))
+const store = vi.hoisted(() => ({ addComposerReference: vi.fn(), requestToolNavigation: vi.fn(), composerDraft: '', memorySpotlight: null as null | { nonce: number; memoryType: string; title: string } }))
 vi.mock('../../src/features/studio/agent/agentStore', () => ({ useAgentStore: (select: (s: unknown) => unknown) => select(store) }))
 vi.mock('../../src/store/useShellStore', () => ({ useShellStore: (select: (s: unknown) => unknown) => select({ sessionUser: { id: 'u' } }) }))
 vi.mock('../../src/features/studio/agent/agentApi', () => ({ fetchStoryMemories: vi.fn(), fetchStoryMemorySets: vi.fn(), deleteStoryMemory: vi.fn(), updateStoryMemory: vi.fn() }))
@@ -32,13 +32,16 @@ const openWorldbuilding = async () => {
   return category
 }
 it('opens readable legacy cards without review notices and keeps actions available while reading', async () => {
+  const legacy = { ...firstCard, content: '临海的旧灯塔\n只在退潮后亮灯。\n\n\n第三章才揭晓缘由。' }
+  vi.mocked(fetchStoryMemories).mockResolvedValueOnce({ total: 1, typeCounts: {}, items: [legacy] })
   render(<AgentMemoryCards novelId="n" />)
   await openWorldbuilding()
   const article = await screen.findByRole('article')
   expect(within(article).getByRole('heading', { name: firstCard.title })).toBeTruthy()
   expect(screen.queryByText(/待审核|待作者审核|需核对原文|未生效/)).toBeNull()
   const actions = screen.getByRole('group', { name: '卡片操作' })
-  fireEvent.click(within(article).getByText(firstCard.content))
+  expect(article.querySelector('.memory-markdown p')?.textContent).toBe(legacy.content)
+  fireEvent.click(within(article).getByText(/第三章才揭晓缘由/))
   fireEvent.scroll(article)
   expect(screen.getByRole('article')).toBe(article)
   expect(screen.getByRole('group', { name: '卡片操作' })).toBe(actions)
@@ -48,7 +51,7 @@ it('opens readable legacy cards without review notices and keeps actions availab
     expect(button.querySelector('svg')).toBeTruthy()
   }
   fireEvent.click(within(actions).getByRole('button', { name: '引用到对话' }))
-  expect(store.addComposerReference).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'memory:card', text: firstCard.content }))
+  expect(store.addComposerReference).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'memory:card', text: legacy.content }))
   expect(screen.queryByRole('dialog', { name: '创作记忆' })).toBeNull()
 })
 
@@ -74,6 +77,35 @@ it('keeps the selected card through an edit and supports keyboard and button nav
   expect(screen.getByRole('heading', { name: firstCard.title })).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '关闭创作记忆' }))
   expect(document.activeElement).toBe(category)
+})
+
+it('renders a growing Markdown profile, keeps the list excerpt readable and leaves table scrolling to the reader', async () => {
+  const profile = {
+    ...firstCard, title: '林汐', sourceChapter: { id: 'chapter-2', title: '雾里的渡船' }, content: [
+      '# 林汐', '', '她在**潮汐邮局**送信。', '', '## 眼下的处境', '', '- 追查消失的船票', '',
+      '| 章节 | 关键经历 |', '| --- | --- |', '| 2 | 登上渡船 |', '',
+      '> 第三声汽笛前下船。', '', '![外部图片](https://example.com/tracker.png)', '',
+      '[不安全](javascript:alert(1))', '<img src="https://example.com/x">',
+    ].join('\n'),
+  }
+  vi.mocked(fetchStoryMemories).mockResolvedValueOnce({ total: 2, typeCounts: {}, items: [profile, secondCard] })
+  render(<AgentMemoryCards novelId="n" />)
+  const trigger = await openWorldbuilding()
+  const article = await screen.findByRole('article')
+  expect(screen.getByRole('button', { name: '林汐', description: '她在潮汐邮局送信。' })).toBeTruthy()
+  expect(within(article).getAllByRole('heading', { name: '林汐' })).toHaveLength(1)
+  expect(within(article).getByRole('heading', { name: '眼下的处境' })).toBeTruthy()
+  expect(article.querySelector('strong')?.textContent).toBe('潮汐邮局')
+  expect(article.querySelector('blockquote')?.textContent).toContain('第三声汽笛前下船')
+  expect(article.querySelector('img, script, a[href^="javascript:"]')).toBeNull()
+  const table = within(article).getByRole('region', { name: '卡片表格，可横向滚动' })
+  expect(within(table).getByRole('cell', { name: '登上渡船' })).toBeTruthy()
+  fireEvent.keyDown(table, { key: 'ArrowRight' })
+  expect(within(article).getByRole('heading', { name: '林汐' })).toBeTruthy()
+  fireEvent.click(within(article).getByRole('button', { name: '来源章节 · 《雾里的渡船》' }))
+  expect(store.requestToolNavigation).toHaveBeenCalledWith('chapter_read', { chapterId: 'chapter-2' })
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(document.activeElement).toBe(trigger)
 })
 
 it('shows category counts and keeps the same open dialog through rapid category changes', async () => {
@@ -105,6 +137,19 @@ it('shows category counts and keeps the same open dialog through rapid category 
   await act(async () => { completeCharacter(characterPage) })
   expect(within(dialog).getByRole('heading', { name: firstCard.title })).toBeTruthy()
   expect(within(dialog).queryByRole('heading', { name: character.title })).toBeNull()
+})
+
+it('navigates a profile appearance by chapter identity even when two chapter titles match', async () => {
+  const appearances = [{ id: 'ch-1', title: '来信' }, { id: 'ch-9', title: '来信' }]
+  const profile = { ...firstCard, sourceChapter: appearances[0], appearances }
+  vi.mocked(fetchStoryMemories).mockResolvedValueOnce({ total: 1, typeCounts: {}, items: [profile] })
+  render(<AgentMemoryCards novelId="n" />)
+  await openWorldbuilding()
+  const reader = await screen.findByRole('article')
+  expect(within(reader).queryByRole('button', { name: /来源章节/ })).toBeNull()
+  fireEvent.click(within(reader).getByText('出场记录 · 2 章'))
+  fireEvent.click(within(reader).getAllByRole('button', { name: '来信' })[1])
+  expect(store.requestToolNavigation).toHaveBeenCalledWith('chapter_read', { chapterId: 'ch-9' })
 })
 
 it('returns from the mobile reader to the same list and preserves a draft when switching cards', async () => {

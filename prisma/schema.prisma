@@ -140,6 +140,9 @@ enum ProjectMemoryType {
   relationshipState
   storyBible
   authorProfile
+  itemCard
+  locationCard
+  sceneCard
 }
 
 enum StoryMemoryLayer {
@@ -638,6 +641,7 @@ model Chapter {
   aiUsageLogs          AiUsageLog[]
   agentRuns            AgentRun[]
   projectMemoryEntries ProjectMemoryEntry[]
+  profileChanges       StoryProfileChange[]
   paragraphUnderlines  ParagraphUnderline[]
   storyCompilations    StoryCompilation[]
   sceneTasks           SceneTask[]
@@ -2481,6 +2485,9 @@ model ProjectMemoryEntry {
   sourceChapterId String?            @map("source_chapter_id") @db.VarChar(64)
   memoryType      ProjectMemoryType  @map("memory_type")
   title           String             @db.VarChar(160)
+  identityKey     String?            @map("identity_key") @db.VarChar(160)
+  aliases         String[]           @default([])
+  profileTracked  Boolean            @default(false) @map("profile_tracked")
   content         String
   importance      Int                @default(50)
   embeddingRef    String?            @map("embedding_ref") @db.VarChar(255)
@@ -2498,11 +2505,30 @@ model ProjectMemoryEntry {
   sourceChapter   Chapter?           @relation(fields: [sourceChapterId], references: [id])
   evidence        MemoryEvidence[]
   revisions       MemoryRevision[]
+  profileChanges  StoryProfileChange[]
 
+  @@unique([novelId, memoryType, identityKey])
   @@index([runId])
   @@index([novelId, memoryType])
   @@index([sourceChapterId])
   @@map("project_memory_entries")
+}
+
+model StoryProfileChange {
+  id           BigInt             @id @default(autoincrement())
+  memoryId     String             @map("memory_id") @db.VarChar(64)
+  chapterId    String?            @map("chapter_id") @db.VarChar(64)
+  section      String
+  body         String?
+  restricted   Boolean            @default(false)
+  manual       Boolean            @default(false)
+  knownBy      String[]           @default([]) @map("known_by")
+  memory       ProjectMemoryEntry @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  chapter      Chapter?           @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@index([memoryId, id])
+  @@index([chapterId])
+  @@map("story_profile_changes")
 }
 
 model MemoryEvidence {

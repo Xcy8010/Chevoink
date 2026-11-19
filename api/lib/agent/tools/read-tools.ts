@@ -1,3 +1,5 @@
+import { memorySearchParameters } from '../memory-tool-parameters.js'
+import { selectProfileExcerpt } from '../story-profile.js'
 import { planLinkFields } from '../novel-plan-contract.js'
 import { z } from 'zod'
 import { recordPlanContentHash } from './plan-observation.js'
@@ -265,29 +267,7 @@ export const memorySearchTool = defineTool({
   title: '检索创作记忆',
   description:
     '按关键词检索本作品沉淀的创作记忆：角色卡、世界观设定、时间线事件、伏笔、章节摘要、风格偏好等。写作前校对人名/设定时使用。',
-  parameters: z.object({
-    query: z.string().min(1).describe('检索关键词（人名、地名、设定名等）'),
-    memoryType: z
-      .enum([
-        'novelSummary',
-        'worldbuilding',
-        'characterCard',
-        'chapterSummary',
-        'timelineEvent',
-        'foreshadowing',
-        'stylePreference',
-        'continuityRule',
-        'volumeSummary',
-        'storyArc',
-        'sceneState',
-        'relationshipState',
-        'storyBible',
-        'authorProfile',
-      ])
-      .optional()
-      .describe('限定记忆类型，缺省为全部'),
-    limit: z.number().int().min(1).max(20).optional().describe('返回条数，默认 8'),
-  }),
+  parameters: memorySearchParameters,
   permission: READ_PERMISSION,
   readOnly: true,
   async execute(ctx, args): Promise<ToolResult> {
@@ -298,9 +278,14 @@ export const memorySearchTool = defineTool({
       return executeDurableRead(captured, 'memory_search', normalize(effective), normalize,
         tx => memorySearchTool.execute({ ...captured, durableRead: undefined, transaction: tx }, effective))
     }
+    const targets = ctx.writingScope?.writing?.targets
+    const target = targets?.[0]
     const entries = await searchStoryMemory({
       userId: ctx.userId, novelId: ctx.novelId, query: args.query,
       memoryType: args.memoryType, limit: args.limit ?? 8,
+      atChapterId: args.atChapterId ?? target?.chapterId ?? (!target ? ctx.chapterId ?? undefined : undefined),
+      atChapterOrder: args.atChapterId ? undefined : target?.orderIndex, viewpointMemoryId: args.viewpointMemoryId,
+      publicOnly: !args.viewpointMemoryId && Boolean(args.atChapterId || target || ctx.chapterId),
     }, ctx.transaction)
 
     if (entries.length === 0) {
@@ -308,7 +293,7 @@ export const memorySearchTool = defineTool({
     }
 
     const lines = entries.map(
-      (entry) => `[${entry.memoryType}] ${entry.title}（ID：${entry.id}）：${ctx.transaction ? entry.content : clip(entry.content, 400)}${entry.evidence.length
+      (entry) => `[${entry.memoryType}] ${entry.title}（${entry.identityKey ? `区分键：${entry.identityKey}，` : ''}ID：${entry.id}）：${ctx.transaction ? entry.content : selectProfileExcerpt(entry.content, args.query, 400)}${entry.evidence.length
         ? `\n  来源：${entry.evidence.map((item) => `${item.sourceType}:${item.sourceId}${item.revision ? `@r${item.revision}` : ''}`).join('、')}` : ''}`,
     )
 

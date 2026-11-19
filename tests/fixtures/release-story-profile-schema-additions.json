@@ -1,0 +1,54 @@
+{
+  "baseline": [
+    [
+      "model AgentPersonalization {\n",
+      "enum AgentPersonalizationMemoryChange {\n  saved\n  edited\n  merged\n  corrected\n  capacity\n  restored\n  migrated\n}\n\n"
+    ],
+    [
+      "  preferredName      String                    @default(\"\") @map(\"preferred_name\") @db.VarChar(80)\n",
+      "  toolRules          Json                      @default(\"[]\") @map(\"tool_rules\")\n  toolRuleTexts      Json                      @default(\"{}\") @map(\"tool_rule_texts\")\n"
+    ],
+    [
+      "  revision     Int                             @default(1)\n",
+      "  activeSlot   Int?                            @map(\"active_slot\")\n  recoveryUntil DateTime?                      @map(\"recovery_until\")\n  pinned       Boolean                         @default(false)\n  topic        String?                         @db.VarChar(40)\n  lastChange   AgentPersonalizationMemoryChange @default(saved) @map(\"last_change\")\n  hitCount     Int                             @default(0) @map(\"hit_count\")\n  lastHitAt    DateTime?                       @map(\"last_hit_at\")\n  retrievals   AgentPersonalizationMemoryHit[]\n"
+    ],
+    [
+      "  @@index([userId, updatedAt(sort: Desc), id(sort: Desc)])\n",
+      "  @@unique([userId, activeSlot])\n"
+    ],
+    [
+      "}\n\nmodel AgentSession {\n",
+      "}\n\nmodel AgentPersonalizationMemoryHit {\n  memoryId String                     @map(\"memory_id\") @db.VarChar(64)\n  memory   AgentPersonalizationMemory @relation(fields: [memoryId], references: [id], onDelete: Cascade)\n  runId    String                     @map(\"run_id\") @db.VarChar(64)\n  run      AgentRun                   @relation(fields: [runId], references: [id], onDelete: Cascade)\n\n  @@id([memoryId, runId])\n  @@index([runId])\n  @@map(\"agent_personalization_memory_hits\")\n"
+    ],
+    [
+      "  incomingChildGrant AgentChildExecutionGrant? @relation(\"ChildExecutionRun\")\n",
+      "  personalizationMemoryHits AgentPersonalizationMemoryHit[]\n"
+    ]
+  ],
+  "candidate": [
+    [
+      "}\n\nenum StoryMemoryLayer {\n",
+      "  itemCard\n  locationCard\n  sceneCard\n"
+    ],
+    [
+      "  paragraphUnderlines  ParagraphUnderline[]\n",
+      "  profileChanges       StoryProfileChange[]\n"
+    ],
+    [
+      "  content         String\n",
+      "  identityKey     String?            @map(\"identity_key\") @db.VarChar(160)\n  aliases         String[]           @default([])\n  profileTracked  Boolean            @default(false) @map(\"profile_tracked\")\n"
+    ],
+    [
+      "\n  @@index([runId])\n  @@index([novelId, memoryType])\n",
+      "  profileChanges  StoryProfileChange[]\n"
+    ],
+    [
+      "  @@index([runId])\n  @@index([novelId, memoryType])\n",
+      "  @@unique([novelId, memoryType, identityKey])\n"
+    ],
+    [
+      "}\n\nmodel MemoryEvidence {\n",
+      "}\n\nmodel StoryProfileChange {\n  id           BigInt             @id @default(autoincrement())\n  memoryId     String             @map(\"memory_id\") @db.VarChar(64)\n  chapterId    String?            @map(\"chapter_id\") @db.VarChar(64)\n  section      String\n  body         String?\n  restricted   Boolean            @default(false)\n  manual       Boolean            @default(false)\n  knownBy      String[]           @default([]) @map(\"known_by\")\n  memory       ProjectMemoryEntry @relation(fields: [memoryId], references: [id], onDelete: Cascade)\n  chapter      Chapter?           @relation(fields: [chapterId], references: [id], onDelete: Cascade)\n\n  @@index([memoryId, id])\n  @@index([chapterId])\n  @@map(\"story_profile_changes\")\n"
+    ]
+  ]
+}

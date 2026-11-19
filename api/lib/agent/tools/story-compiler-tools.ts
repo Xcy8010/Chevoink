@@ -233,6 +233,7 @@ export const storyCompilerPrepareTool = defineTool({
       volumeDecision: args.volumeDecision,
     }, ctx.transaction)
     const bridge = prepared.bridge
+    const profiles = prepared.profiles.map(profile => `〔${profile.title} · ${profile.id}〕${profile.content}`).join('\n')
     const workflowMilestone = prepared.preparedFirstForTarget ? { version: 1 as const, userId: ctx.userId, novelId: ctx.novelId,
       runId: ctx.runId, targetOrderIndex: prepared.compilation.targetOrderIndex, phase: 'prepare' as const } : undefined
     const items = [
@@ -245,7 +246,7 @@ export const storyCompilerPrepareTool = defineTool({
       bridge.openLoops.length ? `开放钩子：${bridge.openLoops.slice(0, 4).join('；')}` : '无已记录开放钩子',
     ]
     return {
-      output: `上下文已准备，compilationId=${prepared.compilation.id}，chapterId=${prepared.compilation.chapterId ?? '尚未创建'}，目标全书第 ${prepared.compilation.targetOrderIndex} 章。根据原请求选择写入、场景记录或检查，不要求固定顺序。\n${items.join('\n')}\n${renderWritingContinuityReference(prepared.continuityReference) ?? ''}`,
+      output: `上下文已准备，compilationId=${prepared.compilation.id}，chapterId=${prepared.compilation.chapterId ?? '尚未创建'}，目标全书第 ${prepared.compilation.targetOrderIndex} 章。根据原请求选择写入、场景记录或检查，不要求固定顺序。\n${items.join('\n')}\n${renderWritingContinuityReference(prepared.continuityReference) ?? ''}${profiles ? '\n本章相关档案：\n' + profiles : ''}`,
       summary: `准备第 ${prepared.compilation.targetOrderIndex} 章写作`,
       ...(workflowMilestone ? { workflowMilestone } : {}),
       display: {

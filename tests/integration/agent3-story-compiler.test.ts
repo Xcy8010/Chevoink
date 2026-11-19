@@ -224,12 +224,23 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     expect(charter.revision).toBe(1)
 
     const intentSummary = '续写第二章，让林舟开门后发现脚步来自顾棠。'
+    const profile = { userId, novelId, memoryType: 'characterCard' as const, layer: 'L1' as const, title: '顾棠', importance: 85, status: 'confirmed' as const, confidence: 1,
+      evidence: { sourceType: 'author_input' as const, sourceId: 'profile-fixture', confidence: 1 } }
+    const card = await saveStoryMemory({ ...profile, sourceChapterId: chapter1Id, content: '她是钟表匠。\n\n## 人物设定\n\n她凭摆声辨钟。' })
+    await saveStoryMemory({ ...profile, memoryId: card.id, effectiveFromChapterId: chapter3Id, section: '当前处境', content: '她把机芯还给了导师。' })
+    await saveStoryMemory({ ...profile, memoryId: card.id, effectiveFromChapterId: chapter2Id, section: '隐情', content: '她藏着第三枚门钥。', knownBy: [] })
     const prepared = await prepareStoryCompilation({ userId, novelId, runId, chapterId: chapter2Id, mode: 'balanced', intentSummary })
     expect(prepared.charter?.oneLinePromise).toContain('雨塔')
     expect(prepared.promises[0]).toMatchObject({ title: '父亲失踪真相', status: 'open' })
     expect(prepared.compilation.sourcePromptHash).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.stringify(prepared.compilation)).not.toContain(intentSummary)
     expect(prepared.compilation.stage).toBe('prepare')
+    const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { sessionId: true } })
+    const toolResult = await storyCompilerPrepareTool.execute({ userId, novelId, runId, chapterId: chapter2Id, sessionId: run.sessionId, callId: 'check-profile', mode: 'build',
+      creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal }, { chapterId: chapter2Id, intentSummary })
+    expect(toolResult.output).toContain('她凭摆声辨钟')
+    expect(toolResult.output).not.toContain('第三枚门钥')
+    expect(toolResult.output).not.toContain('机芯还给了导师')
   })
 
   it('按真实正文和当前双报告提交，并向下一章提供实际前文而不认证自由文本终态', async () => {

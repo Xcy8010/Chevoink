@@ -9,6 +9,7 @@ import { patchAgentWindowConfigurationSchema } from '../../shared/contracts/agen
 import { getWindowConfiguration, patchWindowConfiguration } from '../lib/agent/window-configuration.js'
 import { getModelAssignments, patchModelAssignments } from '../lib/agent/model-assignments.js'
 import { readAgentCreationState } from '../lib/agent/creation-state.js'
+import { storyMemoryTypeSchema } from '../lib/agent/memory-tool-parameters.js'
 
 import {
   continueAgentLoopRunSchema,
@@ -490,13 +491,6 @@ router.post('/memory/:memoryId/review', async (req: Request, res: Response): Pro
   }
 })
 
-// 记忆中心：白名单校验 memoryType，避免非法枚举直接透传 prisma 报 500
-const storyMemoryTypeSchema = z.enum([
-  'novelSummary', 'worldbuilding', 'characterCard', 'chapterSummary', 'timelineEvent', 'foreshadowing',
-  'stylePreference', 'continuityRule', 'volumeSummary', 'storyArc', 'sceneState', 'relationshipState',
-  'storyBible', 'authorProfile',
-])
-
 router.get('/novels/:novelId/memories', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
   try {
@@ -514,16 +508,17 @@ router.get('/novels/:novelId/memories', async (req: Request, res: Response): Pro
   }
 })
 
-router.get('/novels/:novelId/memory-sets', async (req: Request, res: Response): Promise<void> => {
+async function handleMemorySets(req: Request, res: Response): Promise<void> {
   const requestId = createRequestId()
   try {
     const userId = requireSessionUserId(req)
-    const payload = await listStoryMemorySets(userId, req.params.novelId)
+    const payload = await listStoryMemorySets(userId, req.params.novelId, { syncProfiles: req.method === 'POST' })
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
-})
+}
+router.route('/novels/:novelId/memory-sets').get(handleMemorySets).post(handleMemorySets)
 
 router.delete('/memory/:memoryId', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()

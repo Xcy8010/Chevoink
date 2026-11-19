@@ -57,9 +57,12 @@ it('relationship and event tools save recallable cards with structured projectio
     { status: 'inferred', graphProposal: { kind: 'relation' } }, { status: 'inferred', graphProposal: { kind: 'event' } },
   ])
 })
-it('oversized memory text fails validation instead of silently truncating facts', () => {
-  const raw = { memoryType: 'worldbuilding', title: '设定', content: '字'.repeat(4001), importance: 80 }
-  expect(memorySaveTool.parameters.safeParse(memorySaveTool.coerceArgs!(raw)).success).toBe(false)
+it('preserves long Markdown biographies in the current tool and honors the frozen input limit for old calls', async () => {
+  const { legacyMemorySaveParameters } = await import('../../api/lib/agent/memory-tool-parameters.js')
+  const raw = { memoryType: 'characterCard', title: '林汐', content: '## 人物设定\n\n' + '她辨认邮戳时习惯逆光看。'.repeat(700), importance: 80 }
+  const normalized = memorySaveTool.coerceArgs!(raw)
+  expect(memorySaveTool.parameters.parse(normalized).content).toBe(raw.content)
+  expect(legacyMemorySaveParameters.safeParse(normalized).success).toBe(false)
 })
 it.each(['setting', 'world_setting', 'world_building'])('normalizes equivalent worldbuilding type %s without changing facts', memoryType => {
   const raw = { memoryType, title: '设定', content: '待作者确认的设定', importance: 80 }

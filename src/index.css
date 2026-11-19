@@ -639,6 +639,7 @@ body.autohide-scrollbars *:not([data-scrolling='true'])::-webkit-scrollbar-thumb
 
 /* Work 默认收起查看器时：44px 轨道 + 44px 检查栏 + 296px 停靠卡 + 920px 对话。 */
 .studio-skeleton-work { container: studio-skeleton-work / inline-size; }
+.studio-skeleton-work, .work-agent-frame { --work-agent-optical-offset: 16px; }
 /* Loading surfaces must match the finished workspace, not inherit the sidebar. */
 html.dark .studio-workspace :is(
   .studio-skeleton-work,
@@ -653,6 +654,7 @@ html.dark .studio-workspace :is(
   [data-studio-region='mobile-composer']
 ) { background-color: var(--studio-composer-bg); }
 @container studio-skeleton-work (min-width: 1304px) {
+  [data-studio-region='desktop-conversation'] { padding-inline: calc(44px + 2 * var(--work-agent-optical-offset)) 12px; }
   .studio-skeleton-activity-dock { display: block; }
   [data-studio-region='desktop-activity'] { display: none; }
 }
@@ -959,10 +961,14 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-conversation-scroll { grid-area: 1 / 1; padding: 16px 0 calc(var(--agent-footer-height, 180px) + 16px); scroll-padding-bottom: calc(var(--agent-footer-height, 180px) + 16px); }
 .agent-conversation-scroll > .agent-conversation-width { min-height: 100%; padding-inline: 16px; overflow-wrap: anywhere; }
 
-/* With both right panels collapsed, center the conversation in the space before the task dock. */
+/* With both right panels collapsed, place the column slightly toward the task dock. */
 .work-agent-frame {
   --work-agent-column-width: min(54rem, calc(var(--work-agent-chat-width, 100vw) + var(--work-agent-rail-width, 0px) - 2 * var(--work-agent-dock-reserve, 0px)));
-  --work-agent-column-shift: clamp(0px, calc((var(--work-agent-chat-width, 0px) - var(--work-agent-column-width) - 32px) / 2), calc((var(--work-agent-rail-width, 0px) + var(--work-agent-center-reserve, 0px)) / 2));
+  --work-agent-column-shift: clamp(
+    0px,
+    calc((var(--work-agent-chat-width, 0px) - var(--work-agent-column-width) - 32px) / 2),
+    max(var(--work-agent-rail-width, 0px) / 2, var(--work-agent-center-reserve, 0px) / 2 - var(--work-agent-optical-offset))
+  );
 }
 .work-agent-frame .work-agent-compact {
   --work-agent-column-width: 54rem;
@@ -1175,6 +1181,12 @@ html.dark .studio-workspace .agent-composer-goal { background: #333333; }
   max-block-size: min(14rem, 45dvh);
   scrollbar-width: thin;
   scroll-padding-block: .875rem;
+}
+.studio-workspace [data-activity-scroll='records'] {
+  margin-block: .25rem;
+  margin-inline-start: .75rem;
+  border-inline-start: 1px solid var(--border-subtle);
+  padding-inline-start: .75rem;
 }
 .agent-activity-scroll,
 body.autohide-scrollbars .agent-activity-scroll { scrollbar-color: var(--border-strong) transparent; }

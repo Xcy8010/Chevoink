@@ -217,16 +217,59 @@ body:has(.memory-catalog[open]) { overflow: hidden; }
 }
 
 .memory-note-date { margin: 0; color: var(--text-secondary); font-size: 12px; }
+.memory-note-source { display: inline-flex; min-height: 44px; align-items: center; gap: 5px; margin-top: 1.25rem; color: var(--text-secondary); font-size: 13px; text-align: start; overflow-wrap: anywhere; }
+.memory-note-source svg { flex: none; }
+.memory-note-source:hover { color: var(--text-primary); text-decoration: underline; text-underline-offset: 3px; }
+.memory-appearances { margin-top: 1.25rem; font-size: 13px; }
+.memory-appearances summary { width: fit-content; padding-block: 12px; cursor: pointer; color: var(--text-secondary); }
+.memory-appearances summary:hover { color: var(--text-primary); }
+.memory-appearances .memory-note-source { margin: 0; }
 .memory-note-text {
   margin: 22px 0 0;
   padding-top: 20px;
   border-top: 1px solid var(--border-subtle);
+}
+
+.memory-markdown {
+  min-width: 0;
   color: var(--text-primary);
   font-size: 15px;
-  line-height: 1.9;
+  line-height: 1.85;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
 }
+.memory-markdown > * + * { margin-block-start: .85em; }
+.memory-markdown p { white-space: pre-wrap; }
+.memory-markdown > p:first-child:not(:only-child) { font-size: 1.065em; }
+.memory-markdown :is(h4, h5, h6) { font-weight: 660; line-height: 1.5; }
+.memory-markdown h4 { font-size: 1.18em; }
+.memory-markdown h5 { font-size: 1.05em; }
+.memory-markdown > :is(h4, h5, h6):not(:first-child) { margin-block-start: 1.65em; }
+.memory-markdown :is(h4, h5, h6) + * { margin-block-start: .45em; }
+.memory-markdown :is(ol, ul) { padding-inline-start: 1.45em; }
+.memory-markdown ul { list-style: disc; }
+.memory-markdown ol { list-style: decimal; }
+.memory-markdown li + li { margin-block-start: .22em; }
+.memory-markdown li::marker { color: var(--text-secondary); }
+.memory-markdown .contains-task-list { list-style: none; padding-inline-start: .1em; }
+.memory-markdown .task-list-item input { accent-color: var(--text-primary); }
+.memory-markdown blockquote { border-inline-start: 2px solid var(--border-strong); padding-inline-start: 1em; color: var(--text-secondary); }
+.memory-markdown blockquote p + p, .memory-markdown li p + p { margin-block-start: .45em; }
+.memory-markdown hr { border: 0; border-top: 1px solid var(--border-subtle); }
+.memory-markdown code { font-family: ui-monospace, monospace; font-size: .9em; }
+.memory-markdown :not(pre) > code { padding: .1em .28em; border-radius: 3px; background: var(--surface-muted); }
+.memory-table-scroll, .memory-markdown pre {
+  max-inline-size: 100%;
+  overflow: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+}
+.memory-markdown pre { padding: .75em 1em; background: var(--surface-muted); white-space: pre; }
+.memory-markdown table { width: 100%; border-collapse: collapse; font-size: .92em; line-height: 1.6; }
+.memory-markdown :is(th, td) { min-width: 6em; padding: .55em .8em; border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
+.memory-markdown th { color: var(--text-secondary); font-weight: 600; text-align: start; }
+.memory-markdown :is(th, td):first-child { padding-inline-start: 0; }
+.memory-markdown :is(a, pre, .memory-table-scroll):focus-visible,
+.memory-editor-mode button:focus-visible { outline: 2px solid var(--text-primary); outline-offset: -2px; }
 
 .memory-reader-back { display: none; }
 
@@ -304,6 +347,12 @@ body:has(.memory-catalog[open]) { overflow: hidden; }
 }
 
 .memory-editor-field { background: var(--surface-default); }
+.memory-editor-mode, .memory-editor-mode [role='group'] { display: flex; align-items: center; gap: 8px; }
+.memory-editor-mode { justify-content: space-between; font-size: 14px; }
+.memory-editor-mode button { min-height: 44px; padding-inline: 5px; color: var(--text-secondary); font-size: 13px; }
+.memory-editor-mode button[aria-pressed='true'] { color: var(--text-primary); font-weight: 650; text-decoration: underline; text-underline-offset: 5px; }
+.memory-editor-source { font-family: ui-monospace, monospace; }
+.memory-editor-preview { min-height: 12em; padding-block: .5em; }
 .memory-editor-field:focus-visible { border-color: var(--text-secondary); outline: 1px solid var(--text-secondary); outline-offset: -1px; }
 .memory-editor-range { accent-color: var(--text-primary); }
 .memory-editor-save { background: var(--surface-contrast); color: var(--text-contrast); font-weight: 650; }

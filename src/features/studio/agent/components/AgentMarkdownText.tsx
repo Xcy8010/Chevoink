@@ -1,6 +1,7 @@
 import { Component, memo, type ReactNode } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { markdownResources, safeMarkdownUrl } from './markdown-resources'
 import { useStreamingText } from '../../components/use-streaming-text'
 import { containsAgentProtocolArtifact, stripAgentProtocolArtifacts } from '../../../../../shared/agent-output.js'
 
@@ -29,17 +30,9 @@ function removeProtocolText() {
   }
 }
 
-function safeLink(value: string): string {
-  if (/^#[\w-]+$/.test(value)) return value
-  if (!/^https?:\/\//i.test(value)) return ''
-  try {
-    const url = new URL(value)
-    return url.username || url.password ? '' : url.href
-  } catch { return '' }
-}
-
 const heading = 'mb-2 mt-4 text-base font-semibold first:mt-0'
 const components: Components = {
+  ...markdownResources,
   h1: ({ children }) => <h3 className={heading}>{children}</h3>,
   h2: ({ children }) => <h4 className={heading}>{children}</h4>,
   h3: ({ children }) => <h5 className={heading}>{children}</h5>,
@@ -57,10 +50,6 @@ const components: Components = {
   </div>,
   th: ({ children }) => <th scope="col" className="min-w-24 border-b border-[var(--border-subtle)] px-3 py-2 font-semibold">{children}</th>,
   td: ({ children }) => <td className="min-w-24 border-b border-[var(--border-subtle)] px-3 py-2 align-top">{children}</td>,
-  a: ({ children, href }) => href ? <a href={href} target={href.startsWith('#') ? undefined : '_blank'}
-    rel="noopener noreferrer" className="break-all underline underline-offset-2">{children}</a> : <span>{children}</span>,
-  // No img element, even in a hidden/loading state: untrusted prose cannot make tracking requests.
-  img: ({ alt }) => <span className="text-[var(--text-secondary)]">{alt ? `[图片：${alt}，未自动加载]` : '[图片未自动加载]'}</span>,
 }
 
 const plugins = [remarkGfm, removeProtocolText]
@@ -68,7 +57,7 @@ const plugins = [remarkGfm, removeProtocolText]
 // Studio and creation records are already lazy routes. Paint the real block
 // layout with the history, so parsing cannot move adjacent tool rows later.
 function Markdown({ text }: { text: string }) {
-  return <ReactMarkdown skipHtml remarkPlugins={plugins} urlTransform={safeLink} components={components}>
+  return <ReactMarkdown skipHtml remarkPlugins={plugins} urlTransform={safeMarkdownUrl} components={components}>
     {stripAgentProtocolArtifacts(text)}
   </ReactMarkdown>
 }

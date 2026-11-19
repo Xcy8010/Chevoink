@@ -50,6 +50,7 @@ vi.mock('../../api/lib/agent/context-engine.js', async (importOriginal) => {
 
 vi.mock('../../api/lib/agent/story-memory.js', () => ({
   currentStoryMemoryWhere: vi.fn(async (_db, novelId) => ({ novelId })),
+  projectStoryMemoryAt: vi.fn(async (_db, _novelId, entries) => entries),
   searchStoryMemory: vi.fn(),
 }))
 
@@ -189,7 +190,8 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
   it('includes legacy inferred cards as current fallback writing memory', async () => {
     vi.mocked(searchStoryMemory).mockResolvedValueOnce([])
     vi.mocked(prisma.projectMemoryEntry.findMany).mockImplementation(args => {
-      const pending = Promise.resolve(args?.take === 12 ? [{
+      const filter = args?.where?.memoryType
+      const pending = Promise.resolve(filter && typeof filter === 'object' && 'notIn' in filter ? [{
         memoryType: 'characterCard', status: 'inferred', title: '待核人物动机', content: '尚未证实的推断',
         evidence: [{ sourceType: 'chapter', sourceId: 'source-chapter', revision: 8 }],
       }] as never : [] as never)
@@ -209,7 +211,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     vi.mocked(isAgent2FeatureEnabled).mockImplementation(flag => flag === 'storyCompiler')
     vi.mocked(buildStoryCompilerDigest).mockResolvedValueOnce('当前章节检查未完成；原事实与待核提议保留。')
     const { messages } = await assembleContext(input)
-    expect(prisma.projectMemoryEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 12 }))
+    expect(prisma.projectMemoryEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ memoryType: { notIn: ['stylePreference', 'continuityRule'] } }) }))
     expect(buildStoryCompilerDigest).toHaveBeenCalledWith(input.userId, input.novelId, input.chapterId, input.runId)
     expect(JSON.stringify(messages)).toContain('当前章节检查未完成；原事实与待核提议保留。')
     expect(String(messages.at(-1)?.content)).toContain(input.prompt)
@@ -221,7 +223,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     input.taskSpec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: false, structure: false }
     vi.mocked(searchStoryMemory).mockResolvedValueOnce([])
     await assembleContext(input)
-    expect(prisma.projectMemoryEntry.findMany).not.toHaveBeenCalledWith(expect.objectContaining({ take: 12 }))
+    expect(prisma.projectMemoryEntry.findMany).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ memoryType: { notIn: ['stylePreference', 'continuityRule'] } }) }))
   })
   it('overlaps the owned goal read with workspace waits while preserving the original request', async () => {
     let release!: () => void

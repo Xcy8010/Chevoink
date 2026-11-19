@@ -41,7 +41,8 @@ export async function executeDurableMemorySave(ctx: ToolContext, tool: AgentTool
     const title = tool.name === 'memory_relation_save' ? `${effective.fromName}→${effective.toName}:${effective.relationType}` : String(effective.title).trim()
     const memoryType = tool.name === 'memory_relation_save' ? 'relationshipState' : tool.name === 'memory_event_save' ? 'timelineEvent' : effective.memoryType as ProjectMemoryEntry['memoryType']
     const sourceChapterId = typeof effective.sourceChapterId === 'string' ? effective.sourceChapterId : undefined
-    const target = await findAvailableStoryMemory(tx, { novelId: root.novelId, memoryType, title, memoryId, sourceChapterId })
+    const identityKey = typeof effective.identityKey === 'string' ? effective.identityKey : undefined
+    const target = await findAvailableStoryMemory(tx, { novelId: root.novelId, memoryType, title, memoryId, sourceChapterId, identityKey })
     if (memoryId && !target) return runtimeError('MEMORY_TARGET_MISSING', '原卡片不存在或不属于本作品，不能改为新建。')
     if (target) {
       const observed = await readObservedBaseline(tx, root.id, cursor.expectedRevision, { kind: 'memory', id: target.id })

@@ -26,7 +26,8 @@ import {
 } from './context-engine.js'
 import { renderTaskSpec, requiresManuscriptDelivery } from './task-spec.js'
 import { effectiveWritingTaskSpec } from './writing-scope.js'
-import { currentStoryMemoryWhere, searchStoryMemory } from './story-memory.js'
+import { currentStoryMemoryWhere, projectStoryMemoryAt, searchStoryMemory } from './story-memory.js'
+import { selectProfileExcerpt } from './story-profile.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { buildStoryCompilerDigest } from './story-compiler.js'
 import { getLearnedStyleDigest } from './style-learning.js'
@@ -85,7 +86,8 @@ const DECISION_STRATEGIES = `决策策略（每条都是原则，不是流程规
 3. 模式自适应：轻量诉求直接做，重决策先给方案；不要把简单任务复杂化。
 4. 由你按交付规模判断是否属于长任务或复杂任务，只有这类任务才需要待办。普通“写下一章”是一个交付单元，常规读取资料、编译、写作、检查及提交都是内部步骤，不因调用工具多而机械拆成三项待办。每真实完成一项立即更新其原 id，不等最后统一补勾。仅长任务、复杂任务需要待办：如连写多章、跨章节批量整改、多个独立交付步骤，开工前用 todo_write 拆成至少两项可执行工作；简短答复、单处修改或简单单步任务直接执行，不为每次请求机械建清单。清单只记录本任务真实进度，真实交付后及时更新，已完成项保留且不回退。有未完成项必须继续执行；禁止仅因续跑或收尾而补造全 completed 清单、空清单或覆盖旧任务清单。没有创建过清单的任务，完成后直接交付，不需要补写待办。
 5. 写作沿用当前作品记忆。作者本轮明确更改设定、风格或约束时，以新要求为准，并用 memory_save 更新原卡（优先传 memoryId），供后续创作延续。试写、待定想法和仅本轮要求按其原本范围处理。
-6. 用已有记忆延续人名、设定与时间线。上下文未覆盖当前目标时，用 memory_search 补齐细节。
+6. 人物、物品、地点和具体场景各有自己的档案。按目标章用 memory_search 查旧称、去向和关系；写人物视角时带 viewpointMemoryId，只用该人物当时知道的事实。正文中有实际变化时，用 memory_save 为涉及的对象在同一张卡分段补写 Markdown 简介、当前处境或关键经历，标明起效章节。交接物品同时更新物品与相关人物。地点与发生在该地的场景分别建卡。同名者用不同 identityKey，改名沿用原卡 ID 和别名。作者私下设定可标记 knownBy=[]，揭晓时更新知情范围。
+人物卡的开篇用一段小传写出身份、来历和牵引人物的愿望。「人物设定」写作者已定的特征，把声口、习惯、选择或底线落在能看见的细节上。年龄、外貌或动机尚无依据时留待故事补充。逐章经历另起小节，续写时沿用已有设定。
 6.1 质量复核沿用同一判断标准：新增意见先区分原问题仍存、修改引入的具体回归和首轮遗漏，核对当前正文与报告证据，不把建议改法当作必改事实。按原作者合同集中判断和局部修复；同段多条建议先检查组合后的语义、事实、因果与衔接，避免逐条消评论把正文拆碎，也不删掉原本必要的信息。真实新问题继续处理，不用固定轮数或假通过结束。
 7. 卷章结构先核对再动笔：作者用「第 M 卷第 N 章」指称目标时，先用 novel_get_context 核对，然后 chapter_create 一次传 volumeOrder=M + positionInVolume=N 原子创建；「全书第 N 章」才使用 position=N。两个坐标系禁止混用，禁止先建错卷再移动，创建成功后必须复用返回的 chapterId。插章、跨卷移动、拆分、合并完成后调用 structure_validate，禁止靠逐章改数字维持顺序。
 8. 短答复先对齐上一轮：作者发「好的」「可以」「继续」「嗯」这类短消息时，先核对上一条真实待答问题和原授权。纯可选下一步建议不是待答问题，简短认可不自动选择多个建议之一或增加写作、封面权限。只有对应明确问题且原请求已授权的操作才继续；没有待答问题时按原任务真实未完成事项理解“继续”，不能接管已结束任务的附带建议。确有影响执行范围的歧义时用 ask_user 确认。
@@ -128,6 +130,7 @@ const TAG_LIBRARY_DIGEST = [
 async function buildNovelRuleBundle(
   novelId: string,
   currentMemories: ReturnType<typeof currentStoryMemoryWhere>,
+  scope: Parameters<typeof projectStoryMemoryAt>[3],
 ): Promise<{ bootstrapPrompt: string | null; novelDataBundle: string | null; tagNames: string[] }> {
   const novel = await prisma.novel.findUnique({
     where: { id: novelId },
@@ -138,12 +141,12 @@ async function buildNovelRuleBundle(
     return { bootstrapPrompt: null, novelDataBundle: null, tagNames: [] }
   }
 
-  const rules = await prisma.projectMemoryEntry.findMany({
+  const ruleCandidates = await prisma.projectMemoryEntry.findMany({
     where: { ...await currentMemories, memoryType: { in: ['stylePreference', 'continuityRule'] } },
     orderBy: [{ importance: 'desc' }, { updatedAt: 'desc' }],
-    take: 6,
-    select: { memoryType: true, title: true, content: true },
+    select: { id: true, memoryType: true, title: true, content: true, sourceChapterId: true, profileTracked: true },
   })
+  const rules = (await projectStoryMemoryAt(prisma, novelId, ruleCandidates, scope)).slice(0, 6)
 
   const isBootstrapNovel =
     !novel.displayTitle?.trim()
@@ -168,21 +171,21 @@ async function buildNovelRuleBundle(
 }
 
 /** L2/L3：角色卡 + 时间线 + 伏笔摘要（≤1200 字） */
-async function buildStoryMemoryDigest(userId: string, novelId: string, query: string, currentMemories: ReturnType<typeof currentStoryMemoryWhere>, relevantOnly: boolean): Promise<string | null> {
+async function buildStoryMemoryDigest(userId: string, novelId: string, query: string, currentMemories: ReturnType<typeof currentStoryMemoryWhere>, relevantOnly: boolean, scope: Parameters<typeof projectStoryMemoryAt>[3]): Promise<string | null> {
   const where = await currentMemories
-  const retrieved = await searchStoryMemory({ userId, novelId, query, limit: 12 }, undefined, where)
+  const retrieved = await searchStoryMemory({ userId, novelId, query, limit: 12, ...scope }, undefined, where)
   if (retrieved.length > 0) {
     return `与本轮相关的当前创作记忆：\n${retrieved
-      .map((entry) => `[${entry.memoryType}] ${entry.title}：${clip(entry.content, 180)}`)
+      .map((entry) => `[${entry.memoryType}] ${entry.title}：${selectProfileExcerpt(entry.content, query, 180)}`)
       .join('\n')}`
   }
   if (relevantOnly) return null
-  const entries = await prisma.projectMemoryEntry.findMany({
+  const candidates = await prisma.projectMemoryEntry.findMany({
     where: { ...where, memoryType: { notIn: ['stylePreference', 'continuityRule'] } },
     orderBy: [{ importance: 'desc' }, { updatedAt: 'desc' }],
-    take: 12,
-    select: { memoryType: true, title: true, content: true },
+    select: { id: true, memoryType: true, title: true, content: true, sourceChapterId: true, profileTracked: true },
   })
+  const entries = (await projectStoryMemoryAt(prisma, novelId, candidates, scope)).slice(0, 12)
 
   if (entries.length === 0) {
     return null
@@ -190,12 +193,13 @@ async function buildStoryMemoryDigest(userId: string, novelId: string, query: st
 
   const label: Record<string, string> = {
     characterCard: '角色',
+    itemCard: '物品', locationCard: '地点', sceneCard: '场景',
     timelineEvent: '时间线',
     foreshadowing: '伏笔',
     worldbuilding: '设定',
   }
 
-  const lines = entries.map((entry) => `[${label[entry.memoryType] ?? entry.memoryType}] ${entry.title}：${clip(entry.content, 90)}`)
+  const lines = entries.map((entry) => `[${label[entry.memoryType] ?? entry.memoryType}] ${entry.title}：${selectProfileExcerpt(entry.content, query, 90)}`)
   return `当前创作记忆摘要（详情用 memory_search 检索）：\n${lines.join('\n')}`
 }
 
@@ -525,10 +529,15 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     && input.taskSpec.scope.writing?.kind === 'bounded'
   const writingTaskRunIds = frozenWriting ? new Set(await getTaskRunIds(input.sessionId, input.runId)) : undefined
   const currentMemories = currentStoryMemoryWhere(prisma, input.novelId)
+  const memoryTarget = writingTargets[0]
+  const memoryScope = {
+    atChapterId: memoryTarget?.chapterId ?? (!memoryTarget ? input.chapterId ?? undefined : undefined),
+    atChapterOrder: memoryTarget?.orderIndex, publicOnly: requiresManuscriptDelivery(input.taskSpec),
+  }
   const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, storyCompilerDigest, goalMessages, localWritingContext] = await Promise.all([
-    buildNovelRuleBundle(input.novelId, currentMemories),
+    buildNovelRuleBundle(input.novelId, currentMemories, memoryScope),
     buildStoryMemoryDigest(input.userId, input.novelId, input.prompt, currentMemories,
-      input.taskSpec.scope.authorEffects !== undefined && !writingTargets.length && !requiresManuscriptDelivery(input.taskSpec)),
+      input.taskSpec.scope.authorEffects !== undefined && !writingTargets.length && !requiresManuscriptDelivery(input.taskSpec), memoryScope),
     (!focused || catalog.kind === 'writing') && hasCapability('plan_read', 'plan_save') ? buildPlanFolderDigest(input.userId, input.novelId) : Promise.resolve(null),
     hasCapability('cover_generate', 'cover_apply') ? buildCoverCandidateDigest(input) : Promise.resolve(null),
     hasCapability('todo_write') ? buildTodoDigest(input.sessionId, input.taskSpec?.runId ?? input.runId) : Promise.resolve(null),

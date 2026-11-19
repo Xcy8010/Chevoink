@@ -27,6 +27,7 @@ import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/ch
 import { chapterReadTool,memorySearchTool } from '../../api/lib/agent/tools/read-tools.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { memorySaveTool,planSaveTool } from '../../api/lib/agent/tools/write-tools.js'
+import { legacyMemorySaveParameters, legacyMemorySearchParameters } from '../../api/lib/agent/memory-tool-parameters.js'
 import * as credits from '../../api/lib/credits.js'
 import { getStructureReportObservation } from '../../api/lib/data-access.js'
 import { prisma } from '../../api/lib/prisma.js'
@@ -124,6 +125,61 @@ describe.runIf(available)('parent completion with an already verified limited ch
 })
 
 describe.runIf(available)('durable explicit memory save', () => {
+  it('retains the character biography and settings as the story advances through the actual Markdown tool', () => fixture(async f => {
+    const lease = await claim(f)
+    const introduction = '林汐是潮汐邮局的夜班邮差。父亲离开后，她接下了他的班。'
+    const character = '她递信时把封口转向收件人。查邮戳，却从不拆信。'
+    const initial = introduction + '\n\n## 人物设定\n\n' + character + '\n\n## 当前处境\n\n她在旧灯塔等回信。'
+    const base = { memoryType: 'characterCard', title: '林汐', importance: 85 }
+    const tool = memorySaveTool
+    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
+      toolAuthority: [{ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: '整理人物小传，随后按本章修改处境' }, { role: 'assistant', content: null, toolCalls: [
+          { id: 'bio', name: tool.name, arguments: JSON.stringify({ ...base, content: initial }) },
+          { id: 'development', name: tool.name, arguments: JSON.stringify({ ...base, section: '当前处境', effectiveFromChapterId: f.chapterId, content: '她登上了夜船。' }) },
+        ] }], successfulToolSignatures: [] } })
+    const invoke = () => executeDurableToolStep(lease, new AbortController().signal)
+    const first = await invoke()
+    expect(first).toMatchObject({ kind: 'tool', result: { savedMemoryId: expect.any(String) } })
+    const next = await invoke()
+    expect(next).toMatchObject({ kind: 'tool', result: { savedMemoryId: first.kind === 'tool' ? first.result.savedMemoryId : '' } })
+    const cards = await storyMemory.searchStoryMemory({ userId: f.userId, novelId: f.novelId, query: base.title, atChapterId: f.chapterId, publicOnly: true })
+    expect(cards[0].content).toBe(initial.replace('她在旧灯塔等回信。', '她登上了夜船。'))
+  }))
+
+  it.each(['memory_save', 'memory_search'] as const)('replays a prepared %s using its original fields and receipt', action => fixture(async f => {
+    const lease = await claim(f)
+    const save = action === 'memory_save'
+    const schema = save ? legacyMemorySaveParameters : legacyMemorySearchParameters
+    const args = save
+      ? { memoryType: 'characterCard', title: '摆渡人', content: '摆渡人长年守在河边。', importance: 70, section: '不属于旧协议的小节' }
+      : { query: '渡口', atChapterId: '不属于旧协议的章节' }
+    const tool = save ? memorySaveTool : memorySearchTool
+    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: [{ type: 'function', function: { name: action, description: tool.description, parameters: z.toJSONSchema(schema, { io: 'input' }) } }],
+      toolAuthority: [{ name: action, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: '整理渡口的记忆' }, { role: 'assistant', content: null,
+          toolCalls: [{ id: 'old-call', name: action, arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
+    const invoke = () => executeDurableToolStep(lease, new AbortController().signal)
+    vi.spyOn(runtimeOperations, 'commitOperationEffect').mockRejectedValueOnce(new Error('fixture interrupted after preparation'))
+    await expect(invoke()).rejects.toThrow('fixture interrupted')
+    const where = { taskRootId: f.rootId, action }
+    const prepared = await prisma.agentOperation.findFirstOrThrow({ where })
+    expect(prepared.status).toBe('prepared')
+    const snapshot = z.object({ input: z.object({ args: z.unknown(), normalization: z.object({ rawArguments: z.string() }) }) }).parse(prepared.inputSnapshot)
+    expect(snapshot.input.args).toEqual(schema.parse(args))
+    expect(JSON.parse(snapshot.input.normalization.rawArguments)).toEqual(args)
+    expect(await invoke()).toMatchObject({ kind: 'tool' })
+    expect(await prisma.agentOperation.findMany({ where })).toMatchObject([{ id: prepared.id, inputHash: prepared.inputHash, status: 'succeeded' }])
+    expect((await loadExecutionState(f.userId, f.runId)).frame.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'old-call' })
+    if (save) expect(await prisma.projectMemoryEntry.findFirstOrThrow({ where: { novelId: f.novelId, title: '摆渡人' } })).toMatchObject({ content: args.content })
+  }))
+
   it.each(['create', 'update', 'unread', 'stale', 'missing', 'rollback', 'stopped'] as const)('%s fences explicit card writes', async scenario => {
     await fixture(async f => {
       const lease = await claim(f)
