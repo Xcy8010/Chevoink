@@ -47,14 +47,17 @@ export async function advanceDurableWritingDelivery(token: RunLeaseToken) {
     if (!delivery) return null
     if (latest?.role === 'assistant' && !latest.toolCalls?.length && latest.content === delivery.text) return null
     const chapters = delivery.chapters.map(({ id, revision, contentHash }) => ({ id, revision, contentHash }))
-    if (!token.parent && state.configuration.mode === 'build' && state.configuration.agentType === 'orchestrator') {
+    const allowsMemory = (authority: typeof state.configuration.toolAuthority) => CHAPTER_MEMORY_TOOLS
+      .every(name => authority.some(grant => grant.name === name && grant.permission === 'allow' && !grant.alwaysConfirm))
+    if (!token.parent && state.configuration.mode === 'build' && state.configuration.agentType === 'orchestrator'
+      && allowsMemory(state.configuration.toolAuthority)) {
       const content = `${CHAPTER_MEMORY_MARKER}${runtimeJson(chapters).hash}] 以下章节已保存：${JSON.stringify(chapters.map(({ id, revision }) => ({ id, revision })))}。只处理这些章涉及的记忆，然后交付现有稿件。\n${CHAPTER_MEMORY_GUIDANCE}`
       const messages = state.frame.state.messages
       const hasCheck = messages.some(message => message.role === 'system' && message.content === content)
       const needsCheck = !hasCheck && latest?.role === 'tool'
       if (needsCheck || (hasCheck && latest?.role !== 'assistant')) {
         const { toolAuthority } = await readEffectiveNativeTooling(tx, token, state.configuration, taskSpecSchema.parse(state.originalSpec))
-        if (CHAPTER_MEMORY_TOOLS.every(name => toolAuthority.some(grant => grant.name === name && grant.permission === 'allow' && !grant.alwaysConfirm))) {
+        if (allowsMemory(toolAuthority)) {
           if (needsCheck) return saveExecutionStateInTransaction(tx, token, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
             snapshot: { ...state.frame.state, messages: [...messages, { role: 'system', content }] } })
           // Allow lookup, saves and any needed correction before presenting

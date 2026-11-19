@@ -9,7 +9,8 @@ import { probeChapterReviewRevision, readChapterReviewReadiness } from '../../ap
 import type { ChatMessage } from '../../api/lib/ai-service.js'
 
 const mocks = vi.hoisted(() => ({ original: vi.fn(), preference: vi.fn(), committed: vi.fn(), lease: vi.fn(), state: vi.fn(), save: vi.fn(), todos: vi.fn(async () => [] as import('../../shared/contracts').AgentTodoItem[]) }))
-const memoryGrants = vi.hoisted(() => vi.fn(() => ({ toolAuthority: ['memory_search', 'memory_save'].map(name => ({ name, permission: 'allow', alwaysConfirm: false })) })))
+const allowMemory = vi.hoisted(() => ['memory_search', 'memory_save'].map(name => ({ name, permission: 'allow', alwaysConfirm: false })))
+const memoryGrants = vi.hoisted(() => vi.fn(() => ({ toolAuthority: allowMemory })))
 vi.mock('../../api/lib/agent/native-tool-policy.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/native-tool-policy.js')>(), readEffectiveNativeTooling: memoryGrants,
 }))
@@ -64,7 +65,7 @@ async function fixture(prompt = '完成第一章，只输出标题与正文。',
     agentOperation: { count: vi.fn(async () => 0) }, agentProviderAttempt: { count: vi.fn(async () => 0) },
     agentExecutionOutbox: { create: vi.fn(async () => ({})) } }
   mocks.lease.mockImplementation(async (_token, work) => work(db))
-  const state = { originalSpec: spec, configuration: { mode: 'build', agentType: 'orchestrator' },
+  const state = { originalSpec: spec, configuration: { mode: 'build', agentType: 'orchestrator', toolAuthority: allowMemory },
     frame: { revision: 7, snapshotHash: 'a'.repeat(64), state: { phase: 'idle', messages: [{ role: 'user', content: prompt }] as ChatMessage[] } } }
   mocks.state.mockResolvedValue(state)
   mocks.save.mockImplementation(async (_db, _token, input) => { state.frame = { revision: 8, snapshotHash: 'b'.repeat(64), state: input.snapshot }; return state.frame })
@@ -101,6 +102,16 @@ it('projects the saved chapter directly when the memory tool requires confirmati
   f.state.frame.state.messages.push({ role: 'tool', toolCallId: 'chapter-commit', content: '本章已提交' })
   expect(await advanceDurableWritingDelivery(token as never)).not.toBeNull()
   expect(f.state.frame.state.messages.at(-1)).toMatchObject({ role: 'assistant', content: expect.stringContaining(f.chapter.content) })
+})
+
+it('keeps automatic delivery local when the frozen task has no memory writing grant', async () => {
+  const f = await fixture()
+  f.state.configuration.toolAuthority = f.state.configuration.toolAuthority.filter(grant => grant.name !== 'memory_save')
+  f.state.frame.state.messages.push({ role: 'tool', toolCallId: 'chapter-commit', content: '本章已提交' })
+
+  expect(await advanceDurableWritingDelivery(token as never)).not.toBeNull()
+  expect(f.state.frame.state.messages.at(-1)).toMatchObject({ role: 'assistant', content: expect.stringContaining(f.chapter.content) })
+  expect(memoryGrants).not.toHaveBeenCalled()
 })
 
 it('requires a real existing todo update before projecting an already committed chapter, without changing the manuscript', async () => {
