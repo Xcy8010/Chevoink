@@ -35,7 +35,7 @@ describe('Agent 创作可观测与容错', () => {
     const source = read('api/lib/agent/story-memory.ts')
     expect(source).toContain("reasoningEffort: 'low'")
     expect(source).toContain('MEMORY_GRAPH_REFRESH_COOLDOWN_MS')
-    expect(source).toContain("z.enum(['character', 'location', 'organization', 'item', 'event', 'concept'])")
+    expect(source).toContain("z.enum(['character', 'location', 'scene', 'organization', 'item', 'event', 'concept'])")
     expect(source).toContain('if (!force && existingEntityCount > 0)')
     expect(source).toContain("从正文中自动识别")
   })
