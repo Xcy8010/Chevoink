@@ -12,6 +12,7 @@ import { formatNovelSetupRecap, hasNovelDirectionDelivery, isNovelSetupAuthority
 import { failedToolResultSchema, hasAnsweredQuestionBatch } from './runtime-reducer.js'
 import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { isDurablePublicWebOperation, projectDurablePublicWeb } from './runtime-public-web.js'
+import { previousToolActivity, toolActivity, toolActivityReport } from './activity-report.js'
 
 export const durableMessageId = (rootId: string, turn: number) => `dm-${runtimeJson({ rootId, turn }).hash.slice(0, 48)}`
 const sourceSchema = z.object({ revision: z.number().int().nonnegative(), snapshotHash: z.string(), previousHash: z.string().nullable() }).strict()
@@ -117,10 +118,14 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
       if (followup.length) return runtimeError('RUNTIME_RECEIPT_INVALID', '模型归约事件不符合消息追加合同。')
       const events: AgentStreamEventBody[] = []
       const raw = appended.content ?? ''
-      const { title, text } = appended.toolCalls?.some(call => call.name !== 'task_respond') ? readAgentActivityTitle(raw) : { text: raw }
+      const toolCall = appended.toolCalls?.find(call => call.name !== 'task_respond')
+      const { title, text } = toolCall ? readAgentActivityTitle(raw) : { text: raw }
+      const prose = humanizeAgentVisibleText(text)
+      const report = toolCall && !prose.trim()
+        ? toolActivityReport(toolActivity(toolCall.name, title), previousToolActivity(previous.state.messages)) : prose
       if (title) events.push({ type: 'activity.title', messageId, title })
       if (appended.reasoning) events.push({ type: 'reasoning.delta', messageId, delta: appended.reasoning })
-      events.push({ type: 'text.final', messageId, text: humanizeAgentVisibleText(text), asReasoning: false })
+      events.push({ type: 'text.final', messageId, text: report, asReasoning: false })
       return events
     }
     if (appended.role === 'tool') {
@@ -185,8 +190,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
         ...(reviewedChapter ? { reviewedChapter } : {}),
         ...(parsedResult.data.code || parsedResult.data.toolResult.failureCode ? { failureCode: parsedResult.data.code ?? parsedResult.data.toolResult.failureCode } : {}),
         ...(operation.status === 'succeeded' && parsedResult.data.toolResult.display ? { display: parsedResult.data.toolResult.display as AgentToolDisplayPayload } : {}) },
-      ...(terminal?.content ? [{ type: 'text.final' as const, messageId, text: terminal.content, asReasoning: false,
-        ...(recap || terminal.localCompletion?.kind === 'question_cancelled' || terminal.localCompletion?.kind === 'question_unanswered' ? { afterTools: true as const } : {}) }] : [])]
+      ...(terminal?.content ? [{ type: 'text.final' as const, messageId, text: terminal.content, asReasoning: false, afterTools: true as const }] : [])]
     }
   }
   return [{ type: 'execution.progress', revision: frame.revision, stage: frame.state.phase === 'completed' ? 'finalizing' : 'checkpoint' }]

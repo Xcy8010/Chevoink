@@ -4,6 +4,7 @@ import { describe,expect,it,vi } from 'vitest'
 import { stopLoopRun,streamLoopRun } from '../../api/lib/agent/run-service.js'
 import { pollToolApproval,requestToolApproval,resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
 import { loadDurableEvents,publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { modelRouteRevision } from '../../api/lib/agent/runtime-model-cursor.js'
 import { currentNativeToolViews } from '../../api/lib/agent/runtime-tool-view.js'
@@ -169,9 +170,13 @@ describe.runIf(available)('model tool model durable execution chain', () => {
       const replay = await loadDurableEvents(f.userId, f.runId, 0)
       expect(replay.filter(event => event.type === 'message.start')).toHaveLength(2)
       expect(replay.filter(event => event.type === 'text.final')).toHaveLength(2)
+      const opening = replay.find(event => event.type === 'text.final')
+      expect(opening?.text).toMatch(/^我先/)
+      expect(opening!.seq).toBeLessThan(replay.find(event => event.type === 'tool.call')!.seq)
       expect(replay.filter(event => event.type === 'tool.call')).toHaveLength(1)
       expect(replay.filter(event => event.type === 'tool.result')).toEqual([expect.objectContaining({ ok: scenario !== 'stale', callId: 'write-call' })])
-      const historyBeforeReplay = await prisma.agentMessage.findMany({ where: { sessionId: f.sessionId, role: 'assistant' }, orderBy: { id: 'asc' } })
+      const readHistory = () => prisma.agentMessage.findMany({ where: { sessionId: f.sessionId, role: 'assistant' }, orderBy: { id: 'asc' } })
+      let historyBeforeReplay = await readHistory()
       expect(historyBeforeReplay).toHaveLength(2)
       if (scenario !== 'stale') expect(historyBeforeReplay.flatMap(message => message.parts as unknown[])).toContainEqual(expect.objectContaining({
         type: 'tool-call', callId: 'write-call', snapshot: { target: 'chapter', targetId: f.chapterId, field: 'content', previousValue: '原文' },
@@ -179,12 +184,28 @@ describe.runIf(available)('model tool model durable execution chain', () => {
       expect(historyBeforeReplay.flatMap(message => message.parts as unknown[])).toContainEqual(expect.objectContaining({ type: 'tool-call', callId: 'write-call', status: scenario === 'stale' ? 'failed' : 'success' }))
       expect(await publishDurableEvents(f.userId, f.runId)).toEqual([])
       if (scenario === 'default-target') {
+        // Recreate a released projection: the old model event was empty and
+        // its already-persisted assistant message held only the tool receipt.
+        const legacyOpening = { ...opening!, text: '' }
+        const savedOpening = historyBeforeReplay.find(message => message.id === opening!.messageId)!
+        await prisma.$transaction(async tx => {
+          const archived = await tx.agentRunEvent.update({ where: { runId_seq: { runId: f.runId, seq: opening!.seq } },
+            data: { payload: runtimeJson(legacyOpening).value } })
+          await tx.agentEventProjection.update({ where: { eventId: archived.id }, data: { eventHash: runtimeJson(legacyOpening).hash } })
+          await tx.agentMessage.update({ where: { id: savedOpening.id }, data: {
+            parts: runtimeJson((savedOpening.parts as Array<{ type: string }>).filter(part => part.type !== 'text')).value,
+          } })
+        })
+        historyBeforeReplay = await readHistory()
         await pauseDurableTask(f.userId, f.runId)
         const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' } })
         const resumed = await resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id })
         await publishDurableEvents(f.userId, resumed.run.id)
+        const restored = await loadDurableEvents(f.userId, resumed.run.id, 0)
+        expect(restored.find(event => event.type === 'text.final' && event.messageId === opening!.messageId))
+          .toMatchObject({ type: 'text.final', text: '', runId: resumed.run.id })
       }
-      expect(await prisma.agentMessage.findMany({ where: { sessionId: f.sessionId, role: 'assistant' }, orderBy: { id: 'asc' } })).toEqual(historyBeforeReplay)
+      expect(await readHistory()).toEqual(historyBeforeReplay)
     })
   }, 30_000)
 })

@@ -2,6 +2,7 @@ import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_TO
 import { formatNovelSetupRecap, getNovelSetupFollowup, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
 import { createAgentActivityTextStream, readAgentActivityTitle } from '../../../shared/agent-activity-title.js'
+import { sameAgentToolStage } from '../../../shared/agent-tool-presentation.js'
 import { askUserTool, DIRECTION_PURPOSE_REQUIRED, formatUnansweredQuestionWrapUp, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
@@ -75,6 +76,8 @@ import { getTaskRunIds } from './task-lineage.js'
 import type { AgentTool, ToolContext } from './tools/types.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
+import { toolActivity, toolActivityReport, type ToolActivity } from './activity-report.js'
+import { SAVED_PLAN_CLOSING_GUIDANCE } from './task-guidance.js'
 import { createExecutionTextDetector, normalizeExecutionText } from './execution-text-detector.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { toolTurnHistory } from './tool-turn-history.js'
@@ -770,7 +773,7 @@ async function finalizeLegacyRun(
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
-  const afterTools = (terminalNotice?.kind === 'novel_setup' || terminalNotice?.kind === 'question_cancelled') && status === 'succeeded'
+  const afterTools = terminalNotice?.parts.some(part => part.type === 'tool-call')
   // Failure explanations belong to the existing run-status channel. Publish
   // them atomically with the confirmed failure, never as novel prose.
   const failureStatus = status === 'failed' && withFailureStatus && errorMessage
@@ -1097,13 +1100,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
   // 进行中的轮次缓冲：中止/崩溃时当前轮消息还没走到轮末落库点，
   // 不兜底补偿的话作者刷新后会丢掉整个进行中轮次（只看到上一轮为止的进度）
-  let liveTurn: { messageId: string; parts: AgentMessagePart[]; streamedText: string; streamedReasoning: string } | null = null
+  let liveTurn: { messageId: string; parts: AgentMessagePart[]; streamedText: string; streamedReasoning: string; toolPreview?: boolean; toolReport?: string } | null = null
   const flushLiveTurn = async () => {
     const live = liveTurn
     if (!live) return
     const fallbackParts: AgentMessagePart[] = []
     if (live.streamedReasoning.trim()) fallbackParts.push({ type: 'reasoning', text: live.streamedReasoning })
-    if (live.streamedText.trim()) fallbackParts.push({ type: 'text', text: humanizeAgentVisibleText(live.streamedText) })
+    const raw = live.toolPreview ? readAgentActivityTitle(live.streamedText).text : live.streamedText
+    const prose = humanizeAgentVisibleText(live.toolPreview ? stripAgentProtocolArtifacts(raw) : raw)
+    const text = prose.trim() ? prose : live.toolReport ?? ''
+    if (text.trim()) fallbackParts.push({ type: 'text', text })
     // 优先用正式组装的 parts（含工具卡片）；模型流式中断、parts 尚未组装时退化为已流式原文
     const partsToSave = live.parts.length > 0 ? live.parts : fallbackParts
     if (partsToSave.length === 0) return
@@ -1113,6 +1119,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       .catch(() => null)
     if (exists) return
     await persistMessage(live.messageId, runId, params.sessionId, 'assistant', partsToSave).catch(() => {})
+    if (live.parts.length === 0 && live.toolPreview && text !== live.toolReport && text.trim()) {
+      bus.emit({ type: 'text.final', messageId: live.messageId, text, asReasoning: false })
+    }
   }
 
   const announceStopReason = async (text: string, status: 'paused' | 'failed' = 'paused') => {
@@ -1798,12 +1807,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
 
     let lastAssistantText = ''
+    let previousActivity: ToolActivity | undefined
     // 模型把工具调用写成正文文本而非真正 function calling 时的纠偏重试次数
     let requireNativeToolCall = false
     // C3：规划类任务必须以 plan_save 落盘收尾，只聊天不落盘时回填提醒
     const expectsPlanSave = taskSpec.intent !== 'research_analysis' && params.mode === 'plan' && /(规划|大纲|计划)/.test(params.prompt)
     let planSavePerformed = false
-    const savedPlansForNextPrompt = new Map<string, string>()
+    const savedPlanTitles = new Map<string, string>()
     let planSaveReminders = 0
     // 长任务防早停：待办清单（todo_write 维护）未全部完成就想收尾时，回填强指令让它接着执行
     // 续跑时从会话恢复既有清单，新任务从空开始（避免上一个任务的残留待办干扰）
@@ -2091,7 +2101,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const personalization = personalizationEnabled && !bootstrapCall ? await loadPersonalizationContext(params.userId, contextPrompt, runId) : undefined
       toolContext.personalizationMemoryEpoch = personalization?.memoryEpoch
       let estimatedRequestTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
-      if (completedWritingWrapUp.value || estimatedRequestTokens > contextBudget.warningTokens) {
+      const needsContextReminder = completedWritingWrapUp.value || estimatedRequestTokens > contextBudget.warningTokens
+      if (savedPlanTitles.size > 0) {
+        const planReminder = `[当前计划交付] ${SAVED_PLAN_CLOSING_GUIDANCE}`
+        contextReminder.content = needsContextReminder ? `${contextReminder.content}\n${planReminder}` : planReminder
+      }
+      if (needsContextReminder || savedPlanTitles.size > 0) {
         messages.push(contextReminder)
         estimatedRequestTokens += estimateChatMessageTokens(contextReminder)
       }
@@ -2142,6 +2157,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && (writeProgressCount > 0 || params.resume === true) && usesBriefStandaloneWritingClosing(params.prompt)
       let writingTextHeld = requiredWritingPresentation || savedUnboundWriting
       let writingTextBuffer = ''
+      let visibleToolPreview = false
+      let textBeforePreview: string | undefined
       const releaseWritingToolText = () => {
         if (completedWritingWrapUp.value) return
         writingTextHeld = false
@@ -2190,7 +2207,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (liveTurn) liveTurn.streamedText += chunk.delta
             lastActivityAt = Date.now()
             handleRepeatHit(repeatDetector.push(executionTextDetector.push(chunk.delta)))
-            publishAuthorDelta(activityTextStream.push(chunk.delta))
+            if (!visibleToolPreview) publishAuthorDelta(activityTextStream.push(chunk.delta))
           } else if (chunk.type === 'reasoning-delta') {
             if (liveTurn) liveTurn.streamedReasoning += chunk.delta
             lastActivityAt = Date.now()
@@ -2203,6 +2220,21 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (chunk.id) {
               announcedToolNames.set(chunk.id, chunk.name)
               const tool = tools.find(candidate => candidate.name === chunk.name)
+              if (tool && tool.name !== 'task_respond' && !visibleToolPreview) {
+                visibleToolPreview = true
+                if (liveTurn) liveTurn.toolPreview = true
+                const draft = readAgentActivityTitle(liveTurn?.streamedText ?? '')
+                activityTextStream.finish(true)
+                const modelReport = humanizeAgentVisibleText(stripAgentProtocolArtifacts(draft.text))
+                const report = modelReport.trim() ? modelReport : toolActivityReport(toolActivity(tool.name, draft.title), previousActivity)
+                if (report) {
+                  textBeforePreview = report
+                  if (liveTurn) liveTurn.toolReport = report
+                  // Settle any buffered prose before displaying the parameter
+                  // preview. The authoritative turn can still update this slot.
+                  bus.emit({ type: 'text.final', messageId, text: report, asReasoning: false })
+                }
+              }
               if (tool) bus.emitTransient({ type: 'tool.delta', messageId, callId: chunk.id,
                 toolName: tool.name, title: tool.title, argsChars: 0 })
             }
@@ -2269,6 +2301,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }))
         : []
       const effectiveToolCalls = textOnlyModel && !bootstrapCall ? [] : result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
+      const firstActivityCall = effectiveToolCalls.find(call => call.name !== 'task_respond')
+      const nextActivity = firstActivityCall ? toolActivity(firstActivityCall.name, activityTitle) : undefined
       const responseCall = effectiveToolCalls.length === 1 && result.toolCalls[0]?.name === 'task_respond' ? result.toolCalls[0] : undefined
       const responseSuggestion = responseCall ? readTaskResponseNextPrompt(responseCall.arguments) : undefined
       if (responseCall && responseSuggestion) effectiveToolCalls[0] = { ...responseCall, arguments: responseSuggestion.args }
@@ -2296,14 +2330,22 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const cleanContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? modelText.text : normalizeExecutionText(stripAgentProtocolArtifacts(modelText.text))
       // This projection affects publication only. Empty-response, promise and
       // saved-delivery decisions below retain baseline execution normalization.
-      const authorContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? modelText.text : humanizeAgentVisibleText(stripAgentProtocolArtifacts(modelText.text))
+      const authorProse = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse && !nextActivity
+        ? modelText.text : humanizeAgentVisibleText(stripAgentProtocolArtifacts(modelText.text))
+      const authorContent = authorProse.trim() || !nextActivity ? authorProse : toolActivityReport(nextActivity, previousActivity)
+      if (nextActivity) {
+        const sameStage = previousActivity && sameAgentToolStage(nextActivity, previousActivity)
+        previousActivity = { ...nextActivity, title: activityTitle ?? (sameStage ? previousActivity?.title : undefined) }
+      }
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
       // 模型返回的 reasoning 单独保留，执行旁白不改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
       const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && (requiredWritingPresentation || savedUnboundWriting))
-      if (result.content && !deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
+      if ((result.content || authorContent || textBeforePreview) && (nextActivity || !deferWritingCompletionText) && authorContent !== textBeforePreview) {
+        bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
+      }
 
       const parts: AgentMessagePart[] = []
       if (liveTurn) liveTurn.parts = parts
@@ -2555,7 +2597,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           false, undefined, 'user_stop', undefined, undefined, offerCompletedNextPrompt && !savedCandidate?.titleAndBodyOnly
             ? selectInteractiveNextPrompt(lastAssistantText, nextPromptReady ? result : {}, savedCandidate
               ? { kind: 'chapter', title: savedCandidate.chapters.at(-1)?.title ?? '' }
-              : { kind: 'plan', title: [...savedPlansForNextPrompt.values()].at(-1) ?? '' }) : undefined)
+              : { kind: 'plan', title: [...savedPlanTitles.values()].at(-1) ?? '' }) : undefined)
         return
       }
 
@@ -2888,16 +2930,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (call.name === 'plan_save' && outcome.part.status === 'success') {
           planSavePerformed = true
         }
-        if (nextPromptMarker && outcome.part.status === 'success') {
+        if (outcome.part.status === 'success') {
           const display = outcome.part.display
           if (call.name === 'plan_save' && (display?.kind === 'planFile' && display.content.trim() || display?.kind === 'planDiff' && display.after.trim())) {
-            savedPlansForNextPrompt.delete(display.artifactId)
-            savedPlansForNextPrompt.set(display.artifactId, display.title)
+            savedPlanTitles.delete(display.artifactId)
+            savedPlanTitles.set(display.artifactId, display.title)
           }
-          if (call.name === 'plan_rename' && display?.kind === 'planRename' && savedPlansForNextPrompt.has(display.artifactId)) {
-            savedPlansForNextPrompt.set(display.artifactId, display.title)
+          if (call.name === 'plan_rename' && display?.kind === 'planRename' && savedPlanTitles.has(display.artifactId)) {
+            savedPlanTitles.set(display.artifactId, display.title)
           }
-          if (call.name === 'plan_delete' && display?.kind === 'planDelete') savedPlansForNextPrompt.delete(display.artifactId)
+          if (call.name === 'plan_delete' && display?.kind === 'planDelete') savedPlanTitles.delete(display.artifactId)
         }
         // 同步待办清单快照：防早停拦截与预算收尾都依赖它判断任务是否真的做完
         if (call.name === 'todo_write' && outcome.part.status === 'success' && outcome.part.display?.kind === 'todoList') {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import type { AgentStreamEvent } from '../../../shared/contracts/index.js'
+import type { AgentStreamEvent, AgentStreamEventBody } from '../../../shared/contracts/index.js'
 import { lockRunRoot, runtimeError, runtimeJson, runtimeTransaction } from './runtime-common.js'
 import { projectApprovalEvent } from './runtime-approval.js'
 import { projectExecutionFrame, persistProjectedMessages } from './runtime-frame-events.js'
@@ -39,7 +39,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     let seq = latest?.seq ?? 0
     const events: AgentStreamEvent[] = []
     for (const source of sources) {
-      let bodies: import('../../../shared/contracts/index.js').AgentStreamEventBody[]
+      let bodies: AgentStreamEventBody[]
       if (source.type === 'execution.bootstrap.resumed') {
         const original = await (await import('./runtime-bootstrap.js')).readFreshBootstrapResume(tx, userId, runId, source.id)
         const pause = await tx.agentEventProjection.findFirst({ where: { sourceId: original.pause.id, runId, partIndex: 0 }, include: { event: true } })
@@ -220,8 +220,29 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           if (frame.snapshotHash !== paused.data.sourceHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '暂停判定与原执行帧不一致。')
         }
         bodies = [{ type: 'run.paused', reason: paused.data.reason }]
-      } else if (source.type === 'execution.state.saved') bodies = await projectExecutionFrame(tx, source)
-      else bodies = [await projectApprovalEvent(tx, source, userId)]
+      } else if (source.type === 'execution.state.saved') {
+        bodies = await projectExecutionFrame(tx, source)
+        if (source.runId !== runId && bodies.some(body => body.type === 'text.final')) {
+          // This source may already have written the shared transcript under
+          // an older presenter. Keep its published wording and event order.
+          const original = await tx.agentEventProjection.findFirst({ where: { sourceId: source.id, partIndex: 0 },
+            orderBy: [{ event: { createdAt: 'asc' } }, { runId: 'asc' }], select: { runId: true } })
+          if (original) {
+            const existing = await tx.agentEventProjection.findMany({ where: { sourceId: source.id, runId: original.runId },
+              orderBy: { partIndex: 'asc' }, include: { event: true } })
+            const sourceHash = runtimeJson({ id: source.id, taskRootId: source.taskRootId, type: source.type, payload: source.payload }).hash
+            bodies = existing.map(({ version, partIndex, sourceHash: projectedHash, eventHash, event }, index) => {
+              const { runId: projectedRun, seq: projectedSeq, ts, ...body } = event.payload as unknown as AgentStreamEvent
+              if (version !== 1 || partIndex !== index || projectedHash !== sourceHash
+                || runtimeJson(event.payload).hash !== eventHash || event.runId !== original.runId
+                || projectedRun !== event.runId || projectedSeq !== event.seq || body.type !== event.type || ts !== source.createdAt.toISOString()) {
+                return runtimeError('RUNTIME_RECEIPT_INVALID', '原对话事件回放与持久来源不一致。')
+              }
+              return body
+            })
+          }
+        }
+      } else bodies = [await projectApprovalEvent(tx, source, userId)]
       if (seq + bodies.length > 2_147_483_647) runtimeError('RUNTIME_EVENT_SEQUENCE_EXHAUSTED', '事件序号需要迁移，不能回绕。')
       // Different runs can replay the same root's events. Apply each source to
       // shared chat history only once, in the same transaction as its marker.

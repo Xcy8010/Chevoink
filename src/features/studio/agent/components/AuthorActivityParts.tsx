@@ -212,7 +212,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   const calls = group?.calls ?? []
   const grouped = calls.length > 1
   const unresolved = group?.unsettled
-  const running = runActive ? [...calls].reverse().find(part => part.status === 'running') : undefined
+  const running = runActive && active ? [...calls].reverse().find(part => part.status === 'running') : undefined
   const part = running ?? unresolved ?? calls.at(-1)
   const iconPart = group?.title ? calls[0] : part
   const Icon = iconPart && !workingLabel ? toolIcon(iconPart) : Brain
@@ -226,7 +226,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
     const title = group.title
     if (waitingForAnswer) label = `等待你回答 · ${title}`
     else if (importWaiting || waitingForApproval) label = `等待你确认 · ${title}`
-    else if (running || runActive && !group.closed && !group.completed) label = `正在${title}`
+    else if (active && (running || runActive && !group.closed && !group.completed)) label = `正在${title}`
     else if ((group.closed || group.completed) && !group.unfinished) label = `已${title}`
     else label = `${title}未完成`
   } else if (!label && part) {
@@ -234,7 +234,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
     else if (readLabel) label = group?.unfinished
       ? `${readLabel}有未完成项` : `已${readLabel}`
     else if (grouped && !running && unresolved) label = `${getAgentToolPresentation(part.toolName).label}有未完成项`
-    else label = activitySummary(part, runActive, titles, false, grouped, group?.staleReviewCalls?.has(part))
+    else label = activitySummary(part, runActive && active, titles, false, grouped, group?.staleReviewCalls?.has(part))
   }
   const showingActivity = Boolean(active && running && !importWaiting && !waitingForAnswer && !waitingForApproval)
   const step = group?.title ? label : workingLabel ?? (part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : '')
@@ -334,7 +334,9 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   const entries = authorParts.map<ReactNode>((part, index) => {
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
-        const text = part.text.slice(0, Math.max(0, revealed.text.length - textOffset))
+        // Once a tool preview exists, its preceding public report is visible
+        // in full. Only unfinished prose needs the typing reveal.
+        const text = index < lastToolIndex ? part.text : part.text.slice(0, Math.max(0, revealed.text.length - textOffset))
         textOffset += part.text.length
         const inProcess = collapseText || index < lastToolIndex
         return <AgentProcessRegion key={identity} open={!inProcess || processOpen !== false}>

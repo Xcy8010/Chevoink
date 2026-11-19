@@ -68,3 +68,7 @@ const fallback = Object.freeze({ label: '推进创作', phase: 'other' as const 
 export const hasAgentToolPresentation = (name: string): boolean => catalog.has(name)
 export const getAgentToolPresentation = (name: string): AgentToolPresentation => catalog.get(name) ?? fallback
 export const registeredAgentToolPresentationNames = (): string[] => [...catalog.keys()]
+
+export function sameAgentToolStage(left: AgentToolPresentation, right: AgentToolPresentation): boolean {
+  return left.phase === right.phase && (left.phase !== 'save' && left.phase !== 'other' || left.label === right.label)
+}

@@ -194,7 +194,10 @@ export function projectDurablePublicWeb(operation: AgentOperation, previous: Fra
   const { step, callId } = readStep(operation)
   const messageId = `web-${runtimeJson(operation.taskRootId).hash.slice(0, 40)}`
   if (current.state.pendingOperationId === operation.id) return [
-    ...(step.name === 'web_search' ? [{ type: 'message.start' as const, messageId, role: 'assistant' as const }] : []),
+    ...(step.name === 'web_search' ? [
+      { type: 'message.start' as const, messageId, role: 'assistant' as const },
+      { type: 'text.final' as const, messageId, text: '我先查找公开资料，再核对关键内容。', asReasoning: false },
+    ] : []),
     { type: 'tool.call', messageId, callId, toolName: step.name, title: step.name === 'web_search' ? webSearchTool.title : webReadTool.title, args: step.args },
   ]
   if (!receipt) return runtimeError('RUNTIME_RECEIPT_INVALID', '平台查证事件缺少原回执。')

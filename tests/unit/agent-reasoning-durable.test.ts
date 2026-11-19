@@ -72,3 +72,25 @@ it('publishes a verified tool-free reply containing the literal marker without i
   await persistProjectedMessages(tx, source, 'session', events)
   expect(upsert.mock.calls[0][0].create.parts).toEqual([{ type: 'text', text }])
 })
+
+it.each([
+  [undefined, 'chapter_read', null, '我先核对前文。'],
+  ['chapter_read', 'memory_search', '<activity-title>核对前章</activity-title>', ''],
+  ['chapter_read', 'plan_save', '<activity-title>核对前章</activity-title>', '接下来保存创作计划。'],
+] as const)('reports silent durable tool rounds at actual stage boundaries: %s → %s', async (prior, name, priorText, report) => {
+  const before = prior ? [{ role: 'assistant', content: priorText, toolCalls: [{ id: 'prior', name: prior, arguments: '{}' }] },
+    { role: 'tool', toolCallId: 'prior', content: '已经核对。' }] : []
+  const current = { role: 'assistant', content: null, toolCalls: [{ id: 'next', name, arguments: '{}' }] }
+  type Frame = Awaited<ReturnType<typeof readExecutionFrame>>
+  vi.mocked(readExecutionFrame)
+    .mockResolvedValueOnce({ revision: 2, snapshotHash: 'frame',
+      state: { phase: 'idle', turn: 2, messages: [...before, current] } } as Frame)
+    .mockResolvedValueOnce({ revision: 1, snapshotHash: 'frame',
+      state: { phase: 'awaiting_operation', turn: 2, pendingOperationId: 'provider', messages: before } } as Frame)
+  const tx = {} as RuntimeTx
+  const source = { taskRootId: 'root', runId: 'run', type: 'execution.state.saved', eventKey: 'state:root:2',
+    payload: { revision: 2, snapshotHash: 'frame', previousHash: null } } as AgentExecutionOutbox
+  const events = await projectExecutionFrame(tx, source)
+  expect(events).toEqual([{ type: 'text.final', messageId: expect.any(String), text: report, asReasoning: false }])
+  expect(current.content).toBeNull()
+})

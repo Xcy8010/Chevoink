@@ -155,6 +155,43 @@ it('renders a literal reserved line returned as an ordinary tool-free answer', (
   expect(activityAnswerText(parts)).toBe(text)
 })
 
+it('shows one row per reported stage and preserves the opening, details and short closing after reload', () => {
+  const readTitle = { type: 'activity-title', title: '核对前章和父大纲' } as const
+  const opening = { type: 'text', text: '我先核对前一章和父大纲，确认细纲该从哪里接上。' } as const
+  const handoff = { type: 'text', text: '前一章停在渡口。我会把新细纲保存到原大纲下。' } as const
+  const answer = { type: 'text', text: '第十章细纲已保存到原大纲下。' } as const
+  const read = call('outline', 'plan_read')
+  const memory = call('memory', 'memory_search', { status: 'failed' })
+  const appendix = call('report', 'quality_report_get', { status: 'running' })
+  const plan = call('save', 'plan_save', { status: 'running', preparing: true })
+  const first = message('research', [readTitle, opening, read, memory, appendix])
+  const view = render(<Transcript messages={[first]} active="r" />)
+  const row = screen.getByRole('button', { name: /正在/ })
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
+  expect(screen.getByText(opening.text).compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  fireEvent.click(row)
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(3)
+  const checked = { ...first, parts: [readTitle, opening, read, memory, { ...appendix, status: 'success' as const }] }
+
+  view.rerender(<Transcript messages={[checked, message('plan', [handoff, plan])]} active="r" />)
+  const second = screen.getByRole('button', { name: '正在准备 · 保存创作计划' })
+  const report = screen.getByText(handoff.text)
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(2)
+  expect(view.container.querySelectorAll('[data-activity-preparing], [data-activity-running]')).toHaveLength(1)
+  expect(row.compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(report.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+  const savedPlan = { ...plan, preparing: false, status: 'success' as const }
+  const history = completed([checked, message('plan', [handoff, savedPlan]), message('answer', [answer])])
+  view.rerender(<Transcript key="reload" messages={JSON.parse(JSON.stringify(history))} />)
+  expect(screen.getByText(opening.text)).toBeTruthy()
+  expect(screen.getByText(handoff.text)).toBeTruthy()
+  expect(screen.getByText(answer.text)).toBeTruthy()
+  expect(screen.getByRole('button', { name: '已完成创作计划' })).toBeTruthy()
+  expect(view.container.querySelectorAll('[data-activity-preparing], [data-activity-running]')).toHaveLength(0)
+  expect(activityAnswerText(history[2].parts)).toBe(answer.text)
+})
+
 it('keeps the same activity while awaiting approval or an answer, and does not claim completion on cancellation', () => {
   const pending = call('waiting', 'chapter_read', { status: 'running' })
   const view = render(<Transcript active="r" awaitingApprovalCallId={pending.callId} messages={[message('a', [activity, pending])]} />)
@@ -264,9 +301,13 @@ it('groups a 49-call timeline through replay, preserving author-facing paragraph
     ...Array.from({ length: 12 }, (_, i) => call(`review-${i}`, i < 6 ? 'quality_analyze' : 'continuity_validate')),
     ...Array.from({ length: 13 }, (_, i) => saved(`edit-${i}`, 'chapter_edit_range')),
   ]
-  const messages = actions.map((part, i) => message(`m${i}`, i === 24
-    ? [{ type: 'text', text: '初稿写好了。我现在核对人物前后的行动。' }, reasoning, part]
-    : [reasoning, part]))
+  const reports = new Map([
+    [24, '初稿写好了。我现在核对人物前后的行动。'],
+    [30, '行动顺序已经对齐。我再检查前章留下的线索。'],
+    [36, '确认有一处线索提前交代了。我把它移回原来的位置。'],
+  ])
+  const messages = actions.map((part, i) => message(`m${i}`, reports.has(i)
+    ? [{ type: 'text', text: reports.get(i)! }, reasoning, part] : [reasoning, part]))
   const replayed = [{ ...messages[0], parts: [...messages[0].parts, { ...actions[0], status: 'running' as const, preparing: true }] }, ...messages.slice(1)]
   const view = render(<Transcript messages={messages} />)
   const summary = () => Array.from(view.container.querySelectorAll('[data-author-activity] > button'), button => button.textContent)
@@ -311,7 +352,9 @@ it('folds related reads in order and starts a fresh group after an update or unr
   const projection = projectActivityGroups([
     message('first', [first]), message('second', [reasoning, second]),
     message('skill', [skill, chapter, structure, setting]),
-    message('last', [{ type: 'text', text: '资料已核对。' }, last, save, next]),
+    message('last', [{ type: 'text', text: '资料已核对。' }, last]),
+    message('save', [{ type: 'text', text: '大纲里已有对应章节，我会把新细纲存进去。' }, save]),
+    message('recheck', [{ type: 'text', text: '细纲已保存，我再核对它的位置。' }, next]),
   ])
   const group = projection.byMessage.get('first')?.get(first.callId)
   expect(group?.calls.map(part => part.callId)).toEqual(['outline', 'chapter-plan', 'craft-skill', 'previous', 'structure', 'setting'])
@@ -319,7 +362,8 @@ it('folds related reads in order and starts a fresh group after an update or unr
   expect(projection.byMessage.get('skill')?.get(skill.callId)).toBe(group)
   expect(group?.readLabel).toBe('查看创作资料')
   expect(projection.byMessage.get('last')?.get(last.callId)?.calls.map(part => part.callId)).toEqual([last.callId])
-  expect(projection.byMessage.get('last')?.get(next.callId)?.calls.map(part => part.callId)).toEqual([next.callId])
+  expect(projection.byMessage.get('save')?.get(save.callId)?.calls.map(part => part.callId)).toEqual([save.callId])
+  expect(projection.byMessage.get('recheck')?.get(next.callId)?.calls.map(part => part.callId)).toEqual([next.callId])
 })
 
 it('shows one parameter preview and uses actual call events to advance the visible step', () => {
@@ -365,10 +409,11 @@ it('folds creation settings and the cover workflow while keeping the live row an
     message('cover', [{ type: 'text', text: '用刚保存的构图生成候选。' }, picture]),
   ]
   const view = render(<Transcript active="r" messages={messages(setup, generate)} />)
-  const settingsRow = screen.getByRole('button', { name: '正在查看创作设定', exact: true })
+  const settingsRow = screen.getByRole('button', { name: '查看创作设定有未完成项', exact: true })
   const coverRow = screen.getByRole('button', { name: '正在制作封面', exact: true })
   fireEvent.click(settingsRow)
   fireEvent.click(coverRow)
+  expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(1)
   expect(screen.queryByText('核对记忆冲突')).toBeNull()
   expect(screen.getByText('查看文风画像未完成')).toBeTruthy()
   expect(screen.getByText('正在查看人物声口')).toBeTruthy()

@@ -1,6 +1,6 @@
 import { projectAgentAuthorParts } from '../../../../../shared/agent-author-view.js'
 import { activityAttemptKey, activityReviewVersion } from '../../../../../shared/agent-activity-receipts.js'
-import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
+import { getAgentToolPresentation, sameAgentToolStage } from '../../../../../shared/agent-tool-presentation.js'
 import type { AgentMessagePart, AgentUIMessage } from '../../../../../shared/contracts/index.js'
 
 export type ActivityCall = Extract<AgentMessagePart, { type: 'tool-call' }>
@@ -173,6 +173,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
   let current: ActivityGroup | undefined
   let previousScope: string | undefined
   let publicTextSinceAction = false
+  let hasPublicReport = false
   let proposedTitle: string | undefined
 
   for (const { message, scope, parts } of transcript) {
@@ -181,6 +182,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
     if (newAuthorMessage || scope !== previousScope) {
       current = undefined
       publicTextSinceAction = false
+      hasPublicReport = false
       proposedTitle = undefined
     }
     previousScope = scope
@@ -196,6 +198,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
         if (part.type === 'activity-title') proposedTitle = part.title
         else if (part.type === 'text') {
           publicTextSinceAction = true
+          hasPublicReport = true
           authorSpokeByRun.add(sourceRunId)
         }
         continue
@@ -221,8 +224,14 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
         continue
       }
 
-      const title = proposedTitle ?? current?.title
-      if (!current || (title ? title !== current.title : !canGroup(current, part, publicTextSinceAction))) {
+      const changesStage = current && publicTextSinceAction
+        && !sameAgentToolStage(getAgentToolPresentation(current.calls[0].toolName), getAgentToolPresentation(part.toolName))
+      const title = proposedTitle ?? (changesStage ? undefined : current?.title)
+      const separate = title ? title !== current?.title : current && (changesStage || !canGroup(current, part, publicTextSinceAction))
+      // A reported run changes rows after public prose. A batch without another
+      // report stays in one row even when the tool types differ. Keep the
+      // original grouping of old, completely silent untitled transcripts.
+      if (!current || separate && (publicTextSinceAction || !hasPublicReport && !current.title)) {
         if (current?.title) current.closed = true
         current = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id,
           firstCallId: part.callId, calls: [], callKeys: [], childrenByCall: new Map(), ...(title ? { title } : {}) }
@@ -232,9 +241,13 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       publicTextSinceAction = false
       const group = current
       const first = group.calls[0]
-      if (!group.title && first && getAgentToolPresentation(part.toolName).phase === 'read'
-        && getAgentToolPresentation(first.toolName).label !== getAgentToolPresentation(part.toolName).label) {
-        group.readLabel = '查看创作资料'
+      if (!group.title && first) {
+        const next = getAgentToolPresentation(part.toolName)
+        const firstTool = getAgentToolPresentation(first.toolName)
+        if (next.phase !== 'read') group.readLabel = undefined
+        else if (firstTool.label !== next.label && group.calls.every(call => getAgentToolPresentation(call.toolName).phase === 'read')) {
+          group.readLabel = '查看创作资料'
+        }
       }
       if (part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate') {
         const calls = branches.get(identity) ?? []
