@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 
-import { createAgentActivityTextStream, readAgentActivityTitle, visibleAgentActivityTitle } from '../../shared/agent-activity-title.js'
+import { createAgentActivityTextStream, normalizeAgentFinalText, readAgentActivityTitle, visibleAgentActivityTitle } from '../../shared/agent-activity-title.js'
 
 it('recognizes only an entire leading title line and preserves reply content verbatim', () => {
   const text = '  窗外的钟响了。\n\n    余音未散。\n'
@@ -11,6 +11,8 @@ it('recognizes only an entire leading title line and preserves reply content ver
     `这行是示例。\n${title}\n${text}`,
     `> ${title}\n${text}`,
     `${title} 一段原话\n${text}`,
+    '    ' + title + '\n' + text,
+    '\t' + title + '\n' + text,
     '<activity-title>文字没写完',
   ]) expect(readAgentActivityTitle(reply)).toEqual({ text: reply })
 })
@@ -30,8 +32,8 @@ it('does not stream fragments of the title or drop text from a split chunk', () 
   for (let i = 1; i < title.length; i++) {
     const stream = createAgentActivityTextStream()
     expect(stream.push(title.slice(0, i))).toBe('')
-    expect(stream.push(title.slice(i) + text)).toBe('')
-    expect(stream.finish(true)).toBe(text)
+    expect(stream.push(title.slice(i) + text)).toBe(text)
+    expect(stream.finish(true)).toBe('')
   }
   const literal = createAgentActivityTextStream()
   expect(literal.push('<activ')).toBe('')
@@ -41,10 +43,34 @@ it('does not stream fragments of the title or drop text from a split chunk', () 
 
 it('releases a literal first-line tag in a no-tool answer, including a tag-only answer', () => {
   const answer = '<activity-title>保留这段文字</activity-title>'
-  for (const suffix of ['', '\n这是下一行。']) {
+  for (const suffix of ['', '\r\n \n']) {
     const stream = createAgentActivityTextStream()
     expect(stream.push(answer.slice(0, 14))).toBe('')
     expect(stream.push(answer.slice(14) + suffix)).toBe('')
     expect(stream.finish(false)).toBe(answer + suffix)
+  }
+})
+
+it('strips only a complete leading activity line with an ordinary prose body at every chunk boundary', () => {
+  const title = '<activity-title>交付结果</activity-title>'
+  const body = '\n  雨停以后，雁船才离岸。\n'
+  const raw = title + '\r\n' + body
+  const literalExamples = [
+    title,
+    title + '\n \n',
+    '```xml\n' + title + '\n```\n' + body,
+    '`' + title + '`\n' + body,
+    '> ' + title + '\n' + body,
+    '    ' + title + '\n' + body,
+    ' \t' + title + '\n' + body,
+    title.replaceAll('<', '\\<') + '\n' + body,
+    title.replaceAll('<', '&lt;').replaceAll('>', '&gt;') + '\n' + body,
+  ]
+  for (const [content, expected] of [[raw, body], ...literalExamples.map(example => [example, example])]) {
+    expect(normalizeAgentFinalText(content)).toBe(expected)
+    for (let split = 0; split <= content.length; split++) {
+      const stream = createAgentActivityTextStream()
+      expect(stream.push(content.slice(0, split)) + stream.push(content.slice(split)) + stream.finish(false)).toBe(expected)
+    }
   }
 })

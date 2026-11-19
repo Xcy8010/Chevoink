@@ -474,6 +474,7 @@ it('publishes one activity title from an ordinary tool turn without streaming it
   const title = '核对老周的出场时间'
   const text = '第三章写的是老周先收到了电报。'
   const rawTitle = `<activity-title>${title}</activity-title>\n`
+  const rawClosing = '<activity-title>交付核对结论</activity-title>\r\n'
   const read = call('read-chapter')
   const readTool = tool('chapter_read', async () => ({ output: '第三章的正文', summary: '已读取第三章' }))
   mocks.tools = [readTool]
@@ -482,7 +483,12 @@ it('publishes one activity title from an ordinary tool turn without streaming it
     input.onChunk?.({ type: 'text-delta', delta: rawTitle.slice(5) })
     input.onChunk?.({ type: 'tool-call-start', id: read.id, name: read.name })
     return response(rawTitle, [read])
-  }).mockResolvedValueOnce(response(text))
+  }).mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+    for (const delta of [rawClosing.slice(0, 8), rawClosing.slice(8, -1), '\n', text]) {
+      input.onChunk?.({ type: 'text-delta', delta })
+    }
+    return { ...response(rawClosing + text), reasoning: '内部核对完成。' }
+  })
   await run('核对老周的出场时间并给我结论。')
   const projected = events()
   expect(projected.filter(event => event.type === 'activity.title')).toEqual([
@@ -498,6 +504,10 @@ it('publishes one activity title from an ordinary tool turn without streaming it
     expect.objectContaining({ type: 'text.final', text }),
   ]))
   expect(JSON.stringify(projected.filter(event => event.type === 'text.delta' || event.type === 'text.final'))).not.toContain('activity-title')
+  expect(projected.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: text })
+  const saved = (mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>)
+    .map(([entry]) => entry.create?.parts)
+  expect(saved).toContainEqual([{ type: 'reasoning', text: '内部核对完成。' }, { type: 'text', text }])
   expect(readTool.execute).toHaveBeenCalledTimes(1)
   expect(mocks.chat).toHaveBeenCalledTimes(2)
 })
@@ -3664,6 +3674,23 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(mocks.runs.get('run')).toMatchObject({ status: 'failed', usage: { totalTokens: 10 } })
     expect(mocks.runs.get('run')?.errorMessage).toContain('尚未确认')
   })
+  it('does not recover withdrawn tool-protocol prose when persisting the rejection fails', async () => {
+    const withdrawn = '这段中间文本已经撤回。'
+    mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+      const malformed = { ...response('<activity-title>交付结论</activity-title>\n' + withdrawn), finishReason: 'tool_calls' as const }
+      input.onChunk?.({ type: 'text-delta', delta: malformed.content })
+      recordTextRequestFailure(malformed, { usageId: 'settled-malformed', status: 'terminal', billingKnown: true },
+        JSON.stringify(input.messages), JSON.stringify(input.tools), input.usageLog)
+      for (let attempt = 0; attempt < 3; attempt++) mocks.persist.mockRejectedValueOnce(new Error('fixture journal write unavailable'))
+      return malformed
+    })
+    await run('检查当前章节', undefined, true)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events().filter(event => event.type === 'text.final').at(-1)).toMatchObject({ text: '' })
+    const saved = (mocks.persist.mock.calls as unknown as Array<[{ create?: { role?: string; parts?: AgentMessagePart[] } }]>)
+      .flatMap(([entry]) => entry.create?.role === 'assistant' ? entry.create.parts ?? [] : [])
+    expect(saved).not.toContainEqual({ type: 'text', text: withdrawn })
+  })
   it('continues settled empty responses through an actual native tool without replaying their reasoning', async () => {
     const empty = { ...response(''), reasoning: '无效思考'.repeat(1000), finishReason: 'stop' as const }
     queue(empty, empty, response('', [call('after-settled-empty')]), response('实际当前章节已读取，检查完成。'))
@@ -4702,11 +4729,12 @@ describe('author-directed task ending in the real execution loop', () => {
       ? [{ parts: [{ type: 'tool-call', toolName: 'chapter_write', status: 'success' }] }] as never : [])
     mocks.tools = [taskRespondTool]
     const answer = '第一卷计划二十章。'
-    queue(response('', [call('direct-response', 'task_respond', JSON.stringify({ answer }))]))
+    queue(response('', [call('direct-response', 'task_respond', JSON.stringify({ answer: '<activity-title>交付答复</activity-title>\n' + answer }))]))
     try {
       await run(prompt)
       expect(mocks.chat).toHaveBeenCalledOnce()
       expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', taskSpec: frozen })
+      expect(events().filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
     } finally { compilations.mockImplementation(oldCompilation); messages.mockImplementation(oldMessages) }
   })

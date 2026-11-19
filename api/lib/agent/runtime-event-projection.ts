@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import { normalizeAgentFinalText } from '../../../shared/agent-activity-title.js'
 import type { AgentStreamEvent, AgentStreamEventBody } from '../../../shared/contracts/index.js'
 import { lockRunRoot, runtimeError, runtimeJson, runtimeTransaction } from './runtime-common.js'
 import { projectApprovalEvent } from './runtime-approval.js'
@@ -211,7 +212,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           { type: 'run.finished', status: cancelled ? 'cancelled' : 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
             ...(validProof && proof.success && proof.data.limitedWritingDelivery ? { outcome: proof.data.limitedWritingDelivery.outcome } : {}),
             ...(nextPrompt ? { nextPrompt } : {}),
-            artifacts: [], outputSummary: presentation?.text ?? candidate.content ?? '' }]
+            artifacts: [], outputSummary: presentation?.text ?? (candidate.localCompletion ? candidate.content ?? '' : normalizeAgentFinalText(candidate.content ?? '')) }]
       } else if (source.type === 'run.paused') {
         const paused = durablePauseSchema.safeParse(source.payload)
         if (!paused.success || !paused.data.runIds.includes(runId) || source.eventKey !== `pause:${source.id}`) return runtimeError('RUNTIME_RECEIPT_INVALID', '暂停事件源损坏。')

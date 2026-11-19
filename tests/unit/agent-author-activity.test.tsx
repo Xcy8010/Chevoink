@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, expect, it, vi } from 'vitest'
 import type { AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
 import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/studio/agent/components/AuthorActivityParts'
+import { getMessageText } from '../../src/features/studio/agent/lib/panel-helpers'
 import { activityAnswerText, activityReportVisibility, projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
 import { isRunActive, restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 
@@ -175,6 +176,51 @@ it('keeps separate provider call IDs reused in different turns and their own sub
   view.rerender(<Transcript key="reloaded" messages={JSON.parse(JSON.stringify(settled))} />)
   fireEvent.click(screen.getByRole('button', { name: `已${goalTitle}` }))
   expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(4)
+})
+
+it('shows and copies the saved answer without the legacy progress header on reload', () => {
+  const header = '<activity-title>交付渡口细纲</activity-title>'
+  const answer = '渡口的细纲已保存。'
+  const parts = [reasoning, { type: 'text' as const, text: header + '\n\n' + answer }]
+  const history = completed([message('saved', [call('save', 'plan_save')]), message('answer', parts)])
+  const view = render(<Transcript messages={JSON.parse(JSON.stringify(history))} />)
+  expect(screen.getByText(answer)).toBeTruthy()
+  expect(view.container.textContent).not.toContain('交付渡口细纲')
+  expect(activityAnswerText(parts)).toBe(answer)
+  expect(getMessageText(parts, 'assistant')).toBe(answer)
+  expect(getMessageText(parts, 'user')).toBe(header + '\n\n' + answer)
+  expect(view.container.querySelectorAll('[data-author-step]')).toHaveLength(1)
+  expect(history[1].parts).toEqual([reasoning, { type: 'text', text: header + '\n\n' + answer }])
+})
+
+it('holds a split legacy header during event replay without flashing it before the body', () => {
+  const store = useAgentStore.getState()
+  const runId = 'old-stream'
+  const base = { runId, messageId: 'reply', ts: new Date().toISOString() }
+  const marker = '<activity-title>交付渡口细纲</activity-title>'
+  const body = '细纲已经保存。'
+  const text = () => getMessageText(useAgentStore.getState().messages.find(message => message.id === base.messageId)?.parts ?? [])
+  store.beginRun(runId, '写一份细纲。', 'session')
+  try {
+    store.applyEvent({ ...base, type: 'message.start', role: 'assistant', seq: 1 })
+    for (const [index, delta] of [marker.slice(0, 8), marker.slice(8), '\n\n'].entries()) {
+      store.applyEvent({ ...base, type: 'text.delta', delta, seq: index + 2 })
+      expect(text()).toBe('')
+    }
+    store.applyEvent({ ...base, type: 'text.delta', delta: body, seq: 5 })
+    expect(text()).not.toContain('交付渡口细纲')
+    store.applyEvent({ ...base, type: 'text.final', text: marker + '\n\n' + body, asReasoning: false, seq: 6 })
+    expect(text()).toBe(body)
+  } finally {
+    store.resetRun()
+  }
+})
+
+it('preserves the Markdown indentation when copying an intentional code example', () => {
+  const text = '    <activity-title>示例</activity-title>\n\n下面是说明。'
+  const parts: AgentMessagePart[] = [{ type: 'text', text }]
+  expect(activityAnswerText(parts)).toBe(text)
+  expect(getMessageText(parts)).toBe(text)
 })
 
 it('renders a literal reserved line returned as an ordinary tool-free answer', () => {

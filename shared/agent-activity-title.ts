@@ -2,6 +2,7 @@ import type { AgentMessagePart } from './contracts/agent-events.js'
 
 const opening = '<activity-title>'
 const closing = '</activity-title>'
+const indentedCode = /^(?: {4}| {0,3}\t)/u
 
 /** Generic narration is not a creative activity. Keep titles for the author's
  * actual subject, including requested chapter summaries and research reports. */
@@ -12,6 +13,7 @@ export function visibleAgentActivityTitle(title: string): string | undefined {
 
 /** Metadata occupies one complete leading line of an assistant response. */
 export function readAgentActivityTitle(content: string): { title?: string; text: string } {
+  if (indentedCode.test(content)) return { text: content }
   const newline = content.indexOf('\n')
   const line = (newline < 0 ? content : content.slice(0, newline)).trim()
   if (!line.startsWith(opening) || !line.endsWith(closing)) return { text: content }
@@ -20,8 +22,15 @@ export function readAgentActivityTitle(content: string): { title?: string; text:
   return { title, text: newline < 0 ? '' : content.slice(newline + 1) }
 }
 
-/** Hold a possible metadata line until the provider identifies the round as
- * tool-bearing. In a plain reply the same characters can be literal prose. */
+/** A leading metadata line is excluded from ordinary prose with a body.
+ * A standalone marker can be the entire literal answer. */
+export function normalizeAgentFinalText(content: string): string {
+  const { title, text } = readAgentActivityTitle(content)
+  return title && text.trim() ? text : content
+}
+
+/** Hold a possible leading marker until the first line and any reply body
+ * distinguish metadata from a standalone literal. */
 export function createAgentActivityTextStream() {
   let prefix: string | undefined = ''
   return {
@@ -29,16 +38,16 @@ export function createAgentActivityTextStream() {
       if (prefix === undefined) return delta
       prefix += delta
       const candidate = prefix.trimStart()
-      if (!prefix.includes('\n') && (opening.startsWith(candidate) || candidate.startsWith(opening))) return ''
-      if (readAgentActivityTitle(prefix).title) return ''
-      const text = prefix
+      if (!indentedCode.test(prefix) && !prefix.includes('\n') && (opening.startsWith(candidate) || candidate.startsWith(opening))) return ''
+      const { title, text } = readAgentActivityTitle(prefix)
+      if (title && !text.trim()) return ''
       prefix = undefined
       return text
     },
     finish(toolBearing: boolean) {
       const buffered = prefix ?? ''
       prefix = undefined
-      return toolBearing ? readAgentActivityTitle(buffered).text : buffered
+      return toolBearing ? readAgentActivityTitle(buffered).text : normalizeAgentFinalText(buffered)
     },
   }
 }

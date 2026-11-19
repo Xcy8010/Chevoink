@@ -3,7 +3,7 @@ import { REVIEW_OUTCOMES } from '../../../shared/review-lifecycle.js'
 import type { AgentExecutionOutbox } from '@prisma/client'
 import type { AgentStreamEventBody, AgentToolDisplayPayload, AgentMessagePart, AgentRollbackSnapshot } from '../../../shared/contracts/index.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
-import { prependAgentActivityTitle, readAgentActivityTitle, visibleAgentActivityTitle } from '../../../shared/agent-activity-title.js'
+import { normalizeAgentFinalText, prependAgentActivityTitle, readAgentActivityTitle, visibleAgentActivityTitle } from '../../../shared/agent-activity-title.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
@@ -119,7 +119,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
       const events: AgentStreamEventBody[] = []
       const raw = appended.content ?? ''
       const toolCall = appended.toolCalls?.find(call => call.name !== 'task_respond')
-      const metadata = toolCall ? readAgentActivityTitle(raw) : { text: raw }
+      const metadata = toolCall ? readAgentActivityTitle(raw) : { text: normalizeAgentFinalText(raw) }
       const title = metadata.title && visibleAgentActivityTitle(metadata.title)
       const prose = humanizeAgentVisibleText(metadata.text)
       let report = prose

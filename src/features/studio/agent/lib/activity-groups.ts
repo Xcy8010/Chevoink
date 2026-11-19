@@ -1,4 +1,4 @@
-import { projectAgentAuthorParts } from '../../../../../shared/agent-author-view.js'
+import { joinAgentAuthorText, projectAgentAuthorParts } from '../../../../../shared/agent-author-view.js'
 import { activityAttemptKey, activityReviewVersion } from '../../../../../shared/agent-activity-receipts.js'
 import { visibleAgentActivityTitle } from '../../../../../shared/agent-activity-title.js'
 import { getAgentToolPresentation, sameAgentToolStage } from '../../../../../shared/agent-tool-presentation.js'
@@ -43,7 +43,7 @@ function savedReply(part: ActivityCall) {
 export function activityAnswerText(parts: readonly AgentMessagePart[]) {
   const visible = projectAgentAuthorParts(parts)
   const lastTool = visible.reduce((last, part, index) => part.type === 'tool-call' ? index : last, -1)
-  return visible.slice(lastTool + 1).flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n').trim()
+  return joinAgentAuthorText(visible.slice(lastTool + 1))
 }
 
 export type MessageActivityGroups = ReadonlyMap<string, ActivityGroup>

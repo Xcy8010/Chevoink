@@ -336,6 +336,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(system).toContain('进度标题和内部思考不能代替这句汇报')
     expect(system).toContain('工具变更本身无需另发一句')
     expect(system).toContain('常规查阅、保存和同目标重试不逐个播报')
+    expect(system).toContain('直接交付最终答复时，从交付内容起笔，省略活动标题')
     expect(system).toContain('无需执行工具的简单问答直接回答')
     expect(system).toContain('默认用一个短段落交代已保存的成果和位置，再点出对作者最有用的内容')
     expect(String(messages.at(-1)?.content)).toContain(prompt)

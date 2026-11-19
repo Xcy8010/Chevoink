@@ -1,7 +1,7 @@
 import { publicAgentProgressEvent } from '../../../../shared/agent-progress.js'
 import { create } from 'zustand'
 import { appendAgentFinalTextAfterTools, createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
-import { prependAgentActivityTitle } from '../../../../shared/agent-activity-title.js'
+import { normalizeAgentFinalText, prependAgentActivityTitle } from '../../../../shared/agent-activity-title.js'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 import { advanceRunTiming, settleRunTiming, timestamp } from '../../../../shared/agent-timing.js'
 import { qualityAppliedBodyChange } from '../../../../shared/agent-applied-body-change.js'
@@ -1322,7 +1322,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const owned = ensureAssistantMessage(state.messages, event, state.runGoalId)
           if (!owned) return {}
           const key = `${event.runId}:${event.messageId}`
-          const stream = authorTextStreams.get(key) ?? createAgentAuthorTextStream()
+          const stream = authorTextStreams.get(key) ?? createAgentAuthorTextStream({ filterLegacyActivityHeader: true })
           authorTextStreams.set(key, stream)
           const delta = stream.push(event.delta)
           const replay = restoredMessageReplay.get(key)
@@ -1352,7 +1352,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const owned = ensureAssistantMessage(state.messages, event, state.runGoalId)
           if (!owned) return {}
           authorTextStreams.delete(`${event.runId}:${event.messageId}`)
-          const text = event.asReasoning ? '' : projectAgentAuthorText(event.text)
+          const text = event.asReasoning ? '' : projectAgentAuthorText(normalizeAgentFinalText(event.text))
           const replay = restoredMessageReplay.get(`${event.runId}:${event.messageId}`)
           const messages = updateMessageParts(text ? owned : state.messages, event.messageId, parts =>
             event.afterTools ? appendAgentFinalTextAfterTools(parts, text) : replaceAuthorText(parts, text, replay?.seenCalls))

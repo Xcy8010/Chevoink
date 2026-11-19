@@ -2,6 +2,7 @@ import type { AgentMessagePart, AgentUIMessage } from './contracts/index.js'
 import { containsAgentProtocolArtifact, mapAgentVisibleProse, normalizeAgentCitationLinks, stripAgentProtocolArtifacts } from './agent-output.js'
 import { getAgentToolPresentation, hasAgentToolPresentation } from './agent-tool-presentation.js'
 import { publicAgentProgressPart, normalizeAgentProgressText } from './agent-progress.js'
+import { createAgentActivityTextStream, normalizeAgentFinalText } from './agent-activity-title.js'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 
 const parameterLabels: Record<string, string> = {
@@ -113,7 +114,9 @@ export function projectAgentAuthorText(text: string): string {
 
 /** Publish ordinary prose immediately. Ambiguous operation prefixes, quotations
  * and structured payloads retain their paragraph context until classified. */
-export function createAgentAuthorTextStream() {
+export function createAgentAuthorTextStream(options?: { filterLegacyActivityHeader?: boolean }) {
+  // Replayed events from older APIs may still carry a split header.
+  const activityText = options?.filterLegacyActivityHeader ? createAgentActivityTextStream() : undefined
   let pending = ''
   let published = 0
   function ordinaryIncrement(): string {
@@ -131,7 +134,7 @@ export function createAgentAuthorTextStream() {
   }
   return {
     push(delta: string): string {
-      pending += delta
+      pending += activityText ? activityText.push(delta) : delta
       const boundary = [...pending.matchAll(/\n[\t ]*\n/g)].at(-1)
       if (!boundary) return ordinaryIncrement()
       const end = boundary.index + boundary[0].length
@@ -155,6 +158,7 @@ export function createAgentAuthorTextStream() {
       return increment + ordinaryIncrement()
     },
     finish(): string {
+      if (activityText) pending += activityText.finish(false)
       const text = projectAgentAuthorText(pending).slice(published)
       pending = ''
       published = 0
@@ -178,8 +182,8 @@ function projectAuthorPart(part: AgentMessagePart, streamingReasoning: boolean):
   if (part.type === 'reasoning') {
     projected = publicAgentProgressPart(part)
   } else if (part.type === 'text') {
-    // Ordinary reply prose keeps its existing presentation boundary.
-    const text = projectAgentAuthorText(part.text)
+    // Older final replies may have stored a progress header in their text part.
+    const text = projectAgentAuthorText(normalizeAgentFinalText(part.text))
     projected = text.trim()
       ? text === part.text ? part : { ...part, text } : null
   } else if (part.type === 'tool-call') {
@@ -230,5 +234,11 @@ export function projectAgentAuthorMessage(message: AgentUIMessage): AgentUIMessa
 }
 
 export function getAgentAuthorMessageText(parts: readonly AgentMessagePart[]): string {
-  return projectAgentAuthorParts(parts).flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n').trim()
+  return joinAgentAuthorText(projectAgentAuthorParts(parts))
+}
+
+export function joinAgentAuthorText(visibleParts: readonly AgentMessagePart[]): string {
+  const text = visibleParts.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n')
+  // Leading indentation can be Markdown code and must survive copying.
+  return /^(?:[ \t]*\r?\n)*(?: {4}| {0,3}\t)/u.test(text) ? text.trimEnd() : text.trim()
 }

@@ -259,6 +259,10 @@ describe('same-state admission and continuation', () => {
     const literal = '<activity-title>接下来我会检查正文</activity-title>'
     expect(promisesFurtherAction(literal)).toBe(false)
     expect(promisesFurtherAction(`${literal}\n接下来我会检查正文。`)).toBe(true)
+    expect(promisesFurtherAction('如示例 `' + literal + '`')).toBe(false)
+    expect(promisesFurtherAction('    ' + literal)).toBe(false)
+    expect(promisesFurtherAction('> ' + literal.replaceAll('<', '&lt;').replaceAll('>', '&gt;'))).toBe(false)
+    expect(promisesFurtherAction('接下来我会检查这条标记 `' + literal + '`')).toBe(true)
   })
 })
 

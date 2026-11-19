@@ -39,9 +39,9 @@ export function isWritingContinuationRequest(prompt: string): boolean {
 }
 
 export function promisesFurtherAction(text: string): boolean {
-  // A literal tag in a tool-free answer belongs to the delivered text, but
-  // its quoted words do not require another execution turn.
+  // Marker examples are literal deliverables and must not trigger another execution turn.
   const prose = readAgentActivityTitle(text).text
+    .replace(/(?:\\?<|&lt;)activity-title(?:\\?>|&gt;)[^<>\r\n]*?(?:\\?<|&lt;)\/activity-title(?:\\?>|&gt;)/gu, '')
   const lastSentence = prose.trim().split(/[。！!\n]/u).filter(Boolean).at(-1) ?? ''
   if (/(?:如需|如果)/u.test(lastSentence)) return false
   // Optional next steps are advice to the author, not another execution turn.

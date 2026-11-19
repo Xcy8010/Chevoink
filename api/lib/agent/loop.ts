@@ -1,7 +1,7 @@
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { formatNovelSetupRecap, getNovelSetupFollowup, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
-import { createAgentActivityTextStream, readAgentActivityTitle, visibleAgentActivityTitle } from '../../../shared/agent-activity-title.js'
+import { createAgentActivityTextStream, normalizeAgentFinalText, readAgentActivityTitle, visibleAgentActivityTitle } from '../../../shared/agent-activity-title.js'
 import { askUserTool, DIRECTION_PURPOSE_REQUIRED, formatUnansweredQuestionWrapUp, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
@@ -1099,13 +1099,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
   // 进行中的轮次缓冲：中止/崩溃时当前轮消息还没走到轮末落库点，
   // 不兜底补偿的话作者刷新后会丢掉整个进行中轮次（只看到上一轮为止的进度）
-  let liveTurn: { messageId: string; parts: AgentMessagePart[]; streamedText: string; streamedReasoning: string; toolPreview?: boolean; toolReport?: string } | null = null
+  let liveTurn: { messageId: string; parts: AgentMessagePart[]; streamedText: string; streamedAuthorText: string; streamedReasoning: string; toolPreview?: boolean; toolReport?: string } | null = null
   const flushLiveTurn = async () => {
     const live = liveTurn
     if (!live) return
     const fallbackParts: AgentMessagePart[] = []
     if (live.streamedReasoning.trim()) fallbackParts.push({ type: 'reasoning', text: live.streamedReasoning })
-    const raw = live.toolPreview ? readAgentActivityTitle(live.streamedText).text : live.streamedText
+    const raw = live.streamedAuthorText
     const prose = humanizeAgentVisibleText(live.toolPreview ? stripAgentProtocolArtifacts(raw) : raw)
     const text = prose.trim() ? prose : live.toolReport ?? ''
     if (text.trim()) fallbackParts.push({ type: 'text', text })
@@ -2138,7 +2138,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const messageId = randomUUID()
       bus.emit({ type: 'message.start', messageId, role: 'assistant' })
       // 登记本轮缓冲：流式正文/思考与轮末组装的 parts 都记在这里，供中止时补落库
-      liveTurn = { messageId, parts: [], streamedText: '', streamedReasoning: '' }
+      liveTurn = { messageId, parts: [], streamedText: '', streamedAuthorText: '', streamedReasoning: '' }
 
       // Preview preparation immediately without announcing an admitted execution.
       // Only handleToolCall emits tool.call; previews end when parameter generation ends.
@@ -2168,6 +2168,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       const publishAuthorDelta = (delta: string) => {
         if (!delta) return
+        if (liveTurn?.messageId === messageId) liveTurn.streamedAuthorText += delta
+        if (visibleToolPreview) return
         const textIncrement = explanatoryResponse ? delta : visibleTextStreamer.push(delta)
         if (!textIncrement) return
         if (writingTextHeld) writingTextBuffer += textIncrement
@@ -2208,7 +2210,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (liveTurn) liveTurn.streamedText += chunk.delta
             lastActivityAt = Date.now()
             handleRepeatHit(repeatDetector.push(executionTextDetector.push(chunk.delta)))
-            if (!visibleToolPreview) publishAuthorDelta(activityTextStream.push(chunk.delta))
+            publishAuthorDelta(activityTextStream.push(chunk.delta))
           } else if (chunk.type === 'reasoning-delta') {
             if (liveTurn) liveTurn.streamedReasoning += chunk.delta
             lastActivityAt = Date.now()
@@ -2224,10 +2226,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               if (tool && tool.name !== 'task_respond' && !visibleToolPreview) {
                 visibleToolPreview = true
                 if (liveTurn) liveTurn.toolPreview = true
-                const draft = readAgentActivityTitle(liveTurn?.streamedText ?? '')
-                activityTextStream.finish(true)
-                const modelReport = humanizeAgentVisibleText(stripAgentProtocolArtifacts(draft.text))
-                const report = modelReport.trim() ? modelReport : toolActivityReport(tool.name, draft.title && visibleAgentActivityTitle(draft.title), hasPriorActivity)
+                const { title } = readAgentActivityTitle(liveTurn?.streamedText ?? '')
+                const modelReport = humanizeAgentVisibleText(stripAgentProtocolArtifacts(liveTurn?.streamedAuthorText ?? ''))
+                const report = modelReport.trim() ? modelReport : toolActivityReport(tool.name, title && visibleAgentActivityTitle(title), hasPriorActivity)
                 if (report) {
                   textBeforePreview = report
                   if (liveTurn) liveTurn.toolReport = report
@@ -2278,7 +2279,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       const toolBearing = !textOnlyModel && !bootstrapCall && Boolean(result?.toolCalls.some(call => call.name !== 'task_respond'))
       const resultText = result?.content ?? ''
-      const modelText = toolBearing ? readAgentActivityTitle(resultText) : { text: resultText }
+      const modelText = toolBearing ? readAgentActivityTitle(resultText) : { text: normalizeAgentFinalText(resultText) }
       const activityTitle = modelText.title && visibleAgentActivityTitle(modelText.title)
       if (result) publishAuthorDelta(activityTextStream.finish(toolBearing))
       if (activityTitle) bus.emit({ type: 'activity.title', messageId, title: activityTitle })
@@ -2397,6 +2398,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (liveTurn) {
           liveTurn.parts = diagnosticParts
           liveTurn.streamedText = ''
+          liveTurn.streamedAuthorText = ''
+          liveTurn.toolReport = undefined
         }
         if (!consumeTextRequestRecovery(result, recoverySystem, recoveryContent,
           { userId: params.userId, action: 'agentLoopTurn', targetId: runId })) {
@@ -2817,7 +2820,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             await assertLegacyOwnerReceipt(tx)
             return assertTaskResponseEligible(tx, subject)
           })
-          return { ...proof, answer }
+          return { ...proof, answer: normalizeAgentFinalText(answer) }
         } : undefined
         const executionTools = coordinatedCommit ? tools.map(tool => tool.name === call.name ? coordinatedCommit! : tool) : tools
         const admittedPublicStep = bootstrapCall?.id === call.id ? publicWebStep : undefined

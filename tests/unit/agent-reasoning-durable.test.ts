@@ -73,6 +73,44 @@ it('publishes a verified tool-free reply containing the literal marker without i
   expect(upsert.mock.calls[0][0].create.parts).toEqual([{ type: 'text', text }])
 })
 
+it('recovers only final prose from a committed post-tool frame, without changing the raw provider frame', async () => {
+  const text = '雁船在第二章离岸。'
+  const raw = '<activity-title>交付核对结果</activity-title>\n' + text
+  const before = [
+    { role: 'assistant', content: null, toolCalls: [{ id: 'read', name: 'chapter_read', arguments: '{}' }] },
+    { role: 'tool', toolCallId: 'read', content: '合成章节。' },
+  ]
+  const current = { role: 'assistant', content: raw, reasoning: returned }
+  type Frame = Awaited<ReturnType<typeof readExecutionFrame>>
+  const frames = [
+    { revision: 2, snapshotHash: 'frame', state: { phase: 'idle', turn: 2, messages: [...before, current] } } as Frame,
+    { revision: 1, snapshotHash: 'frame', state: { phase: 'awaiting_operation', turn: 2, pendingOperationId: 'provider', messages: before } } as Frame,
+  ]
+  type Saved = { parts: unknown; role: string; sessionId: string; run: { taskRootId: string } }
+  let saved: Saved | null = null
+  const tx = { agentMessage: {
+    findUnique: vi.fn(async () => saved),
+    upsert: vi.fn(async ({ create }: { create: Omit<Saved, 'run'> }) => {
+      saved = { ...create, run: { taskRootId: 'root' } }
+    }),
+  } } as unknown as RuntimeTx
+  const source = { taskRootId: 'root', runId: 'run', type: 'execution.state.saved', eventKey: 'state:root:2',
+    payload: { revision: 2, snapshotHash: 'frame', previousHash: null }, createdAt: new Date() } as AgentExecutionOutbox
+  for (let count = 0; count < 2; count++) {
+    for (const frame of frames) vi.mocked(readExecutionFrame).mockResolvedValueOnce(frame)
+    const events = await projectExecutionFrame(tx, source)
+    expect(events).toEqual([
+      { type: 'reasoning.delta', messageId: expect.any(String), delta: returned },
+      { type: 'text.final', messageId: expect.any(String), text, asReasoning: false },
+    ])
+    // A state frame is projected more than once under recovery, while the outbox
+    // publishes it once. Its persisted author text contains only the prose.
+    if (count === 0) await persistProjectedMessages(tx, source, 'session', events)
+  }
+  expect(saved).toMatchObject({ parts: [{ type: 'reasoning', text: returned }, { type: 'text', text }] })
+  expect(current.content).toBe(raw)
+})
+
 it.each([
   [undefined, 'chapter_read', null, '我先核对前文。'],
   ['chapter_read', 'memory_search', '<activity-title>核对前章</activity-title>', ''],
