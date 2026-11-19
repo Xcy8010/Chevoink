@@ -890,14 +890,17 @@ describe.runIf(available)('durable question lifecycle', () => {
       const events = await publishDurableEvents(f.userId, f.runId, 200)
       const recapEvents = events.filter(event => event.type === 'text.final' && event.text === terminalText)
       expect(recapEvents).toHaveLength(1)
-      if (scenario === 'answered') {
-        const [recap] = recapEvents
-        if (recap.type !== 'text.final') throw new Error('Expected durable recap text')
-        expect(recap.afterTools).toBe(true)
-        const toolResult = events.find(event => event.type === 'tool.result' && event.callId === 'confirmed-create')
-        expect(toolResult).toMatchObject({ ok: true, messageId: recap.messageId, seq: expect.any(Number) })
-        expect(recap.seq).toBeGreaterThan(toolResult!.seq)
-        const history = await prisma.agentMessage.findUniqueOrThrow({ where: { id: recap.messageId } })
+      const [recap] = recapEvents
+      if (recap.type !== 'text.final') throw new Error('Expected durable recap text')
+      expect(recap.afterTools).toBe(true)
+      const terminalCallId = closedQuestion ? 'question-call' : scenario === 'blocked' ? 'blocked-save' : 'confirmed-create'
+      const toolResult = events.find(event => event.type === 'tool.result' && event.callId === terminalCallId)
+      expect(toolResult).toMatchObject({ messageId: recap.messageId, seq: expect.any(Number) })
+      expect(recap.seq).toBeGreaterThan(toolResult!.seq)
+      const history = await prisma.agentMessage.findUniqueOrThrow({ where: { id: recap.messageId } })
+      expect((history.parts as unknown[]).at(-1)).toEqual({ type: 'text', text: terminalText })
+      if (scenario === 'answered' || scenario === 'historical-answered') {
+        expect(toolResult).toMatchObject({ ok: true })
         expect(history.parts).toMatchObject([
           { type: 'text', text: progress },
           { type: 'tool-call', callId: 'confirmed-create', status: 'success' },
@@ -905,14 +908,13 @@ describe.runIf(available)('durable question lifecycle', () => {
         ])
       } else if (cancelled) {
         const status = scenario === 'historical-cancelled' ? 'cancelled' : 'completed'
-        expect(recapEvents[0]).toMatchObject({ afterTools: true })
         expect(events).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'question-call',
           display: { kind: 'question', ...questions[0], questions, cancelled: true, unanswered: true } }))
         expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId }, select: { status: true } })).toEqual({ status })
         expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId }, select: { status: true } })).toEqual({ status })
         expect((await loadExecutionState(f.userId, f.runId)).frame.state.messages.at(-1)).toMatchObject({ role: 'assistant',
           localCompletion: { kind: scenario === 'historical-cancelled' ? 'question_cancelled' : 'question_unanswered' } })
-      } else expect(recapEvents[0]).not.toHaveProperty('afterTools')
+      }
       expect(await providerOperations()).toEqual(fixtureProviders)
       expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'plan_save' } })).toBe(0)
       expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'novel_create' } })).toBe(
