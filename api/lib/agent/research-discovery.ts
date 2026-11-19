@@ -4,6 +4,7 @@ import { normalizeResearchSearchQuery, researchSourceWithinScope } from './resea
 export type DiscoverySource = {
   id: string; url: string; title: string; failed: boolean
   pageType?: 'chapter' | 'book' | 'unknown'; eligible: boolean
+  searchPriority?: number
   versions: Array<{ contentKind: string; verifiedChapter: boolean; links: Array<{ url: string; title: string }> }>
 }
 export type ResearchDiscoveryStep =
@@ -33,7 +34,8 @@ export function planResearchDiscovery(input: {
   if (allowed('web_read') && input.readRemaining > 0) {
     const parents = sources.flatMap(source => source.versions.flatMap(version => version.links.map(link => link.url)))
     const candidates = sources.filter(source => !source.failed && !source.versions.length && (source.eligible || parents.includes(source.url)))
-      .sort((left, right) => rank(left.url) - rank(right.url))
+      .sort((left, right) => rank(left.url) - rank(right.url)
+        || (left.searchPriority ?? Number.MAX_SAFE_INTEGER) - (right.searchPriority ?? Number.MAX_SAFE_INTEGER))
     for (const source of candidates) {
       const step: ResearchDiscoveryStep = { name: 'web_read', args: { sourceId: source.id,
         ...(input.navigation && source.pageType === 'book' ? { purpose: 'navigation' as const } : {}) },

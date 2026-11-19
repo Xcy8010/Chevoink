@@ -3,6 +3,7 @@ import { REVIEW_OUTCOMES } from '../../../shared/review-lifecycle.js'
 import type { AgentExecutionOutbox } from '@prisma/client'
 import type { AgentStreamEventBody, AgentToolDisplayPayload, AgentMessagePart, AgentRollbackSnapshot } from '../../../shared/contracts/index.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
+import { prependAgentActivityTitle, readAgentActivityTitle } from '../../../shared/agent-activity-title.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
@@ -10,24 +11,28 @@ import { projectReviewWriteDeferral } from './runtime-review-deferral.js'
 import { formatNovelSetupRecap, hasNovelDirectionDelivery, isNovelSetupAuthorityFailure, NOVEL_SETUP_BLOCKED_NOTICE, novelSetupNotice, novelSetupRecapSchema } from './novel-initialization.js'
 import { failedToolResultSchema, hasAnsweredQuestionBatch } from './runtime-reducer.js'
 import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
+import { isDurablePublicWebOperation, projectDurablePublicWeb } from './runtime-public-web.js'
 
 export const durableMessageId = (rootId: string, turn: number) => `dm-${runtimeJson({ rootId, turn }).hash.slice(0, 48)}`
 const sourceSchema = z.object({ revision: z.number().int().nonnegative(), snapshotHash: z.string(), previousHash: z.string().nullable() }).strict()
 const operationInput = z.object({ input: z.object({ callId: z.string(), args: z.unknown() }) })
 const historyRollback = z.object({ toolResult: z.object({ snapshot: z.object({ target: z.enum(['chapter', 'novel']),
   targetId: z.string(), field: z.string(), previousValue: z.string().nullable() }).optional() }) })
+const reviewedChapterSchema = z.object({ chapterId: z.string().min(1), revision: z.number().int().nonnegative() })
 
 /** The existing history table is the UI projection, not execution authority.
  * Caller holds the root lock and commits this with the source projection marker. */
 export async function persistProjectedMessages(tx: RuntimeTx, source: AgentExecutionOutbox, sessionId: string, bodies: AgentStreamEventBody[]) {
   for (const body of bodies) {
-    if (!['message.start', 'reasoning.delta', 'text.final', 'tool.call', 'tool.result'].includes(body.type) || !('messageId' in body)) continue
+    if (!['message.start', 'activity.title', 'reasoning.delta', 'text.final', 'tool.call', 'tool.result'].includes(body.type) || !('messageId' in body)) continue
     const old = await tx.agentMessage.findUnique({ where: { id: body.messageId }, include: { run: { select: { taskRootId: true } } } })
     if (old && (old.sessionId !== sessionId || old.role !== 'assistant' || old.run.taskRootId !== source.taskRootId)) {
       return runtimeError('RUNTIME_SCOPE_MISMATCH', '历史消息不属于原持久任务，不能覆盖。')
     }
     let parts = (old?.parts ?? []) as unknown as AgentMessagePart[]
-    if (body.type === 'reasoning.delta') {
+    if (body.type === 'activity.title') {
+      parts = prependAgentActivityTitle(parts, body.title)
+    } else if (body.type === 'reasoning.delta') {
       const existing = parts.find(part => part.type === 'reasoning')
       parts = existing ? parts.map(part => part === existing ? { ...existing, text: existing.text + body.delta } : part)
         : [...parts, { type: 'reasoning', text: body.delta }]
@@ -52,6 +57,7 @@ export async function persistProjectedMessages(tx: RuntimeTx, source: AgentExecu
       }
       const result = { status: body.ok ? 'success' as const : 'failed' as const, summary: body.summary,
         ...(body.toolName !== 'continuity_validate' && body.toolName !== 'chapter_bridge_commit' && body.reviewOutcome ? { reviewOutcome: body.reviewOutcome } : {}),
+        ...(body.reviewedChapter ? { reviewedChapter: body.reviewedChapter } : {}),
         ...(body.durationMs !== undefined ? { durationMs: body.durationMs } : {}), ...(body.display ? { display: body.display } : {}),
         ...(snapshot ? { snapshot } : {}) }
       if (index < 0) parts = [...parts, { type: 'tool-call', callId: body.callId, toolName: body.toolName, title: body.toolName, args: null, ...result }]
@@ -80,6 +86,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
   if (frame.state.phase === 'awaiting_operation' && previous.state.pendingOperationId !== frame.state.pendingOperationId) {
     const operation = await tx.agentOperation.findFirst({ where: { id: frame.state.pendingOperationId!, taskRootId: source.taskRootId } })
     if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '待执行操作事件缺少原输入。')
+    if (isDurablePublicWebOperation(operation)) return projectDurablePublicWeb(operation, previous, frame)
     if (operation.kind === 'provider') return [{ type: 'message.start', messageId, role: 'assistant' }, { type: 'execution.progress', revision: frame.revision, stage: 'model' }]
     if (operation.kind === 'tool') {
       if (operation.action === 'ask_user') return [{ type: 'execution.progress', revision: frame.revision, stage: 'tool' }]
@@ -95,19 +102,33 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
   if (previous.state.phase === 'awaiting_operation' && frame.state.phase === 'idle') {
     const [appended, ...followup] = frame.state.messages.slice(previous.state.messages.length)
     if (!appended) return runtimeError('RUNTIME_RECEIPT_INVALID', '执行归约事件不符合消息追加合同。')
+    if (appended.role === 'user') {
+      const operation = await tx.agentOperation.findFirst({ where: { id: previous.state.pendingOperationId!, taskRootId: source.taskRootId },
+        include: { effectReceipt: true } })
+      if (operation && isDurablePublicWebOperation(operation)) {
+        if (operation.status !== 'succeeded' || !operation.effectReceipt || runtimeJson(operation.effectReceipt.result).hash !== operation.effectReceipt.resultHash) {
+          return runtimeError('RUNTIME_RECEIPT_INVALID', '平台查证事件缺少原回执。')
+        }
+        return projectDurablePublicWeb(operation, previous, frame, operation.effectReceipt)
+      }
+    }
     const { humanizeAgentVisibleText } = await import('./visible-text.js')
     if (appended.role === 'assistant') {
       if (followup.length) return runtimeError('RUNTIME_RECEIPT_INVALID', '模型归约事件不符合消息追加合同。')
       const events: AgentStreamEventBody[] = []
+      const raw = appended.content ?? ''
+      const { title, text } = appended.toolCalls?.some(call => call.name !== 'task_respond') ? readAgentActivityTitle(raw) : { text: raw }
+      if (title) events.push({ type: 'activity.title', messageId, title })
       if (appended.reasoning) events.push({ type: 'reasoning.delta', messageId, delta: appended.reasoning })
-      events.push({ type: 'text.final', messageId, text: humanizeAgentVisibleText(appended.content ?? ''), asReasoning: false })
+      events.push({ type: 'text.final', messageId, text: humanizeAgentVisibleText(text), asReasoning: false })
       return events
     }
     if (appended.role === 'tool') {
       const operation = await tx.agentOperation.findFirst({ where: { id: previous.state.pendingOperationId!, taskRootId: source.taskRootId }, include: { effectReceipt: true } })
       const receipt = operation?.effectReceipt
       const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ output: z.string().optional(), summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional(), questionTimedOut: z.literal(true).optional(),
-        questionCancelled: z.literal(true).optional(), questionCancellationVersion: z.literal(2).optional(), novelSetupRecap: novelSetupRecapSchema.optional() }) }).safeParse(receipt?.result)
+        questionCancelled: z.literal(true).optional(), questionCancellationVersion: z.literal(2).optional(), novelSetupRecap: novelSetupRecapSchema.optional(),
+        reviewRequestFinished: z.unknown().optional() }) }).safeParse(receipt?.result)
       if (!operation || !receipt || !parsedResult.success || !['succeeded', 'failed'].includes(operation.status)
         || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果事件缺少完整回执。')
       const last = followup.at(-1)
@@ -157,9 +178,11 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
           return runtimeError('RUNTIME_RECEIPT_INVALID', '本轮收尾与原工具回执不一致。')
         }
       }
+      const reviewedChapter = reviewedChapterSchema.safeParse(parsedResult.data.toolResult.reviewRequestFinished).data
       return [{ type: 'tool.result', messageId, callId: appended.toolCallId, toolName: operation.action, ok: operation.status === 'succeeded' && parsedResult.data.toolResult.outcome !== 'failed',
         summary: humanizeAgentVisibleText(parsedResult.data.toolResult.summary), durationMs: Math.max(0, receipt.createdAt.getTime() - operation.createdAt.getTime()),
         ...(operation.action !== 'continuity_validate' && operation.action !== 'chapter_bridge_commit' && parsedResult.data.toolResult.reviewOutcome ? { reviewOutcome: parsedResult.data.toolResult.reviewOutcome } : {}),
+        ...(reviewedChapter ? { reviewedChapter } : {}),
         ...(parsedResult.data.code || parsedResult.data.toolResult.failureCode ? { failureCode: parsedResult.data.code ?? parsedResult.data.toolResult.failureCode } : {}),
         ...(operation.status === 'succeeded' && parsedResult.data.toolResult.display ? { display: parsedResult.data.toolResult.display as AgentToolDisplayPayload } : {}) },
       ...(terminal?.content ? [{ type: 'text.final' as const, messageId, text: terminal.content, asReasoning: false,

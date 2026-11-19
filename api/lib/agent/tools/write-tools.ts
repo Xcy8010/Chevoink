@@ -24,7 +24,7 @@ export const memorySaveTool = defineTool({
   name: 'memory_save',
   title: '沉淀创作记忆',
   description:
-    '每个人物、物品、地点、具体场景和故事线分别建档。续写后先查原卡，有卡用 memoryId 与 section 只更新变化的小节，确认缺卡才新建。人物卡用 Markdown 写一段小传交代身份、来历和愿望，在「## 人物设定」写已有依据的外貌、习惯、性格或行事底线，后续更新「当前处境」或「关键经历」。物品记录「持有人」，故事线记录「当前进展」，同一故事线跨章沿用原卡。标明正文来源章节，必要时另标起效章。仅作者知情的段落传 knownBy=[]，揭晓后更新。作者明确改设定时按要求追溯。试写和待定情节保持原本范围。',
+    '每个人物、物品、地点、具体场景和故事线分别建档。续写后先查原卡，有卡用 memoryId 与 section 只更新变化的小节并保持卡名，确认缺卡才新建。名称确有变化时用 renameTo。仅在作者明确要求纠正误名、原名有依据时用 restoreTitle。人物卡用 Markdown 写一段小传交代身份、来历和愿望，在「## 人物设定」写已有依据的外貌、习惯、性格或行事底线，后续更新「当前处境」或「关键经历」。物品记录「持有人」，故事线记录「当前进展」，同一故事线跨章沿用原卡。标明正文来源章节，必要时另标起效章。仅作者知情的段落传 knownBy=[]，揭晓后更新。试写和待定情节保持原本范围。',
   parameters: memorySaveParameters,
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
@@ -55,7 +55,7 @@ export const memorySaveTool = defineTool({
     else if (typeof result.content === 'number' || typeof result.content === 'boolean') result.content = String(result.content)
     if (typeof result.title === 'number') result.title = String(result.title)
     if (typeof result.title === 'string') result.title = result.title.trim().slice(0, 120)
-    // title 漏填兜底：取正文首句作标题，避免整轮工具调用因参数校验失败作废（作者明确要求兜底）
+    // 冻结的旧调用仍使用同一归一化规则；已有卡小节的名称由持久层决定。
     if (typeof result.title !== 'string' || !result.title.trim()) {
       const content = typeof result.content === 'string' ? result.content.trim() : ''
       if (content) {
@@ -81,6 +81,7 @@ export const memorySaveTool = defineTool({
       title: args.title, content: args.content, importance: args.importance,
       confidence: evidence.confidence, status: 'inferred', explicitSave: true,
       memoryId: args.memoryId ?? null,
+      renameTo: args.renameTo, restoreTitle: args.restoreTitle,
       identityKey: args.identityKey, aliases: args.aliases, section: args.section,
       effectiveFromChapterId: args.effectiveFromChapterId, knownBy: args.knownBy,
       overwrite: args.overwrite === true,
@@ -88,8 +89,9 @@ export const memorySaveTool = defineTool({
     }, ctx.transaction)
     return {
       savedMemoryId: result.id,
-      output: `已${result.action === 'created' ? '保存' : '更新'}创作记忆 [${args.memoryType}] ${args.title}（memoryId=${result.id}）。`,
-      summary: `${result.action === 'created' ? '沉淀' : '更新'}记忆「${args.title}」`,
+      display: { kind: 'memoryCard', memoryId: result.id, memoryType: args.memoryType, title: result.title },
+      output: `已${result.action === 'created' ? '保存' : '更新'}创作记忆 [${args.memoryType}] ${result.title}（memoryId=${result.id}）。`,
+      summary: `${result.action === 'created' ? '沉淀' : '更新'}记忆「${result.title}」`,
     }
   },
 })

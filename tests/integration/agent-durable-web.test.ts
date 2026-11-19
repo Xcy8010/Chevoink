@@ -12,11 +12,13 @@ import { extractReaderNavigationHtml } from '../../api/lib/web-reader-quality.js
 import * as sources from '../../api/lib/agent/research-sources.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
+import { executeDurablePublicWeb, prepareDurablePublicWeb } from '../../api/lib/agent/runtime-public-web.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
-import { webSearchTool, webReadNavigationTool } from '../../api/lib/agent/tools/search-tools.js'
+import { webSearchTool, webReadTool, webReadNavigationTool } from '../../api/lib/agent/tools/search-tools.js'
+import { assessReaderText } from '../../api/lib/web-reader-quality.js'
 import type { AgentTool } from '../../api/lib/agent/tools/types.js'
 import { available, claim, fixture } from '../support/agent-durable-runtime-fixture.js'
 
@@ -52,6 +54,91 @@ async function webFixture(work: (f: Fixture, lease: Awaited<ReturnType<typeof st
 const signal = () => new AbortController().signal
 
 describe.runIf(available)('durable web identity, research budget and dispatch fence', () => {
+  it.each(['recovered', 'unknown', 'revoked', 'known-and-revoked', 'unknown-and-revoked'] as const)('keeps the public text-model Search/Read authority and receipt across %s', scenario => {
+    const publicWebQuestion = '月港 官方公告 生效日期'
+    const prompt = '核对月港的生效日期。作者内部草稿限于本次回答。'
+    return fixture(async f => {
+      const provider = env.webSearchProvider
+      env.webSearchProvider = 'bocha'
+      try {
+        vi.spyOn(models, 'getToolModelRuntime').mockResolvedValue(null)
+        const transport = vi.spyOn(search, 'searchWeb').mockResolvedValue(outcome)
+        const article = '公开公告规定2026年10月1日生效。本文保留主管机构原文及其引用位置。'.repeat(30)
+        const fetched = vi.spyOn(reader, 'readPublicWebPage').mockImplementation(async url => ({
+          ...assessReaderText(article), status: 'ok', finalUrl: url, provider: 'direct', retryable: false, contentKind: 'article',
+        }))
+        const initial = await claim(f)
+        const tools = [webSearchTool, webReadTool]
+        await initializeExecutionState(initial, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator',
+          creativeFreedom: 'balanced', qualityMode: 'balanced',
+          model: { tier: 'speed', provider: 'fixture', modelName: 'exact-text-model', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+          tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+          toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', dangerous: false, alwaysConfirm: false })),
+          protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: prompt }], successfulToolSignatures: [] } })
+        await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
+        const period = getCreditWindow()
+        await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 20000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
+        const operation = await prepareDurablePublicWeb(initial, (await loadExecutionState(f.userId, f.runId)).frame)
+        if (!operation) throw new Error('public search not prepared')
+        if (scenario === 'revoked') {
+          await prisma.agentSession.update({ where: { id: f.sessionId }, data: { toolPolicy: { network: 'ask' } } })
+          const denied = await executeDurablePublicWeb(initial, operation, signal())
+          expect(denied.frame.state.messages.at(-1)?.content).toContain('当前任务无可自动执行的搜索权限')
+          expect(transport).not.toHaveBeenCalled()
+          expect(await prisma.webToolCall.count({ where: { runId: f.runId } })).toBe(0)
+          return
+        }
+        const unknown = scenario === 'unknown' || scenario === 'unknown-and-revoked'
+        if (unknown) {
+          transport.mockRejectedValueOnce(new Error('supplier request sent before interrupted response'))
+          await expect(executeDurablePublicWeb(initial, operation, signal())).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+        } else {
+          vi.spyOn(sources, 'saveResearchSearchOutcome').mockRejectedValueOnce(new Error('interrupted before public Search projection'))
+          await expect(executeDurablePublicWeb(initial, operation, signal())).rejects.toThrow('interrupted before public Search projection')
+        }
+        expect(transport).toHaveBeenCalledExactlyOnceWith(publicWebQuestion, 6, expect.any(AbortSignal), null, undefined, undefined,
+          { stopOnUnknown: true }, publicWebQuestion)
+        await pauseDurableTask(f.userId, f.runId)
+        const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' } })
+        const resumed = await resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id })
+        const lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'public-web-resumed')
+        await prisma.agentRun.update({ where: { id: lease.runId }, data: { status: 'running' } })
+        if (scenario.endsWith('-and-revoked')) await prisma.agentSession.update({ where: { id: f.sessionId }, data: { toolPolicy: { network: 'deny' } } })
+        if (unknown) {
+          await expect(executeDurablePublicWeb(lease, operation, signal())).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+          expect(transport).toHaveBeenCalledOnce()
+          expect(fetched).not.toHaveBeenCalled()
+          expect(await prisma.webToolCall.count({ where: { runId: f.runId, status: 'dispatched' } })).toBe(1)
+          return
+        }
+        const searched = await executeDurablePublicWeb(lease, operation, signal())
+        if (scenario === 'known-and-revoked') {
+          expect(searched.frame.state.messages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining('原查证步骤已有结算回执') })
+          expect(searched.frame.state.messages.at(-1)?.content).not.toContain(outcome.results[0].url)
+          expect(await prepareDurablePublicWeb(lease, searched.frame)).toBeNull()
+          expect(await prisma.webToolCall.count({ where: { runId: f.runId, kind: 'search', status: 'completed', amountMilli: 2000 } })).toBe(1)
+          expect(transport).toHaveBeenCalledOnce()
+          expect(fetched).not.toHaveBeenCalled()
+          return
+        }
+        expect(searched.frame.state.messages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining(outcome.results[0].url) })
+        expect(transport).toHaveBeenCalledOnce()
+        const read = await prepareDurablePublicWeb(lease, searched.frame)
+        if (!read) throw new Error('public read not prepared')
+        const verified = await executeDurablePublicWeb(lease, read, signal())
+        expect(verified.frame.state.messages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining('2026年10月1日生效') })
+        expect(verified.frame.state.messages.at(-1)?.content).toContain('来源编号 sourceId')
+        expect(verified.frame.state.messages.some(message => message.role === 'assistant' && message.toolCalls?.length)).toBe(false)
+        expect(await prepareDurablePublicWeb(lease, verified.frame)).toBeNull()
+        expect(fetched).toHaveBeenCalledOnce()
+        expect(await prisma.webToolCall.count({ where: { runId: f.runId, kind: 'search', status: 'completed', amountMilli: 2000 } })).toBe(1)
+        expect(await prisma.webToolCall.count({ where: { runId: lease.runId, kind: 'fetch', status: 'completed', amountMilli: 0 } })).toBe(1)
+      } finally { env.webSearchProvider = provider }
+    }, undefined, prompt, { publicWebQuestion })
+  })
+
   it.each(['approved', 'narrowed'] as const)('recovers an ask Web raw result across runs with original confirmation: %s', scenario => webFixture(async (f, initialLease, transport) => {
     const waiting = await executeDurableToolStep(initialLease, signal())
     if (waiting.kind !== 'waiting_approval') throw Error('Expected original Web approval')

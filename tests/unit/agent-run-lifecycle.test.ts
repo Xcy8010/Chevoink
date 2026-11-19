@@ -470,6 +470,48 @@ function queue(...responses: Response[]) {
   })
 }
 
+it('publishes one activity title from an ordinary tool turn without streaming it as prose or dispatching a new call', async () => {
+  const title = '核对老周的出场时间'
+  const text = '第三章写的是老周先收到了电报。'
+  const rawTitle = `<activity-title>${title}</activity-title>\n`
+  const read = call('read-chapter')
+  const readTool = tool('chapter_read', async () => ({ output: '第三章的正文', summary: '已读取第三章' }))
+  mocks.tools = [readTool]
+  mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+    input.onChunk?.({ type: 'text-delta', delta: rawTitle.slice(0, 5) })
+    input.onChunk?.({ type: 'text-delta', delta: rawTitle.slice(5) })
+    input.onChunk?.({ type: 'tool-call-start', id: read.id, name: read.name })
+    return response(rawTitle, [read])
+  }).mockResolvedValueOnce(response(text))
+  await run('核对老周的出场时间并给我结论。')
+  const projected = events()
+  expect(projected.filter(event => event.type === 'activity.title')).toEqual([
+    { type: 'activity.title', messageId: expect.any(String), title },
+  ])
+  expect(projected.filter(event => event.type === 'tool.call')).toHaveLength(1)
+  expect(projected.filter(event => event.type === 'tool.result')).toMatchObject([{ callId: read.id, ok: true, summary: '已读取第三章' }])
+  expect(projected.filter(event => event.type === 'text.delta' || event.type === 'text.final')).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'text.final', text }),
+  ]))
+  expect(JSON.stringify(projected.filter(event => event.type === 'text.delta' || event.type === 'text.final'))).not.toContain('activity-title')
+  expect(readTool.execute).toHaveBeenCalledTimes(1)
+  expect(mocks.chat).toHaveBeenCalledTimes(2)
+})
+
+it('keeps a literal title-tag-only answer when the requested reply has no tool calls', async () => {
+  const answer = '<activity-title>接下来我会检查正文</activity-title>'
+  mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+    input.onChunk?.({ type: 'text-delta', delta: answer.slice(0, 10) })
+    input.onChunk?.({ type: 'text-delta', delta: answer.slice(10) })
+    return response(answer)
+  })
+  await run(`请只逐字回复“${answer}”。`)
+  expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: answer }))
+  expect(events().map(event => event.type)).not.toContain('activity.title')
+  expect(mocks.chat).toHaveBeenCalledTimes(1)
+  expect(mocks.runs.get('run')?.status).toBe('completed')
+})
+
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.fixtureBudgetExhaustions = 0
@@ -4184,6 +4226,69 @@ describe('committed chapter todo synchronization', () => {
 })
 
 describe('source acquisition in the real Agent loop', () => {
+  it.each(['text-only', 'source-conflict', 'native', 'unconfirmed-consent', 'needs-approval'] as const)('checks public sources on the original selected route: %s', async scenario => {
+    const prompt = '请联网核对月港合成公告里的规则日期。这里还有作者手稿内部段落。'
+    const publicWebQuestion = '月港 官方公告 生效日期'
+    const spec = { ...buildTaskSpec({ runId: 'run', novelId: 'novel', prompt }),
+      ...(scenario === 'unconfirmed-consent' ? {} : { publicWebQuestion }) }
+    mocks.currentOriginal = { prompt, taskSpec: spec }
+    const runtime = { ...await mocks.modelRuntime(), ...(scenario !== 'native' ? { toolsUnsupported: true as const } : {}) }
+    mocks.modelRuntime.mockResolvedValue(runtime)
+    const requestedSources = [
+      { sourceId: 'official-a', title: '公告', source: 'sources.example.com', url: 'https://sources.example.com/a', snippet: '发布日与生效日不同。' },
+      { sourceId: 'official-b', title: '更新', source: 'sources.example.com', url: 'https://sources.example.com/b', snippet: '页面限制访问。' },
+    ]
+    const search = tool('web_search', async (_ctx, args) => {
+      expect(args).toEqual({ query: publicWebQuestion, maxResults: 6 })
+      expect(JSON.stringify(args)).not.toContain('作者手稿')
+      return { output: '已发现两份合成公告，摘要做线索。', display: { kind: 'webSearch', query: publicWebQuestion, provider: 'fixture', results: requestedSources } }
+    })
+    if (scenario === 'needs-approval') search.permission = { ...search.permission, build: 'ask' }
+    const read = tool('web_read', async (_ctx, args) => {
+      const requested = args as { sourceId: string }
+      if (requested.sourceId === 'official-b') return scenario === 'source-conflict'
+        ? { output: '[official-b] https://sources.example.com/b 原文规定2026年11月1日生效。' }
+        : { outcome: 'failed', output: '次要公告原文不可读，无法核对其生效日期。' }
+      return { output: '[official-a] https://sources.example.com/a 原文规定2026年10月1日生效。' }
+    })
+    mocks.tools = [search, read]
+    mocks.openAITools.mockReturnValue([search, read].map(tool => ({
+      type: 'function', function: { name: tool.name, description: tool.description, parameters: {} },
+    })))
+    mocks.chat.mockImplementationOnce(async input => {
+      expect(input.model).toBe('selected-current-model')
+      expect(input.provider).toBe('selected-provider')
+      if (scenario === 'native') {
+        expect(input.tools.map(definition => definition.function.name)).toContain('web_search')
+      } else {
+        expect(input.tools).toEqual([])
+        const all = input.messages.map(message => typeof message.content === 'string' ? message.content : '').join('\n')
+        if (scenario === 'text-only' || scenario === 'source-conflict') {
+          expect(all).toContain('[official-a] https://sources.example.com/a')
+          expect(all).toContain(scenario === 'source-conflict' ? '2026年11月1日生效' : '次要公告原文不可读')
+          expect(all).toContain('若原文不可读、只取得摘要或来源互相冲突')
+        } else if (scenario === 'needs-approval') expect(all).toContain('当前任务无可自动执行的搜索权限')
+        else {
+          expect(all).not.toContain('平台联网查证回执')
+          expect(input.textOnlyWebQuestionRequired).toBe(true)
+        }
+      }
+      return response(scenario === 'unconfirmed-consent'
+        ? '这条规则尚未查证。如果当前界面提供「联网查证」，请填写可公开发送的检索词。'
+        : scenario === 'source-conflict' ? '两份公告的生效日分别为10月1日和11月1日，现有原文解释不了差异。' : '先按公开材料核对这项规则。')
+    })
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: null, mode: 'build', prompt,
+      ...(scenario === 'unconfirmed-consent' ? {} : { publicWebQuestion }) })
+    expect(search.execute).toHaveBeenCalledTimes(scenario === 'text-only' || scenario === 'source-conflict' ? 1 : 0)
+    expect(read.execute).toHaveBeenCalledTimes(scenario === 'text-only' || scenario === 'source-conflict' ? 2 : 0)
+    expect(mocks.approval).not.toHaveBeenCalled()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    if (scenario === 'unconfirmed-consent') expect(events()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'text.final', text: expect.stringContaining('请填写可公开发送的检索词') }),
+    ]))
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+
   it.each(['original', 'alternative', 'missing'] as const)('preserves source facts and hands %s evidence to the Agent without the old two-search stop', async branch => {
     const { planResearchDiscovery, researchDiscoveryStepKey } = await import('../../api/lib/agent/research-discovery.js')
     type Source = import('../../api/lib/agent/research-discovery.js').DiscoverySource

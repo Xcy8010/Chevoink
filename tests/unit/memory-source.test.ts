@@ -14,7 +14,7 @@ const ctx = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', signal: new
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(prisma.chapter.findFirst).mockResolvedValue({ id: 'c', revision: 2, content: '林舟把钥匙交给顾棠。' } as never)
-  vi.mocked(saveStoryMemory).mockResolvedValue({ id: 'card', status: 'inferred', action: 'created' })
+  vi.mocked(saveStoryMemory).mockResolvedValue({ id: 'card', title: '设定', status: 'inferred', action: 'created' })
 })
 it('binds chapter scope/revision and validates literal quote', async () => {
   const evidence = await resolveMemorySource(ctx, { sourceChapterId: 'c', revision: 2, sourceQuote: '钥匙交给顾棠' })

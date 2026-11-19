@@ -10,7 +10,7 @@ import { readExecutionFrame } from '../../api/lib/agent/runtime-state.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { getToolByName } from '../../api/lib/agent/tools/registry.js'
-import { legacyMemorySaveParameters, legacyMemorySearchParameters } from '../../api/lib/agent/memory-tool-parameters.js'
+import { legacyMemorySaveParameters, legacyMemorySearchParameters, previousMemorySaveParameters } from '../../api/lib/agent/memory-tool-parameters.js'
 
 vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionFrame: vi.fn() }))
 const view = (name: string, parameters: Record<string, unknown>, description = '旧平台说明'): NativeToolView => ({ type: 'function', function: { name, parameters, description } })
@@ -32,6 +32,14 @@ describe('current native built-in presentation', () => {
     expect(legacy.safeParse(args).success).toBe(false)
     expect(customResult.function.parameters).toEqual(custom.function.parameters)
     expect(runtimeJson(original).hash).toBe(originalHash)
+  })
+
+  it('offers deliberate renames on new requests while keeping the prior memory section schema intact', async () => {
+    const original = view('memory_save', toOpenAIParameters(previousMemorySaveParameters))
+    const [current] = await currentNativeToolViews([original], { novelId: 'n' })
+    expect(current.function.parameters).toHaveProperty('properties.renameTo')
+    expect(original.function.parameters).toHaveProperty('properties.section')
+    expect(original.function.parameters).not.toHaveProperty('properties.renameTo')
   })
 
   it.each(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit'])('does not require a new provider source frame for metadata-only %s clarification', async action => {

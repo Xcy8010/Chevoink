@@ -131,7 +131,7 @@ async function chapterOrders(db: Prisma.TransactionClient, novelId: string, ids:
 
 /** Shape one update against the state *at that chapter*, then materialize the latest author view. */
 export async function prepareProfileUpdate(db: Prisma.TransactionClient, novelId: string, existing: ProjectMemoryEntry | null, input: ProfileWrite & {
-  content: string; title?: string; sourceChapterId?: string | null; systemDerived?: boolean; manual?: boolean; mergeSections?: boolean
+  content: string; title?: string; restoreTitle?: string; sourceChapterId?: string | null; systemDerived?: boolean; manual?: boolean; mergeSections?: boolean
 }) {
   const at = input.effectiveFromChapterId ?? input.sourceChapterId ?? null
   const prior: ProfileChange[] = existing?.profileTracked
@@ -149,6 +149,22 @@ export async function prepareProfileUpdate(db: Prisma.TransactionClient, novelId
   const history = [...prior, ...changes]
   const chapters = await chapterOrders(db, novelId, [...history.flatMap(c => c.chapterId ? [c.chapterId] : []), ...(at ? [at] : [])])
   if (at && !chapters.has(at)) throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '设定生效章节已归档或不属于本作品。')
+  if (input.restoreTitle && existing) {
+    const names = prior.filter(change => change.section === profileTitle)
+    const mistaken = names.at(-1)
+    const rank = mistaken && chapterRank(mistaken.chapterId, chapters)
+    const nameBefore = rank === undefined ? undefined : visibleSections(names.slice(0, -1), chapters, rank).get(profileTitle)
+    if (!mistaken || mistaken.body !== existing.title || nameBefore?.body !== input.restoreTitle
+      || visibleSections(names, chapters).get(profileTitle) !== mistaken
+      || names.slice(0, -1).some(change => change.body === existing.title)
+      || prior.some(change => change.section === profileAlias + existing.title && change.body !== null)) {
+      throw new DataAccessError(409, 'MEMORY_TITLE_CONFLICT', '现有名称历史无法唯一确认原名，未纠正。')
+    }
+    const correction: ProfileChange = { section: profileTitle, body: input.restoreTitle, chapterId: mistaken.chapterId,
+      restricted: nameBefore.restricted, knownBy: nameBefore.knownBy, manual: true }
+    changes.push(correction)
+    history.push(correction)
+  }
   const active = visibleSections(history, chapters, at ? chapters.get(at) : Infinity)
   const next = input.section ? new Map([[input.section.trim(), input.content.trim()]]) : splitProfileMarkdown(input.content)
   if ([...next.keys()].some(name => name.startsWith(metadataPrefix))) {
@@ -226,9 +242,9 @@ export async function projectStoryMemoryAt<T extends RecallEntry>(db: Prisma.Tra
       if (!content) return []
       if (!scoped || !history.some(c => c.section === profileTitle)) return [{ ...entry, content }]
       const sections = visibleSections(history, chapters, order, scope.viewpointMemoryId, scope.publicOnly)
-      const aliases = [...sections.values()].flatMap(c => c.section.startsWith(profileAlias) && c.body ? [c.body] : [])
-      return [{ ...entry, content, title: sections.get(profileTitle)?.body ?? '未具名档案',
-        aliases, identityKey: sections.get(profileKey)?.body ?? null }]
+      const title = sections.get(profileTitle)?.body ?? '未具名档案'
+      const aliases = [...sections.values()].flatMap(c => c.section.startsWith(profileAlias) && c.body && c.body !== title ? [c.body] : [])
+      return [{ ...entry, content, title, aliases, identityKey: sections.get(profileKey)?.body ?? null }]
     }
     // Generated whole-book aggregates may contain facts copied from a later chapter.
     if (scoped && (entry.memoryType === 'storyBible' || entry.memoryType === 'volumeSummary')) return []

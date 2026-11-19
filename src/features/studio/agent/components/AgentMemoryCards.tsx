@@ -96,17 +96,17 @@ function MemoryShelf({ novelId }: { novelId: string }) {
   useEffect(() => {
     if (!memorySpotlight || memorySpotlight.nonce === spotlightNonce.current) return
     if (Date.now() - memorySpotlight.nonce > 8000 || !section.current || section.current.offsetParent === null) return
-    const { memoryType, title, nonce } = memorySpotlight
+    const { memoryType, title, nonce, memoryId } = memorySpotlight
     let cancelled = false
     const unavailable = () => {
       if (cancelled) return
       spotlightNonce.current = nonce
       setToast('未能唯一定位该记忆，请在创作记忆中查找。')
     }
-    if (!title.trim()) unavailable()
-    else void fetchStoryMemories(novelId, { memoryType, title, page: 1, pageSize: 2 }).then(result => {
+    if (!memoryId && !title.trim()) unavailable()
+    else void fetchStoryMemories(novelId, { memoryType, ...(memoryId ? { memoryId } : { title }), page: 1, pageSize: 2 }).then(result => {
       if (cancelled) return
-      if (result.total === 1 && result.items.length === 1) {
+      if (result.total === 1 && result.items.length === 1 && (!memoryId || result.items[0].id === memoryId)) {
         spotlightNonce.current = nonce
         trigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
         setLocation({ memoryType, card: result.items[0] })

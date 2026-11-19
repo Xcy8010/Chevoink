@@ -937,7 +937,7 @@ const ToolCallCard = memo(function ToolCallCard({
   // 联网搜索过程态：复用 tool.call args 里的 query，免新增事件类型
   const argsRecord = typeof part.args === 'object' && part.args !== null ? (part.args as Record<string, unknown>) : null
   // 记忆沉淀卡：去掉参数展开，点击整行去记忆中心看对应卡片
-  const spotlight = part.status === 'success' ? getMemorySpotlight(part.toolName, part.args) : null
+  const spotlight = part.status === 'success' ? getMemorySpotlight(part.toolName, part.args, part.display) : null
   const spotlightType = spotlight?.type ?? null
   const spotlightTitle = spotlight?.title ?? ''
   const rowExpandable = spotlightType === null && (expandable || collapsible)
@@ -993,7 +993,7 @@ const ToolCallCard = memo(function ToolCallCard({
             {spotlightType !== null ? (
               <button
                 type="button"
-                onClick={() => requestMemorySpotlight(spotlightType, spotlightTitle)}
+                onClick={() => requestMemorySpotlight(spotlightType, spotlightTitle, spotlight?.memoryId)}
                 aria-label="在记忆中心查看这张卡片"
                 title="在记忆中心查看这张卡片"
                 className="absolute inset-0 z-0"

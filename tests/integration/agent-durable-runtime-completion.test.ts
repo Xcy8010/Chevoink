@@ -29,7 +29,7 @@ import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/ch
 import { chapterReadTool,memorySearchTool } from '../../api/lib/agent/tools/read-tools.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { memorySaveTool,planSaveTool } from '../../api/lib/agent/tools/write-tools.js'
-import { legacyMemorySaveParameters, legacyMemorySearchParameters } from '../../api/lib/agent/memory-tool-parameters.js'
+import { legacyMemorySaveParameters, legacyMemorySearchParameters, previousMemorySaveParameters } from '../../api/lib/agent/memory-tool-parameters.js'
 import * as credits from '../../api/lib/credits.js'
 import { getStructureReportObservation } from '../../api/lib/data-access.js'
 import { prisma } from '../../api/lib/prisma.js'
@@ -127,6 +127,43 @@ describe.runIf(available)('parent completion with an already verified limited ch
 })
 
 describe.runIf(available)('durable explicit memory save', () => {
+  it.each([undefined, '十七号上午，在他的住处'])('keeps the card identity through a prepared legacy section update with title %s', title => fixture(async f => {
+    const lease = await claim(f)
+    const original = await storyMemory.saveStoryMemory({
+      userId: f.userId, novelId: f.novelId, runId: f.runId, title: '老周', aliases: ['周师傅'],
+      memoryType: 'characterCard', layer: 'L1', content: '修钟人。\n\n## 人物设定\n\n做事谨慎。',
+      importance: 70, confidence: 1, status: 'confirmed', evidence: { sourceType: 'author_input', sourceId: f.sourceMessageId, confidence: 1 },
+    })
+    const graphBefore = await storyMemory.getMemoryGraph(f.userId, f.novelId)
+    const person = graphBefore.nodes.find(entry => entry.label === original.title)!
+    const args = { memoryType: 'characterCard', memoryId: original.id, title, importance: 70, section: '当前处境',
+      content: '十七号上午，在他的住处。他等来一封电报。', sourceChapterId: f.chapterId }
+    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: [{ type: 'function', function: { name: 'memory_save', description: memorySaveTool.description,
+        parameters: z.toJSONSchema(previousMemorySaveParameters, { io: 'input' }) } }],
+      toolAuthority: [{ name: 'memory_save', permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: '只更新老周当前处境' }, { role: 'assistant', content: null,
+          toolCalls: [{ id: 'update-section', name: 'memory_save', arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
+    const invoke = () => executeDurableToolStep(lease, new AbortController().signal)
+    vi.spyOn(runtimeOperations, 'commitOperationEffect').mockRejectedValueOnce(new Error('fixture interrupted after preparation'))
+    await expect(invoke()).rejects.toThrow('fixture interrupted')
+    const where = { taskRootId: f.rootId, action: 'memory_save' }
+    const prepared = await prisma.agentOperation.findFirstOrThrow({ where })
+    expect(prepared.inputSnapshot).toMatchObject({ input: { args: { title: '十七号上午，在他的住处', memoryId: original.id } } })
+
+    expect(await invoke()).toMatchObject({ kind: 'tool', result: { savedMemoryId: original.id, summary: '更新记忆「老周」',
+      output: expect.stringContaining(`老周（memoryId=${original.id}）`) } })
+    expect(await prisma.agentOperation.findMany({ where })).toMatchObject([{ id: prepared.id, inputHash: prepared.inputHash, status: 'succeeded' }])
+    const card = await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: original.id } })
+    expect(card).toMatchObject({ title: '老周', aliases: ['周师傅'],
+      content: `修钟人。\n\n## 人物设定\n\n做事谨慎。\n\n## 当前处境\n\n${args.content}` })
+    expect((await storyMemory.getMemoryGraph(f.userId, f.novelId)).nodes).toEqual([
+      expect.objectContaining({ id: person.id, label: '老周', description: card.content }),
+    ])
+  }))
+
   it('retains the character biography and settings as the story advances through the actual Markdown tool', () => fixture(async f => {
     const lease = await claim(f)
     const introduction = '林汐是潮汐邮局的夜班邮差。父亲离开后，她接下了他的班。'

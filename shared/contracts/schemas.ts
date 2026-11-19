@@ -1,4 +1,5 @@
 import { selectableModelTierSchema } from './model-tier.js'
+import { publicWebQuestionSchema } from './public-web-research.js'
 import { z } from 'zod'
 import {
   MAX_AGENT_FILE_BYTES_PDF,
@@ -131,6 +132,7 @@ export const startAgentLoopRunSchema = z.object({
   agentQuestionProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   predictNextPrompt: z.literal(true).optional(),
   clientRequestId: z.string().uuid().optional(),
+  publicWebQuestion: publicWebQuestionSchema.optional(),
   modelSelectionExplicit: z.literal(true).optional(),
   sessionId: z.string().min(1),
   novelId: z.string().min(1),

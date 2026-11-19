@@ -19,6 +19,9 @@ import {
 } from '../../api/lib/agent/story-memory.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
+import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
+import type { ToolContext } from '../../api/lib/agent/tools/types.js'
+import { memorySaveTool } from '../../api/lib/agent/tools/write-tools.js'
 
 const dbAvailable = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 
@@ -148,7 +151,7 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P4 故事记忆与混合召回（需 DB
       evidence: { sourceType: 'author_input' as const, sourceId: 'secret-name-fixture', confidence: 1 } }
     const keeper = await saveStoryMemory({ ...base, title: '帐房', content: '记得旧账。' })
     const guest = await saveStoryMemory({ ...base, title: '过江客', content: '一名旅人。', sourceChapterId: chapterIds[0] })
-    await saveStoryMemory({ ...base, memoryId: guest.id, title: '黑塔密使', identityKey: '潜伏的门主', aliases: ['夜使'],
+    await saveStoryMemory({ ...base, memoryId: guest.id, title: '过江客', renameTo: '黑塔密使', identityKey: '潜伏的门主', aliases: ['夜使'],
       section: '身份', content: '他是黑塔派来的信使。', effectiveFromChapterId: chapterIds[39], knownBy: [keeper.id] })
     const recall = async (order: number, viewpointMemoryId?: string) => (await searchStoryMemory({
       userId, novelId, memoryType: 'characterCard', query: '过江客', limit: 20, atChapterOrder: order, publicOnly: true, viewpointMemoryId,
@@ -219,6 +222,64 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P4 故事记忆与混合召回（需 DB
     const replacement = '封港调查已经结案。'
     await saveStoryMemory({ ...input, section: undefined, title: legacy.title, content: replacement, memoryId: legacy.id })
     expect((await recall(nextChapter))[0].content).toBe(replacement)
+  })
+
+  it('keeps a real numeric name, supports a deliberate chapter rename and avoids duplicate item updates', async () => {
+    const session = await prisma.agentSession.create({ data: { userId, novelId, title: '按章补记' } })
+    const { manuscriptRevision } = await prisma.novel.findUniqueOrThrow({ where: { id: novelId }, select: { manuscriptRevision: true } })
+    const run = await prisma.agentRun.create({ data: { userId, novelId, sessionId: session.id, mode: 'act', action: 'workspaceAgent',
+      agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', manuscriptRevision } })
+    const ctx: ToolContext = { userId, novelId, sessionId: session.id, runId: run.id, chapterId: null, callId: 'chapter-memory',
+      mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
+    const save = (args: Record<string, unknown>) => memorySaveTool.execute(ctx, memorySaveTool.parameters.parse(normalizeToolInput(memorySaveTool, args)))
+    const [earlier, later] = chapterIds.slice(1, 3)
+    const character = await save({ memoryType: 'characterCard', title: '十七号', content: '夜班守门人。', sourceChapterId: earlier, aliases: ['小十七'] })
+    const personFirst = await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: character.savedMemoryId } })
+    expect(personFirst).toMatchObject({ title: '十七号', aliases: ['小十七'] })
+    const item = await save({ memoryType: 'itemCard', title: '松木匣', section: '持有人', content: '十七号。', sourceChapterId: earlier })
+    const itemPatch = { memoryType: 'itemCard', title: '夜深后物品已经交接', memoryId: item.savedMemoryId, section: '持有人', content: '桥下向导。', sourceChapterId: later }
+    const handoff = await save(itemPatch)
+    expect(handoff).toMatchObject({ savedMemoryId: item.savedMemoryId, summary: '更新记忆「松木匣」' })
+    const afterHandoff = await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: item.savedMemoryId } })
+    await save(itemPatch)
+    expect(await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: item.savedMemoryId } })).toMatchObject({
+      version: afterHandoff.version, title: '松木匣', content: '## 持有人\n\n桥下向导。', aliases: [],
+    })
+
+    const renamed = await save({ memoryType: 'characterCard', memoryId: character.savedMemoryId, renameTo: '青松', section: '身份',
+      content: '十七号改用青松为名。', effectiveFromChapterId: later })
+    expect(renamed).toMatchObject({ savedMemoryId: character.savedMemoryId, summary: '更新记忆「青松」' })
+    const correct = await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: character.savedMemoryId } })
+    const [inEarlierChapter] = await projectStoryMemoryAt(prisma, novelId, [correct], { atChapterId: earlier, publicOnly: true })
+    expect(inEarlierChapter).toMatchObject({ title: '十七号', content: '夜班守门人。' })
+    expect(correct).toMatchObject({ title: '青松', aliases: ['小十七', '十七号'] })
+    await save({ memoryType: 'characterCard', title: '青松', identityKey: '另一位来访者', content: '来自北门。' })
+    const listed = await request(app).get(`/api/agent/novels/${novelId}/memories`).set('Cookie', cookie)
+      .query({ memoryType: 'characterCard', memoryId: character.savedMemoryId }).expect(200)
+    expect(listed.body.data).toMatchObject({ total: 1, items: [{ id: character.savedMemoryId, title: '青松' }] })
+  })
+
+  it('corrects an evidenced mistaken title in place and keeps the graph identity', async () => {
+    const base = { userId, novelId, memoryType: 'characterCard' as const, layer: 'L1' as const,
+      importance: 70, status: 'inferred' as const, confidence: 0.8, explicitSave: true,
+      evidence: { sourceType: 'artifact' as const, sourceId: 'name-repair-fixture', confidence: 0.8 } }
+    const name = '浮桥校时员', error = '雨后，浮桥边的钟声响了'
+    const original = await saveStoryMemory({ ...base, title: name, content: '校准桥头钟。', aliases: ['时钟匠'] })
+    const before = (await getMemoryGraph(userId, novelId)).nodes.find(node => node.label === name)!
+    const patch = { ...base, memoryId: original.id, section: '当前处境', content: `${error}。他刚到浮桥。`, sourceChapterId: chapterIds[4] }
+    await saveStoryMemory({ ...patch, title: error, section: undefined, content: `校准桥头钟。\n\n## 当前处境\n\n${patch.content}` })
+    await expect(saveStoryMemory({ ...patch, title: error, restoreTitle: '无历史的名称' })).rejects.toMatchObject({ code: 'MEMORY_TITLE_CONFLICT' })
+    const repaired = await saveStoryMemory({ ...patch, title: error, restoreTitle: name })
+    expect(repaired).toMatchObject({ id: original.id, title: name })
+    const card = await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: original.id } })
+    expect(card).toMatchObject({ title: name, aliases: ['时钟匠'], content: `校准桥头钟。\n\n## 当前处境\n\n${patch.content}` })
+    const graph = await getMemoryGraph(userId, novelId)
+    expect(graph.nodes).toContainEqual(expect.objectContaining({ id: before.id, label: name }))
+    expect(graph.nodes).not.toContainEqual(expect.objectContaining({ label: error }))
+    expect(await prisma.entityAlias.findMany({ where: { entityId: before.id, alias: error } })).toEqual([])
+    const corrected = await updateStoryMemoryEntry(userId, original.id, { title: '作者新定校时员', expectedVersion: card.version })
+    await saveStoryMemory({ ...patch, title: corrected.title, content: '他开始检查钟摆。' })
+    await expect(saveStoryMemory({ ...patch, title: corrected.title, restoreTitle: name })).rejects.toMatchObject({ code: 'MEMORY_TITLE_CONFLICT' })
   })
 
   it('links appearances only to chapters containing the profile or its verified source span', async () => {

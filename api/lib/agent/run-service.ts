@@ -406,7 +406,7 @@ export async function startLoopRunLocked(
 
   // A plain human Continue reuses the saved contract, progress and budget.
   if (options.humanOrigin === 'http' && !options.goal && !options.queuedRequest && !options.completedQuestion && !session.spawnedFromRunId
-    && !input.selection && !input.attachments?.length && (isContinuationRequest(input.prompt) || isWritingContinuationRequest(input.prompt))) {
+    && !input.publicWebQuestion && !input.selection && !input.attachments?.length && (isContinuationRequest(input.prompt) || isWritingContinuationRequest(input.prompt))) {
     const previous = await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: session.id }, orderBy: { createdAt: 'desc' } })
     if (previous && ['paused', 'failed', 'running', 'awaiting_approval'].includes(previous.status)) {
       const writingResume = isWritingContinuationRequest(input.prompt)
@@ -433,6 +433,9 @@ export async function startLoopRunLocked(
   const modelAssignments = input.modelAssignments ?? await freezeModelAssignments(userId, input.novelId)
   const networkAdmission = options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
     && options.concurrencyScope !== 'orchestration' ? 1 as const : undefined
+  if (steering?.publicWebQuestion || input.publicWebQuestion && (!networkAdmission || input.pinnedSubagentId)) {
+    throw new DataAccessError(403, 'WEB_VERIFICATION_SCOPE', '请把公开联网查证作为一条普通主 Agent 请求发送。')
+  }
   if (!networkAdmission && input.predictNextPrompt) input = { ...input, predictNextPrompt: undefined }
   const researchAdmission = !input.selection ? networkAdmission : undefined
   const purposeSpec = buildTaskSpec({ runId: 'model-purpose', novelId: input.novelId, chapterId: input.chapterId, prompt: input.prompt, selection: input.selection, researchAdmission, networkAdmission })
@@ -613,6 +616,7 @@ export async function startLoopRunLocked(
         terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 2,
         novelInitializationTarget: isEmptyNovelMetadata(manuscript) ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom, qualityMode: input.qualityMode })
+      if (networkAdmission && input.publicWebQuestion) fresh = { ...fresh, publicWebQuestion: input.publicWebQuestion }
       if (networkAdmission && input.agentQuestionProtocol) {
         fresh = { ...fresh, scope: { ...fresh.scope, agentQuestionProtocol: input.agentQuestionProtocol } }
       }
@@ -720,6 +724,7 @@ export async function startLoopRunLocked(
     chapterId,
     mode: input.mode,
     prompt: input.prompt,
+    publicWebQuestion: networkAdmission ? readHumanAdmission(run.startRequest)?.request.publicWebQuestion : undefined,
     predictNextPrompt: Boolean(networkAdmission && input.predictNextPrompt && (!input.agentProfile || input.agentProfile === 'orchestrator')),
     selection: input.selection ?? null,
     attachments: input.attachments ?? [],
@@ -1341,6 +1346,7 @@ async function continueLoopRunLocked(
     chapterId: run.chapterId,
     mode: run.mode === 'act' ? 'build' : run.mode,
     prompt: resumePrompt,
+    publicWebQuestion: !activation ? readHumanAdmission(run.startRequest)?.request.publicWebQuestion : undefined,
     predictNextPrompt: !activation && readHumanAdmission(run.startRequest)?.request.predictNextPrompt,
     attachments: queuedInput?.attachments,
     selection: queuedInput?.selection,

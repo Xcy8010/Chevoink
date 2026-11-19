@@ -37,6 +37,14 @@ it('retains a safe exact-title lookup for legacy memory summaries without args',
   fireEvent.click(screen.getByRole('button', { name: '查看记忆：四卷结构规划' }))
   expect(useAgentStore.getState().memorySpotlight).toMatchObject({ memoryType: '', title: '四卷结构规划' })
 })
+it('opens the exact saved card from its receipt even if the model supplied a scene as its title', () => {
+  mount([activity({ summary: '更新记忆「老周」' })], [part({
+    args: { memoryId: 'zhou-a', memoryType: 'characterCard', title: '十七号上午，在他的住处' },
+    display: { kind: 'memoryCard', memoryId: 'zhou-a', memoryType: 'characterCard', title: '老周' },
+  })])
+  fireEvent.click(screen.getByRole('button', { name: '查看记忆：老周' }))
+  expect(useAgentStore.getState().memorySpotlight).toMatchObject({ memoryId: 'zhou-a', title: '老周', memoryType: 'characterCard' })
+})
 it.each([
   ['memory_event_save', { title: '夜袭' }, 'timelineEvent', '夜袭'],
   ['memory_relation_save', { fromName: '甲', toName: '乙', relationType: '盟友' }, 'relationshipState', '甲→乙:盟友'],

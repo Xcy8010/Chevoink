@@ -128,7 +128,8 @@ export async function actOnQueuedRequest(userId: string, sessionId: string, id: 
     const data: Prisma.AgentQueuedRequestUpdateManyMutationInput = { revision: { increment: 1 } }
     if (action === 'delete') data.status = 'cancelled'
     if (action === 'edit') {
-      const parsed = startAgentLoopRunSchema.parse({ ...input, prompt })
+      const parsed = startAgentLoopRunSchema.parse({ ...input, prompt,
+        ...(prompt?.trim() !== input.prompt.trim() ? { publicWebQuestion: undefined } : {}) })
       data.payload = (readHumanAdmission(item.payload) ? withHumanAdmission(parsed) : parsed) as Prisma.InputJsonValue
     }
     if (action === 'steer') {

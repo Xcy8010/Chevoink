@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { markdownResources, safeMarkdownUrl } from './markdown-resources'
 import { useStreamingText } from '../../components/use-streaming-text'
 import { containsAgentProtocolArtifact, stripAgentProtocolArtifacts } from '../../../../../shared/agent-output.js'
+import { escapeLiteralActivityLine } from '../../../../../shared/agent-activity-title.js'
 
 type MarkdownNode = { type: string; value?: string; children?: MarkdownNode[] }
 /** Clean protocol artifacts after parsing, never inside code examples or JSON fences. */
@@ -58,7 +59,7 @@ const plugins = [remarkGfm, removeProtocolText]
 // layout with the history, so parsing cannot move adjacent tool rows later.
 function Markdown({ text }: { text: string }) {
   return <ReactMarkdown skipHtml remarkPlugins={plugins} urlTransform={safeMarkdownUrl} components={components}>
-    {stripAgentProtocolArtifacts(text)}
+    {escapeLiteralActivityLine(stripAgentProtocolArtifacts(text))}
   </ReactMarkdown>
 }
 

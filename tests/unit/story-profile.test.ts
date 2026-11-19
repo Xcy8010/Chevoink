@@ -16,7 +16,7 @@ const row = { id: 'm1', title: '守门人', memoryType: 'characterCard', profile
 function db(changes: Change[] = base) {
   return {
     chapter: { findMany: async () => [...orders].map(([id, orderIndex]) => ({ id, orderIndex })) },
-    storyProfileChange: { findMany: async () => changes.map(change => ({ memoryId: row.id, ...change })) },
+    storyProfileChange: { findMany: async () => changes.map((change, index) => ({ id: BigInt(index + 1), memoryId: row.id, ...change })) },
   } as unknown as Prisma.TransactionClient
 }
 
@@ -69,6 +69,26 @@ describe('story profile revisions', () => {
     const retroactive = await prepareProfileUpdate(db(), 'n', row, { section: '现状', content: '最初住在水岸。', effectiveFromChapterId: 'c1' })
     expect(retroactive.content).toContain('已经离开')
     expect(renderProfileAt([...base, ...retroactive.changes], orders, 1)).toContain('最初住在水岸')
+  })
+
+  it('corrects a demonstrably mistaken chapter name without rewriting the old evidence', async () => {
+    const profile = await prepareProfileUpdate(db([]), 'n', null, { title: '老周', content: '修钟人。' })
+    const original = { ...row, title: '老周', content: profile.content }
+    const scene = { title: '十七号上午', section: '当前处境', content: '十七号上午。他等来电报。', sourceChapterId: 'c7' }
+    const oldWrite = await prepareProfileUpdate(db(profile.changes), 'n', original, scene)
+    const mistaken = { ...original, title: scene.title, content: oldWrite.content, aliases: ['老周'] }
+    const history = [...profile.changes, ...oldWrite.changes]
+    await expect(prepareProfileUpdate(db(history), 'n', mistaken, { restoreTitle: '错认的旧名', content: scene.content, section: scene.section }))
+      .rejects.toMatchObject({ code: 'MEMORY_TITLE_CONFLICT' })
+    const correction = await prepareProfileUpdate(db(history), 'n', mistaken, { restoreTitle: '老周', content: scene.content, section: scene.section, sourceChapterId: 'c7' })
+    expect(correction).toMatchObject({ title: '老周', content: oldWrite.content })
+    expect(correction.changes).toHaveLength(1)
+    expect(correction.changes[0]).toMatchObject({ body: '老周', chapterId: 'c7' })
+    expect(correction.changes[0]).not.toHaveProperty('id')
+    const corrected = { ...mistaken, title: '老周', aliases: [] }
+    const scoped = await projectStoryMemoryAt(db([...history, ...correction.changes]), 'n', [corrected], { atChapterOrder: 8 })
+    expect(scoped[0]).toMatchObject({ title: '老周', aliases: [], content: oldWrite.content })
+    expect(history).toContainEqual(expect.objectContaining({ body: '十七号上午' }))
   })
 
   it('merges an agent introduction or selected headings into a Markdown dossier, while the full editor can delete omitted sections', async () => {

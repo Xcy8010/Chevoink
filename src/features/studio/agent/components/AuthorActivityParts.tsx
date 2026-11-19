@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import { useStreamingTextState } from '../../components/use-streaming-text'
 import { useAgentStore } from '../agentStore'
 import { getMemorySpotlight } from '../tool-argument-view'
-import { activityChapterId, activityTarget, projectActivityGroups, type ActivityCall, type ActivityGroup, type MessageActivityGroups } from '../lib/activity-groups'
+import { activityChapterId, activityReviewProblem, projectActivityGroups, type ActivityCall, type ActivityGroup, type MessageActivityGroups } from '../lib/activity-groups'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
 import { agentRunningToolLabel } from '../../../../../shared/agent-progress.js'
@@ -52,16 +52,7 @@ function chapterTitle(part: ActivityCall, titles?: ReadonlyMap<string, string>) 
   return id ? titles?.get(id) : undefined
 }
 
-function reviewProblem(part: ActivityCall): 'stale' | 'incomplete' | undefined {
-  if (part.reviewOutcome === 'stale') return 'stale'
-  if (part.reviewOutcome === 'provider_unresolved' || part.reviewOutcome === 'provider_failed' || part.reviewOutcome === 'evidence_repair_required') return 'incomplete'
-  if (part.display?.kind === 'qualityReport') {
-    if (part.display.status === 'stale') return 'stale'
-    if (part.display.status === 'analyzing' || part.display.status === 'failed') return 'incomplete'
-  }
-}
-
-function activitySummary(part: ActivityCall, runActive: boolean, titles?: ReadonlyMap<string, string>, detail = false, grouped = false): string {
+function activitySummary(part: ActivityCall, runActive: boolean, titles?: ReadonlyMap<string, string>, detail = false, grouped = false, stale = false): string {
   const presentation = getAgentToolPresentation(part.toolName)
   const action = actionNames[part.toolName] ?? presentation.label
   const title = grouped ? undefined : chapterTitle(part, titles)
@@ -95,9 +86,10 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
     if (isWrite) return grouped ? '已写入正文' : `已写入${named}正文 · ${display.after.length.toLocaleString('zh-CN')} 字`
     return named ? `已完成${named}的修改` : '已完成修改'
   }
+  if (display?.kind === 'memoryCard') return `已保存记忆「${display.title}」`
   if (isWrite) return '写入正文'
   if (review) {
-    const problem = reviewProblem(part)
+    const problem = stale ? 'stale' : activityReviewProblem(part)
     if (problem === 'stale') return `${presentation.label} · 正文有新改动`
     if (problem === 'incomplete') return `${presentation.label}未完成`
     return part.toolName === 'quality_report_get' ? '已查看复查报告' : `${presentation.label}完成`
@@ -117,12 +109,6 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
 function isOpenImport(part: ActivityCall, runActive: boolean) {
   return runActive && part.toolName === 'novel_import' && part.status === 'running'
     && /^\/studio\/novel\/[^/?#]+\?/.test(part.importWaiting?.url ?? '')
-}
-
-function hasCurrentFailure(part: ActivityCall) {
-  return part.status === 'failed' || part.status === 'denied'
-    || reviewProblem(part) === 'incomplete'
-    || part.display?.kind === 'webSearch' && part.display.provider === 'unavailable'
 }
 
 const readDetails: Record<string, RegExp> = {
@@ -169,8 +155,8 @@ function ProjectSearchLocations({ display, onOpen }: {
   </ul></ActivityScrollArea>
 }
 
-const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles, readOnly }: {
-  part: ActivityCall; runActive: boolean; titles?: ReadonlyMap<string, string>; readOnly?: boolean
+const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles, readOnly, stale }: {
+  part: ActivityCall; runActive: boolean; titles?: ReadonlyMap<string, string>; readOnly?: boolean; stale?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
@@ -182,8 +168,8 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles, r
   const planId = part.toolName === 'plan_read' && !display ? (part.args as { planId?: unknown } | null)?.planId : undefined
   const navigable = Boolean(chapterId) || typeof planId === 'string' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
   const openTarget = !readOnly && navigable ? () => navigate(part.toolName, chapterId ? { chapterId } : part.args, display) : undefined
-  const label = savedReadDetail(part) ?? activitySummary(part, runActive, titles, true)
-  const memory = !readOnly && part.status === 'success' ? getMemorySpotlight(part.toolName, part.args) : null
+  const label = savedReadDetail(part) ?? activitySummary(part, runActive, titles, true, false, stale)
+  const memory = !readOnly && part.status === 'success' ? getMemorySpotlight(part.toolName, part.args, display) : null
   const hasResultTarget = display?.kind === 'chapterDiff' || display?.kind === 'chapterRef' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
   const collapsible = display?.kind === 'projectSearch' && new Set(display.matches.map(hit => hit.chapterId)).size > 4
     || display?.kind === 'readSources' && display.items.length > 4
@@ -210,39 +196,48 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles, r
           {label}<ChevronDown aria-hidden className={cn('ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-transform', !open && '-rotate-90')} />
         </button> : <span className="min-w-0 break-words">{label}</span>}
         {openTarget && !hasResultTarget ? <button type="button" onClick={openTarget} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">{typeof planId === 'string' ? '打开计划' : '打开章节'}</button> : null}
-        {memory ? <button type="button" onClick={() => spotlight(memory.type, memory.title)} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">查看设定</button> : null}
+        {memory ? <button type="button" onClick={() => spotlight(memory.type, memory.title, memory.memoryId)} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">查看设定</button> : null}
       </div>
     </div>
     {collapsible ? <AgentProcessRegion open={open} id={detailsId}>{result}</AgentProcessRegion> : result}
   </li>
 })
 
-const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, titles, readOnly }: {
+const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, titles, readOnly, awaitingApprovalCallId }: {
   group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; titles?: ReadonlyMap<string, string>; readOnly?: boolean
+  awaitingApprovalCallId?: string
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
   const calls = group?.calls ?? []
   const grouped = calls.length > 1
-  const latest = new Map(calls.map(part => [JSON.stringify([part.toolName, activityTarget(part)]), part]))
-  // A successful retry for the same target supersedes the headline. The
-  // failed receipt stays in the expanded list.
-  const unresolved = [...latest.values()].find(hasCurrentFailure)
+  const unresolved = group?.unsettled
   const running = runActive ? [...calls].reverse().find(part => part.status === 'running') : undefined
   const part = running ?? unresolved ?? calls.at(-1)
-  const Icon = part && !workingLabel ? toolIcon(part) : Brain
+  const iconPart = group?.title ? calls[0] : part
+  const Icon = iconPart && !workingLabel ? toolIcon(iconPart) : Brain
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
+  const waitingForAnswer = runActive && calls.some(call => call.toolName === 'ask_user' && call.status === 'running')
+  const waitingForApproval = runActive && awaitingApprovalCallId !== undefined
+    && calls.some(call => !call.preparing && call.status === 'running' && call.callId === awaitingApprovalCallId)
   const readLabel = group?.readLabel
   let label = workingLabel
-  if (!label && part) {
+  if (group?.title) {
+    const title = group.title
+    if (waitingForAnswer) label = `等待你回答 · ${title}`
+    else if (importWaiting || waitingForApproval) label = `等待你确认 · ${title}`
+    else if (running || runActive && !group.closed && !group.completed) label = `正在${title}`
+    else if ((group.closed || group.completed) && !group.unfinished) label = `已${title}`
+    else label = `${title}未完成`
+  } else if (!label && part) {
     if (readLabel && running) label = activitySummary(running, runActive, titles, true)
-    else if (readLabel) label = unresolved || [...latest.values()].some(call => call.status === 'running')
+    else if (readLabel) label = group?.unfinished
       ? `${readLabel}有未完成项` : `已${readLabel}`
     else if (grouped && !running && unresolved) label = `${getAgentToolPresentation(part.toolName).label}有未完成项`
-    else label = activitySummary(part, runActive, titles, false, grouped)
+    else label = activitySummary(part, runActive, titles, false, grouped, group?.staleReviewCalls?.has(part))
   }
-  const showingActivity = Boolean(active && running && !importWaiting && running.toolName !== 'ask_user')
-  const step = workingLabel ?? (part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : '')
+  const showingActivity = Boolean(active && running && !importWaiting && !waitingForAnswer && !waitingForApproval)
+  const step = group?.title ? label : workingLabel ?? (part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : '')
   const previousStep = useRef(step)
   const headline = useRef<HTMLSpanElement>(null)
   useLayoutEffect(() => {
@@ -263,7 +258,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
       <span ref={headline} className="agent-activity-line items-center">
         <Icon aria-hidden className="h-4 w-4" />
         <span className="min-w-0 break-words text-balance">
-          <span aria-live={active || running || workingLabel ? 'polite' : undefined}
+          <span aria-live={group?.title || active || running || workingLabel ? 'polite' : undefined}
             data-activity-preparing={showingActivity && running?.preparing || undefined}
             data-activity-running={showingActivity && !running?.preparing || undefined}
             className={cn('agent-activity-label', (showingActivity || workingLabel) && 'agent-processing-shimmer')}>{label}</span>
@@ -274,8 +269,12 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
     {!readOnly && importWaiting?.importWaiting ? <a className="ml-6 text-xs underline" href={importWaiting.importWaiting.url}>核对原文并确认导入</a> : null}
     {group ? <AgentProcessRegion open={open} id={detailsId}>
       <ActivityScrollArea><ul>
-        {calls.flatMap(call => [call, ...(group.childrenByCall.get(call.callId) ?? [])]).map(call =>
-          <ActivityDetail key={JSON.stringify([call.subagentCallId ?? null, call.callId])} part={call} runActive={runActive} titles={titles} readOnly={readOnly} />)}
+        {calls.flatMap((call, index) => {
+          const key = group.callKeys[index]
+          return [call, ...(group.childrenByCall.get(key) ?? [])].map(detail =>
+            <ActivityDetail key={JSON.stringify([key, detail.subagentCallId ?? null, detail.callId])} part={detail} runActive={runActive} titles={titles} readOnly={readOnly}
+              stale={group.staleReviewCalls?.has(detail)} />)
+        })}
       </ul></ActivityScrollArea>
     </AgentProcessRegion> : null}
   </div>
@@ -301,7 +300,7 @@ export function AuthorProgressText({ text, className }: { text: string; classNam
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapterTitles, readOnly,
+  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapterTitles, readOnly, awaitingApprovalCallId,
 }: {
   parts: AgentMessagePart[]
   messageId: string
@@ -316,6 +315,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   onTextRevealed?: (messageId: string, text: string) => void
   activityChapterTitles?: ReadonlyMap<string, string>
   readOnly?: boolean
+  awaitingApprovalCallId?: string
 }) {
   const authorParts = useMemo(() => projectAgentAuthorParts(parts.filter(part => part.type !== 'reasoning'), false, { includePreparing: runActive }), [parts, runActive])
   const localGroups = useMemo(() => groups ?? projectActivityGroups([{ id: messageId, runId: '', role: 'assistant', parts }]).byMessage.get(messageId), [groups, messageId, parts])
@@ -347,9 +347,8 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       const key = rendered.size ? group.id : stepKey
       rendered.add(group.id)
       return <AgentProcessRegion key={key} open={processOpen ?? true}>
-        {group.transition ? <AuthorProgressText text={group.transition} className="mb-3" /> : null}
         <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles} readOnly={readOnly}
-          workingLabel={liveGroupId === group.id ? workingLabel : undefined} />
+          workingLabel={liveGroupId === group.id ? workingLabel : undefined} awaitingApprovalCallId={awaitingApprovalCallId} />
       </AgentProcessRegion>
   })
   if (workingLabel && !liveGroupId) {

@@ -1,6 +1,7 @@
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { formatNovelSetupRecap, getNovelSetupFollowup, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
+import { createAgentActivityTextStream, readAgentActivityTitle } from '../../../shared/agent-activity-title.js'
 import { askUserTool, DIRECTION_PURPOSE_REQUIRED, formatUnansweredQuestionWrapUp, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
@@ -77,6 +78,8 @@ import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-t
 import { createExecutionTextDetector, normalizeExecutionText } from './execution-text-detector.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { toolTurnHistory } from './tool-turn-history.js'
+import { isTextOnlyModel, mayAutoVerifyWeb, publicWebAnswerGuidance, publicWebAuthorityMessage, publicWebCallId, publicWebObservation, publicWebPendingNotice, publicWebReadSteps, recordedPublicWebStep, type PublicWebStep } from './public-web-verification.js'
+import { readPublicWebStepDisposition } from './tools/search-tools.js'
 import { emptyResponseRecoveryOutputTokens, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { chapterAnchorFailureSummary, toolFailureRecovery } from './tool-failure-recovery.js'
 import { frozenWritingToolGuidance, writingPreparationGuidance } from './writing-tool-guidance.js'
@@ -141,6 +144,8 @@ export type ExecuteAgentRunParams = {
   chapterId: string | null
   mode: AgentExecutionMode
   prompt: string
+  /** Read from the authenticated original admission, including Continue. */
+  publicWebQuestion?: string
   predictNextPrompt?: boolean
   selection?: { text: string; start?: number; end?: number } | null
   /** 本轮附带附件元数据：持久化为用户消息 attachment parts 并注入上下文 */
@@ -441,6 +446,8 @@ export async function handleToolCall(
   let invalidFields: string[] | undefined
   const fail = (summary: string, observation: string, status: 'failed' | 'denied', reviewRequestFinished?: ToolCallOutcome['reviewRequestFinished'], reviewOutcome?: ReviewOutcome, display?: ToolCallOutcome['part']['display']): ToolCallOutcome => {
     if (!published) publishToolCall(null)
+    const reviewSubject = reviewRequestFinished ?? reviewSnapshot
+    const reviewedChapter = reviewSubject && { chapterId: reviewSubject.chapterId, revision: reviewSubject.revision }
     if (requestTrace.records.length) reviewRequestFinished = reviewSnapshot && textRequestsFinished(requestTrace) ? {
       version: 1, ...reviewSnapshot, usageIds: requestTrace.records.map(row => row.usageId),
     } : undefined
@@ -456,12 +463,13 @@ export async function handleToolCall(
       invalidFields,
       ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}),
       ...(reviewRequestFinished ? { reviewRequestFinished } : {}),
+      ...(reviewedChapter ? { reviewedChapter } : {}),
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
     return { observation, failureCode, reviewRequestFinished, reviewOutcome,
       unresolvedTextRequest: reviewOutcome === 'provider_unresolved' || requestTrace.records.length > 0 && !textRequestsFinished(requestTrace)
-        || failureCode === 'UNEXPECTED_TOOL_ERROR' && STATE_SENSITIVE_VALIDATORS.has(call.name), part: { ...basePart, args: published ? parsedArgs : null, status, summary, ...(display ? { display } : {}), ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}) },
+        || failureCode === 'UNEXPECTED_TOOL_ERROR' && STATE_SENSITIVE_VALIDATORS.has(call.name), part: { ...basePart, args: published ? parsedArgs : null, status, summary, ...(display ? { display } : {}), ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}), ...(reviewedChapter ? { reviewedChapter } : {}) },
 }
   }
 
@@ -516,6 +524,10 @@ export async function handleToolCall(
   const personalAdmission = !subagent && PERSONALIZATION_WRITE_ACTIONS.includes(tool.name)
     ? await readPersonalizationWriteAdmission(prisma, ctx, tool.name, validated.data) : 'direct'
   const hardConfirmation = tool.alwaysConfirm || personalAdmission === 'confirm'
+  if (ctx.platformWebVerification && (permission !== 'allow' || hardConfirmation)) {
+    failureCode = 'RESEARCH_VERIFICATION_PERMISSION'
+    return fail('联网查证权限不足', publicWebAuthorityMessage(call.name === 'web_search' ? 'search' : 'read'), 'denied')
+  }
   const needAsk = Boolean(hardConfirmation || (permission === 'ask' && !env.agentAutoApprove
     && !(hasAlwaysAllow(ctx.sessionId, tool.name) && !tool.dangerous)))
   autoApproved = !needAsk && personalAdmission !== 'reject'
@@ -611,6 +623,8 @@ export async function handleToolCall(
     const reviewRequestFinished = result.reviewRequestFinished ?? (reviewSnapshot
       && requestTrace.records.length > 0 && textRequestsFinished(requestTrace) ? { version: 1 as const, ...reviewSnapshot,
         usageIds: requestTrace.records.map(row => row.usageId) } : undefined)
+    const reviewed = result.reviewRequestFinished
+    const reviewedChapter = reviewed && { chapterId: reviewed.chapterId, revision: reviewed.revision }
 
     bus.emit({
       type: 'tool.result',
@@ -622,6 +636,7 @@ export async function handleToolCall(
       display: result.display,
       ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}),
       ...(reviewRequestFinished ? { reviewRequestFinished } : {}),
+      ...(reviewedChapter ? { reviewedChapter } : {}),
       durationMs,
       ...subagentMark,
     })
@@ -648,6 +663,7 @@ export async function handleToolCall(
         summary,
         display: result.display,
         ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}),
+        ...(reviewedChapter ? { reviewedChapter } : {}),
         durationMs,
         // 写操作快照随消息落库，供「回退到本轮对话前」逆序恢复
         snapshot: result.snapshot,
@@ -1747,7 +1763,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return Math.min(stagnantBatches, completed)
       })
     }
+    const publicWebQuestion = params.publicWebQuestion === taskSpec.publicWebQuestion ? params.publicWebQuestion : undefined
     const toolContext: ToolContext = {
+      publicWebSearchQuestion: taskSpec.networkAccess !== 'denied' && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId
+        ? publicWebQuestion : undefined,
       planContentHashes: new Map(),
       planSemanticHashes: new Map(),
       authorQuestionAnswers: new Map(),
@@ -1921,6 +1940,25 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     // Cumulative usage and observation counts are accounting. Actual completion,
     // cancellation, provider/budget boundaries and authority govern execution.
     const seenGoalConsents = new Set<string>()
+    let publicWebQueue: PublicWebStep[] | undefined
+    let publicWebHinted = false
+    let legacyPublicWebHadSettled = false
+    if (params.resume && publicWebQuestion && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId) {
+      const journal = await prisma.agentRunEvent.findMany({ where: { runId, type: 'tool.call' }, select: { payload: true } })
+      const seen = new Set<string>()
+      for (const { payload } of journal) {
+        const prior = recordedPublicWebStep(payload, taskSpec.id, publicWebQuestion)
+        if (!prior || seen.has(prior.callId)) continue
+        seen.add(prior.callId)
+        const disposition = await readPublicWebStepDisposition({ ...toolContext, callId: prior.callId }, prior.step, publicWebQuestion)
+        if (disposition === 'pending') {
+          forceWrapUpLocal = true
+          await wrapUpAndFinish(publicWebPendingNotice)
+          return
+        }
+        if (disposition === 'settled') legacyPublicWebHadSettled = true
+      }
+    }
     if (taskSpec.controlPolicy !== 'until_completion') checkpointOrigin = 'unknown_legacy'
     const executionControl = untilCompletionControl(checkpointOrigin)
     while (executionControl.controlPolicy === 'until_completion') {
@@ -1934,21 +1972,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       toolContext.personalizationToolRulesEnabled = true
       toolContext.toolAuthority = snapshotToolAuthority(tools, params.mode)
       let bootstrapCall: ToolCallRequest | undefined
-      if (taskSpec.researchNavigation?.version === 1 && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied') {
-        const discovery = await (await import('./research-recovery.js')).takeResearchDiscoveryHandoff({ userId: params.userId,
-          novelId: params.novelId, sessionId: params.sessionId, runId }, tools.map(tool => tool.name))
-        if (discovery) bootstrapCall = { id: `research-discovery-${discovery.receiptId}`, name: discovery.name, arguments: JSON.stringify(discovery.args) }
-      }
-      if (!bootstrapCall && (!researchHandoffChecked || researchReadBootstrap) && taskSpec.researchDiscoveryProtocol === 1
-        && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied'
-        && tools.some(tool => tool.name === 'web_read')) {
-        researchHandoffChecked = true
-        const handoff = await (await import('./research-recovery.js')).takeResearchReadHandoff({ userId: params.userId,
-          novelId: params.novelId, sessionId: params.sessionId, runId })
-        if (handoff) bootstrapCall = { id: `research-read-${handoff.receiptId}`, name: 'web_read',
-          arguments: JSON.stringify({ sourceId: handoff.sourceId, ...(handoff.purpose ? { purpose: handoff.purpose } : {}) }) }
-        researchReadBootstrap = null
-      }
       if (completedWritingWrapUp.value) requireNativeToolCall = todoItems.some(item => item.status === 'pending' || item.status === 'in_progress')
       const configurationChanges = await prisma.agentConfigurationChange.findMany({ where: { runId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
       if (configurationChanges.length) {
@@ -1970,6 +1993,42 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (mode) {
           taskSpec = { ...taskSpec, creativeFreedom: mode }
           toolContext.creativeFreedom = mode
+        }
+      }
+      const textOnlyModel = isTextOnlyModel(modelRuntime)
+      const publicVerification = textOnlyModel && Boolean(publicWebQuestion) && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId
+      let publicWebStep: PublicWebStep | undefined
+      if (!textOnlyModel && !publicWebQuestion && taskSpec.researchNavigation?.version === 1 && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied') {
+        const discovery = await (await import('./research-recovery.js')).takeResearchDiscoveryHandoff({ userId: params.userId,
+          novelId: params.novelId, sessionId: params.sessionId, runId }, tools.map(tool => tool.name))
+        if (discovery) bootstrapCall = { id: `research-discovery-${discovery.receiptId}`, name: discovery.name, arguments: JSON.stringify(discovery.args) }
+      }
+      if (!textOnlyModel && !publicWebQuestion && !bootstrapCall && (!researchHandoffChecked || researchReadBootstrap) && taskSpec.researchDiscoveryProtocol === 1
+        && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied'
+        && tools.some(tool => tool.name === 'web_read')) {
+        researchHandoffChecked = true
+        const handoff = await (await import('./research-recovery.js')).takeResearchReadHandoff({ userId: params.userId,
+          novelId: params.novelId, sessionId: params.sessionId, runId })
+        if (handoff) bootstrapCall = { id: `research-read-${handoff.receiptId}`, name: 'web_read',
+          arguments: JSON.stringify({ sourceId: handoff.sourceId, ...(handoff.purpose ? { purpose: handoff.purpose } : {}) }) }
+        researchReadBootstrap = null
+      }
+      if (publicVerification) {
+        if (!publicWebHinted) {
+          messages.push({ role: 'system', content: publicWebAnswerGuidance })
+          publicWebHinted = true
+        }
+        publicWebQueue ??= [{ name: 'web_search', args: { query: publicWebQuestion!, maxResults: 6 } }]
+        publicWebStep = publicWebQueue.shift()
+        if (publicWebStep) {
+          const name = publicWebStep.name
+          if (mayAutoVerifyWeb(toolContext.toolAuthority?.get(name))) {
+            bootstrapCall = { id: publicWebCallId(taskSpec.id, publicWebStep), name, arguments: JSON.stringify(publicWebStep.args) }
+          } else {
+            messages.push({ role: 'user', content: publicWebAuthorityMessage(name === 'web_search' ? 'search' : 'read', legacyPublicWebHadSettled) })
+            publicWebQueue.length = 0
+            publicWebStep = undefined
+          }
         }
       }
       if (!sessionPolicy?.spawnedFromSessionId && agent.type === 'orchestrator') {
@@ -2027,7 +2086,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         messages.push(preparationReminder)
       }
       const budgetStarted = performance.now()
-      const openAITools = (personalizationEnabled ? availableDefinitions : stableDefinitions).filter(definition => toolContext.toolAuthority?.has(definition.function.name))
+      const openAITools = textOnlyModel ? [] : (personalizationEnabled ? availableDefinitions : stableDefinitions).filter(definition => toolContext.toolAuthority?.has(definition.function.name))
       const toolDefinitionTokens = estimateToolDefinitionTokens(openAITools)
       const personalization = personalizationEnabled && !bootstrapCall ? await loadPersonalizationContext(params.userId, contextPrompt, runId) : undefined
       toolContext.personalizationMemoryEpoch = personalization?.memoryEpoch
@@ -2075,6 +2134,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const explanatoryResponse = !requiresManuscriptDelivery(taskSpec)
         && (taskSpec.scope.authorEffects?.manuscript === false || taskSpec.writingPacing === 'conversation_only')
       const visibleTextStreamer = createVisibleTextStreamer()
+      const activityTextStream = createAgentActivityTextStream()
       const requiredWritingPresentation = requiresCompletedWritingPresentation(taskSpec)
       const savedUnboundWriting = !requiredWritingPresentation && params.mode === 'build'
         && taskSpec.scope.agentWritingProtocol === 1 && !taskSpec.scope.agentWritingBinding
@@ -2087,6 +2147,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         writingTextHeld = false
         if (writingTextBuffer) bus.emit({ type: 'text.delta', messageId, delta: writingTextBuffer })
         writingTextBuffer = ''
+      }
+      const publishAuthorDelta = (delta: string) => {
+        if (!delta) return
+        const textIncrement = explanatoryResponse ? delta : visibleTextStreamer.push(delta)
+        if (!textIncrement) return
+        if (writingTextHeld) writingTextBuffer += textIncrement
+        else bus.emit({ type: 'text.delta', messageId, delta: textIncrement })
       }
       // Execution safeguards retain their original incremental input. Author
       // classification may hold a paragraph and must never delay detection.
@@ -2103,6 +2170,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         personalization,
         nextPromptMarker,
         tools: openAITools,
+        textOnlyModel,
+        textOnlyWebQuestionRequired: textOnlyModel && !publicVerification && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId,
         ...(requireNativeToolCall && openAITools.length > 0 ? { toolChoice: 'required' as const } : {}),
         model: runtimeModelName,
         providerBaseUrl: modelRuntime.baseUrl,
@@ -2121,11 +2190,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (liveTurn) liveTurn.streamedText += chunk.delta
             lastActivityAt = Date.now()
             handleRepeatHit(repeatDetector.push(executionTextDetector.push(chunk.delta)))
-            const textIncrement = explanatoryResponse ? chunk.delta : visibleTextStreamer.push(chunk.delta)
-            if (textIncrement) {
-              if (writingTextHeld) writingTextBuffer += textIncrement
-              else bus.emit({ type: 'text.delta', messageId, delta: textIncrement })
-            }
+            publishAuthorDelta(activityTextStream.push(chunk.delta))
           } else if (chunk.type === 'reasoning-delta') {
             if (liveTurn) liveTurn.streamedReasoning += chunk.delta
             lastActivityAt = Date.now()
@@ -2178,6 +2243,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return null
       })
 
+      const toolBearing = !textOnlyModel && !bootstrapCall && Boolean(result?.toolCalls.some(call => call.name !== 'task_respond'))
+      const resultText = result?.content ?? ''
+      const modelText = toolBearing ? readAgentActivityTitle(resultText) : { text: resultText }
+      const activityTitle = modelText.title
+      if (result) publishAuthorDelta(activityTextStream.finish(toolBearing))
+      if (activityTitle) bus.emit({ type: 'activity.title', messageId, title: activityTitle })
       // A generated proposal may be replaced, restricted or served from cache.
       // End all parameter previews before admission/preflight can wait on other work.
       // Journal this small tombstone so reconnect also clears previews seen earlier.
@@ -2190,14 +2261,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (!bootstrapCall) observeTurnUsage(result.usage)
       await persistCheckpoint()
 
-      const recoveredToolCalls = !explanatoryResponse && result.finishReason !== 'length' && result.toolCalls.length === 0
+      const recoveredToolCalls = !textOnlyModel && !explanatoryResponse && result.finishReason !== 'length' && result.toolCalls.length === 0
         ? recoverAgentProtocolToolCalls(result.content).map((call, index) => ({
             id: `recovered_${messageId}_${index}`,
             name: call.name,
             arguments: call.arguments,
           }))
         : []
-      const effectiveToolCalls = result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
+      const effectiveToolCalls = textOnlyModel && !bootstrapCall ? [] : result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
       const responseCall = effectiveToolCalls.length === 1 && result.toolCalls[0]?.name === 'task_respond' ? result.toolCalls[0] : undefined
       const responseSuggestion = responseCall ? readTaskResponseNextPrompt(responseCall.arguments) : undefined
       if (responseCall && responseSuggestion) effectiveToolCalls[0] = { ...responseCall, arguments: responseSuggestion.args }
@@ -2205,13 +2276,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const chapterMemoryBatch = chapterMemoryWrapUp && effectiveToolCalls.some(call => CHAPTER_MEMORY_TOOLS.includes(call.name))
       if (effectiveToolCalls.length) releaseWritingToolText()
       let ordinaryResponse: TaskResponse | undefined
-      if (ordinaryResponseAvailable && effectiveToolCalls.length === 0 && result.content.trim()
-        && result.finishReason !== 'length' && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)
-        && !isTaskResponseToolEnvelope(result.content)
+      if (ordinaryResponseAvailable && effectiveToolCalls.length === 0 && modelText.text.trim()
+        && result.finishReason !== 'length' && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(modelText.text)
+        && !isTaskResponseToolEnvelope(modelText.text)
         && !pendingReviews.size && !forceWrapUpReason
         && !todoItems.some(item => ['pending', 'in_progress'].includes(item.status))) {
         const proof = await readResponseProof()
-        if (proof) ordinaryResponse = { ...proof, answer: result.content }
+        if (proof) ordinaryResponse = { ...proof, answer: modelText.text }
       }
 
       const toolHistoryStart = messages.length
@@ -2219,13 +2290,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         forceWrapUpReason = deniedCommitObservation
         forceWrapUpLocal = false
       }
-      messages.push(...toolTurnHistory(result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall),
+      messages.push(...toolTurnHistory(textOnlyModel && !bootstrapCall ? { ...result, toolCalls: [] } : result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall),
         recoveredText: recoveredToolCalls.length > 0 }))
 
-      const cleanContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? result.content : normalizeExecutionText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
+      const cleanContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? modelText.text : normalizeExecutionText(stripAgentProtocolArtifacts(modelText.text))
       // This projection affects publication only. Empty-response, promise and
       // saved-delivery decisions below retain baseline execution normalization.
-      const authorContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? result.content : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
+      const authorContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? modelText.text : humanizeAgentVisibleText(stripAgentProtocolArtifacts(modelText.text))
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
       // 模型返回的 reasoning 单独保留，执行旁白不改道思考区。
@@ -2236,6 +2307,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       const parts: AgentMessagePart[] = []
       if (liveTurn) liveTurn.parts = parts
+      if (activityTitle) parts.push({ type: 'activity-title', title: activityTitle })
       if (result.reasoning) {
         parts.push({ type: 'reasoning', text: result.reasoning })
       }
@@ -2709,10 +2781,38 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           return { ...proof, answer }
         } : undefined
         const executionTools = coordinatedCommit ? tools.map(tool => tool.name === call.name ? coordinatedCommit! : tool) : tools
+        const admittedPublicStep = bootstrapCall?.id === call.id ? publicWebStep : undefined
+        const publicWebAdmission: ToolContext['webAdmission'] = admittedPublicStep ? async (tx, work) => {
+          await assertLegacyOwnerReceipt(tx)
+          controller.signal.throwIfAborted()
+          const deny = async () => {
+            const disposition = await readPublicWebStepDisposition({ ...toolContext, callId: call.id }, admittedPublicStep, publicWebQuestion!, tx)
+            if (disposition === 'pending') throw new DataAccessError(409, 'CREDIT_WEB_TOOL_PENDING', publicWebPendingNotice)
+            throw new DataAccessError(403, 'RESEARCH_VERIFICATION_PERMISSION',
+              publicWebAuthorityMessage(call.name === 'web_search' ? 'search' : 'read', disposition === 'settled'))
+          }
+          await tx.$queryRaw`SELECT id FROM agent_sessions WHERE id = ${params.sessionId} FOR SHARE`
+          const current = await tx.agentSession.findFirst({ where: { id: params.sessionId, userId: params.userId, novelId: params.novelId } })
+          if (!current || current.spawnedFromRunId) return deny()
+          const latest = applySessionToolPolicy(orchestrationScopedTools.filter(tool => tool.name === call.name), params.mode, current.toolPolicy,
+            current.sandboxMode === 'read_only' || current.sandboxMode === 'full_access' ? current.sandboxMode : 'workspace')
+          const effective = applyPersonalizationToolRules(latest, params.mode, await readPersonalizationRules(params.userId, tx, 'share'),
+            tool => hasPersonalizationSessionOverride(current.toolPolicy, governedPolicyKey(tool)))
+          if (!mayAutoVerifyWeb(snapshotToolAuthority(effective, params.mode).get(call.name))) return deny()
+          return work()
+        } : undefined
         const outcome = await handleToolCall(call, executionTools, { ...toolContext, writingScope: taskSpec.scope, callId: call.id, messageId, respondTask,
+          ...(admittedPublicStep ? { platformWebVerification: true as const, webAdmission: publicWebAdmission } : {}),
           legacyBatchRenames: call.name === 'novel_update_meta' ? legacyBatchRenames : undefined }, bus, messageId, runId,
           undefined, coordinatedCommit || bootstrapCall?.id === call.id ? async () => { await bus.persist() } : undefined)
         if (!outcome) continue
+        if (admittedPublicStep && publicWebQueue) {
+          if (outcome.part.status === 'success' && call.name === 'web_search') publicWebQueue.push(...publicWebReadSteps(outcome.part.display))
+          if (outcome.failureCode && /^(?:CREDIT_WEB_TOOL_PENDING|RESEARCH_REQUEST_UNCERTAIN|RESEARCH_REQUEST_ALREADY_RESERVED)$/u.test(outcome.failureCode)) {
+            forceWrapUpLocal = true
+            forceWrapUpReason = publicWebPendingNotice
+          }
+        }
         if (call.name === 'novel_rename' && outcome.part.status === 'success') legacyBatchRenames.push(outcome.part)
         const isNovelMetadataWrite = call.name === 'novel_create' || call.name === 'novel_update_meta'
         if (initializationCompletionRequired && isNovelMetadataWrite) {
@@ -2818,7 +2918,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         parts.push(outcome.part)
         // 子 Agent 内嵌执行产生的内部工具卡片随父消息一并直播与落库，刷新后仍可展开查看
         if (outcome.extraParts?.length) parts.push(...outcome.extraParts)
-        messages.push({ role: 'tool', toolCallId: call.id, content: outcome.observation })
+        messages.push({ role: 'tool', toolCallId: call.id, content: admittedPublicStep
+          ? publicWebObservation(admittedPublicStep.name, outcome.observation, outcome.part.status === 'success') : outcome.observation })
         // Tool proposals in the question's batch were generated before the
         // author's choice. The next model turn must see the actual choice.
         if (forceWrapUpReason || authorEndRequested || questionTimedOut || cancelledQuestionWrapUp || novelSetupSaved
@@ -2936,7 +3037,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         await persistCheckpoint()
         messages.push({ role: 'user', content: `[系统] 已读取真实检查意见；读取不是处理或完成。${chapterReviewDecisionGuidance(review!)}` })
       }
-      if (!bootstrapCall && !forceWrapUpReason && blockedRepeat < 4 && stagnantBatches >= 4 && taskSpec.researchDiscoveryProtocol === 1
+      if (!textOnlyModel && !publicWebQuestion && !bootstrapCall && !forceWrapUpReason && blockedRepeat < 4 && stagnantBatches >= 4 && taskSpec.researchDiscoveryProtocol === 1
         && taskSpec.intent === 'research_analysis' && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied'
         && tools.some(tool => tool.name === 'web_read')) {
         const handoff = await (await import('./research-recovery.js')).claimResearchReadHandoff({ userId: params.userId,

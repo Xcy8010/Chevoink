@@ -53,6 +53,24 @@ describe('search URL handoff to the model', () => {
     expect(mocks.search).not.toHaveBeenCalled()
     expect(mocks.charge).not.toHaveBeenCalled()
   })
+  it('persists the dispatch-time matching scope and reprojects exactly that digest from the original receipt', async () => {
+    const { findWebToolCallOutcome } = await import('../../api/lib/billing/web-tool-calls.js')
+    const { saveResearchSearchOutcome } = await import('../../api/lib/agent/research-sources.js')
+    env.webSearchProvider = 'bocha'
+    const ctx = { ...context(), publicWebSearchQuestion: '仅公开的原问题' }
+    mocks.configuration.mockResolvedValue({ provider: 'bocha', modelName: 'fixture', baseUrl: 'https://search.example.com', apiKey: 'private-config' })
+    mocks.search.mockResolvedValue({ provider: 'bocha', results: [] })
+    await webSearchTool.execute(ctx, { query: '公开站点检索', maxResults: 2 })
+    const saved = vi.mocked(saveResearchSearchOutcome).mock.lastCall?.[1]
+    expect(saved).toMatchObject({ provider: 'bocha', results: [], contextKey: expect.stringMatching(/^[a-f0-9]{64}$/u) })
+    vi.mocked(findWebToolCallOutcome).mockResolvedValueOnce(saved)
+    env.webSearchProvider = 'disabled'
+    await webSearchTool.execute(ctx, { query: '公开站点检索', maxResults: 2 })
+    expect(saveResearchSearchOutcome).toHaveBeenLastCalledWith(ctx, saved, '公开站点检索')
+    expect(JSON.stringify(saved)).not.toContain('private-config')
+    expect(mocks.search).toHaveBeenCalledOnce()
+    expect(mocks.charge).toHaveBeenCalledOnce()
+  })
   it('rejects an invalid configured provider before reserving, charging or dispatching', async () => {
     const { reserveResearchRequest } = await import('../../api/lib/agent/research-sources.js')
     vi.mocked(reserveResearchRequest).mockClear()

@@ -603,7 +603,7 @@ export function AgentPanel({
   })
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
   const working = activityRunActive && (panelPhase === 'starting' || panelPhase === 'running') && !pendingApproval && !pendingQuestion
-  const currentActivity = working && runId ? activityGroups.runningByRun.get(runId) : undefined
+  const currentActivity = activityRunActive && runId ? activityGroups.activeByRun.get(runId) : undefined
   const workingLabel = useActivityWorkingLabel(messages, runId, panelPhase, working && !currentActivity, activityGroups)
   const waitingForFirstResponse = lastUserRequest?.runId === runId && lastUserRequest.requestTiming?.elapsedMs === null
   const workingMessage = workingLabel && runId && !waitingForFirstResponse
@@ -1076,7 +1076,7 @@ export function AgentPanel({
 
 
   const handleSend = useCallback(
-    async (prompt: string, attachments: AgentAttachmentMeta[], freedom: CreativeFreedom, selectedQualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string) => {
+    async (prompt: string, attachments: AgentAttachmentMeta[], freedom: CreativeFreedom, selectedQualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string, publicWebQuestion?: string) => {
       setActionError(null)
       setActionNotice(null)
       deliveryErrorRef.current = null
@@ -1107,6 +1107,7 @@ export function AgentPanel({
             // Agent 默认最大权限：恒以 build 模式运行（后端路由也有强制兜底）
             mode: 'build' as const,
             prompt,
+            ...(publicWebQuestion ? { publicWebQuestion } : {}),
             predictNextPrompt: true as const,
             agentQuestionProtocol: 2 as const,
             selection: targetChapterId ? selection ?? null : null,
@@ -1743,7 +1744,7 @@ export function AgentPanel({
               const block = blockInfoById.get(message.id)
               const isBlockFirst = block?.firstId === message.id
               const isBlockLast = block?.lastId === message.id
-              const messageRunActive = active && message.runId === runId
+              const messageRunActive = active && (message.runTiming?.sourceRunId ?? message.runId) === runId
               const blockRunActive = active && runId !== null && Boolean(block?.runIds?.includes(runId))
               const messageActivities = activityGroups.byMessage.get(message.id)
               const hasActivity = messageActivities && [...messageActivities.values()].some(group => group.messageId === message.id)
@@ -1752,15 +1753,12 @@ export function AgentPanel({
               const finalText = isBlockLast ? activityAnswerText(message.parts) : ''
               const receipt = isBlockLast && !blockRunActive && message.completedAt && !finalText
                 ? activityGroups.savedReplyByRun.get(message.runId) : undefined
-              const firstRunId = block?.runIds?.[0] ?? message.runId
-              const projectedOpening = activityGroups.openingByRun.get(firstRunId)
-              const opening = isBlockFirst && hasProcess ? projectedOpening ?? undefined : undefined
               const timing = isBlockFirst && !block?.authorId ? blockTimings.get(message.id) : undefined
               const showSummary = timing && (blockRunActive || timing.elapsedMs !== null || hasProcess)
               const settling = settlingBlocks.has(block?.firstId)
               const processOpen = !hasProcess || blockRunActive || settling || isBlockExpanded(block, message.runId)
               const messageWorkingLabel = message.id === workingMessageId ? workingLabel : undefined
-              if (!showSummary && !hasActivity && !authorText && !opening && !receipt && !messageWorkingLabel) return null
+              if (!showSummary && !hasActivity && !authorText && !receipt && !messageWorkingLabel) return null
               const wholeMessageIsProcess = hasProcess && !showSummary && !finalText && !receipt
 
               return (
@@ -1772,7 +1770,6 @@ export function AgentPanel({
                 >
                   {showSummary ? <AuthorActivitySummary timing={timing} active={blockRunActive} open={processOpen}
                     onToggle={hasProcess && !blockRunActive && !settling ? () => toggleBlock(message.id) : undefined} /> : null}
-                  {opening ? <AgentProcessRegion open={processOpen} className="mb-4"><AuthorProgressText text={opening} /></AgentProcessRegion> : null}
                   <AuthorActivityParts
                     parts={message.parts}
                     groups={messageActivities}
@@ -1786,6 +1783,7 @@ export function AgentPanel({
                     workingLabel={messageWorkingLabel}
                     workingGroupId={workingGroup?.id}
                     activityChapterTitles={activityChapterTitles}
+                    awaitingApprovalCallId={pendingApproval?.callId}
                   />
                   {receipt ? <AuthorProgressText text={receipt} /> : null}
                   {/* Only confirmed completed replies expose copy and branch actions. */}
@@ -1967,7 +1965,7 @@ export function AgentPanel({
           nextPrompt={nextPrompt?.text}
           onContinue={canContinue ? goalView.runBelongsToGoal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
           disabled={conversationLoading || modelPreference.loading}
-          onSend={(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId) => handleSend(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId)}
+          onSend={handleSend}
           creativeFreedom={creativeFreedom}
           onCreativeFreedomChange={setCreativeFreedom}
           qualityMode={qualityMode}

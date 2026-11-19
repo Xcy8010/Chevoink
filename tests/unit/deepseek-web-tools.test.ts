@@ -5,6 +5,7 @@ import { searchWeb } from '../../api/lib/web-search-service.js'
 import { readPublicWebPage, WEB_READER_MAX_BYTES } from '../../api/lib/web-reader-service.js'
 import { webToolEndpoint } from '../../api/lib/web-tool-provider.js'
 import { extractMarkdownReaderLinks } from '../../api/lib/web-reader-markdown.js'
+import { estimateTextTokens } from '../../api/lib/agent/context-budget.js'
 import type { ToolModelRuntime } from '../../api/lib/tool-model-config.js'
 
 const config: ToolModelRuntime = { provider: 'deepseek', modelName: 'deepseek-search', baseUrl: 'https://api.deepseek.com', apiKey: 'offline-fixture-secret' }
@@ -63,7 +64,7 @@ describe('DeepSeek Search JSON contract', () => {
   it.each(['https://api.deepseek.com', 'https://yunshu.chevolink.com/v1/tools/search'])('sends Search contract through %s', async baseUrl => {
     transport.mockResolvedValue(Response.json({ results: [item, item, { ...item, url: 'http://127.0.0.1/private' }] }, { headers: { 'x-request-id': 'request-19' } }))
     const outcome = await searchWeb('public query', 2, undefined, { ...config, provider: 'deepseek_YunShu', webToolProtocol: 'deepseek', baseUrl })
-    expect(outcome).toMatchObject({ provider: 'deepseek', results: [{ title: item.title, url: item.url, snippet: item.summary, source: 'Example' }],
+    expect(outcome).toMatchObject({ provider: 'deepseek', results: [{ title: item.title, url: item.url, snippet: item.snippet, summary: item.summary, source: 'Example' }],
       attempts: [expect.objectContaining({ provider: 'deepseek', outcome: 'results', httpStatus: 200, providerRequestId: 'request-19' })] })
     expect(transport).toHaveBeenCalledOnce()
     const [endpoint, options] = transport.mock.calls[0]
@@ -93,6 +94,81 @@ describe('DeepSeek Search JSON contract', () => {
   it('counts the documented limit as Unicode characters', async () => {
     transport.mockResolvedValue(Response.json({ results: [item] }))
     expect((await searchWeb('😀'.repeat(128), 2, undefined, config)).provider).toBe('deepseek')
+  })
+
+  it('keeps bounded short and long descriptions plus optional discovery metadata', async () => {
+    const summary = '公开公告细节。'.repeat(180)
+    const supporting = { ...item, summary, rerank_score: 2.8, authority: 4, date: '2026-11-18T08:00:00+08:00' }
+    const malformed = { ...item, url: 'https://example.com/legacy', rerank_score: 'bad', authority: 99, date: 'soon' }
+    transport.mockResolvedValue(Response.json({ results: [malformed, supporting] }))
+    const outcome = await searchWeb('official notice after:2026', 2, undefined, config, undefined, undefined, undefined, 'Which public rule changed?')
+    expect(outcome.results[0]).toMatchObject({ url: supporting.url, snippet: item.snippet, summary: summary.slice(0, 799) + '…',
+      rerankScore: 2.8, authority: 4, publishedAt: '2026-11-18T00:00:00.000Z' })
+    expect(outcome.results[1]).toEqual({ title: malformed.title, url: malformed.url, snippet: malformed.snippet, summary: malformed.summary, source: 'Example' })
+    expect(transport).toHaveBeenCalledOnce()
+    expect(JSON.parse(transport.mock.calls[0][1].body)).toEqual({ query: 'official notice after:2026', count: 2, need_content: false, ori_question: 'Which public rule changed?' })
+  })
+})
+
+describe('bounded same-question offline search comparison', () => {
+  const news = (path: string, title: string, evidence: string, date: string, authority: number, score: number) => ({
+    title, url: `https://sources.example.com/${path}`, snippet: '短摘要。', summary: '见原文。'.repeat(75) + evidence,
+    rerank_score: score, authority, date, content: '', site_name: '合成来源',
+  })
+  const misleading = (prefix: string) => [1, 2, 3].map(index =>
+    news(`article/${prefix}-${index}`, `相似结果 ${index}`, '本页不含请求的事实。', '2025-09-01T00:00:00Z', 1, 1.2))
+  it.each([
+    {
+      query: '"霜河档案" 周禾 site:sources.example.com',
+      target: { title: '霜河档案', author: '周禾', sourceHosts: ['sources.example.com'] },
+      rows: [...misleading('book'), news('book/true', '霜河档案最新章节', '作者：周禾，出版于月港文学。', '2026-08-02T00:00:00Z', 4, 2.8)],
+      claim: '出版于月港文学',
+    },
+    {
+      query: '月港港口进出许可 after:2026-06-01',
+      rows: [...misleading('notice'), news('notice/current', '月港港口官方公告', '公告于2026年8月2日发布，自2026年10月1日生效。', '2026-08-02T00:00:00Z', 4, 2.6)],
+      claim: '自2026年10月1日生效',
+    },
+    {
+      query: '港务局夜间灯塔颜色',
+      rows: [...misleading('fact'), news('manual/lantern', '港务局航标手册', '内河入口的合成航标灯为紫色。', '2026-08-02T00:00:00Z', 4, 2.4)],
+      claim: '合成航标灯为紫色',
+    },
+  ])('selects a supporting primary page for $query within one Search and two direct GETs', async ({ query, rows, target, claim }) => {
+    const primary = rows.at(-1)!
+    const check = async (optimized: boolean) => {
+      transport.mockReset()
+      transport.mockImplementation(async (address: string | URL) => {
+        const url = String(address)
+        if (url === 'https://api.deepseek.com/v1/tools/search') return Response.json({ results: rows })
+        const row = rows.find(candidate => candidate.url === url)
+        if (!row) throw new Error('unexpected fixture request')
+        return new Response(`${row.title}\n\n${article}\n\n${row.summary}`, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+      })
+      // Both passes use the same transport and source corpus. The baseline
+      // uses provider order and the original 200-character model excerpt.
+      const started = performance.now()
+      const search = await searchWeb(query, 6, undefined, config, target)
+      const candidates = optimized ? search.results : rows
+      const exposed = optimized ? search.results.slice(0, 3).map(value => value.summary ?? value.snippet) : rows.slice(0, 3).map(value => value.summary.slice(0, 200))
+      const pages = []
+      for (const candidate of candidates.slice(0, 2)) pages.push(await readPublicWebPage(candidate.url, new AbortController().signal, null))
+      const providerCalls = transport.mock.calls.filter(([url]) => String(url) === 'https://api.deepseek.com/v1/tools/search').length
+      return {
+        primaryInTopThree: candidates.slice(0, 3).some(value => value.url === primary.url),
+        citationSupported: pages.some(page => page.status === 'ok' && page.finalUrl === primary.url && page.text.includes(claim)),
+        citationPreviews: exposed.some(value => value.includes(claim)),
+        requests: transport.mock.calls.length,
+        providerCalls,
+        previewTokensEstimate: estimateTextTokens(exposed.join('\n')),
+        supplierCostYuanAtListedRate: providerCalls * 0.005,
+        fixtureElapsedMs: Math.round((performance.now() - started) * 100) / 100,
+      }
+    }
+    const baseline = await check(false), optimized = await check(true)
+    expect(baseline).toMatchObject({ primaryInTopThree: false, citationSupported: false, citationPreviews: false, requests: 3, providerCalls: 1, supplierCostYuanAtListedRate: 0.005 })
+    expect(optimized).toMatchObject({ primaryInTopThree: true, citationSupported: true, citationPreviews: true, requests: 3, providerCalls: 1, supplierCostYuanAtListedRate: 0.005 })
+    console.info('[offline-search-comparison]', { query, baseline, optimized })
   })
 })
 

@@ -47,15 +47,34 @@ export async function saveWebToolCacheOutcome(ctx: Scope, kind: Kind, request: u
 /** Look up logical identity before cache/configuration. Old calls cannot acquire today's price. */
 export async function findWebToolCallOutcome<T>(ctx: Scope, kind: Kind, request: unknown): Promise<T | null> {
   return prisma.$transaction(async tx => {
-    await ownedRun(tx, ctx)
-    const saved = await tx.webToolCall.findUnique({ where: { id: identity(ctx, kind) } })
+    const saved = await readBoundWebToolCall(tx, ctx, kind, request)
     if (!saved) return null
-    if (saved.requestHash !== digest(request)) throw new DataAccessError(409, 'CREDIT_IDEMPOTENCY_CONFLICT', '联网调用参数与原回执不一致。')
     if (saved.status === 'dispatched') throw pending()
     if (saved.status === 'failed') throw new DataAccessError(409, 'CREDIT_WEB_TOOL_FAILED', '原联网调用已失败并记录退款义务，未重复请求或扣费。')
     if (saved.status !== 'completed' || saved.outcome === null) throw pending()
     return saved.outcome as T
   })
+}
+
+async function readBoundWebToolCall(tx: Prisma.TransactionClient, ctx: Scope, kind: Kind, request: unknown) {
+  await ownedRun(tx, ctx)
+  const saved = await tx.webToolCall.findUnique({ where: { id: identity(ctx, kind) } })
+  if (saved && (saved.requestHash !== digest(request) || saved.runId !== ctx.runId || saved.kind !== kind)) {
+    throw new DataAccessError(409, 'CREDIT_IDEMPOTENCY_CONFLICT', '联网调用参数与原回执不一致。')
+  }
+  return saved
+}
+
+/** A revoked grant still permits reconciliation of its exact owned billing
+ * record. This deliberately returns no provider output or expandable data. */
+export async function readWebToolCallDisposition(ctx: Scope, kind: Kind, request: unknown, transaction?: Prisma.TransactionClient) {
+  const read = async (tx: Prisma.TransactionClient) => {
+    const saved = await readBoundWebToolCall(tx, ctx, kind, request)
+    if (!saved) return 'absent' as const
+    if (saved.status === 'failed' || saved.status === 'completed' && saved.outcome !== null) return 'settled' as const
+    return 'pending' as const
+  }
+  return transaction ? read(transaction) : prisma.$transaction(read)
 }
 
 /** Caller owns this dispatch and observed cancellation before full tool delivery. */

@@ -10,6 +10,7 @@ import { countReportChineseCharacters } from '../../../shared/agent-output.js'
 import { researchChapterTitle, researchSourceHosts } from './research-navigation-policy.js'
 import { mergeResearchRanges } from './research-ranges.js'
 import { evaluateResearchNavigationCandidates, evaluateResearchSearchCandidates } from '../research-search-quality.js'
+import { webSearchResultSchema } from '../web-search-result.js'
 import { runtimeJson } from './runtime-common.js'
 import { durableTaskSpecIdentity } from './runtime-identity.js'
 import type { ToolContext } from './tools/types.js'
@@ -252,8 +253,14 @@ export type ResearchSearchBudgetContext = { query: string; extension?: {
   gap: 'missing_target_text' | 'source_unavailable'; direction: 'open_web' | 'site' | 'chapter' | 'catalogue'; host?: string
 } }
 
-/** Cache identity ignores presentation and word order, never task ownership. */
+/** Plain keywords can move between equivalent saved calls. Terms with syntax
+ * preserve order and boundaries because those change the provider request. */
+export function hasOrderedResearchSearchSyntax(query: string) {
+  return /["()]|(?:^|\s)(?:lang:|after:|before:|-\S)/iu.test(query) || /\bOR\b/u.test(query)
+}
+
 export function normalizeResearchSearchQuery(query: string): string {
+  if (hasOrderedResearchSearchSyntax(query)) return query.trim()
   return [...new Set(query.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}:./_-]+/gu, ' ').trim().split(/\s+/u))].sort().join(' ')
 }
 
@@ -400,18 +407,19 @@ export async function recordResearchReadOutcome(scope: Scope & { callId: string 
   })
 }
 
-const searchOutcomeSchema = z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']),
-  query: z.string().max(120).optional(),
-  results: z.array(z.object({ title: z.string(), url: z.string().max(8192), snippet: z.string(), source: z.string() })).max(8),
+const savedSearchResult = webSearchResultSchema.extend({ url: z.string().max(8192) })
+export const searchOutcomeSchema = z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']),
+  query: z.string().max(120).optional(), contextKey: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  results: z.array(savedSearchResult).max(8),
   navigation: z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']),
-    results: z.array(z.object({ title: z.string(), url: z.string().max(8192), snippet: z.string(), source: z.string() })).max(2) }).optional() })
+    results: z.array(savedSearchResult).max(2) }).optional() })
 
 const searchFailureSchema = z.object({ kind: z.literal('known_http_failure'), query: z.string().max(120),
   failures: z.array(z.object({ provider: z.string(), httpStatus: z.number().int().min(400).max(599) })) })
 
 /** Only a confirmed original non-billable failure can resolve this same request.
  * A refund alone never upgrades an unknown supplier response to a known one. */
-export async function recordResearchSearchFailure(scope: Scope & { callId: string }, request: { query: string; count: number },
+export async function recordResearchSearchFailure(scope: Scope & { callId: string }, request: { query: string; count: number; originalQuestionHash?: string },
   failures: Array<{ provider: string; httpStatus: number }>) {
   return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
@@ -437,11 +445,11 @@ export async function recordResearchSearchFailure(scope: Scope & { callId: strin
 /** Persist only bounded public results, not provider credentials or trace IDs. */
 export async function saveResearchSearchOutcome(scope: Scope & { callId: string }, outcome: unknown, query?: string) {
   const parsed = searchOutcomeSchema.parse(outcome)
-  const savedOutcome = { provider: parsed.provider, ...(query ? { query: query.slice(0, 120) } : {}), results: parsed.results.map(result => ({
-    title: result.title.slice(0, 300), url: canonicalResearchUrl(result.url), snippet: result.snippet.slice(0, 300), source: result.source.slice(0, 300),
-  })), ...(parsed.navigation ? { navigation: { provider: parsed.navigation.provider, results: parsed.navigation.results.map(result => ({
-    title: result.title.slice(0, 300), url: canonicalResearchUrl(result.url), snippet: result.snippet.slice(0, 300), source: result.source.slice(0, 300),
-  })) } } : {}) }
+  const bounded = (result: z.infer<typeof savedSearchResult>) => ({ ...result, title: result.title.slice(0, 300),
+    url: canonicalResearchUrl(result.url), snippet: result.snippet.slice(0, 300), source: result.source.slice(0, 300) })
+  const savedOutcome = { provider: parsed.provider, ...(query ? { query: query.slice(0, 120) } : {}),
+    ...(parsed.contextKey ? { contextKey: parsed.contextKey } : {}), results: parsed.results.map(bounded),
+    ...(parsed.navigation ? { navigation: { provider: parsed.navigation.provider, results: parsed.navigation.results.map(bounded) } } : {}) }
   return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
@@ -451,7 +459,8 @@ export async function saveResearchSearchOutcome(scope: Scope & { callId: string 
   })
 }
 
-export async function findResearchSearchOutcome(scope: Scope, requestKey: string, query?: string) {
+export async function findResearchSearchOutcome(scope: Scope, requestKey: string, query?: string,
+  context?: { key: string; legacyRequestKey?: string }) {
   return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
@@ -462,12 +471,20 @@ export async function findResearchSearchOutcome(scope: Scope, requestKey: string
       if (searchFailureSchema.safeParse(saved.savedOutcome).success) return null
       return searchOutcomeSchema.parse(saved.savedOutcome)
     }
-    if (!query) return null
+    if (!query || !context) return null
+    if (context.legacyRequestKey) {
+      const legacy = await tx.agentResearchRequest.findFirst({ where: { scopeKey, kind: 'search', requestKey: context.legacyRequestKey,
+        status: 'consumed', savedOutcome: { not: Prisma.DbNull } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { savedOutcome: true } })
+      const parsed = searchOutcomeSchema.safeParse(legacy?.savedOutcome)
+      if (parsed.success && parsed.data.query?.trim() === query.trim()) return parsed.data
+    }
     const previous = await tx.agentResearchRequest.findMany({ where: { scopeKey, kind: 'search', status: 'consumed', savedOutcome: { not: Prisma.DbNull } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { savedOutcome: true } })
     for (const entry of previous) {
       const parsed = searchOutcomeSchema.safeParse(entry.savedOutcome)
-      if (parsed.success && parsed.data.query && normalizeResearchSearchQuery(parsed.data.query) === normalizeResearchSearchQuery(query)) return parsed.data
+      if (!parsed.success || !parsed.data.query || normalizeResearchSearchQuery(parsed.data.query) !== normalizeResearchSearchQuery(query)) continue
+      if (parsed.data.contextKey === context.key) return parsed.data
     }
     return null
   })

@@ -1,3 +1,4 @@
+import { readAgentActivityTitle } from '../../../shared/agent-activity-title.js'
 import type { AgentMessagePart, AgentTodoItem } from '../../../shared/contracts/index.js'
 
 /** A truncated response can recover only with a strictly larger request that
@@ -38,7 +39,10 @@ export function isWritingContinuationRequest(prompt: string): boolean {
 }
 
 export function promisesFurtherAction(text: string): boolean {
-  const lastSentence = text.trim().split(/[。！!\n]/u).filter(Boolean).at(-1) ?? ''
+  // A literal tag in a tool-free answer belongs to the delivered text, but
+  // its quoted words do not require another execution turn.
+  const prose = readAgentActivityTitle(text).text
+  const lastSentence = prose.trim().split(/[。！!\n]/u).filter(Boolean).at(-1) ?? ''
   if (/(?:如需|如果)/u.test(lastSentence)) return false
   // Optional next steps are advice to the author, not another execution turn.
   // Check each clause so an advisory prefix cannot hide a later actual promise.

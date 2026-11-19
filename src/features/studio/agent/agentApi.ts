@@ -228,10 +228,11 @@ export function fetchAgentContextDetail(
 /** 记忆中心：分页拉取 Agent 沉淀的创作记忆卡片 */
 export function fetchStoryMemories(
   novelId: string,
-  options?: { memoryType?: string; title?: string; query?: string; page?: number; pageSize?: number },
+  options?: { memoryType?: string; memoryId?: string; title?: string; query?: string; page?: number; pageSize?: number },
 ): Promise<StoryMemoryList> {
   const query = new URLSearchParams()
   if (options?.memoryType) query.set('memoryType', options.memoryType)
+  if (options?.memoryId) query.set('memoryId', options.memoryId)
   if (options?.title !== undefined) query.set('title', options.title)
   if (options?.query) query.set('query', options.query)
   query.set('page', String(options?.page ?? 1))

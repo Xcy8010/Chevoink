@@ -25,9 +25,7 @@ export function useProcessingHint(messages: AgentUIMessage[], runId: string | nu
 export function useActivityWorkingLabel(messages: AgentUIMessage[], runId: string | null, phase: string, enabled: boolean,
   groups: ReturnType<typeof projectActivityGroups>) {
   const lastCall = runId ? groups.lastCallByRun.get(runId) : undefined
-  // The null opening is an actual author-visible paragraph, not the projected
-  // opening shown when the run starts with a tool.
-  const wroteOpening = Boolean(runId && !lastCall && groups.openingByRun.get(runId) === null)
+  const wroteOpening = Boolean(runId && !lastCall && groups.authorSpokeByRun.has(runId))
   const silent = useProcessingHint(messages, runId, phase, false, enabled && wroteOpening)
   if (!enabled) return undefined
   if (wroteOpening) return silent ? '正在处理…' : undefined

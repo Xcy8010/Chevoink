@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { legacyMemorySaveParameters, legacyMemorySearchParameters } from './memory-tool-parameters.js'
+import { legacyMemorySaveParameters, legacyMemorySearchParameters, previousMemorySaveParameters } from './memory-tool-parameters.js'
 import { storyCharterInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import type { TaskSpec } from '../../../shared/contracts/index.js'
 import type { AgentTool } from './tools/types.js'
@@ -84,7 +84,7 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
     const legacy = toOpenAIParameters(legacyMemorySaveParameters)
     const properties = legacy.properties as Record<string, Record<string, unknown>>
     // Previously prepared operations retain their exact published descriptions.
-    return [current, legacy, { ...legacy, properties: {
+    return [current, toOpenAIParameters(previousMemorySaveParameters), legacy, { ...legacy, properties: {
       ...properties,
       sourceChapterId: { ...properties.sourceChapterId, description: '来源章节 ID（章节摘要必填）' },
       sourceQuote: { ...properties.sourceQuote, description: '仅用于来源章节的逐字原文，必须同时传真实sourceChapterId。规划/待定设定不是章节证据，不把摘要或计划包装成引用；无章节依据时仅提交待审候选，不传revision/sourceQuote' },

@@ -52,9 +52,10 @@ export async function advanceDurableWritingDelivery(token: RunLeaseToken) {
       .every(name => authority.some(grant => grant.name === name && grant.permission === 'allow' && !grant.alwaysConfirm))
     if (!token.parent && state.configuration.mode === 'build' && state.configuration.agentType === 'orchestrator'
       && allowsMemory(state.configuration.toolAuthority) && isAgent2FeatureEnabled('memory2', token.userId)) {
-      const content = `${CHAPTER_MEMORY_MARKER}${runtimeJson(chapters).hash}] 以下章节已保存：${JSON.stringify(chapters.map(({ id, revision }) => ({ id, revision })))}。只处理这些章涉及的记忆，然后交付现有稿件。\n${CHAPTER_MEMORY_GUIDANCE}`
+      const marker = `${CHAPTER_MEMORY_MARKER}${runtimeJson(chapters).hash}]`
+      const content = `${marker} 以下章节已保存：${JSON.stringify(chapters.map(({ id, revision }) => ({ id, revision })))}。只处理这些章涉及的记忆，然后交付现有稿件。\n${CHAPTER_MEMORY_GUIDANCE}`
       const messages = state.frame.state.messages
-      const hasCheck = messages.some(message => message.role === 'system' && message.content === content)
+      const hasCheck = messages.some(message => message.role === 'system' && message.content?.startsWith(marker))
       const needsCheck = !hasCheck && latest?.role === 'tool'
       if (needsCheck || (hasCheck && latest?.role !== 'assistant')) {
         const { toolAuthority } = await readEffectiveNativeTooling(tx, token, state.configuration, taskSpecSchema.parse(state.originalSpec))

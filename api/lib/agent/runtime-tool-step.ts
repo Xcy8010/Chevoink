@@ -10,7 +10,7 @@ import { accountProfileTool, accountPreferencesGetTool, accountPreferencesUpdate
 import { readEffectiveNativeTooling, readNativeToolAdmission, type NativeToolAdmission } from './native-tool-policy.js'
 import { z } from 'zod'
 import { originalToolParameterSchemas } from './tool-schema.js'
-import { legacyMemorySaveParameters, legacyMemorySearchParameters } from './memory-tool-parameters.js'
+import { legacyMemorySaveParameters, legacyMemorySearchParameters, previousMemorySaveParameters } from './memory-tool-parameters.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { env } from '../../config/env.js'
 import { requestToolApproval, pollToolApproval, readCommitReviewApproval, readToolApprovalOutcome } from './runtime-approval.js'
@@ -253,6 +253,8 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       if (!((isSave ? 'section' : 'atChapterId') in fields)) {
         // Old parsers stripped unknown fields. Reuse that behavior for both initial admission and prepared receipts.
         tool = { ...tool, parameters: isSave ? legacyMemorySaveParameters : legacyMemorySearchParameters }
+      } else if (isSave && !('renameTo' in fields) && !('restoreTitle' in fields)) {
+        tool = { ...tool, parameters: previousMemorySaveParameters }
       }
     }
     if (!historicalWriter && (sourceContract || published !== definition || call.name === 'agent_configure') && !validateToolInput(toolWithNativeView(tool, published), normalized).success) {
@@ -268,6 +270,8 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     const originalChapterId = originalScope.selection?.chapterId ?? (originalScope.chapterIds?.length === 1 ? originalScope.chapterIds[0] : null)
     const ctx: ToolContext = { userId: lease.userId, runId: lease.runId, novelId: root.novelId, sessionId: root.sessionId,
       chapterId: originalChapterId, callId: call.id, mode: current.configuration.mode, creativeFreedom: current.configuration.creativeFreedom,
+      ...(!lease.parent && call.name === 'web_search' && originalSpec.networkAccess !== 'denied'
+        ? { publicWebSearchQuestion: originalSpec.publicWebQuestion } : {}),
       qualityMode: current.configuration.qualityMode, protectedChapterIds: new Set(current.configuration.protectedChapterIds),
       toolAuthority: new Map(effective.toolAuthority.map(item => [item.name, item])), signal, emit: () => {},
       modelSelection: { ...(current.configuration.model.tokenPrice ? { tokenPrice: current.configuration.model.tokenPrice } : {}), ...(current.configuration.model.modelConfigId ? { modelConfigId: current.configuration.model.modelConfigId, modelConfigRevision: current.configuration.model.modelConfigRevision } : {}), ...(current.configuration.model.weightedRoute ? { weightedRoute: current.configuration.model.weightedRoute } : {}), tier: current.configuration.model.tier as CreditModelTier,

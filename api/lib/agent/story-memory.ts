@@ -41,6 +41,8 @@ type SaveMemoryInput = ProfileWrite & {
   evidence: EvidenceInput
   /** Pass the original card ID when changing the name of an existing memory. */
   memoryId?: string | null
+  renameTo?: string
+  restoreTitle?: string
   /** Compatibility with existing callers. Same-name cards now update in place by default. */
   overwrite?: boolean
   /** Automatic manuscript projections must preserve manual edits of the same card. */
@@ -149,6 +151,7 @@ type MemoryIdentity = { memoryType: ProjectMemoryType; title: string; sourceChap
 const storyBibleTitle = '故事圣经（系统增量）'
 const storyBibleSources: ProjectMemoryType[] = ['worldbuilding', 'characterCard', 'timelineEvent', 'foreshadowing', 'continuityRule', 'relationshipState']
 const currentRollupReason = 'current_memory_rollup'
+const explicitMemoryRevisions = ['author_edit', 'memory_save', 'memory_rename', 'memory_title_restore']
 
 function memoryRollup(memory: MemoryIdentity) {
   if (memory.memoryType === 'storyBible' && memory.title === storyBibleTitle) return 'bible'
@@ -251,7 +254,7 @@ async function supersedeMemoryVersions(db: Prisma.TransactionClient, memory: { i
 // their own identity rather than sharing that single graph node.
 async function syncCharacterProfileGraph(db: Prisma.TransactionClient, memory: {
   novelId: string; memoryType: ProjectMemoryType; identityKey: string | null; title: string; content: string; status: StoryMemoryStatus; aliases: string[]
-}, sourceId: string, previousTitle?: string) {
+}, sourceId: string, previousTitle?: string, discardPreviousName = false) {
   if (memory.memoryType !== 'characterCard' || memory.identityKey || memory.title.length > 128) return
   const key = { novelId: memory.novelId, entityType: 'character', canonicalName: memory.title }
   const where = { novelId_entityType_canonicalName: key }
@@ -259,16 +262,22 @@ async function syncCharacterProfileGraph(db: Prisma.TransactionClient, memory: {
   let entity = await db.storyEntity.findUnique({ where })
   if (previousTitle && memory.title !== previousTitle) {
     const prior = await db.storyEntity.findUnique({ where: { novelId_entityType_canonicalName: { ...key, canonicalName: previousTitle } } })
+    if (discardPreviousName && prior && entity) {
+      throw new DataAccessError(409, 'MEMORY_TITLE_CONFLICT', '关系网已有两个独立的人物，无法确认原名归属，未纠正。')
+    }
     if (prior && !entity) entity = prior
     else if (prior) await db.storyEntity.update({ where: { id: prior.id }, data: { status: 'superseded' } })
   }
   entity = entity ? await db.storyEntity.update({ where: { id: entity.id }, data: { canonicalName: memory.title, ...data } })
     : await db.storyEntity.upsert({ where, create: { ...key, ...data }, update: data })
+  if (discardPreviousName && previousTitle) {
+    await db.entityAlias.deleteMany({ where: { entityId: entity.id, alias: previousTitle } })
+  }
   const aliases = [...new Set([memory.title, ...memory.aliases])].filter(alias => alias.length <= 128)
   await db.entityAlias.createMany({ data: aliases.map(alias => ({ entityId: entity.id, alias, sourceId })), skipDuplicates: true })
 }
 
-export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Prisma.TransactionClient): Promise<{ id: string; action: 'created' | 'updated'; status: StoryMemoryStatus }> {
+export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Prisma.TransactionClient): Promise<{ id: string; title: string; action: 'created' | 'updated'; status: StoryMemoryStatus }> {
   if (!transaction) return prisma.$transaction(tx => saveStoryMemory(input, tx))
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
@@ -311,8 +320,33 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
     } }, select: { id: true } })
     if (reserved) throw new DataAccessError(409, 'MEMORY_TITLE_CONFLICT', '此身份标识已属于另一张档案。')
   }
-  // Resolving an alias finds the original profile. Only an explicit ID can rename it.
-  if (profile && existing && !input.memoryId && existing.aliases.includes(title)) title = existing.title
+  const sectionUpdate = existing && input.section !== undefined
+  const restoring = existing && input.restoreTitle && input.restoreTitle !== existing.title
+  if (restoring) {
+    const [latest, deliberateEdit] = await Promise.all([
+      db.memoryRevision.findFirst({ where: { memoryId: existing.id },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { reason: true } }),
+      db.memoryRevision.findFirst({ where: { memoryId: existing.id,
+        reason: { in: ['author_edit', 'memory_rename', 'memory_title_restore'] } }, select: { id: true } }),
+    ])
+    // Legacy revisions store content without tying an author edit to a name.
+    // A later section save can reset card status while the author edit still applies.
+    if (!profile || !existing.profileTracked || existing.status === 'confirmed' || existing.reviewStatus === 'accepted'
+      || latest?.reason !== 'memory_save' || deliberateEdit) {
+      throw new DataAccessError(409, 'MEMORY_TITLE_CONFLICT', '无法确认当前卡名来自误写，请在记忆中核对名称历史。')
+    }
+    const names = [input.restoreTitle!, existing.title]
+    const conflict = await db.projectMemoryEntry.findFirst({ where: { AND: [current, {
+      id: { not: existing.id }, memoryType: existing.memoryType, OR: [{ title: { in: names } }, { aliases: { hasSome: names } }],
+    }] }, select: { id: true } })
+    if (conflict) throw new DataAccessError(409, 'MEMORY_TITLE_CONFLICT', '名称还指向其他档案，未纠正当前卡名。')
+  }
+  // A section addresses content on an existing card. A supplied title can be
+  // a lookup term or an older tool's first-line fallback, never a rename.
+  if (existing) {
+    if (input.renameTo || input.restoreTitle) title = input.renameTo ?? input.restoreTitle!
+    else if (sectionUpdate || profile && !input.memoryId && existing.aliases.includes(title)) title = existing.title
+  }
   if (input.memoryType === 'chapterSummary' && existing?.sourceChapterId && input.sourceChapterId && existing.sourceChapterId !== input.sourceChapterId) {
     throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '该摘要属于其他章节，请使用来源章节对应的卡片 ID。')
   }
@@ -323,40 +357,45 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
   const deleted = await db.projectMemoryEntry.findFirst({
     where: { ...deletedMemoryWhere(input.novelId), OR: [memoryIdentityWhere(identity), ...(existing ? [memoryIdentityWhere(existing)] : []),
       ...(profile && !existing && !input.identityKey ? [{ memoryType: input.memoryType, OR: [{ title }, { aliases: { has: title } }] }] : [])] },
-    select: { id: true },
+    select: { id: true, title: true },
   })
   if (deleted) {
-    if (input.systemDerived) return { id: deleted.id, action: 'updated', status: 'invalid' }
+    if (input.systemDerived) return { id: deleted.id, title: deleted.title, action: 'updated', status: 'invalid' }
     throw new DataAccessError(409, 'MEMORY_DELETED', '作者已删除此记忆，不会自动重建。')
   }
-  if (existing && existing.title !== title && !identity.identityKey) {
+  if (existing && existing.title !== title && !identity.identityKey && !restoring) {
     const destination = await findMemoryTarget(db, { ...identity, novelId: input.novelId }, current)
     if (destination && destination.id !== existing.id) {
       throw new DataAccessError(409, 'MEMORY_TITLE_CONFLICT', '已有同类型同标题的记忆，请使用新的标题。')
     }
   }
   if (existing && input.systemDerived && !(profile && input.section)) {
-    const explicit = await db.memoryRevision.findFirst({ where: { memoryId: existing.id, reason: { in: ['author_edit', 'memory_save'] } } })
+    const explicit = await db.memoryRevision.findFirst({ where: { memoryId: existing.id, reason: { in: explicitMemoryRevisions } } })
     const excerpt = input.memoryType === 'chapterSummary' && title === `章节:${input.sourceChapterId}`
     const covered = excerpt && await db.memoryEvidence.findFirst({ where: {
       memoryId: existing.id, sourceType: 'chapter', sourceId: input.evidence.sourceId, revision: input.evidence.revision,
     } })
-    if (explicit || covered) return { id: existing.id, action: 'updated', status: existing.status }
+    if (explicit || covered) return { id: existing.id, title: existing.title, action: 'updated', status: existing.status }
   }
   if (input.knownBy?.length) {
     const ids = [...new Set(input.knownBy)]
     const valid = await db.projectMemoryEntry.count({ where: { AND: [current, { memoryType: 'characterCard', id: { in: ids } }] } })
     if (valid !== ids.length) throw new DataAccessError(409, 'MEMORY_TARGET_MISSING', '知情人物档案已删除或不属于当前作品。')
   }
+  const validAliases = restoring ? input.aliases?.filter(alias => alias.trim() !== existing.title) : input.aliases
   const prepared = tracksSections ? await prepareProfileUpdate(db, input.novelId, existing, {
-    ...input, title, content, sourceChapterId: input.sourceChapterId ?? (input.evidence.sourceType === 'chapter' ? input.evidence.sourceId : null),
+    ...input, aliases: validAliases, restoreTitle: restoring ? input.restoreTitle : undefined,
+    title: restoring || sectionUpdate && !input.renameTo && input.title.trim() !== title ? undefined : title,
+    content, sourceChapterId: input.sourceChapterId ?? (input.evidence.sourceType === 'chapter' ? input.evidence.sourceId : null),
     manual: input.explicitSave || input.evidence.sourceType === 'author_input',
     // Older storyArc calls without section explicitly replaced the whole card.
     mergeSections: profile && !storyArc && input.explicitSave === true,
   }) : undefined
   if (prepared) { content = prepared.content; title = prepared.title ?? title }
-  const aliases = profile ? [...new Set([...(existing?.aliases ?? []), ...(input.aliases ?? []).map(a => a.trim()),
-    ...(existing && existing.title !== title ? [existing.title] : []), input.title.trim()])].filter(a => a && a !== title) : undefined
+  const aliases = profile ? [...new Set([...(existing?.aliases ?? []), ...(validAliases ?? []).map(a => a.trim()),
+    ...(existing && existing.title !== title && !restoring ? [existing.title] : []),
+    ...(!sectionUpdate && !input.renameTo && !input.restoreTitle ? [input.title.trim()] : []),
+  ])].filter(alias => alias && alias !== title && !(restoring && alias === existing.title)) : undefined
   const status = input.status === 'conflicted' ? 'inferred' : input.status
   const graphProposal = input.graphProposal ? { title, content, proposal: memoryGraphProposalSchema.parse(input.graphProposal) } : undefined
   const data = {
@@ -373,13 +412,15 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
     || existing.layer !== input.layer || existing.status === 'inferred' && status === 'confirmed'
     || input.explicitSave && existing.runId !== null && existing.runId !== input.runId
     || !!graphProposal && !isDeepStrictEqual(existing.graphProposal, JSON.parse(JSON.stringify(graphProposal)))
-  const auditReason = input.explicitSave ? 'memory_save' : rebuildingRollup ? currentRollupReason : null
+  const auditReason = restoring ? 'memory_title_restore'
+    : input.renameTo && textChanged && existing?.title !== title ? 'memory_rename'
+      : input.explicitSave ? 'memory_save' : rebuildingRollup ? currentRollupReason : null
   if (existing && !changed) {
     await addEvidence(existing.id, input.evidence, db)
     if (auditReason && !await db.memoryRevision.findFirst({ where: { memoryId: existing.id, reason: auditReason } })) {
       await db.memoryRevision.create({ data: { memoryId: existing.id, before: existing.content, after: content, reason: auditReason } })
     }
-    return { id: existing.id, action: 'updated', status: existing.status }
+    return { id: existing.id, title: existing.title, action: 'updated', status: existing.status }
   }
   if (existing && !input.systemDerived) await invalidateDerivedMemory(db, input.novelId, existing.id)
   const saved = existing
@@ -398,8 +439,8 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
     await projectReviewedMemoryGraph(db, saved, existing?.title)
   }
   if (existing) await supersedeMemoryVersions(db, existing)
-  if (!input.systemDerived) await syncCharacterProfileGraph(db, saved, input.evidence.sourceId, existing?.title)
-  return { id: saved.id, action: existing ? 'updated' : 'created', status: saved.status }
+  if (!input.systemDerived) await syncCharacterProfileGraph(db, saved, input.evidence.sourceId, existing?.title, Boolean(restoring))
+  return { id: saved.id, title: saved.title, action: existing ? 'updated' : 'created', status: saved.status }
 }
 
 export async function searchStoryMemory(input: StoryRecallScope & {
@@ -1211,11 +1252,12 @@ async function cardChapterSources(novelId: string, rows: Array<{ id: string; tit
 }
 
 /** 创作记忆卡片列表（记忆中心可视化用）：只返回生效中的卡片，按更新时间倒序分页 */
-export async function listStoryMemories(userId: string, novelId: string, input: { memoryType?: ProjectMemoryType; title?: string; query?: string; page: number; pageSize: number }) {
+export async function listStoryMemories(userId: string, novelId: string, input: { memoryType?: ProjectMemoryType; memoryId?: string; title?: string; query?: string; page: number; pageSize: number }) {
   const novel = await prisma.novel.findFirst({ where: { id: novelId, authorId: userId }, select: { id: true } })
   if (!novel) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或无权查看记忆。')
   const currentMemories = await currentStoryMemoryWhere(prisma, novelId)
   const filters: Prisma.ProjectMemoryEntryWhereInput[] = []
+  if (input.memoryId) filters.push({ id: input.memoryId })
   if (input.title !== undefined) {
     const chapterId = /^(?:章节|chapter)[:：]\s*(.+)$/i.exec(input.title)?.[1].trim()
     filters.push({ OR: [

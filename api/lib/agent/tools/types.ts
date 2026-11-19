@@ -17,6 +17,10 @@ import type { RunLeaseToken } from '../runtime-lease.js'
 
 /** 工具执行上下文：身份与作用域由服务端注入，绝不信任模型给出的 ID */
 export type ToolContext = {
+  /** Exact public question supplied separately by the authenticated author. */
+  publicWebSearchQuestion?: string
+  /** A verified server step must preserve a sent but unobserved Search. */
+  platformWebVerification?: true
   /** Main legacy executor only; absent for children, durable and non-native calls. */
   respondTask?: (answer: string) => Promise<import('../task-response.js').TaskResponse>
   /** Successful direct renames before message persistence. Only the main legacy

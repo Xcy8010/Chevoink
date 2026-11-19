@@ -4,7 +4,8 @@ import { parsePublicHttpUrl, readBoundedPublicBody } from './public-http.js'
 import { getToolModelRuntime, ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
 import { requestWebTool, webToolEndpoint, resolveWebToolProtocol } from './web-tool-provider.js'
 import { parseHTML } from 'linkedom'
-import { evaluateResearchSearchCandidates, evaluateResearchNavigationCandidates, searchQueryHash, type ResearchSearchEvaluation, type ResearchSearchTarget } from './research-search-quality.js'
+import { evaluateResearchSearchCandidates, evaluateResearchNavigationCandidates, rankResearchSearchResults, searchQueryHash, type ResearchSearchEvaluation, type ResearchSearchTarget } from './research-search-quality.js'
+import { searchAuthoritySchema, searchPublicationDateSchema, searchRerankScoreSchema, WEB_SEARCH_SNIPPET_CHARS, WEB_SEARCH_SUMMARY_CHARS, type WebSearchResult } from './web-search-result.js'
 
 export { evaluateResearchSearchCandidates } from './research-search-quality.js'
 export type { ResearchSearchEvaluation, ResearchSearchTarget } from './research-search-quality.js'
@@ -17,17 +18,13 @@ export type { ResearchSearchEvaluation, ResearchSearchTarget } from './research-
  * 域名硬编码在服务层，模型只传 query，无 SSRF 面。
  */
 
-export type WebSearchResult = {
-  title: string
-  url: string
-  snippet: string
-  /** 来源域名（前端卡片右侧展示） */
-  source: string
-}
+export type { WebSearchResult } from './web-search-result.js'
 
 export type WebSearchOutcome = {
   provider: 'bocha' | 'deepseek' | 'sogou' | 'bing'
   results: WebSearchResult[]
+  /** Dispatch-time scope for matching equivalent queries after recovery. */
+  contextKey?: string
   attempts?: SearchAttempt[]
   quality?: ResearchSearchEvaluation
   /** Supplementary navigation retains its actual engine; result/fee owner stays unchanged. */
@@ -110,10 +107,12 @@ export function assertWebSearchConfiguration(configured: ToolModelRuntime | null
     (!query.trim() || [...query].length > 128)) throw new WebSearchError('WEB_SEARCH_QUERY_INVALID')
 }
 
-const SNIPPET_MAX = 300
 export const deepseekSearchSchema = z.object({ results: z.array(z.object({
   title: z.string(), url: z.string(), snippet: z.string(), summary: z.string(), content: z.string(),
   site_name: z.string().nullable().optional(),
+  rerank_score: searchRerankScoreSchema.optional().catch(undefined),
+  authority: searchAuthoritySchema.optional().catch(undefined),
+  date: searchPublicationDateSchema.nullish().catch(undefined),
 })).max(50) })
 export const bochaResponseSchema = z.object({
   code: z.literal(200),
@@ -151,7 +150,14 @@ function stripTags(text: string): string {
 }
 
 function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text
+}
+
+function searchDescriptions(snippet: string, summary = '') {
+  const cleanSnippet = stripTags(snippet), cleanSummary = stripTags(summary)
+  const short = truncate(cleanSnippet || cleanSummary, WEB_SEARCH_SNIPPET_CHARS)
+  const long = truncate(cleanSummary || cleanSnippet, WEB_SEARCH_SUMMARY_CHARS)
+  return { snippet: short, ...(long !== short ? { summary: long } : {}) }
 }
 
 function hostOf(url: string): string {
@@ -216,7 +222,7 @@ async function searchBocha(query: string, maxResults: number, signal: AbortSigna
       .map((item) => ({
         title: stripTags(item.name ?? ''),
         url: item.url ?? '',
-        snippet: truncate(stripTags(item.summary || item.snippet || ''), SNIPPET_MAX),
+        ...searchDescriptions(item.snippet ?? '', item.summary ?? ''),
         source: item.siteName || hostOf(item.url ?? ''),
       })), maxResults)
     if (values.length && !results.length) throw new WebSearchError('博查未返回可用的公开来源')
@@ -224,9 +230,9 @@ async function searchBocha(query: string, maxResults: number, signal: AbortSigna
   } finally { await request.close() }
 }
 
-async function searchDeepSeek(query: string, maxResults: number, signal: AbortSignal, configured: ToolModelRuntime, metadata: AttemptResponse): Promise<WebSearchResult[]> {
+async function searchDeepSeek(query: string, maxResults: number, signal: AbortSignal, configured: ToolModelRuntime, metadata: AttemptResponse, originalQuestion?: string): Promise<WebSearchResult[]> {
   const request = await requestWebTool(webToolEndpoint(configured, 'search'), configured.apiKey,
-    { query, count: maxResults, need_content: false }, signal)
+    { query, count: maxResults, need_content: false, ...(originalQuestion ? { ori_question: originalQuestion } : {}) }, signal)
   try {
     const { response } = request
     captureSearchResponse(response, metadata)
@@ -240,8 +246,13 @@ async function searchDeepSeek(query: string, maxResults: number, signal: AbortSi
     if (!payload.success) throw new WebSearchError('DEEPSEEK_SEARCH_PROTOCOL_ERROR')
     // Keep the original count until publicResults runs: unsafe-only results are
     // a failed contract, never evidence of a genuinely empty search.
-    return payload.data.results.map(item => ({ title: stripTags(item.title), url: item.url,
-      snippet: truncate(stripTags(item.summary || item.snippet), SNIPPET_MAX), source: item.site_name || hostOf(item.url) }))
+    return payload.data.results.map(item => ({
+      title: truncate(stripTags(item.title), 300), url: item.url, source: truncate(item.site_name || hostOf(item.url), 300),
+      ...searchDescriptions(item.snippet, item.summary),
+      ...(item.rerank_score === undefined ? {} : { rerankScore: item.rerank_score }),
+      ...(item.authority === undefined ? {} : { authority: item.authority }),
+      ...(item.date ? { publishedAt: new Date(item.date).toISOString() } : {}),
+    }))
   } finally { await request.close() }
 }
 
@@ -289,7 +300,7 @@ async function searchSogou(query: string, maxResults: number, signal: AbortSigna
     }
     if (!href) continue
     const snippet = block.querySelector('.str-text,.text-layout,.space-txt,p')?.textContent?.replace(/\s+/gu, ' ').trim() ?? ''
-    results.push({ title, url: href, snippet: truncate(snippet, SNIPPET_MAX), source: hostOf(href) })
+    results.push({ title, url: href, snippet: truncate(snippet, WEB_SEARCH_SNIPPET_CHARS), source: hostOf(href) })
   }
 
   if (metadata.queryHash) metadata.parseCode = results.length ? 'SOGOU_RESULTS_PARSED' : blocks.length ? 'SOGOU_NO_USABLE_LINKS' : 'SOGOU_NO_RESULT_BLOCKS'
@@ -347,7 +358,7 @@ async function searchBing(query: string, maxResults: number, signal: AbortSignal
     results.push({
       title: picked.title,
       url: picked.href,
-      snippet: truncate(stripTags(snippetMatch?.[1] ?? ''), SNIPPET_MAX),
+      snippet: truncate(stripTags(snippetMatch?.[1] ?? ''), WEB_SEARCH_SNIPPET_CHARS),
       source: hostOf(picked.href),
     })
   }
@@ -372,6 +383,8 @@ export async function searchWeb(
   expectedTarget?: ResearchSearchTarget,
   navigationPolicy?: { version: 1; sourceSites?: readonly string[]; alternativeAvailable?: boolean },
   durable?: { stopOnUnknown: true },
+  /** Supplied only by the server from an author-approved public question. */
+  originalQuestion?: string,
 ): Promise<WebSearchOutcome> {
   if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 8) {
     throw new WebSearchError('搜索结果数量必须为 1–8')
@@ -401,19 +414,19 @@ export async function searchWeb(
       // A slow provider must leave time for fallback; all attempts still share the overall deadline.
       const local = withTimeout(merged, Math.max(1, Math.floor(env.webSearchTimeoutMs / 2)))
       try {
-        const raw = provider === 'deepseek' ? await searchDeepSeek(query, maxResults, local.signal, configured!, metadata)
+        const raw = provider === 'deepseek' ? await searchDeepSeek(query, maxResults, local.signal, configured!, metadata, originalQuestion)
           : provider === 'bocha' ? await searchBocha(query, maxResults, local.signal, configured, metadata)
           : provider === 'sogou' ? await searchSogou(query, maxResults, local.signal, metadata)
             : await searchBing(query, maxResults, local.signal, metadata)
         local.signal.throwIfAborted()
-        const results = publicResults(raw, maxResults)
+        const results = rankResearchSearchResults(query, publicResults(raw, raw.length), expectedTarget).slice(0, maxResults)
         if (raw.length && !results.length) {
           if (constrained) metadata.parseCode = 'PUBLIC_SOURCE_FILTER_REJECTED'
           throw new WebSearchError('搜索未返回可用的公开来源')
         }
         const quality = constrained ? evaluateResearchSearchCandidates(query, results, expectedTarget) : undefined
         const hints = navigationPolicy ? evaluateResearchNavigationCandidates(results, expectedTarget, navigationPolicy.sourceSites, navigationPolicy.alternativeAvailable).slice(0, 2)
-          .map(({ title, url, snippet, source }) => ({ title, url, snippet, source })) : []
+          .map(({ index }) => results[index]) : []
         if (hints.length > (navigation?.results.length ?? 0)) navigation = { provider, results: hints }
         attempts.push({ provider, outcome: results.length ? 'results' : 'empty', durationMs: Date.now() - started, ...metadata,
           ...(quality ? { resultCount: results.length, eligibleCount: quality.eligibleCount,

@@ -79,6 +79,7 @@ export type ModelCapabilities = {
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
   reasoningParameterMode?: 'native' | 'omit'
   toolCallingProtocol?: ToolCallingProtocol
+  toolsUnsupported?: true
   reasoningEfforts: ModelReasoningEffort[]
   defaultReasoningEffort: ModelReasoningEffort
   visionEnabled: boolean
@@ -111,6 +112,7 @@ export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undef
       ? { reasoningParameterMode: record.reasoningParameterMode } : {}),
     ...(record.toolCallingProtocol === 'responses' && validation.protocol === 'responses' && validation.tools === 'verified'
       ? { toolCallingProtocol: record.toolCallingProtocol } : {}),
+    ...(validation.version === 1 && validation.text === 'verified' && validation.tools === 'unsupported' ? { toolsUnsupported: true as const } : {}),
     reasoningEfforts,
     defaultReasoningEffort: reasoningEfforts.includes(configuredDefault) ? configuredDefault : reasoningEfforts[0] ?? 'high',
     visionEnabled: record.visionEnabled === true,
@@ -706,6 +708,7 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
   reasoningParameterMode?: 'native' | 'omit'
   tier: CreditModelTier
   toolCallingProtocol?: ToolCallingProtocol
+  toolsUnsupported?: true
   tokenPrice?: TokenPrice
   freePromotion?: import('../../shared/model-promotion.js').ModelPromotion | null
   multiplierBps: number

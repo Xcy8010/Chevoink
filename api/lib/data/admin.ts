@@ -19,7 +19,8 @@ import type {
   AgentMessagePart,
   Pagination,
 } from '../../../shared/contracts/index.js'
-import { projectAgentAuthorParts, projectAgentToolSummary } from '../../../shared/agent-author-view.js'
+import { projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../shared/agent-author-view.js'
+import { activityAttemptKey } from '../../../shared/agent-activity-receipts.js'
 import { publicReviewExecution } from '../../../shared/review-lifecycle.js'
 import { loadMessageTimings } from '../agent/message-timing.js'
 import { loadServerRunNotices } from '../agent/events.js'
@@ -885,6 +886,7 @@ export async function getAdminAgentSessionMessagesData(
     loadMessageTimings(record.userId, record.id, runIds),
     loadServerRunNotices(record.userId, runIds),
   ]) : [new Map(), new Map()]
+  const replayAttempts = new Map<string, string>()
 
   return {
     session: {
@@ -918,7 +920,8 @@ export async function getAdminAgentSessionMessagesData(
         const timing = timings.get(run.id)
         return [{ ...base,
           parts: goalContinuation ? [] : role === 'assistant'
-            ? replayAuthorParts(parts, notices.has(message.id), run.runtimeProtocolVersion === 1 ? run.taskRoot?.status : undefined)
+            ? replayAuthorParts(parts, notices.has(message.id), run.runtimeProtocolVersion === 1 ? run.taskRoot?.status : undefined,
+              JSON.stringify([run.runtimeProtocolVersion === 1 ? run.taskRootId ?? run.id : run.id, goal?.goalId]), message.id, replayAttempts)
             : parts.filter(part => part.type === 'text' || part.type === 'attachment'),
           runTiming: timing,
           completedAt: role === 'assistant' ? timing?.completedAt ?? (run.status === 'completed' ? toIso(run.finishedAt) : null) : null,
@@ -933,16 +936,26 @@ export async function getAdminAgentSessionMessagesData(
   }
 }
 
-function replayAuthorParts(parts: AgentMessagePart[], serverNotice: boolean, taskStatus?: string): AgentMessagePart[] {
+function replayAuthorParts(parts: AgentMessagePart[], serverNotice: boolean, taskStatus: string | undefined,
+  scope: string, messageId: string, attempts: Map<string, string>): AgentMessagePart[] {
   return projectAgentAuthorParts(parts.flatMap((part): AgentMessagePart[] => {
     if (part.type === 'text') return serverNotice ? [] : [part]
+    if (part.type === 'activity-title' && typeof part.title === 'string') {
+      const title = projectAgentAuthorText(part.title).trim()
+      return title ? [{ type: 'activity-title', title }] : []
+    }
     if (part.type !== 'tool-call') return []
     const args = part.args && typeof part.args === 'object' ? part.args as Record<string, unknown> : {}
     const targets = Object.fromEntries(['chapterId', 'chapter_id', 'planId', 'volumeId'].flatMap(key =>
       typeof args[key] === 'string' ? [[key, args[key]]] : []))
     const stopped = part.status === 'running' && (taskStatus === 'paused' || taskStatus === 'completed')
+    const input = activityAttemptKey({ ...part, activityRetryId: undefined })
+    const key = input ? JSON.stringify([scope, input]) : undefined
+    const retryId = (key && attempts.get(key)) || JSON.stringify([messageId, part.subagentCallId ?? null, part.callId])
+    if (key) attempts.set(key, retryId)
     return [publicReviewExecution({ ...part,
       args: targets,
+      activityRetryId: retryId,
       snapshot: undefined,
       importWaiting: undefined,
       ...(part.display?.kind === 'exportReady' ? { display: { ...part.display, downloadUrl: '' } } : {}),

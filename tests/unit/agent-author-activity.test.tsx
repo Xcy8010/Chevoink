@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
 import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/studio/agent/components/AuthorActivityParts'
 import { activityAnswerText, activityWorkingLabel, projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
+import { restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 afterEach(cleanup)
 const title = '风从窗台进来'
@@ -21,12 +22,207 @@ const saved = (callId: string, toolName = 'chapter_write') => call(callId, toolN
   display: { kind: 'chapterDiff', chapterId: 'internal-chapter-id', chapterTitle: title, before: '原文。', after: '正文写好了。', appliedDirectly: true, revision: 5 },
 })
 
-function Transcript({ messages, active }: { messages: AgentUIMessage[]; active?: string }) {
+function Transcript({ messages, active, awaitingApprovalCallId }: { messages: AgentUIMessage[]; active?: string; awaitingApprovalCallId?: string }) {
   const projection = projectActivityGroups(messages)
   return <>{messages.map(item => <AuthorActivityParts key={item.id} messageId={item.id}
-    parts={item.parts} groups={projection.byMessage.get(item.id)} activeGroupId={active ? projection.runningByRun.get(active)?.id : undefined}
-    runActive={item.runId === active} activityChapterTitles={titles} />)}</>
+    parts={item.parts} groups={projection.byMessage.get(item.id)} activeGroupId={active ? projection.activeByRun.get(active)?.id : undefined}
+    runActive={(item.runTiming?.sourceRunId ?? item.runId) === active} activityChapterTitles={titles} awaitingApprovalCallId={awaitingApprovalCallId} />)}</>
 }
+
+const goalTitle = '核对老周的出场时间'
+const activity: AgentMessagePart = { type: 'activity-title', title: goalTitle }
+const completed = (messages: AgentUIMessage[]) => messages.map(item => ({ ...item, completedAt: '2026-11-19T16:31:00.000Z' }))
+
+it('keeps a titled progress row in place through three overlapping tools and a later turn, then completes with the reply intact', () => {
+  const first = call('search', 'project_search', { status: 'running' })
+  const second = call('card', 'memory_search', { status: 'running' })
+  const third = call('chapter', 'chapter_read', { status: 'running' })
+  const final = { type: 'text', text: '老周在第三章首次出场。' } as const
+  const asSuccess = (part: ActivityCall) => ({ ...part, status: 'success' as const })
+  const view = render(<Transcript active="r" messages={[message('batch', [activity, first, second, third])]} />)
+  const button = screen.getByRole('button', { name: `正在${goalTitle}` })
+  fireEvent.click(button)
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(3)
+  view.rerender(<Transcript active="r" messages={[message('batch', [activity, asSuccess(first), asSuccess(second), third])]} />)
+  expect(screen.getByRole('button', { name: `正在${goalTitle}`, expanded: true })).toBe(button)
+  view.rerender(<Transcript active="r" messages={[message('batch', [activity, asSuccess(first), asSuccess(second), asSuccess(third)]), message('follow-up', [])]} />)
+  expect(screen.getByRole('button', { name: `正在${goalTitle}`, expanded: true })).toBe(button)
+
+  const settled = completed([
+    message('batch', [activity, asSuccess(first), asSuccess(second), asSuccess(third)]),
+    message('follow-up', [call('check', 'chapter_list_summaries')]),
+    message('answer', [final]),
+  ])
+  view.rerender(<Transcript messages={settled} />)
+  expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(button)
+  expect(Array.from(view.container.querySelectorAll('[data-activity-tool]'), node => node.getAttribute('data-activity-tool')))
+    .toEqual(['project_search', 'memory_search', 'chapter_read', 'chapter_list_summaries'])
+  expect(screen.getByText(final.text)).toBeTruthy()
+  expect(activityAnswerText(settled.at(-1)!.parts)).toBe(final.text)
+  view.rerender(<Transcript key="refreshed" messages={JSON.parse(JSON.stringify(settled))} />)
+  expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: false })).toBeTruthy()
+  expect(screen.getByText(final.text)).toBeTruthy()
+})
+
+it('keeps a failed review in details until an actual current-version report exists for the same target', () => {
+  const chapterId = 'internal-chapter-id'
+  const review = (callId: string, id: string, revision: number, status: ActivityCall['status'] = 'success') => call(callId, 'continuity_validate', {
+    status, args: { chapterId: id }, reviewedChapter: { chapterId: id, revision },
+    ...(status === 'success' ? { reviewOutcome: 'decision_required' as const,
+      display: { kind: 'storyCompiler' as const, phase: 'repair' as const, title: '章节衔接复查', detail: '发现一处矛盾', items: ['需要核对原文'], errorCount: 1 } } : {}),
+  })
+  const failed = review('failed', chapterId, 4, 'failed')
+  const unrelated = review('other', 'other-chapter', 5)
+  const row = (calls: ActivityCall[]) => completed([message('review', [activity, failed, ...calls]), message('reply', [{ type: 'text', text: '出场时间仍有一处待核。' }])])
+  const view = render(<Transcript active="r" messages={[message('review', [activity, failed, unrelated])]} />)
+  expect(screen.getByRole('button', { name: `正在${goalTitle}` })).toBeTruthy()
+  expect(screen.queryByText('章节衔接复查未完成')).toBeNull()
+  view.rerender(<Transcript messages={row([unrelated])} />)
+  const button = screen.getByRole('button', { name: `${goalTitle}未完成` })
+  expect(screen.getByText('出场时间仍有一处待核。')).toBeTruthy()
+  fireEvent.click(button)
+  expect(screen.getByText('章节衔接复查未完成')).toBeTruthy()
+  view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4)])} />)
+  expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(button)
+  const currentDraft = call('current', 'chapter_read', { display: { kind: 'chapterRef', chapterId, title, wordCount: 300, revision: 5 } })
+  view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4), currentDraft])} />)
+  expect(screen.getByRole('button', { name: `${goalTitle}未完成`, expanded: true })).toBe(button)
+  view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4), saved('revision')])} />)
+  expect(screen.getByRole('button', { name: `${goalTitle}未完成`, expanded: true })).toBe(button)
+  expect(screen.getByText('章节衔接复查 · 正文有新改动')).toBeTruthy()
+  view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4), saved('revision'), review('verify', chapterId, 5)])} />)
+  expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(button)
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(5)
+})
+
+it.each([
+  ['memory_save', { memoryId: 'old-zhou', section: '当前处境', content: '合成处境' },
+    { memoryId: 'old-zhou', section: '关键经历', content: '合成经历' }],
+  ['chapter_edit_range', { chapterId: 'internal-chapter-id', oldText: '原文第一处。', newText: '改写第一处。' },
+    { chapterId: 'internal-chapter-id', oldText: '原文第二处。', newText: '改写第二处。' }],
+  ['continuity_validate', { chapterId: 'internal-chapter-id', focus: '出场时间' },
+    { chapterId: 'internal-chapter-id', focus: '人物是否知道这封信' }],
+] as const)('keeps a failed %s step unresolved after another successful step at the same object', (toolName, first, other) => {
+  const failed = call('failed', toolName, { status: 'failed', args: first })
+  const unrelated = call('unrelated', toolName, { args: other })
+  const finished = (calls: ActivityCall[]) => completed([message('batch', [activity, ...calls])])
+  const view = render(<Transcript messages={finished([failed, unrelated])} />)
+  const row = screen.getByRole('button', { name: `${goalTitle}未完成` })
+  fireEvent.click(row)
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(2)
+  const sameInput = Object.fromEntries(Object.entries(first).reverse())
+  view.rerender(<Transcript messages={finished([failed, unrelated, call('retry', toolName, { args: sameInput })])} />)
+  expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(row)
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(3)
+})
+
+it('preserves independently running work even when a second call with the same arguments succeeds', () => {
+  const running = call('pending', 'chapter_read', { status: 'running' })
+  const success = { ...running, callId: 'success', status: 'success' as const }
+  const records = [message('batch', [activity, running, success])]
+  const view = render(<Transcript active="r" messages={records} />)
+  const row = screen.getByRole('button', { name: `正在${goalTitle}` })
+  expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(1)
+  expect(projectActivityGroups(records).byMessage.get('batch')?.get('pending')?.unfinished).toBe(true)
+  view.rerender(<Transcript messages={completed(records)} />)
+  expect(screen.getByRole('button', { name: `${goalTitle}未完成` })).toBe(row)
+})
+
+it('keeps separate provider call IDs reused in different turns and their own subagent details', () => {
+  const first = call('call_0', 'subagent_run')
+  const second = call('call_0', 'subagent_run', { status: 'running' })
+  const childA = call('inner_0', 'project_search', { subagentCallId: 'call_0' })
+  const childB = call('inner_0', 'memory_search', { subagentCallId: 'call_0' })
+  const records = [message('one', [activity, first, childA]), message('two', [second, childB])]
+  const view = render(<Transcript active="r" messages={records} />)
+  const row = screen.getByRole('button', { name: `正在${goalTitle}` })
+  fireEvent.click(row)
+  expect(Array.from(view.container.querySelectorAll('[data-activity-tool]'), node => node.getAttribute('data-activity-tool')))
+    .toEqual(['subagent_run', 'project_search', 'subagent_run', 'memory_search'])
+  expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(1)
+  const settled = completed([records[0], message('two', [{ ...second, status: 'success' }, childB])])
+  view.rerender(<Transcript key="reloaded" messages={JSON.parse(JSON.stringify(settled))} />)
+  fireEvent.click(screen.getByRole('button', { name: `已${goalTitle}` }))
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(4)
+})
+
+it('renders a literal reserved line returned as an ordinary tool-free answer', () => {
+  const text = '<activity-title>保留原样 & 原文</activity-title>'
+  const parts = [{ type: 'text' as const, text }]
+  render(<Transcript messages={completed([message('answer', parts)])} />)
+  expect(screen.getByText(text)).toBeTruthy()
+  expect(activityAnswerText(parts)).toBe(text)
+})
+
+it('keeps the same activity while awaiting approval or an answer, and does not claim completion on cancellation', () => {
+  const pending = call('waiting', 'chapter_read', { status: 'running' })
+  const view = render(<Transcript active="r" awaitingApprovalCallId={pending.callId} messages={[message('a', [activity, pending])]} />)
+  const button = screen.getByRole('button', { name: `等待你确认 · ${goalTitle}` })
+  expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(0)
+  const question = call('question', 'ask_user', { status: 'running' })
+  view.rerender(<Transcript active="r" messages={[message('a', [activity, { ...pending, status: 'success' }]), message('b', [question])]} />)
+  expect(screen.getByRole('button', { name: `等待你回答 · ${goalTitle}` })).toBe(button)
+  view.rerender(<Transcript messages={[message('a', [activity, { ...pending, status: 'success' }]), message('b', [{ ...question, status: 'failed' }])]} />)
+  expect(screen.getByRole('button', { name: `${goalTitle}未完成` })).toBe(button)
+  expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(0)
+})
+
+it('projects the same title and receipt after a stream disconnect and a fresh history load', () => {
+  const store = useAgentStore.getState()
+  const runId = 'reconnection'
+  const base = { runId, messageId: 'original', ts: '2026-11-19T16:35:00.000Z' }
+  try {
+    store.resetRun()
+    store.beginRun(runId, '核对人物', 'session')
+    const apply = store.applyEvent
+    act(() => {
+      apply({ ...base, seq: 1, type: 'message.start', role: 'assistant' })
+      apply({ ...base, seq: 2, type: 'activity.title', title: goalTitle })
+      apply({ ...base, seq: 3, type: 'tool.call', callId: 'read', toolName: 'continuity_validate', title: '检查', args: { compilationId: 'draft' } })
+    })
+    const snapshot = JSON.parse(JSON.stringify(useAgentStore.getState().messages))
+    const view = render(<Transcript active={runId} messages={snapshot} />)
+    const activeRow = screen.getByRole('button', { name: `正在${goalTitle}` })
+    act(() => {
+      restoreActiveRunHistory(snapshot, runId, 'session')
+      apply({ ...base, seq: 2, type: 'activity.title', title: goalTitle })
+      apply({ ...base, seq: 3, type: 'tool.call', callId: 'read', toolName: 'continuity_validate', title: '检查', args: { compilationId: 'draft' } })
+      apply({ ...base, seq: 4, type: 'tool.result', callId: 'read', toolName: 'continuity_validate', ok: true,
+        summary: '连续性检查完成', durationMs: 25, reviewedChapter: { chapterId: 'internal-chapter-id', revision: 7 } })
+      apply({ ...base, messageId: 'answer', seq: 5, type: 'text.final', text: '老周先收到电报。', asReasoning: false })
+      apply({ ...base, seq: 6, type: 'run.finished', status: 'succeeded', artifacts: [], outputSummary: '',
+        usage: { completionTokens: 10, promptTokens: 20, totalTokens: 30 } })
+    })
+    const history = JSON.parse(JSON.stringify(useAgentStore.getState().messages)) as AgentUIMessage[]
+    view.rerender(<Transcript messages={history} />)
+    expect(screen.getByRole('button', { name: `已${goalTitle}` })).toBe(activeRow)
+    const parts = history.find(item => item.id === base.messageId)?.parts ?? []
+    expect(parts.filter(part => part.type === 'activity-title')).toEqual([activity])
+    expect(parts.filter(part => part.type === 'tool-call')).toEqual([expect.objectContaining({
+      status: 'success', callId: 'read', args: { compilationId: 'draft' }, reviewedChapter: { chapterId: 'internal-chapter-id', revision: 7 },
+    })])
+    expect(screen.getByText('老周先收到电报。')).toBeTruthy()
+  } finally {
+    act(() => store.resetRun())
+  }
+})
+
+it('keeps a resumed durable goal together and gives a separate request its own row even with the same title', () => {
+  const runTiming = { scopeId: 'root:root-one', sourceRunId: 'resumed', elapsedMs: 120, activeSince: null, status: 'running' as const, lastSeq: 3 }
+  const before = { ...message('original', [activity, call('one', 'chapter_read')], 'original-run'), runTiming }
+  const continued = { ...message('continued', [call('two', 'memory_search')], 'resumed'), runTiming }
+  const user = { id: 'request', runId: 'resumed', role: 'user' as const, parts: [{ type: 'text' as const, text: '现在按修改过的正文再核对一次。' }], createdAt: '', runTiming }
+  const next = { ...message('next', [activity, call('three', 'project_search', { status: 'running' })], 'resumed'), runTiming }
+  const view = render(<Transcript active="resumed" messages={[before, continued]} />)
+  const previous = screen.getByRole('button', { name: `正在${goalTitle}` })
+  fireEvent.click(previous)
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(2)
+  view.rerender(<Transcript active="resumed" messages={[before, continued, user, next]} />)
+  expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(previous)
+  expect(screen.getByRole('button', { name: `正在${goalTitle}` })).not.toBe(previous)
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(2)
+})
 
 it('upgrades one focused disclosure from preparation to persisted write, without showing thought or parameters', () => {
   const preview = call('write', 'chapter_write', { status: 'running', preparing: true, args: null })
@@ -47,11 +243,12 @@ it('upgrades one focused disclosure from preparation to persisted write, without
 
 it('preserves only the latest terminal status in the headline and the failed attempt in details', () => {
   const failureReceipt = '这批修改未保存，第 3 处未找到对应原文'
-  const failed = call('failed', 'chapter_edit_range', { status: 'failed', summary: failureReceipt })
+  const args = { chapterId: 'internal-chapter-id', oldText: '原文。', newText: '正文写好了。' }
+  const failed = call('failed', 'chapter_edit_range', { status: 'failed', args, summary: failureReceipt })
   const view = render(<Transcript messages={[message('a', [failed])]} />)
   const toggle = screen.getByRole('button', { name: `《${title}》正文修改未保存` })
   fireEvent.click(toggle)
-  view.rerender(<Transcript messages={[message('a', [failed]), message('b', [reasoning, saved('retry', 'chapter_edit_range')])]} />)
+  view.rerender(<Transcript messages={[message('a', [failed]), message('b', [reasoning, { ...saved('retry', 'chapter_edit_range'), args }])]} />)
   const group = view.container.querySelector('[data-author-activity]')!
   expect(within(group as HTMLElement).getByRole('button', { name: '已完成修改', expanded: true })).toBe(toggle)
   expect(within(group as HTMLElement).getByText(failureReceipt)).toBeTruthy()
@@ -70,7 +267,7 @@ it('groups a 49-call timeline through replay, preserving author-facing paragraph
   const messages = actions.map((part, i) => message(`m${i}`, i === 24
     ? [{ type: 'text', text: '初稿写好了。我现在核对人物前后的行动。' }, reasoning, part]
     : [reasoning, part]))
-  const replayed = [...messages, message('replay', [{ ...actions[0], status: 'running', preparing: true }])]
+  const replayed = [{ ...messages[0], parts: [...messages[0].parts, { ...actions[0], status: 'running' as const, preparing: true }] }, ...messages.slice(1)]
   const view = render(<Transcript messages={messages} />)
   const summary = () => Array.from(view.container.querySelectorAll('[data-author-activity] > button'), button => button.textContent)
   expect(summary()).toHaveLength(5)
@@ -307,22 +504,21 @@ it('shows elapsed processing time and folds the completed process without hiding
   expect(screen.getByText('这是最终回复。')).toBeTruthy()
 })
 
-it('uses visible prose first, with short milestone and saved-result fallbacks for a silent outline', () => {
+it('keeps an actual saved result on silent legacy outlines without inserting transition prose', () => {
   const plan = call('plan', 'plan_save', {
     display: { kind: 'planFile', artifactId: 'INTERNAL_PLAN', title: '第四章细纲', content: '合成细纲。' },
   })
   const read = message('read', [reasoning, call('read', 'plan_read')])
   const outline = message('outline', [plan])
   const silent = projectActivityGroups([read, outline])
-  expect(silent.openingByRun.get('r')).toBe('我会先核对与这次任务有关的资料。')
-  expect(silent.byMessage.get('outline')?.get('plan')?.transition).toMatch(/接下来整理创作计划/)
+  const view = render(<Transcript messages={[read, outline]} />)
+  expect(view.container.querySelector('[data-author-progress]')).toBeNull()
   expect(silent.savedReplyByRun.get('r')).toBe('已完成《第四章细纲》的更新。')
 
   const prose: AgentMessagePart = { type: 'text', text: '我会让第四章承接上一章的来访。' }
   const final: AgentMessagePart = { type: 'text', text: '细纲保留了来访者未说明的目的。' }
   const narrated = projectActivityGroups([message('read', [prose, ...read.parts]), message('outline', [prose, plan, final])])
-  expect(narrated.openingByRun.get('r')).toBeNull()
-  expect(narrated.byMessage.get('outline')?.get('plan')?.transition).toBeUndefined()
+  expect(narrated.authorSpokeByRun.has('r')).toBe(true)
   expect(activityAnswerText([prose, plan, final])).toBe(final.text)
   expect(activityAnswerText([prose, plan])).toBe('')
   expect(projectActivityGroups([message('failed', [{ ...plan, status: 'failed' }])]).savedReplyByRun.has('r')).toBe(false)

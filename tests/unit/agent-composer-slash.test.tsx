@@ -56,7 +56,7 @@ describe('composer slash menu', () => {
     const view = render(<AgentComposer {...input} />)
     typeDraft('/')
     const slashLabels = within(card()).getAllByRole('option').map(item => item.textContent)
-    expect(slashLabels.map(label => label?.replace(/PNG.*|PDF.*|查看.*|点选.*|选择后.*|不选时.*/g, ''))).toEqual(['上传图片', '上传文件', '样章学习与写作风格', '目标', '引用作品内容', '指定子 Agent', '技能'])
+    expect(slashLabels.map(label => label?.replace(/PNG.*|PDF.*|查看.*|点选.*|选择后.*|不选时.*/g, ''))).toEqual(['上传图片', '上传文件', '联网查证', '样章学习与写作风格', '目标', '引用作品内容', '指定子 Agent', '技能'])
     expect(card().className).toContain('left-0 right-0')
     expect(card().className).toContain('bottom-full')
     expect(card().className).toContain('60dvh')
@@ -78,6 +78,21 @@ describe('composer slash menu', () => {
     expect(screen.queryByRole('listbox')).toBeNull()
     expect(useAgentStore.getState().composerDraft).toBe(text)
     expect(input.onSend).not.toHaveBeenCalled()
+  })
+
+  it('sends the separate public query only on the current opted-in message', async () => {
+    const input = props()
+    const view = render(<AgentComposer {...input} />)
+    typeDraft('/联网查证')
+    choose('联网查证')
+    fireEvent.change(screen.getByRole('textbox', { name: '公开检索词' }), { target: { value: '月港 公告 生效日期' } })
+    view.rerender(<AgentComposer {...input} voiceScopeKey="slash:n1:other" />)
+    expect(screen.queryByRole('textbox', { name: '公开检索词' })).toBeNull()
+    view.rerender(<AgentComposer {...input} />)
+    typeDraft('核对日期，并保留未公开稿件上下文。')
+    await act(async () => { fireEvent.keyDown(editor(), { key: 'Enter' }) })
+    expect(input.onSend).toHaveBeenCalledExactlyOnceWith('核对日期，并保留未公开稿件上下文。', [], 'balanced', 'premium', [], undefined, '月港 公告 生效日期')
+    expect(screen.queryByRole('textbox', { name: '公开检索词' })).toBeNull()
   })
 
   it.each([

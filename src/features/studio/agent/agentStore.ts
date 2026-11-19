@@ -1,6 +1,7 @@
 import { publicAgentProgressEvent } from '../../../../shared/agent-progress.js'
 import { create } from 'zustand'
 import { appendAgentFinalTextAfterTools, createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
+import { prependAgentActivityTitle } from '../../../../shared/agent-activity-title.js'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 import { advanceRunTiming, settleRunTiming, timestamp } from '../../../../shared/agent-timing.js'
 import { qualityAppliedBodyChange } from '../../../../shared/agent-applied-body-change.js'
@@ -122,6 +123,7 @@ export type MemorySpotlightRequest = {
   nonce: number
   memoryType: string
   title: string
+  memoryId?: string
 }
 
 export type ToolNavigationRequest = {
@@ -339,7 +341,7 @@ type AgentStoreState = {
   setAutoFollow: (value: boolean) => void
   requestToolNavigation: (toolName: string, args: unknown, display?: AgentToolDisplayPayload) => void
   clearToolNavigationRequest: () => void
-  requestMemorySpotlight: (memoryType: string, title: string) => void
+  requestMemorySpotlight: (memoryType: string, title: string, memoryId?: string) => void
   /** 将刚通过作者审查的写入活动标记为已接受；执行成功本身仍只是已完成。 */
   markWorkspaceActivitiesAccepted: (criteria: { chapterId?: string; toolNames?: string[]; all?: boolean }) => void
 }
@@ -1164,8 +1166,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   clearToolNavigationRequest: () => set({ toolNavigationRequest: null }),
 
-  requestMemorySpotlight: (memoryType, title) => set({
-    memorySpotlight: { nonce: Date.now(), memoryType, title },
+  requestMemorySpotlight: (memoryType, title, memoryId) => set({
+    memorySpotlight: { nonce: Date.now(), memoryType, title, memoryId },
   }),
 
   markWorkspaceActivitiesAccepted: (criteria) =>
@@ -1216,7 +1218,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }
       // A late stream from another run cannot change the current message,
       // cursor or draft lifecycle, including preparation-end cleanup.
-      if (event.runId !== state.runId && ['run.started', 'message.start', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.question_wait', 'run.finished', 'error'].includes(event.type)) return {}
+      if (event.runId !== state.runId && ['run.started', 'message.start', 'activity.title', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.question_wait', 'run.finished', 'error'].includes(event.type)) return {}
 
       // Only accepted live events can establish a local response clock. Start
       // metadata and historical replay cannot masquerade as model output.
@@ -1317,6 +1319,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
         case 'execution.progress':
           return base
+
+        case 'activity.title': {
+          const owned = ensureAssistantMessage(state.messages, event, state.runGoalId)
+          if (!owned) return {}
+          return { ...base, messages: updateMessageParts(owned, event.messageId, parts => prependAgentActivityTitle(parts, event.title)) }
+        }
 
         case 'text.final': {
           const owned = ensureAssistantMessage(state.messages, event, state.runGoalId)
@@ -1568,6 +1576,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                 args: previous?.type === 'tool-call' ? previous.args : null,
                 status: event.ok ? 'success' : 'failed', preparing: false,
                 summary: event.summary, display: event.display, durationMs: event.durationMs, reviewOutcome: event.reviewOutcome,
+                ...(event.reviewedChapter ? { reviewedChapter: event.reviewedChapter } : {}),
                 ...(event.subagentCallId ? { subagentCallId: event.subagentCallId } : {}),
               }
               return index < 0 ? [...parts, settled] : parts.map((part, at) => at === index ? settled : part)

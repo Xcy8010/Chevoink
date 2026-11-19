@@ -239,7 +239,7 @@ describe('story compiler task identity', () => {
     await currentReviewReadinessFixture(db as unknown as Prisma.TransactionClient, ctx, compilation)
     db.chapterQualityReport.findFirst.mockResolvedValue({ id: 'q', chapterRevision: 3, status: 'passed', findings: [],
       deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') } })
-    const save = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory', action: 'created', status: 'inferred' })
+    const save = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory', title: 'fixture', action: 'created', status: 'inferred' })
     try {
       await commitChapterBridge({ userId: 'u', novelId: 'n', runId: 'new-run', compilationId: 'original-compiler', chapterSummary: '原章节摘要',
         exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },

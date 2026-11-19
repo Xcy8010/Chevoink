@@ -1,6 +1,7 @@
 import type { AgentAttachmentMeta } from './agent-attachments.js'
 import type { AgentExecutionMode, EntityId } from './models.js'
 import type { ProjectSearchMatch } from './search-contracts.js'
+import type { StoryMemoryCard } from './memory-contracts.js'
 import type { ReviewOutcome } from '../review-lifecycle.js'
 
 /** Server proof that a review request returned, even if its local report write failed.
@@ -119,7 +120,8 @@ export type AgentToolDisplayPayload =
     }
   | { kind: 'markdown'; markdown: string }
   | { kind: 'readSources'; items: Array<{ title: string; preview?: string; target?: { kind: 'chapter' | 'plan'; id: EntityId } }> }
-  | { kind: 'chapterRef'; chapterId: EntityId; title: string; wordCount: number; range?: { start: number; end: number } }
+  | { kind: 'chapterRef'; chapterId: EntityId; title: string; wordCount: number; range?: { start: number; end: number }; revision?: number }
+  | { kind: 'memoryCard'; memoryId: EntityId; memoryType: StoryMemoryCard['memoryType']; title: string }
   | { kind: 'sessionRename'; sessionId: EntityId; title: string }
   | { kind: 'plan'; summary: string; steps: Array<{ title: string; detail?: string }> }
   | { kind: 'planFile'; artifactId: EntityId; title: string; content: string }
@@ -242,7 +244,7 @@ export type AgentToolDisplayPayload =
       kind: 'webSearch'
       query: string
       provider: string
-      results: Array<{ title: string; url: string; snippet: string; source: string }>
+      results: Array<{ title: string; url: string; snippet: string; source: string; publishedAt?: string; sourceId?: string; eligible?: false }>
     }
   | {
       /** 站内作品搜索：已上架他作 + 本人未公开作品（isOwn 标记），供 platform_novel_read 深读定位 */
@@ -390,6 +392,7 @@ export type AgentStreamEventBody =
   | { type: 'run.configuration'; modelTier: import('./credits.js').CreditModelTier; customModelId: string | null;
       reasoningEffort: import('./credits.js').ModelReasoningEffort; creativeFreedom: CreativeFreedom; modelSelectionExplicit: boolean }
   | { type: 'execution.progress'; revision: number; stage: 'model' | 'tool' | 'checkpoint' | 'finalizing' }
+  | { type: 'activity.title'; messageId: string; title: string }
   | { type: 'review.reconciled'; callId: string; chapterId: string; revision: number;
       compilationId: string | null; receipt: AgentReviewFailureReconciliation | AgentCancelledReviewRetirement | AgentAuthorReviewReplacement | AgentAuthorContinuedReview }
   | { type: 'text.delta'; messageId: string; delta: string }
@@ -471,6 +474,8 @@ export type AgentStreamEventBody =
       failureCode?: string
       reviewOutcome?: ReviewOutcome
       reviewRequestFinished?: AgentReviewRequestReceipt
+      /** Actual chapter/version observed by a review, for activity presentation. */
+      reviewedChapter?: { chapterId: string; revision: number }
       invalidFields?: string[]
       display?: AgentToolDisplayPayload
       durationMs: number
@@ -517,6 +522,7 @@ export type AgentNextPrompt = { runId: EntityId; text: string }
 /** 消息分部：AgentMessage.parts 的元素结构，前端按 type 分发渲染 */
 export type AgentMessagePart =
   | { type: 'text'; text: string }
+  | { type: 'activity-title'; title: string }
   | { type: 'reasoning'; text: string; durationMs?: number; activity?: true }
   | {
       type: 'tool-call'
@@ -529,7 +535,10 @@ export type AgentMessagePart =
       /** Server proof of rejection before the tool execute function was entered. */
       preExecutionFailure?: true
       reviewOutcome?: ReviewOutcome
+      reviewedChapter?: { chapterId: string; revision: number }
       importWaiting?: { url: string; expiresAt: string }
+      /** Read-only replay comparison, using a receipt ID in place of redacted arguments. */
+      activityRetryId?: string
       display?: AgentToolDisplayPayload
       durationMs?: number
       /** 写入结果已经过作者审查并明确采纳；普通执行成功只表示“已完成”。 */
@@ -593,6 +602,7 @@ export interface StartAgentLoopRunRequest {
   predictNextPrompt?: true
   /** UUID for matching this author message to local delivery UI, without idempotency semantics. */
   clientRequestId?: string
+  publicWebQuestion?: string
   sessionId: EntityId
   novelId: EntityId
   chapterId?: EntityId | null

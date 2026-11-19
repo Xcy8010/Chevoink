@@ -1,5 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { getAdminAgentRunDetailsData, getAdminAgentSessionMessagesData } from '../../api/lib/data/admin.js'
+import { projectActivityGroups } from '../../src/features/studio/agent/lib/activity-groups'
 
 const db = vi.hoisted(() => ({
   session: vi.fn(), run: vi.fn(), relatedRuns: vi.fn(), pendingHistory: vi.fn(),
@@ -92,6 +93,33 @@ it('keeps legacy transcript compatibility and projects replay messages to the re
   expect(result?.runs[0].messages[1]).toMatchObject({ goalContinuation: false, parts: [{ text: '作者输入' }] })
   expect(result?.runs[0].messages[2].parts).toMatchObject([{ type: 'tool-call', args: { chapterId: 'chapter' } }])
   expect(JSON.stringify(result)).not.toMatch(/合成自动续跑输入|合成思考|synthetic-argument|synthetic-snapshot/)
+})
+
+it('passes named progress and comparable receipts through replay while redacting section contents and other arguments', async () => {
+  const title = '补记老周的设定'
+  const args = { memoryId: 'memory', section: '当前处境', content: '未公开的设定甲', sourceQuote: '作者原文甲' }
+  const failure = { type: 'tool-call', toolName: 'memory_save', title: '内部标题', callId: 'not-saved', status: 'failed', args }
+  const otherSection = { ...failure, callId: 'unrelated', status: 'success', args: { ...args, section: '关键经历', content: '未公开的设定乙' } }
+  const retry = { ...failure, callId: 'retry', status: 'success' }
+  const run = {
+    id: 'run', mode: 'act', action: 'workspaceAgent', status: 'completed', createdAt: time,
+    finishedAt: time, startedAt: time, usage: null, goalExecution: null, runtimeProtocolVersion: 0,
+    messages: [
+      message('first', 'assistant', [{ type: 'activity-title', title, secret: '原始私有字段' }, failure]),
+      message('second', 'assistant', [otherSection]),
+    ],
+  }
+  db.session.mockResolvedValue({
+    id: 'session', userId: 'owner', title: '合成会话', createdAt: time, novel: { title: '合成作品', displayTitle: null }, runs: [run],
+  })
+  const payload = await getAdminAgentSessionMessagesData('session', { replay: true, userId: 'owner' })
+  const messages = payload!.runs[0].messages
+  expect(messages[0].parts[0]).toEqual({ type: 'activity-title', title })
+  expect(projectActivityGroups(messages).byMessage.get('first')?.get(failure.callId)).toMatchObject({ title, unfinished: true })
+  expect(JSON.stringify(payload)).not.toMatch(/私有字段|未公开的设定|作者原文|当前处境|关键经历|sourceQuote/)
+  run.messages.push(message('third', 'assistant', [retry]))
+  const withRetry = await getAdminAgentSessionMessagesData('session', { replay: true, userId: 'owner' })
+  expect(projectActivityGroups(withRetry!.runs[0].messages).byMessage.get('first')?.get(failure.callId)).toMatchObject({ title, unfinished: false })
 })
 
 it('returns paginated chronological receipts and recorded model/charge evidence without raw payloads', async () => {

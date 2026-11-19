@@ -1,4 +1,5 @@
 import { projectAgentAuthorParts } from '../../../../../shared/agent-author-view.js'
+import { activityAttemptKey, activityReviewVersion } from '../../../../../shared/agent-activity-receipts.js'
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
 import type { AgentMessagePart, AgentUIMessage } from '../../../../../shared/contracts/index.js'
 
@@ -10,20 +11,15 @@ export type ActivityGroup = {
   messageId: string
   firstCallId: string
   calls: ActivityCall[]
+  callKeys: string[]
   childrenByCall: Map<string, ActivityCall[]>
   readLabel?: string
-  transition?: string
-}
-
-export const activityOpening = '我会先梳理这次的要求。'
-
-const readOpening = '我会先核对与这次任务有关的资料。'
-const milestones: Record<string, string> = {
-  plan_save: '接下来整理创作计划，把关键情节和前后的衔接理清。',
-  chapter_write: '接下来处理正文，让这一章接上已有情节。',
-  chapter_edit_range: '接下来集中处理需要修改的地方。',
-  continuity_validate: '接下来核对这一章和前文的衔接。',
-  quality_analyze: '接下来看看这一章的表达是否贴合人物和情境。',
+  title?: string
+  closed?: boolean
+  completed?: boolean
+  unfinished?: boolean
+  unsettled?: ActivityCall
+  staleReviewCalls?: Set<ActivityCall>
 }
 
 /** These are presentation receipts, separate from the assistant's reply and
@@ -42,7 +38,7 @@ function savedReply(part: ActivityCall) {
 
 export function activityWorkingLabel(part: ActivityCall | undefined) {
   if (!part) return '正在思考'
-  if (part.status === 'failed' || part.status === 'denied') return '核对刚才未完成的步骤'
+  if (part.status === 'failed' || part.status === 'denied') return '正在处理…'
   if (part.toolName === 'plan_save') return '核对计划保存结果'
   const { phase, label } = getAgentToolPresentation(part.toolName)
   if (phase === 'read') return '梳理刚查到的资料'
@@ -67,15 +63,57 @@ export function activityChapterId(part: ActivityCall): string | undefined {
   return typeof id === 'string' ? id : undefined
 }
 
-export function activityTarget(part: ActivityCall): string | undefined {
-  const chapterId = activityChapterId(part)
-  if (chapterId) return `chapter:${chapterId}`
+export function activityReviewProblem(part: ActivityCall): 'stale' | 'incomplete' | undefined {
+  if (part.reviewOutcome === 'stale') return 'stale'
+  if (part.reviewOutcome === 'provider_unresolved' || part.reviewOutcome === 'provider_failed' || part.reviewOutcome === 'evidence_repair_required') return 'incomplete'
+  if (part.display?.kind === 'qualityReport') {
+    if (part.display.status === 'stale') return 'stale'
+    if (part.display.status === 'analyzing' || part.display.status === 'failed') return 'incomplete'
+  }
+}
+
+function hasActivityFailure(part: ActivityCall) {
+  return part.status === 'failed' || part.status === 'denied'
+    || activityReviewProblem(part) === 'incomplete'
+    || part.display?.kind === 'webSearch' && part.display.provider === 'unavailable'
+}
+
+function observedChapterVersion(part: ActivityCall) {
   const display = part.display
-  if (display && 'artifactId' in display) return `artifact:${display.artifactId}`
-  if (part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate' || part.toolName === 'ask_user') return part.callId
-  const args = part.args as { planId?: unknown; volumeId?: unknown } | null
-  if (typeof args?.planId === 'string') return `artifact:${args.planId}`
-  if (typeof args?.volumeId === 'string') return `volume:${args.volumeId}`
+  if (part.status === 'success' && display && (display.kind === 'chapterRef' || display.kind === 'chapterDiff' && (display.appliedDirectly || part.accepted)) && display.revision !== undefined) {
+    return { chapterId: display.chapterId, revision: display.revision }
+  }
+  if (part.status === 'success' && display?.kind === 'qualityReport' && display.appliedBodyChange) {
+    const { chapterId, targetRevision } = display.appliedBodyChange
+    return { chapterId, revision: targetRevision }
+  }
+  return activityReviewVersion(part)
+}
+
+function findUnsettledCall(calls: ActivityCall[], stale: ReadonlySet<ActivityCall>) {
+  // Concurrent attempts have their own receipts. An already settled sibling
+  // cannot substitute for a call that is still executing.
+  const running = calls.find(part => !part.preparing && part.status === 'running')
+  if (running) return running
+  const incomplete = (part: ActivityCall) => hasActivityFailure(part) || stale.has(part)
+    || part.display?.kind === 'question' && (part.display.unanswered || part.display.cancelled)
+  if (!calls.some(part => !part.preparing && incomplete(part))) return undefined
+
+  const successes = new Map<string, ActivityCall>()
+  for (let index = calls.length - 1; index >= 0; index--) {
+    const part = calls[index]
+    if (part.preparing) continue
+    const key = activityAttemptKey(part)
+    if (!incomplete(part)) {
+      if (key && !successes.has(key)) successes.set(key, part)
+      continue
+    }
+    const retry = key ? successes.get(key) : undefined
+    if (!retry || part.reviewOutcome === 'provider_unresolved') return part
+    const version = activityReviewVersion(part)
+    const retryVersion = activityReviewVersion(retry)
+    if (version && (!retryVersion || retryVersion.chapterId !== version.chapterId || retryVersion.revision < version.revision)) return part
+  }
 }
 
 const activityFamilies = new Map([
@@ -99,61 +137,70 @@ function canGroup(current: ActivityGroup, next: ActivityCall, afterText: boolean
 
 /** Only presentation is grouped. Individual tool receipts retain their identity
  * and order, even when a preview is upgraded or a result is replayed. */
-export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'id' | 'role' | 'runId' | 'goalId' | 'parts'>[]) {
+export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'id' | 'role' | 'runId' | 'goalId' | 'parts' | 'runTiming' | 'completedAt' | 'goalContinuation'>[]) {
   const byMessage = new Map<string, Map<string, ActivityGroup>>()
   const runningByRun = new Map<string, ActivityGroup>()
-  const openingByRun = new Map<string, string | null>()
+  const activeByRun = new Map<string, ActivityGroup>()
+  const authorSpokeByRun = new Set<string>()
   const savedReplyByRun = new Map<string, string>()
   const lastCallByRun = new Map<string, ActivityCall>()
   const lastGroupByRun = new Map<string, ActivityGroup>()
-  const groups: ActivityGroup[] = []
+  const groups: Array<{ group: ActivityGroup; scope: string }> = []
   const seen = new Map<string, { group?: ActivityGroup; calls: ActivityCall[]; index: number }>()
   const branches = new Map<string, ActivityCall[]>()
   const transcript = messages.map(message => ({
     message,
-    scope: JSON.stringify([message.runId, message.goalId ?? null]),
+    scope: JSON.stringify([message.runTiming?.scopeId ?? message.runId, message.goalId ?? null]),
     parts: message.role === 'assistant'
       ? projectAgentAuthorParts(message.parts.filter(part => part.type !== 'reasoning'), false, { includePreparing: true })
       : [],
   }))
-  const callIdentity = (scope: string, part: ActivityCall) => JSON.stringify([scope, part.subagentCallId ?? null, part.callId])
+  const callIdentity = (scope: string, messageId: string, part: ActivityCall) => JSON.stringify([scope, messageId, part.subagentCallId ?? null, part.callId])
   // Parameter deltas can describe several proposed calls in the same provider
   // turn. Only call/result events establish which operations have started.
   const reportedCalls = new Map<string, { scope: string; status: ActivityCall['status'] }>()
-  for (const { scope, parts } of transcript) {
+  for (const { message, scope, parts } of transcript) {
     for (const part of parts) {
       if (part.type !== 'tool-call' || part.preparing) continue
-      const id = callIdentity(scope, part)
+      const id = callIdentity(scope, message.id, part)
       if (part.status !== 'running' || !reportedCalls.has(id)) reportedCalls.set(id, { scope, status: part.status })
     }
   }
   const executingScopes = new Set([...reportedCalls.values()].filter(call => call.status === 'running').map(call => call.scope))
   const displayedPreparations = new Set<string>()
+  const completedScopes = new Set<string>()
+  const runByScope = new Map<string, string>()
   let current: ActivityGroup | undefined
   let previousScope: string | undefined
   let publicTextSinceAction = false
-  const announcedMilestones = new Set<string>()
+  let proposedTitle: string | undefined
 
   for (const { message, scope, parts } of transcript) {
-    if (message.role !== 'assistant' || scope !== previousScope) {
+    const newAuthorMessage = message.role !== 'assistant' && !message.goalContinuation
+    if (newAuthorMessage && scope === previousScope && current?.title) current.closed = true
+    if (newAuthorMessage || scope !== previousScope) {
       current = undefined
       publicTextSinceAction = false
-      announcedMilestones.clear()
+      proposedTitle = undefined
     }
     previousScope = scope
     if (message.role !== 'assistant') continue
 
+    const sourceRunId = message.runTiming?.sourceRunId ?? message.runId
+    runByScope.set(scope, sourceRunId)
+    if (message.completedAt || message.runTiming?.completedAt) completedScopes.add(scope)
     const messageGroups = new Map<string, ActivityGroup>()
     byMessage.set(message.id, messageGroups)
     for (const part of parts) {
       if (part.type !== 'tool-call') {
-        if (part.type === 'text') {
+        if (part.type === 'activity-title') proposedTitle = part.title
+        else if (part.type === 'text') {
           publicTextSinceAction = true
-          if (!openingByRun.has(message.runId)) openingByRun.set(message.runId, null)
+          authorSpokeByRun.add(sourceRunId)
         }
         continue
       }
-      const identity = callIdentity(scope, part)
+      const identity = callIdentity(scope, message.id, part)
       if (part.preparing) {
         if (part.subagentCallId || reportedCalls.has(identity) || executingScopes.has(scope) || displayedPreparations.has(scope)) continue
         displayedPreparations.add(scope)
@@ -166,7 +213,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
         continue
       }
       if (part.subagentCallId) {
-        const parentKey = JSON.stringify([scope, null, part.subagentCallId])
+        const parentKey = JSON.stringify([scope, message.id, null, part.subagentCallId])
         const calls = branches.get(parentKey) ?? []
         branches.set(parentKey, calls)
         seen.set(identity, { calls, index: calls.length })
@@ -174,40 +221,63 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
         continue
       }
 
-      const { phase } = getAgentToolPresentation(part.toolName)
-      const milestone = milestones[part.toolName === 'chapter_append' ? 'chapter_write' : part.toolName]
-      const opening = !openingByRun.has(message.runId)
-      if (opening) openingByRun.set(message.runId, phase === 'read' ? readOpening : milestone ?? activityOpening)
-      if (!current || !canGroup(current, part, publicTextSinceAction)) {
-        current = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id, firstCallId: part.callId, calls: [], childrenByCall: new Map() }
-        if (!opening && !publicTextSinceAction && milestone && !announcedMilestones.has(milestone)) current.transition = milestone
-        if (milestone) announcedMilestones.add(milestone)
-        groups.push(current)
+      const title = proposedTitle ?? current?.title
+      if (!current || (title ? title !== current.title : !canGroup(current, part, publicTextSinceAction))) {
+        if (current?.title) current.closed = true
+        current = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id,
+          firstCallId: part.callId, calls: [], callKeys: [], childrenByCall: new Map(), ...(title ? { title } : {}) }
+        groups.push({ group: current, scope })
       }
+      proposedTitle = undefined
       publicTextSinceAction = false
       const group = current
       const first = group.calls[0]
-      if (first && phase === 'read' && getAgentToolPresentation(first.toolName).label !== getAgentToolPresentation(part.toolName).label) {
+      if (!group.title && first && getAgentToolPresentation(part.toolName).phase === 'read'
+        && getAgentToolPresentation(first.toolName).label !== getAgentToolPresentation(part.toolName).label) {
         group.readLabel = '查看创作资料'
       }
       if (part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate') {
         const calls = branches.get(identity) ?? []
-        group.childrenByCall.set(part.callId, calls)
+        group.childrenByCall.set(identity, calls)
         branches.set(identity, calls)
       }
       seen.set(identity, { group, calls: group.calls, index: group.calls.length })
       group.calls.push(part)
+      group.callKeys.push(identity)
       messageGroups.set(part.callId, group)
     }
   }
-  for (const group of groups) {
-    lastGroupByRun.set(group.runId, group)
-    if (group.calls.some(part => part.status === 'running')) runningByRun.set(group.runId, group)
+  const chaptersByScope = new Map<string, Map<string, number>>()
+  for (const { group, scope } of groups) {
+    const chapters = chaptersByScope.get(scope) ?? new Map<string, number>()
+    chaptersByScope.set(scope, chapters)
     for (const part of group.calls) {
-      lastCallByRun.set(group.runId, part)
+      const version = observedChapterVersion(part)
+      if (version) chapters.set(version.chapterId, Math.max(version.revision, chapters.get(version.chapterId) ?? version.revision))
+    }
+  }
+  for (const { group, scope } of groups) {
+    const sourceRunId = runByScope.get(scope) ?? group.runId
+    lastGroupByRun.set(sourceRunId, group)
+    if (group.calls.some(part => part.status === 'running')) runningByRun.set(sourceRunId, group)
+    const chapters = chaptersByScope.get(scope)
+    const stale = new Set(group.calls.filter(part => {
+      const review = activityReviewVersion(part)
+      return activityReviewProblem(part) === 'stale' || review && (chapters?.get(review.chapterId) ?? review.revision) > review.revision
+    }))
+    group.staleReviewCalls = stale
+    group.unsettled = findUnsettledCall(group.calls, stale)
+    group.unfinished = Boolean(group.unsettled) || group.calls.every(part => part.preparing)
+    if (group.title) {
+      group.completed = completedScopes.has(scope)
+      if (!group.closed && !group.completed) activeByRun.set(sourceRunId, group)
+    }
+    for (const part of group.calls) {
+      lastCallByRun.set(sourceRunId, part)
       const reply = savedReply(part)
       if (reply) savedReplyByRun.set(group.runId, reply)
     }
   }
-  return { byMessage, runningByRun, openingByRun, savedReplyByRun, lastCallByRun, lastGroupByRun }
+  for (const [runId, group] of runningByRun) activeByRun.set(runId, group)
+  return { byMessage, runningByRun, activeByRun, authorSpokeByRun, savedReplyByRun, lastCallByRun, lastGroupByRun }
 }

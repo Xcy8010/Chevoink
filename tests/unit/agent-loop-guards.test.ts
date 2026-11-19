@@ -255,6 +255,11 @@ describe('same-state admission and continuation', () => {
       expect(promisesFurtherAction(text), text).toBe(true)
     }
   })
+  it('does not turn a literal activity line into a promise to execute another round', () => {
+    const literal = '<activity-title>接下来我会检查正文</activity-title>'
+    expect(promisesFurtherAction(literal)).toBe(false)
+    expect(promisesFurtherAction(`${literal}\n接下来我会检查正文。`)).toBe(true)
+  })
 })
 
 describe('internal token budget compatibility is storage-only', () => {

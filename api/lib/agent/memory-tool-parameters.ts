@@ -25,7 +25,7 @@ export const legacyMemorySearchParameters = z.object({
   limit: z.number().int().min(1).max(20).optional().describe('返回条数，默认 8'),
 })
 
-export const memorySaveParameters = legacyMemorySaveParameters.extend({
+export const previousMemorySaveParameters = legacyMemorySaveParameters.extend({
   memoryType: storyMemoryTypeSchema.describe('记忆类型'),
   content: z.string().min(1).describe('Markdown 正文；更新长档案时传 section 与该小节的新内容，其余小节保留'),
   identityKey: z.string().trim().min(1).max(160).optional().describe('同名不同对象的稳定区分键；后续优先用原卡 memoryId'),
@@ -33,6 +33,16 @@ export const memorySaveParameters = legacyMemorySaveParameters.extend({
   section: z.string().trim().min(1).max(160).optional().describe('要更新的 Markdown 二级小节名，如当前处境、持有人或关键经历'),
   effectiveFromChapterId: z.string().min(1).optional().describe('事实起效的章节 ID；默认沿用来源章，追溯设定时填写实际起始章'),
   knownBy: z.array(z.string().min(1)).nullable().optional().describe('已知此事实的人物卡 ID；[] 表示仅作者知情，null 表示公开，省略沿用该段设置'),
+})
+
+export const memorySaveParameters = previousMemorySaveParameters.extend({
+  title: legacyMemorySaveParameters.shape.title.describe('建卡时填对象名称；有 memoryId 的小节更新沿用原卡名'),
+  renameTo: z.string().trim().min(1).max(120).optional().describe('确需将既有档案更名时填写新名称，必须带原 memoryId；可指定起效章'),
+  restoreTitle: z.string().trim().min(1).max(120).optional().describe('作者要求纠正误名时，填该卡上一有效名称并带原 memoryId；保留改名历史，移除误名的别名'),
+}).superRefine((value, ctx) => {
+  if ((value.renameTo || value.restoreTitle) && (!value.memoryId || value.renameTo && value.restoreTitle)) {
+    ctx.addIssue({ code: 'custom', path: ['memoryId'], message: '改名或纠正误名时须提供原卡 ID，且一次只执行其中一种。' })
+  }
 })
 
 export const memorySearchParameters = legacyMemorySearchParameters.extend({

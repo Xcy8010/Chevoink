@@ -32,6 +32,35 @@ function stream(text: string) {
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
 
+it('keeps the chosen text-only route, offers the conditional public-query prompt, and sends past tools as read-only context', async () => {
+  const original = '请联网核对月港公告的生效日期。'
+  const answer = '这条规则尚未查证。如果当前界面提供「联网查证」，请填写可公开发送的检索词。'
+  const messages: ChatMessage[] = [
+    { role: 'user', content: '上周仅在站内查询。' },
+    { role: 'assistant', content: null, reasoning: 'previous private reasoning', toolCalls: [{ id: 'old', name: 'memory_search', arguments: '{}' }] },
+    { role: 'tool', toolCallId: 'old', content: '旧任务没有相关资料' },
+    { role: 'user', content: original },
+  ]
+  const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(
+    `data: ${JSON.stringify({ choices: [{ delta: { content: answer }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 4 } })}\n\ndata: [DONE]\n\n`))
+  vi.stubGlobal('fetch', fetcher)
+  await expect(chatWithTools({ messages, tools: [], provider: 'custom', model: 'existing-text-only', providerBaseUrl: 'https://model.example/v1',
+    providerApiKey: 'fixture', textOnlyModel: true, textOnlyWebQuestionRequired: true,
+    usageLog: { userId: 'test', action: 'agentLoopTurn', modelTier: 'custom' } })).resolves.toMatchObject({ content: answer, toolCalls: [] })
+  expect(fetcher).toHaveBeenCalledExactlyOnceWith('https://model.example/v1/chat/completions', expect.any(Object))
+  const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
+  expect(body.model).toBe('existing-text-only')
+  expect(body).not.toHaveProperty('tools')
+  expect(body.messages).toEqual(expect.arrayContaining([
+    { role: 'user', content: original },
+    { role: 'user', content: expect.stringContaining('旧任务没有相关资料') },
+    { role: 'system', content: expect.stringContaining('若作者当前界面提供「联网查证」') },
+  ]))
+  expect(body.messages.some((message: { role: string; tool_calls?: unknown }) => message.role === 'tool' || message.tool_calls)).toBe(false)
+  expect(JSON.stringify(body)).not.toContain('previous private reasoning')
+  expect(messages).toHaveLength(4)
+})
+
 describe('personalization in actual model requests', () => {
   const messages: ChatMessage[] = [{ role: 'system', content: 'Known author context' }, { role: 'user', content: '请给我三个提纲。' }]
   const options = { messages, tools: [], providerApiKey: 'fake-test-key',

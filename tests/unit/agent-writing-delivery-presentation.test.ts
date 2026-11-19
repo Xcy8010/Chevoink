@@ -85,6 +85,8 @@ it('checks relevant cards after chapter commit and before projecting the exact p
   expect(await advanceDurableWritingDelivery(token as never)).toMatchObject({ revision: 8 })
   expect(f.state.frame.state.messages.at(-1)?.content).toEqual(expect.stringContaining('[本章补记'))
   expect(f.mocks.agentExecutionOutbox.create).not.toHaveBeenCalled()
+  const check = f.state.frame.state.messages.at(-1)!
+  check.content = check.content!.split('\n')[0] + '\n旧版本的补记说明。'
   observe('memory_search')
   expect(await advanceDurableWritingDelivery(token as never)).toBeNull()
   observe('memory_save')

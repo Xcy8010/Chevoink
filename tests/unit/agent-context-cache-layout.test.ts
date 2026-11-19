@@ -216,7 +216,8 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(JSON.stringify(messages)).toContain('当前章节检查未完成；原事实与待核提议保留。')
     const system = messages.filter(message => message.role === 'system').map(message => message.content).join('\n')
     expect(system).toContain('默认在本章正文保存后、交付前补记')
-    expect(system).toContain('沿用原 memoryId、类型和标题')
+    expect(system).toContain('沿用原 memoryId 和类型')
+    expect(system).toContain('暂留这一条，完成其他补记并继续交付正文')
     expect(String(messages.at(-1)?.content)).toContain(input.prompt)
   })
   it('does not preload unrelated memory for a fresh discussion with no query match', async () => {
@@ -328,13 +329,11 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const input = { ...interpretedInput(prompt), mode }
     const { messages } = await assembleContext(input)
     const system = String(messages[0].content)
-    expect(system).toContain('多步的正文写作、修订、大纲或审阅，在首次调用工具前')
-    expect(system).toContain('说明这次会怎样处理作者的具体目标，随后同轮推进实际工作')
-    expect(system).toContain('后续只在有实质发现、完成可确认的阶段或创作取舍发生变化时')
-    expect(system).toContain('有影响当前作品的发现就同步，不必等所有资料都查完')
-    expect(system).toContain('依据回执简述已完成的内容和接下来要核对的问题')
-    expect(system).toContain('同轮继续调用需要的工具')
-    expect(system).toContain('简单问答直接回答；作者要求不发进展、只给结果或只给正文时，遵循指定格式')
+    expect(system).toContain('同一轮的回复首行用 <activity-title>动作＋对象</activity-title>')
+    expect(system).toContain('串行、并行及后续轮次继续同一目标时沿用该标题')
+    expect(system).toContain('状态由真实结果显示')
+    expect(system).toContain('只对影响交付的新发现、缺项或需要作者决定的事简短说一句')
+    expect(system).toContain('简单问答和作者要求只给结果或不要进展时省略标题')
     expect(system).toContain('默认收尾简短：先说明实际完成的结果')
     expect(String(messages.at(-1)?.content)).toContain(prompt)
   })
@@ -343,7 +342,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const { messages } = await assembleContext({ ...buildInput(), mode: 'plan' })
     const system = String(messages[0].content)
     expect(system).toContain('当前模式：Plan（规划）')
-    expect(system).toContain('多步的正文写作、修订、大纲或审阅，在首次调用工具前')
+    expect(system).toContain('<activity-title>动作＋对象</activity-title>')
     expect(system).not.toContain('不播报写入过程')
     expect(system).not.toContain('不要输出“我现在开始写”')
   })
@@ -620,6 +619,19 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(messages.at(-1)?.content).toContain('你好')
     expect(messages.at(-1)?.content).toContain('只继续这项要求')
     expect(messages.at(-1)?.content).toContain('原始要求若只是问候或提问')
+  })
+
+  it('restores the interrupted task activity title as read-only context without importing another task’s title', async () => {
+    const tool = { type: 'tool-call', toolName: 'chapter_read', status: 'success', summary: '已读取章节' }
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([
+      { id: 'partial', runId: 'run-1', role: 'assistant', parts: [{ type: 'activity-title', title: '核对老周的出场时间' }, tool] },
+      { id: 'old', runId: 'other-run', role: 'assistant', parts: [{ type: 'activity-title', title: '整理别章的细纲' }, tool] },
+    ] as never)
+    const { messages } = await assembleContext({ ...buildInput(), includeCurrentRunHistory: true })
+    expect(messages.filter(message => String(message.content).includes('历史进度标题'))).toEqual([
+      { role: 'user', content: expect.stringContaining('核对老周的出场时间') },
+    ])
+    expect(JSON.stringify(messages)).not.toContain('整理别章的细纲')
   })
 
   it('automatically adds the approved scoped style before the first model request, without changing stable system', async () => {

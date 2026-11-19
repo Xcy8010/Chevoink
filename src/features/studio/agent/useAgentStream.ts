@@ -18,6 +18,7 @@ const EVENT_TYPES = [
   'run.configuration',
   'message.start',
   'execution.progress',
+  'activity.title',
   'text.delta',
   'text.final',
   'reasoning.delta',

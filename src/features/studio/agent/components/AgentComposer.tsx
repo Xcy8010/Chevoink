@@ -1,4 +1,5 @@
 import { CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../../shared/contracts/agent-window-configuration.js'
+import { PUBLIC_WEB_QUESTION_LIMIT } from '../../../../../shared/contracts/public-web-research.js'
 import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../components/ModelPriceDetails'
 import {
   useEffect,
@@ -12,7 +13,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from 'react'
-import { ArrowUp, Bot, BookOpenText, Check, ChevronDown, ChevronRight, Feather, FileText, Image, LoaderCircle, Mic, Play, Plus, Rocket, Scale, Settings2, Square, Target, Wrench, X } from 'lucide-react'
+import { ArrowUp, Bot, BookOpenText, Check, ChevronDown, ChevronRight, Feather, FileText, Globe2, Image, LoaderCircle, Mic, Play, Plus, Rocket, Scale, Settings2, Square, Target, Wrench, X } from 'lucide-react'
 import { ReasoningSlider } from './ReasoningSlider'
 import StyleLearningDialog from '../../components/StyleLearningDialog'
 import { SubagentPicker } from './SubagentPicker'
@@ -78,7 +79,7 @@ type AgentComposerProps = {
   stopping?: boolean
   disabled?: boolean
   /** 可返回 Promise：启动失败时抛错，输入框保留草稿与附件 */
-  onSend: (prompt: string, attachments: AgentAttachmentMeta[], creativeFreedom: CreativeFreedom, qualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string) => Promise<void> | void
+  onSend: (prompt: string, attachments: AgentAttachmentMeta[], creativeFreedom: CreativeFreedom, qualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string, publicWebQuestion?: string) => Promise<void> | void
   onStop: () => void
   onContinue?: () => Promise<void>
   continueLabel?: string
@@ -303,6 +304,8 @@ export function AgentComposer({
   const canUseGoalEntry = goalCreationEnabled || goalActive
   // 启动中（建会话 + 启动 run 的网络往返）：成功后才清空草稿，避免内容“瞬间消失”观感
   const [sending, setSending] = useState(false)
+  const [publicSearchDraft, setPublicSearchDraft] = useState<{ scope: string; query: string } | null>(null)
+  const publicSearchInput = useRef<HTMLInputElement | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [attachError, setAttachError] = useState<string | null>(null)
   const [referencePickerOpen, setReferencePickerOpen] = useState(false)
@@ -337,6 +340,7 @@ export function AgentComposer({
   const caretAfterDraft = useRef<number | null>(null)
   const slashCaretReferences = useRef<string[] | null>(null)
   const scope = voiceScopeKey ?? ''
+  const publicSearch = publicSearchDraft && sameComposerDraftScope(publicSearchDraft.scope, scope) ? publicSearchDraft : null
   const voice = useVoiceInput({
     scopeKey: scope,
     disabled: !scope || voiceDisabled || disabled || running || sending || uploading > 0,
@@ -433,10 +437,11 @@ export function AgentComposer({
   const fileFull = fileCount >= MAX_AGENT_FILE_COUNT
 
   const canSend =
-    !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0 && (!isComposerBlank(prompt) || references.length > 0)
+    !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0 && (!publicSearch || Boolean(publicSearch.query.trim()))
+    && (!isComposerBlank(prompt) || references.length > 0)
   const continueLock = useRef(false)
   const submitting = sending && !continueLock.current
-  const showContinue = !submitting && Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
+  const showContinue = !submitting && !publicSearch && Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
   const canContinue = showContinue && !running && !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0
   const showPlaceholder = !composing && (submitting || (isComposerBlank(prompt) && references.length === 0))
   const offeredNextPrompt = showPlaceholder && !running && !stopping && !disabled && !sending && !voiceActive &&
@@ -698,6 +703,10 @@ export function AgentComposer({
     }
 
     const submitGoal = command.kind !== 'control' && canUseGoalEntry && (goalMode || command.kind === 'enable') ? onGoalSubmit : undefined
+    if (publicSearch && (!publicSearch.query.trim() || submitGoal || command.kind === 'control' || goalActive || pinnedSubagent)) {
+      setAttachError('联网查证需要填写公开检索词，并作为普通主 Agent 请求发送。')
+      return
+    }
     const objective = submitGoal && (command.kind === 'enable' ? command.body.trim() : effectivePrompt.trim())
     if (objective === '') {
       onGoalOpen?.()
@@ -718,6 +727,9 @@ export function AgentComposer({
         if (pinnedSubagent) await submitGoal(objective, pending, creativeFreedom, qualityMode, pinned, pinnedSubagent.id)
         else await submitGoal(objective, pending, creativeFreedom, qualityMode, pinned)
         if (sameComposerDraftScope(currentScope.current, sendingScope)) setGoalMode(false)
+      } else if (publicSearch) {
+        await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned, undefined, publicSearch.query.trim())
+        setPublicSearchDraft(draft => draft === publicSearch ? null : draft)
       } else if (pinnedSubagent) await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned, pinnedSubagent.id)
       else await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned)
       clearSubmittedDraft()
@@ -812,6 +824,13 @@ export function AgentComposer({
   const tools = [
     { id: 'image', label: '上传图片', hint: 'PNG、JPG、WebP，最多 6 张', aliases: 'image photo', icon: Image, disabled: imageFull, action: () => { imageInputRef.current?.click(); closeToolMenus() } },
     { id: 'file', label: '上传文件', hint: 'PDF、DOCX、TXT、Markdown', aliases: 'file upload', icon: FileText, disabled: fileFull, action: () => { fileInputRef.current?.click(); closeToolMenus() } },
+    { id: 'public-web', label: '联网查证', aliases: 'web search', icon: Globe2,
+      disabled: disabled || sending || voiceActive || goalMode || goalActive || Boolean(pinnedSubagent),
+      action: () => {
+        closeToolMenus()
+        setPublicSearchDraft(publicSearch ?? { scope, query: '' })
+        requestAnimationFrame(() => publicSearchInput.current?.focus())
+      } },
     { id: 'style', label: '样章学习与写作风格', hint: '查看文件、学习依据和自动使用的规则', aliases: 'style', icon: BookOpenText, action: () => { closeToolMenus(); setStyleLearningOpen(true) } },
     ...(canUseGoalEntry ? [{ id: 'goal', label: '目标', aliases: 'goal', icon: Target, disabled: disabled || sending, action: () => { closeToolMenus(); onGoalOpen?.() } }] : []),
     { id: 'reference', label: '引用作品内容', hint: '点选目录、计划或章节，也可从作品树拖入。', aliases: 'reference chapter', icon: BookOpenText, expanded: referencePickerOpen, action: () => setReferencePickerOpen(value => !value) },
@@ -1036,6 +1055,15 @@ export function AgentComposer({
         className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-[min(32rem,60dvh)] overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] py-1 shadow-[0_14px_34px_rgba(15,23,42,0.16)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&_*]:[scrollbar-width:none] [&_*::-webkit-scrollbar]:hidden"
       >{renderToolMenu(true)}</div> : null}
       {dragActive ? <div className="pointer-events-none absolute inset-1 z-20 flex items-center justify-center rounded-[16px] bg-[var(--surface-default)]/95 text-xs font-medium text-[var(--text-primary)]">松开即可添加引用、图片或文件</div> : null}
+      {publicSearch ? <div className="mb-2 flex items-center gap-2 rounded-md border border-[var(--border-subtle)] px-2">
+        <Globe2 aria-hidden className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
+        <input ref={publicSearchInput} aria-label="公开检索词" placeholder="公开检索词" value={publicSearch.query}
+          maxLength={PUBLIC_WEB_QUESTION_LIMIT} disabled={disabled || sending}
+          onChange={event => setPublicSearchDraft({ scope, query: event.target.value })}
+          className="min-w-0 flex-1 bg-transparent py-2 text-xs text-[var(--text-primary)]" />
+        <button type="button" aria-label="取消联网查证" disabled={sending} onClick={() => { setPublicSearchDraft(null); editorRef.current?.focus() }}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md hover:bg-[var(--surface-muted)]"><X className="h-4 w-4" /></button>
+      </div> : null}
       {pinnedSubagent ? <div className="mb-2 flex items-center gap-2 px-1 text-[11px] text-[var(--text-primary)]"><span className="min-w-0 truncate">本轮子 Agent：{pinnedSubagent.name}</span><button type="button" disabled={sending || voiceActive} onClick={() => useAgentStore.setState({ composerSubagent: null })} aria-label="取消指定子 Agent" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md hover:bg-[var(--surface-muted)]"><X className="h-3.5 w-3.5" /></button></div> : null}
       {pinnedSkills.length > 0 && (
         <div className="mb-2 flex flex-wrap items-center gap-1.5 px-1">

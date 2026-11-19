@@ -5,7 +5,7 @@ import AgentMemoryCards from '../../src/features/studio/agent/components/AgentMe
 import { fetchStoryMemories, fetchStoryMemorySets, updateStoryMemory } from '../../src/features/studio/agent/agentApi'
 import type { StoryMemoryCard } from '../../shared/contracts'
 
-const store = vi.hoisted(() => ({ addComposerReference: vi.fn(), requestToolNavigation: vi.fn(), composerDraft: '', memorySpotlight: null as null | { nonce: number; memoryType: string; title: string } }))
+const store = vi.hoisted(() => ({ addComposerReference: vi.fn(), requestToolNavigation: vi.fn(), composerDraft: '', memorySpotlight: null as null | { nonce: number; memoryType: string; title: string; memoryId?: string } }))
 vi.mock('../../src/features/studio/agent/agentStore', () => ({ useAgentStore: (select: (s: unknown) => unknown) => select(store) }))
 vi.mock('../../src/store/useShellStore', () => ({ useShellStore: (select: (s: unknown) => unknown) => select({ sessionUser: { id: 'u' } }) }))
 vi.mock('../../src/features/studio/agent/agentApi', () => ({ fetchStoryMemories: vi.fn(), fetchStoryMemorySets: vi.fn(), deleteStoryMemory: vi.fn(), updateStoryMemory: vi.fn() }))
@@ -223,4 +223,13 @@ it('missing spotlight does not silently navigate to the newest unrelated card', 
   await waitFor(() => expect(screen.getByRole('status').textContent).toContain('未能唯一定位该记忆'))
   expect(screen.queryByRole('dialog')).toBeNull()
   expect(fetchStoryMemories).toHaveBeenCalledWith('n', expect.objectContaining({ title: '并不存在的目标卡' }))
+})
+
+it('opens the saved card by ID even when the current name has changed', async () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockImplementation(() => document.body)
+  store.memorySpotlight = { nonce: Date.now(), memoryType: 'worldbuilding', title: '旧称', memoryId: firstCard.id }
+  vi.mocked(fetchStoryMemories).mockResolvedValue({ total: 1, items: [firstCard], typeCounts: { worldbuilding: 2 } })
+  render(<AgentMemoryCards novelId="n" />)
+  await screen.findByRole('heading', { name: firstCard.title })
+  expect(fetchStoryMemories).toHaveBeenCalledWith('n', { memoryType: 'worldbuilding', memoryId: firstCard.id, page: 1, pageSize: 2 })
 })

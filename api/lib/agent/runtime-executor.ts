@@ -38,6 +38,8 @@ import { renderWritingPresentation, writingPresentationPreference } from './writ
 import { NOVEL_SETUP_BLOCKED_NOTICE } from './novel-initialization.js'
 import { loadPersonalizationContext, projectPersonalizedMessages } from './personalization-context.js'
 import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
+import { executeDurablePublicWeb, isDurablePublicWebOperation, prepareDurablePublicWeb } from './runtime-public-web.js'
+import { isTextOnlyModel } from './public-web-verification.js'
 
 const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const durableModelTier = creditModelTierSchema
@@ -282,6 +284,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
     if (state.frame.state.phase !== 'awaiting_operation') return null
     const operation = await tx.agentOperation.findUniqueOrThrow({ where: { id: state.frame.state.pendingOperationId! } })
+    if (isDurablePublicWebOperation(operation)) return { publicWeb: operation }
     if (operation.kind !== 'provider') return null
     if (operation.status === 'cancelled') {
       const stale = await tx.agentProviderAttempt.findFirst({ where: { operationId: operation.id, status: 'cancelled', dispatchedAt: null,
@@ -304,6 +307,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
       request: readPreparedModelRequest(operation.inputSnapshot) }
   })
   if (prepared && 'refreshed' in prepared) return { kind: 'context' as const, frame: prepared.refreshed! }
+  if (prepared && 'publicWeb' in prepared) return executeDurablePublicWeb(lease, prepared.publicWeb!, signal)
   if (!prepared) {
     const writingDelivery = await advanceDurableWritingDelivery(lease)
     if (writingDelivery) return { kind: 'context' as const, frame: writingDelivery }
@@ -348,6 +352,11 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   const inputLimit = resolveDurableInputLimit(window, maxOutputTokens)
   if (inputLimit < 1) return runtimeError('RUNTIME_CONTEXT_LIMIT', '模型上下文窗口不足以预留配置的输出空间，请调整模型配置；原任务保留。')
   const originalSpec = taskSpecSchema.parse(current.state.originalSpec)
+  const textOnlyModel = isTextOnlyModel(runtime)
+  if (!prepared && !lease.parent && textOnlyModel && originalSpec.publicWebQuestion) {
+    const operation = await prepareDurablePublicWeb(lease, frame)
+    if (operation) return executeDurablePublicWeb(lease, operation, signal)
+  }
   const effectiveTools = prepared ? null : await withRunLease(lease, tx => readEffectiveNativeTooling(tx, lease, configuration, originalSpec))
   const personalization = !lease.parent && effectiveTools?.personalizationEnabled ? await loadPersonalizationContext(lease.userId, originalSpec.goals.join('\n'), lease.runId) : undefined
   if (!prepared) {
@@ -359,8 +368,8 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   const memoryCheck = [...frame.state.messages].reverse().find(message => message.role === 'user'
     || message.role === 'system' && message.content.startsWith(CHAPTER_MEMORY_MARKER))
   const finishingMemory = memoryCheck?.role === 'system'
-  const tools = prepared?.preparedTools ?? (await currentNativeToolViews(effectiveTools!.tools, originalSpec.scope))
-    .filter(({ function: { name } }) => !finishingMemory || CHAPTER_MEMORY_TOOLS.includes(name) || name === 'chapter_read' || name === 'execution_context_read')
+  const tools = prepared?.preparedTools ?? (textOnlyModel ? [] : (await currentNativeToolViews(effectiveTools!.tools, originalSpec.scope))
+    .filter(({ function: { name } }) => !finishingMemory || CHAPTER_MEMORY_TOOLS.includes(name) || name === 'chapter_read' || name === 'execution_context_read'))
   const requestMessages = prepared ? frame.state.messages : projectPersonalizedMessages(frame.state.messages, personalization)
   if (estimateChatMessagesTokens(requestMessages) + estimateToolDefinitionTokens(tools) > inputLimit) {
     return runtimeError('RUNTIME_CONTEXT_LIMIT', '原请求、工具定义或不可再归档内容超过模型输入预算；已保留完整原文，不截掉要求或盲目重试模型。')
@@ -371,6 +380,8 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   if (price.modelTier !== tier.data) return runtimeError('RUNTIME_PRICE_INVALID', '冻结价目与当前模型身份不一致。')
   signal.throwIfAborted()
   const result = await chatWithTools({ messages: frame.state.messages, tools,
+    textOnlyModel: !prepared && textOnlyModel,
+    textOnlyWebQuestionRequired: !prepared && textOnlyModel && !originalSpec.publicWebQuestion && !lease.parent,
     preparedMainRequest: prepared?.request,
     personalization,
     nextPromptMarker: configuration.nextPromptMarker,

@@ -85,7 +85,7 @@ function ChangesTree({ activities, pendingReviewCount }: { activities: Workspace
                 aria-label={`查看${target.kind === 'memory' ? '记忆' : '文档'}：${target.title}`}
                 className="inline-flex min-h-8 items-center rounded-sm text-left text-[var(--text-primary)] underline decoration-current underline-offset-4 hover:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
                 onClick={() => {
-                  if (target.kind === 'memory') requestMemorySpotlight(target.memoryType, target.title)
+                  if (target.kind === 'memory') requestMemorySpotlight(target.memoryType, target.title, target.memoryId)
                   else requestToolNavigation(target.toolName, target.args, target.display)
                 }}>{target.title}</button> : null
               const linkedSummary = target && titleOffset >= 0

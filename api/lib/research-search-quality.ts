@@ -11,6 +11,7 @@ export type ResearchSearchCandidate = {
   siteMatch: boolean
   titleMatch: 'exact' | 'related' | 'absent' | 'unconstrained'
   authorMatch: 'mentioned' | 'conflicting' | 'unknown' | 'unconstrained'
+  publicationMatch?: 'within' | 'outside' | 'unknown'
   pageType: 'book' | 'chapter' | 'secondary' | 'homepage' | 'unknown'
   reasons: string[]
 }
@@ -27,6 +28,19 @@ type SiteConstraint = { host: string; path: string; exclude: boolean }
 export const searchQueryHash = (query: string) => createHash('sha256').update(query).digest('hex')
 const normalized = (value: string) => value.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim()
 const hostMatches = (actual: string, expected: string) => actual === expected || actual.endsWith(`.${expected}`)
+
+function publicationBounds(query: string) {
+  let from = -Infinity, before = Infinity
+  const operators = query.replace(/"[^"]*"/gu, ' ')
+  for (const [, op, text] of operators.matchAll(/(?:^|[\s(])(after|before):(\d{4}(?:-\d{2}-\d{2})?)(?=$|[\s)])/giu)) {
+    const day = text.length === 4 ? `${text}-01-01` : text
+    const time = Date.parse(day)
+    if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== day) continue
+    if (op.toLowerCase() === 'after') from = Math.max(from, time)
+    else before = Math.min(before, time)
+  }
+  return { from, before, constrained: from !== -Infinity || before !== Infinity }
+}
 
 function siteConstraints(query: string): { sites: SiteConstraint[]; invalid: boolean } {
   const sites: SiteConstraint[] = []
@@ -80,6 +94,7 @@ function titleMatch(title: string, snippet: string, target: ResearchSearchTarget
  * chapter completeness, semantic progress, or permission to write a report. */
 export function evaluateResearchSearchCandidates(query: string, results: readonly WebSearchResult[], target?: ResearchSearchTarget): ResearchSearchEvaluation {
   const { sites, invalid } = siteConstraints(query)
+  const publication = publicationBounds(query)
   const hosts: string[] = []
   let invalidHosts = false
   for (const value of target?.sourceHosts ?? []) {
@@ -89,7 +104,7 @@ export function evaluateResearchSearchCandidates(query: string, results: readonl
       hosts.push(url.hostname.toLowerCase())
     } catch { invalidHosts = true }
   }
-  const hasHardConstraints = Boolean(target?.title || sites.length || invalid || invalidHosts || target?.sourceHosts?.length)
+  const hasHardConstraints = Boolean(target?.title || sites.length || invalid || invalidHosts || target?.sourceHosts?.length || publication.constrained)
   const candidates = results.map((result, index): ResearchSearchCandidate => {
     let url: URL
     try { url = parsePublicHttpUrl(result.url, true) }
@@ -99,23 +114,50 @@ export function evaluateResearchSearchCandidates(query: string, results: readonl
       && (site.path === '/' || url.pathname === site.path || url.pathname.startsWith(`${site.path}/`))
     const positive = sites.filter(site => !site.exclude)
     const siteMatch = !invalid && (!positive.length || positive.some(matchesSite)) && !sites.some(site => site.exclude && matchesSite(site))
-    const match = target?.title ? titleMatch(result.title, result.snippet, target) : 'unconstrained'
-    const authorText = normalized(`${result.title}\n${result.snippet}`)
+    const descriptions = `${result.snippet}\n${result.summary ?? ''}`
+    const match = target?.title ? titleMatch(result.title, descriptions, target) : 'unconstrained'
+    const authorText = normalized(`${result.title}\n${descriptions}`)
     const declaredAuthor = authorText.match(/(?:作者|author)\s*[:：]\s*([^\s，,。;；|_<>《》]{1,80})/iu)?.[1]
     const authorMatch = !target?.author ? 'unconstrained' : declaredAuthor && normalized(declaredAuthor) !== normalized(target.author)
       ? 'conflicting' : authorText.includes(normalized(target.author)) ? 'mentioned' : 'unknown'
     const pageType = resultPageType(url, result.title)
+    const publishedAt = result.publishedAt ? Date.parse(result.publishedAt) : NaN
+    const publicationMatch = !publication.constrained ? undefined : !Number.isFinite(publishedAt) ? 'unknown'
+      : publishedAt >= publication.from && publishedAt < publication.before ? 'within' : 'outside'
     const reasons: string[] = []
     if (!hostMatch) reasons.push('FROZEN_SOURCE_HOST_MISMATCH')
     if (!siteMatch) reasons.push(invalid ? 'QUERY_SITE_CONSTRAINT_INVALID' : 'QUERY_SITE_CONSTRAINT_MISMATCH')
     if (target?.title && match !== 'exact') reasons.push(match === 'related' ? 'TARGET_TITLE_RELATED_ONLY' : 'TARGET_TITLE_ABSENT')
     if (authorMatch === 'conflicting') reasons.push('TARGET_AUTHOR_CONFLICT')
+    if (publicationMatch === 'outside') reasons.push('PUBLICATION_DATE_OUTSIDE_QUERY')
     if (target?.title && pageType !== 'book' && pageType !== 'chapter') reasons.push(pageType === 'secondary' ? 'SECONDARY_SOURCE_ONLY' : pageType === 'homepage' ? 'PLATFORM_HOME_ONLY' : 'BOOK_PAGE_TYPE_UNCONFIRMED')
-    return { index, eligible: reasons.length === 0, hostMatch, siteMatch, titleMatch: match, authorMatch, pageType, reasons }
+    return { index, eligible: reasons.length === 0, hostMatch, siteMatch, titleMatch: match, authorMatch, pageType,
+      ...(publicationMatch ? { publicationMatch } : {}), reasons }
   })
   const eligibleResults = results.filter((_result, index) => candidates[index].eligible)
   return { version: 1, queryHash: searchQueryHash(query), hasHardConstraints, resultCount: results.length,
     eligibleCount: eligibleResults.length, eligibleResults, candidates }
+}
+
+/** Order candidates for inspection. Provider scores and dates are discovery
+ * signals; the actual source text still determines what it supports. */
+export function rankResearchSearchResults(query: string, results: readonly WebSearchResult[], target?: ResearchSearchTarget): WebSearchResult[] {
+  const evaluated = evaluateResearchSearchCandidates(query, results, target)
+  const rank = (candidate: ResearchSearchCandidate) => {
+    const { authority = -1, rerankScore = -1 } = results[candidate.index]
+    // Eligibility and known target identity outrank supplier quality. Use
+    // supplier reranking and authority jointly within otherwise suitable hits.
+    return [Number(candidate.eligible), Number(candidate.eligible && candidate.authorMatch === 'mentioned'),
+      Number(candidate.publicationMatch === 'within'), Number(rerankScore >= 1.5), Number(authority >= 3), rerankScore, authority]
+  }
+  return evaluated.candidates.map(candidate => ({ index: candidate.index, rank: rank(candidate) }))
+    .sort((a, b) => {
+      for (let i = 0; i < a.rank.length; i++) {
+        const difference = b.rank[i] - a.rank[i]
+        if (difference) return difference
+      }
+      return a.index - b.index
+    }).map(({ index }) => results[index])
 }
 
 /** A navigation hint is neither a body candidate nor verified identity. Query

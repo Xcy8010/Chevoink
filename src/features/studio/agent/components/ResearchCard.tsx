@@ -23,7 +23,7 @@ function ResearchResult({ call, runActive }: { call: ResearchCall; runActive: bo
       {display.results.map((result, index) => <li key={`${result.url}:${index}`}>
         <a href={result.url} target="_blank" rel="noopener noreferrer"
           className="block rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]">
-          <span className="flex items-baseline gap-2"><span className="min-w-0 flex-1 break-words text-xs text-[var(--text-primary)]">{result.title}</span><span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">{result.source}</span></span>
+          <span className="flex flex-wrap items-baseline gap-x-2"><span className="min-w-0 flex-1 break-words text-xs text-[var(--text-primary)]">{result.title}</span><span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">{result.source}{result.publishedAt ? <> · <time dateTime={result.publishedAt}>{result.publishedAt.slice(0, 10)}</time></> : null}</span></span>
           {result.snippet ? <span className="mt-0.5 block break-words text-[11px] leading-5 text-[var(--text-secondary)]">{result.snippet}</span> : null}
         </a>
       </li>)}

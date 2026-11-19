@@ -131,14 +131,42 @@ describe('one task research request budget', () => {
     expect(await readResearchRequestBudget(f.scope, 'read', f.tx)).toEqual({ used: 3, limit: 8, remaining: 5 })
     expect(f.rows.filter(row => row.status === 'baseline')).toEqual(before)
   })
-  it('reuses the task search cache after resume and word reordering without another reservation', async () => {
-    const f = fixture(); expect(await f.search('样本 作者 site:fanqienovel.com', 'saved')).toBe(true)
+  it('recovers legacy results by exact request key and preserves the budget for equivalent keywords', async () => {
+    const f = fixture(), original = '样本 作者 site:fanqienovel.com'
+    expect(await f.search(original, 'saved')).toBe(true)
     const before = structuredClone(f.rows)
     expect(normalizeResearchSearchQuery('作者，样本 site:fanqienovel.com')).toBe(normalizeResearchSearchQuery('样本 作者 site:fanqienovel.com'))
-    expect(await findResearchSearchOutcome({ ...f.scope, runId: 'resumed' }, 'different-key', '作者，样本 site:fanqienovel.com'))
-      .toMatchObject({ provider: 'bocha', query: '样本 作者 site:fanqienovel.com', results: [] })
+    const resumed = { ...f.scope, runId: 'resumed' }
+    expect(await findResearchSearchOutcome(resumed, digest(original))).toMatchObject({ provider: 'bocha', query: original, results: [] })
+    expect(await findResearchSearchOutcome(resumed, 'different-key', '作者，样本 site:fanqienovel.com',
+      { key: digest('changed count or provider') })).toBeNull()
     expect(f.rows).toEqual(before)
     expect(await f.search('作者，样本 site:fanqienovel.com', 'repeat')).toBe(false)
+  })
+  it('replays full ranking metadata only for the same public question and query semantics', async () => {
+    const f = fixture(), query = '"river song" lang:zh,en after:2025 before:2027'
+    const call = f.call('ranked-search'), contextKey = digest(['public question', 6, 'provider config'])
+    expect(await reserveResearchRequest(call, 'search', 'ranked-key', undefined, f.tx, { query })).toBe(true)
+    await settleResearchRequest(call, 'consumed', f.tx)
+    const result = { title: 'Official source', url: 'https://sources.example.com/official', source: 'sources.example.com',
+      snippet: 'Short excerpt', summary: 'Actual public summary. '.repeat(25), authority: 4, rerankScore: 2.9, publishedAt: '2026-10-01T00:00:00.000Z' }
+    await saveResearchSearchOutcome(call, { provider: 'deepseek', results: [result], contextKey }, query)
+    const resumed = { ...f.scope, runId: 'resumed' }
+    const matching = { key: contextKey }
+    expect(await findResearchSearchOutcome(resumed, 'different-worktree-key', query, matching)).toMatchObject({ query, results: [result] })
+    expect(await findResearchSearchOutcome(resumed, 'other', query, { ...matching, key: digest('different public question') })).toBeNull()
+    for (const change of [query.replace('lang:zh,en', 'lang:zh'), query.replace('before:2027', 'before:2026'),
+      query.replace('"river song"', '"song river"'), query.replace('"river song"', '"river  song"')]) {
+      expect(await findResearchSearchOutcome(resumed, 'other', change, matching)).toBeNull()
+    }
+    expect(await readResearchRequestBudget(resumed, 'search', f.tx)).toMatchObject({ used: 1, remaining: 4 })
+  })
+  it('accepts an ordered legacy key only with the exact same original query', async () => {
+    const f = fixture(), original = '"two  spaces" after:2025'
+    expect(await f.search(original, 'old-ordered')).toBe(true)
+    const resumed = { ...f.scope, runId: 'resumed' }, context = { key: digest('original scope'), legacyRequestKey: digest(original) }
+    expect(await findResearchSearchOutcome(resumed, 'v2-key', original, context)).toMatchObject({ provider: 'bocha', query: original })
+    expect(await findResearchSearchOutcome(resumed, 'another-v2-key', '"two spaces" after:2025', context)).toBeNull()
   })
   it.each(['free-failed', 'refunded-failed', 'unknown', 'wrong-request', 'no-refund'] as const)('records only original confirmed HTTP failure: %s', async state => {
     const f = fixture(), call = f.call('original-http-failure'), request = { query: '样本 作者', count: 2 }

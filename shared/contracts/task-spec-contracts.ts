@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { storyCompilerModeSchema } from './story-compiler-contracts.js'
 import { taskAuthorizationSchema } from './task-authorization.js'
+import { publicWebQuestionSchema } from './public-web-research.js'
 import { writingTailVolumeCapabilitySchema } from './writing-volume-contracts.js'
 
 const localEditRegionSchema = z.object({ chapterId: z.string().min(1), revision: z.number().int().positive(),
@@ -171,6 +172,8 @@ export const taskSpecSchema = z.object({
   researchBudget: z.enum(['standard', 'extended']).optional(),
   /** Fresh server-derived denial; absent legacy contracts keep their ceiling. */
   networkAccess: z.literal('denied').optional(),
+  /** Separate public text supplied by the author for this request only. */
+  publicWebQuestion: publicWebQuestionSchema.optional(),
   /** Search-only scope is distinct from a complete network prohibition. */
   researchReadAccess: z.literal('denied').optional(),
   /** Fresh server policy for bounded source discovery/reading and limitation receipts. */

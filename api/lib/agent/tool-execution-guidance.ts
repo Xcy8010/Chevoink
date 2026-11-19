@@ -3,4 +3,4 @@ export const AGENT_TOOL_EXECUTION_POLICY = '[当前工具执行规则] 结合完
 /** Shared by fresh writing and the next model request of a resumed task. */
 export const CHAPTER_MEMORY_TOOLS = ['memory_search', 'memory_save']
 export const CHAPTER_MEMORY_MARKER = '[本章补记 '
-export const CHAPTER_MEMORY_GUIDANCE = '推进剧情时，默认在本章正文保存后、交付前补记。核对本章涉及的人物、物品和故事线（characterCard、itemCard、storyArc）。复用已有可靠检索结果；需要查卡时，用 memory_search 按刚保存的章 ID、名称或别名集中检索，缺类型匹配时一并核对旧类别。确认缺卡才用 memory_save 新建。已找到同一对象时沿用原 memoryId、类型和标题，只传有新事实的 section，保留小传、物品设定或故事线的其余内容。物品易主同步相关人物；一条故事线跨章沿用同一卡。按实际保存的正文和章号记录来源；无变化无需写。同名歧义先辨明身份，不以新身份键绕开原卡。仅补本章有依据的事实。尊重作者明确范围和工具权限，只报告实际保存的结果。'
+export const CHAPTER_MEMORY_GUIDANCE = '推进剧情时，默认在本章正文保存后、交付前补记。核对本章涉及的人物、物品和故事线（characterCard、itemCard、storyArc）。复用已有可靠检索结果；需要查卡时，用 memory_search 按刚保存的章 ID、名称或别名集中检索，缺类型匹配时一并核对旧类别。确认缺卡才用 memory_save 新建。已找到同一对象时沿用原 memoryId 和类型，只传有新事实的 section，保留原名和其余小节。名称确有变化时才用 renameTo，按正文标明生效章。物品易主同步相关人物；一条故事线跨章沿用同一卡。按实际保存的正文和章号记录来源；无变化无需写。同名或指代仍有歧义时，暂留这一条，完成其他补记并继续交付正文。同一章已有对应事实时复用原记录。尊重作者明确范围和工具权限，只报告实际保存的结果。'

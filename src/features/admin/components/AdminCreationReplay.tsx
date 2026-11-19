@@ -197,8 +197,7 @@ export function AdminCreationReplay({ userId, sessionId }: { userId: string; ses
               const text = getMessageText(message.parts, 'assistant')
               const finalText = isLast ? activityAnswerText(message.parts) : ''
               const receipt = isLast && message.completedAt && !finalText ? activities.savedReplyByRun.get(message.runId) : undefined
-              const opening = isFirst && hasProcess ? activities.openingByRun.get(block?.runIds?.[0] ?? message.runId) : undefined
-              if (!summary && !hasActivity && !opening && !receipt && !text) return null
+              if (!summary && !hasActivity && !receipt && !text) return null
               const wholeMessageIsProcess = hasProcess && !summary && !finalText && !receipt
               const showReplyTime = Boolean(finalText || receipt || text && open)
               const completedAt = isLast ? message.completedAt : null
@@ -207,7 +206,6 @@ export function AdminCreationReplay({ userId, sessionId }: { userId: string; ses
                 className={cn('agent-reading-column min-w-0', message.id !== projection.lastAssistantId && 'agent-msg-cv')}>
                 {summary ? <AuthorActivitySummary timing={timing} active={false} open={open} onToggle={block?.ops ? () => toggle(block.firstId) : undefined} /> : null}
                 <div className="group/replay-message">
-                  {opening ? <AgentProcessRegion open={open} className="mb-4"><AuthorProgressText text={opening} /></AgentProcessRegion> : null}
                   <AuthorActivityParts parts={message.parts} groups={groups} messageId={message.id} runActive={false} readOnly
                     processOpen={hasProcess && !wholeMessageIsProcess ? open : undefined}
                     collapseText={hasProcess && !isLast && !wholeMessageIsProcess} />

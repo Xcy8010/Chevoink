@@ -47,8 +47,11 @@ export function describeToolArguments(args: unknown): ToolArgumentRow[] {
   })
 }
 
-export function getMemorySpotlight(toolName: string, args: unknown): { type: string; title: string } | null {
-  const record = args as { memoryType?: unknown; title?: unknown; fromName?: unknown; toName?: unknown; relationType?: unknown } | null
+export function getMemorySpotlight(toolName: string, args: unknown, display?: AgentToolDisplayPayload): { type: string; title: string; memoryId?: string } | null {
+  if (toolName === 'memory_save' && display?.kind === 'memoryCard') {
+    return { type: display.memoryType, title: display.title, memoryId: display.memoryId }
+  }
+  const record = args as { memoryType?: unknown; title?: unknown; memoryId?: unknown; fromName?: unknown; toName?: unknown; relationType?: unknown } | null
   const type = toolName === 'memory_event_save' ? 'timelineEvent'
     : toolName === 'memory_relation_save' ? 'relationshipState'
       : toolName === 'memory_save' && typeof record?.memoryType === 'string' ? record.memoryType : null
@@ -57,7 +60,8 @@ export function getMemorySpotlight(toolName: string, args: unknown): { type: str
     && typeof record.toName === 'string' && typeof record.relationType === 'string'
     ? `${record.fromName}→${record.toName}:${record.relationType}`
     : typeof record?.title === 'string' ? record.title : ''
-  return { type, title }
+  const memoryId = toolName === 'memory_save' && typeof record?.memoryId === 'string' ? record.memoryId.trim() : ''
+  return { type, title, ...(memoryId ? { memoryId } : {}) }
 }
 
 export function getToolTargetTitle(display: AgentToolDisplayPayload | undefined, args: unknown): string | null {

@@ -1,6 +1,6 @@
 import type { AgentMessagePart } from '../../../../shared/contracts/index.js'
 import type { WorkspaceActivity } from './agentStore'
-import { getToolTargetTitle } from './tool-argument-view'
+import { getMemorySpotlight, getToolTargetTitle } from './tool-argument-view'
 import { qualityAppliedBodyChange } from '../../../../shared/agent-applied-body-change.js'
 
 type ToolPart = Extract<AgentMessagePart, { type: 'tool-call' }>
@@ -14,16 +14,13 @@ export function resolveActivityNavigation(activity: WorkspaceActivity, part?: To
   const text = (value: unknown) => typeof value === 'string' ? value.trim() : ''
   const toolName = activity.toolName
   if (['memory_save', 'memory_event_save', 'memory_relation_save'].includes(toolName)) {
-    const relationTitle = toolName === 'memory_relation_save' && text(args.fromName) && text(args.toName) && text(args.relationType)
-      ? `${text(args.fromName)}→${text(args.toName)}:${text(args.relationType)}` : ''
+    const memory = getMemorySpotlight(toolName, args, display)
     // Legacy history may retain only the summary. The memory panel still requires
     // one exact match in this novel and refuses ambiguous/deleted targets.
-    const legacyTitle = /^(?:沉淀记忆|记忆冲突|记忆候选|事件候选|关系候选)「([^「」]+)」/.exec(activity.summary ?? '')?.[1]
-    const title = relationTitle || text(args.title) || legacyTitle
+    const legacyTitle = /^(?:沉淀记忆|更新记忆|记忆冲突|记忆候选|事件候选|关系候选)「([^「」]+)」/.exec(activity.summary ?? '')?.[1]
+    const title = text(memory?.title) || text(args.title) || legacyTitle
     if (!title) return null
-    const memoryType = toolName === 'memory_event_save' ? 'timelineEvent'
-      : toolName === 'memory_relation_save' ? 'relationshipState' : text(args.memoryType)
-    return { kind: 'memory' as const, title, memoryType }
+    return { kind: 'memory' as const, title, memoryType: memory?.type ?? '', memoryId: memory?.memoryId }
   }
   // A deletion record is not an extant document to open.
   if (toolName.endsWith('_delete') || display?.kind === 'planDelete') return null

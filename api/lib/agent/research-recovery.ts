@@ -3,8 +3,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { prisma, DataAccessError } from '../prisma.js'
-import { evaluateResearchSearchCandidates, evaluateResearchNavigationCandidates } from '../research-search-quality.js'
-import { researchSourceWithinScope, getResearchReadTarget, readResearchRequestBudget, readResearchReportForDelivery, saveResearchReportSection } from './research-sources.js'
+import { evaluateResearchSearchCandidates, evaluateResearchNavigationCandidates, rankResearchSearchResults } from '../research-search-quality.js'
+import { researchSourceWithinScope, getResearchReadTarget, readResearchRequestBudget, readResearchReportForDelivery, saveResearchReportSection, searchOutcomeSchema } from './research-sources.js'
 import { planResearchDiscovery, researchDiscoveryStepKey, type DiscoverySource, type ResearchDiscoveryStep } from './research-discovery.js'
 import { matchesReaderChapter } from '../web-reader-quality.js'
 
@@ -69,22 +69,21 @@ export async function takeResearchDiscoveryHandoff(scope: Scope, allowedTools: r
     const searches = await tx.agentResearchRequest.findMany({ where: { scopeKey, kind: 'search', status: 'consumed',
       savedOutcome: { not: Prisma.DbNull } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
     const queries: string[] = []
-    const eligibility = new Map<string, { eligible: boolean; pageType: DiscoverySource['pageType'] }>()
+    const eligibility = new Map<string, { eligible: boolean; pageType: DiscoverySource['pageType']; searchPriority: number }>()
     for (const search of searches) {
-      const saved = search.savedOutcome
-      if (!saved || typeof saved !== 'object' || Array.isArray(saved)) continue
-      if (typeof saved.query === 'string') queries.push(saved.query)
-      const navigation = saved.navigation && typeof saved.navigation === 'object' && !Array.isArray(saved.navigation) ? saved.navigation : null
-      const entries = [...(Array.isArray(saved.results) ? saved.results : []), ...(Array.isArray(navigation?.results) ? navigation.results : [])]
-        .flatMap(entry => entry && typeof entry === 'object' && !Array.isArray(entry) && typeof entry.url === 'string'
-          && typeof entry.title === 'string' && typeof entry.snippet === 'string' && typeof entry.source === 'string'
-          ? [{ url: entry.url, title: entry.title, snippet: entry.snippet, source: entry.source }] : [])
-      const evaluated = evaluateResearchSearchCandidates((spec.researchNavigation.sourceSites ?? []).join(' '), entries, target)
+      const parsed = searchOutcomeSchema.safeParse(search.savedOutcome)
+      if (!parsed.success) continue
+      const saved = parsed.data
+      if (saved.query) queries.push(saved.query)
+      const query = saved.query ?? (spec.researchNavigation.sourceSites ?? []).join(' ')
+      const entries = rankResearchSearchResults(query, [...saved.results, ...(saved.navigation?.results ?? [])], target)
+      const evaluated = evaluateResearchSearchCandidates(query, entries, target)
       const nav = evaluateResearchNavigationCandidates(entries, target, spec.researchNavigation.sourceSites)
       entries.forEach((entry, index) => {
         const page = evaluated.candidates[index]?.pageType
+        const searchPriority = Math.min(index, eligibility.get(entry.url)?.searchPriority ?? index)
         eligibility.set(entry.url, { eligible: evaluated.eligibleResults.includes(entry) || nav.some(item => item.url === entry.url),
-          pageType: page === 'book' || page === 'chapter' ? page : 'unknown' })
+          pageType: page === 'book' || page === 'chapter' ? page : 'unknown', searchPriority })
       })
     }
     const stored = await tx.agentResearchSource.findMany({ where: { taskKey,
@@ -92,7 +91,8 @@ export async function takeResearchDiscoveryHandoff(scope: Scope, allowedTools: r
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], include: { versions: { select: { contentKind: true, quality: true } } } })
     const sources: DiscoverySource[] = stored.map(source => ({ id: source.id, url: source.canonicalUrl, title: source.title,
       failed: source.readFailure !== null, eligible: eligibility.get(source.canonicalUrl)?.eligible ?? false,
-      pageType: eligibility.get(source.canonicalUrl)?.pageType, versions: source.versions.map(version => {
+      pageType: eligibility.get(source.canonicalUrl)?.pageType, searchPriority: eligibility.get(source.canonicalUrl)?.searchPriority,
+      versions: source.versions.map(version => {
         const quality = version.quality && typeof version.quality === 'object' && !Array.isArray(version.quality) ? version.quality : {}
         const evidence = quality.evidence && typeof quality.evidence === 'object' && !Array.isArray(quality.evidence) ? quality.evidence : {}
         const identity = evidence.identity && typeof evidence.identity === 'object' && !Array.isArray(evidence.identity) ? evidence.identity : {}
@@ -176,15 +176,12 @@ export async function claimResearchReadHandoff(scope: Scope, searchCallIds: read
       ...(!spec.researchNavigation ? { id: { in: searchCallIds.map(callId => hash([scopeKey, scope.runId, callId])) } } : {}),
       savedOutcome: { not: Prisma.DbNull } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 5 })
     for (const search of searches) {
-      const saved = search.savedOutcome
-      if (!saved || typeof saved !== 'object' || Array.isArray(saved) || typeof saved.query !== 'string' || !Array.isArray(saved.results)) continue
-      const entries = saved.results.flatMap(entry => entry && typeof entry === 'object' && !Array.isArray(entry)
-        && typeof entry.url === 'string' && typeof entry.title === 'string' && typeof entry.snippet === 'string' && typeof entry.source === 'string'
-        ? [{ url: entry.url, title: entry.title, snippet: entry.snippet, source: entry.source }] : [])
-      const extra = saved.navigation && typeof saved.navigation === 'object' && !Array.isArray(saved.navigation) && Array.isArray(saved.navigation.results)
-        ? saved.navigation.results.flatMap(entry => entry && typeof entry === 'object' && !Array.isArray(entry) && typeof entry.url === 'string'
-          && typeof entry.title === 'string' && typeof entry.snippet === 'string' && typeof entry.source === 'string' ? [{ url: entry.url, title: entry.title, snippet: entry.snippet, source: entry.source }] : []) : []
-      const evaluation = evaluateResearchSearchCandidates(spec.researchNavigation ? (spec.researchNavigation.sourceSites ?? []).join(' ') : saved.query, entries, target)
+      const parsed = searchOutcomeSchema.safeParse(search.savedOutcome)
+      if (!parsed.success || !parsed.data.query) continue
+      const saved = parsed.data
+      const entries = rankResearchSearchResults(parsed.data.query, saved.results, target)
+      const extra = saved.navigation?.results ?? []
+      const evaluation = evaluateResearchSearchCandidates(parsed.data.query, entries, target)
       const eligible = evaluation.eligibleResults.filter(item => !spec.researchNavigation || evaluation.candidates[entries.indexOf(item)].pageType === 'book'
         || evaluation.candidates[entries.indexOf(item)].pageType === 'chapter').map(item => ({ ...item,
         purpose: spec.researchNavigation && evaluation.candidates[entries.indexOf(item)].pageType === 'book' ? 'navigation' as const : undefined }))
