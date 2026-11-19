@@ -229,6 +229,7 @@ export default function AdminLoginPage() {
               <p className="mb-1.5 text-sm text-[var(--text-secondary)]">短信验证码</p>
               <div className="flex gap-2">
                 <TextInput
+                  className="min-w-0 flex-1"
                   inputMode="numeric"
                   autoComplete="one-time-code"
                   placeholder="请输入短信验证码"
@@ -280,6 +281,7 @@ export default function AdminLoginPage() {
                 </button>
               )}
               <TextInput
+                className="min-w-0 flex-1"
                 placeholder="图中字符"
                 value={captchaAnswer}
                 onChange={(event) => setCaptchaAnswer(event.target.value)}
