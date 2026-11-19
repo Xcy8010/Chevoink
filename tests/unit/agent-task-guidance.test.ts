@@ -93,7 +93,7 @@ it.each(['创建新作品并保存简介标签。', '写下一章。', '只输�
 
 it.each(['把第三章修好并保存。', '详细解释每处修改，完整列出复查意见。', '只输出标题正文，不要总结。'])('keeps concise defaults subordinate to the complete author request: %s', prompt => {
   const spec = task(prompt), before = structuredClone(spec), text = taskOperatingGuidance(spec, 'build')!
-  expect(text).toContain('作品中已有保存成果时默认一两句简短确认结果和位置')
+  expect(text).toContain('作品中已有保存成果时，用一个短段落交代结果、位置和有代表性的内容')
   expect(text).toContain('有影响使用的缺项才说明')
   expect(text).toContain('不复述已保存正文、提纲情节或修改流水')
   expect(text).toContain('作者要求在聊天中交付完整内容、报告、详细解释或具体改动时按要求展开')

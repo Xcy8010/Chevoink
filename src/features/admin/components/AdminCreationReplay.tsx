@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils'
 import { AuthorActivityParts, AuthorActivitySummary, AuthorProgressText } from '@/features/studio/agent/components/AuthorActivityParts'
 import { AgentProcessRegion } from '@/features/studio/agent/components/AgentProcessRegion'
 import { AuthorRequestBubble } from '@/features/studio/agent/components/AuthorRequestBubble'
-import { activityAnswerText, projectActivityGroups } from '@/features/studio/agent/lib/activity-groups'
+import { activityAnswerText, activityReportVisibility, hasVisibleActivityText, projectActivityGroups } from '@/features/studio/agent/lib/activity-groups'
 import { getMessageText } from '@/features/studio/agent/lib/panel-helpers'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '@/features/studio/agent/lib/message-projection'
 import ImageLightbox from '@/features/studio/components/ImageLightbox'
@@ -194,12 +194,13 @@ export function AdminCreationReplay({ userId, sessionId }: { userId: string; ses
               const summary = timing && (timing.elapsedMs !== null || hasProcess)
               const groups = activities.byMessage.get(message.id)
               const hasActivity = groups && [...groups.values()].some(group => group.messageId === message.id)
-              const text = getMessageText(message.parts, 'assistant')
+              const reportVisibility = activityReportVisibility(activities.reportsByMessage.get(message.id), false)
+              const hasAuthorText = hasVisibleActivityText(message.parts, reportVisibility)
               const finalText = isLast ? activityAnswerText(message.parts) : ''
               const receipt = isLast && message.completedAt && !finalText ? activities.savedReplyByRun.get(message.runId) : undefined
-              if (!summary && !hasActivity && !receipt && !text) return null
+              if (!summary && !hasActivity && !receipt && !hasAuthorText) return null
               const wholeMessageIsProcess = hasProcess && !summary && !finalText && !receipt
-              const showReplyTime = Boolean(finalText || receipt || text && open)
+              const showReplyTime = Boolean(finalText || receipt || hasAuthorText && open)
               const completedAt = isLast ? message.completedAt : null
               const copyText = completedAt ? finalText || receipt : null
               return <AgentProcessRegion key={message.id} open={!wholeMessageIsProcess || open}
@@ -208,7 +209,7 @@ export function AdminCreationReplay({ userId, sessionId }: { userId: string; ses
                 <div className="group/replay-message">
                   <AuthorActivityParts parts={message.parts} groups={groups} messageId={message.id} runActive={false} readOnly
                     processOpen={hasProcess && !wholeMessageIsProcess ? open : undefined}
-                    collapseText={hasProcess && !isLast && !wholeMessageIsProcess} />
+                    collapseText={hasProcess && !isLast && !wholeMessageIsProcess} reportVisibility={reportVisibility} />
                   {receipt ? <AuthorProgressText text={receipt} /> : null}
                   {showReplyTime ? <div className="mt-1 flex flex-wrap items-center gap-2">
                     {copyText ? <ReplayCopy text={copyText} label="复制回复" /> : null}

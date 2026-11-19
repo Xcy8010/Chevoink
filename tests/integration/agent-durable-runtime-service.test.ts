@@ -898,7 +898,7 @@ describe.runIf(available)('durable question lifecycle', () => {
       expect(toolResult).toMatchObject({ messageId: recap.messageId, seq: expect.any(Number) })
       expect(recap.seq).toBeGreaterThan(toolResult!.seq)
       const history = await prisma.agentMessage.findUniqueOrThrow({ where: { id: recap.messageId } })
-      expect((history.parts as unknown[]).at(-1)).toEqual({ type: 'text', text: terminalText })
+      expect((history.parts as unknown[]).at(-1)).toEqual({ type: 'text', text: terminalText, afterTools: true })
       if (scenario === 'answered' || scenario === 'historical-answered') {
         expect(toolResult).toMatchObject({ ok: true })
         expect(history.parts).toMatchObject([

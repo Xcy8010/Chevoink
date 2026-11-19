@@ -517,9 +517,9 @@ it('keeps a literal title-tag-only answer when the requested reply has no tool c
 })
 
 it.each([
-  { prompt: '写第十章细纲。', opening: '我先看《渡口》的章末，核对细纲从哪里接上。', closing: '第十章细纲已保存到原大纲下。' },
+  { prompt: '写第十章细纲。', opening: '我先看《渡口》的章末，核对细纲从哪里接上。', closing: '第十章细纲已保存到原大纲下。这章接在渡口的夜班之后。守夜人捡到的信落到迟归的船夫手里，把两人的选择连了起来。' },
   { prompt: '写第十章细纲并保存，也把完整细纲给我。', opening: '', closing: '## 第十章细纲\n\n第一场，渡口的守夜人捡到一封信。\n\n第二场，守夜人将信交给迟归的船夫。' },
-])('reports a read-to-plan transition before tools and honors the requested closing: $prompt', async ({ prompt, opening, closing }) => {
+])('introduces tools once, allows silent routine saves and honors the requested closing: $prompt', async ({ prompt, opening, closing }) => {
   const { enableAgentWritingScope } = await import('../../api/lib/agent/agent-writing-scope.js')
   const taskSpec = enableAgentWritingScope(buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt, authorWritingProtocol: 2 }))
   mocks.currentOriginal = { prompt, taskSpec }
@@ -532,7 +532,7 @@ it.each([
       display: { kind: 'planFile', artifactId: 'plan-10', title: '第十章细纲', content: planBody } }), false),
   ]
   mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
-    const content = opening ? `<activity-title>核对前章的结尾</activity-title>\n${opening}` : ''
+    const content = opening ? `<activity-title>核对前章的结尾</activity-title>\n${opening}` : '<activity-title>总结这一步的结果</activity-title>'
     if (content) input.onChunk?.({ type: 'text-delta', delta: content })
     input.onChunk?.({ type: 'tool-call-start', id: read.id, name: read.name })
     return response(content, [read])
@@ -541,7 +541,7 @@ it.each([
     return response('', [plan])
   }).mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
     const instructions = input.messages.map(message => typeof message.content === 'string' ? message.content : '').join('\n')
-    expect(instructions).toContain('默认用一两句交代计划名称、位置及影响使用的缺项')
+    expect(instructions).toContain('说明计划名称和位置，点出核心冲突、关键转折或与前章的衔接')
     expect(instructions).toContain('作者要求在聊天里交付计划、详细解释或完整内容时，按原请求完整提供')
     return response(closing)
   })
@@ -552,14 +552,31 @@ it.each([
     : event.type === 'tool.delta' || event.type === 'tool.result' ? [`${event.type}:${event.callId}`] : [])
   expect(ordered).toEqual([
     opening || '我先核对前文。', 'tool.delta:read', 'tool.result:read',
-    '接下来保存创作计划。', 'tool.delta:save', 'tool.result:save', closing,
+    'tool.delta:save', 'tool.result:save', closing,
   ])
+  expect(events().filter(event => event.type === 'activity.title')).toHaveLength(opening ? 1 : 0)
   expect(mocks.chat).toHaveBeenCalledTimes(3)
   expect(mocks.tools[1].execute).toHaveBeenCalledOnce()
   const persisted = (mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>)
     .flatMap(([entry]) => entry.create?.parts ?? [])
   expect(persisted).toContainEqual(expect.objectContaining({ type: 'tool-call', callId: plan.id, display: expect.objectContaining({ content: planBody }) }))
   expect(persisted).toContainEqual({ type: 'text', text: closing })
+})
+
+it.each(['run', 'other-run'])('restores the opening only from this run’s own tool history: %s', async priorRun => {
+  const prompt = '核对前文的人物出场时间。'
+  admitCurrentOriginal(prompt)
+  const payload: AgentStreamEvent = { type: 'tool.call', runId: priorRun, seq: 1, ts: 1, messageId: 'old-message',
+    callId: 'old-read', toolName: 'chapter_read', title: '读取章节', args: {} }
+  mocks.runEvents.push({ runId: priorRun, seq: 1, type: payload.type, payload, createdAt: new Date(1) })
+  const read = tool('chapter_read', async () => ({ output: '前章的人物在黄昏抵达。' }))
+  mocks.tools = [read]
+  queue(response('', [call('new-read', read.name)]), response('人物在黄昏抵达。'))
+  await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c',
+    mode: 'build', prompt, resume: true })
+  expect(events().filter(event => event.type === 'text.final' && event.text === '我先核对前文。')).toHaveLength(priorRun === 'run' ? 0 : 1)
+  expect(read.execute).toHaveBeenCalledOnce()
+  expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
 })
 
 it('retains real prose received after a preview when the provider stream is cancelled', async () => {
@@ -4427,7 +4444,7 @@ describe('source acquisition in the real Agent loop', () => {
 
 describe('ordinary chapter summary presentation', () => {
   it.each([
-    ['写下一章。', '已完成第1章《当前章》。\n\n阿岚把旧碗放回柜上。铜钱压在碗底。'],
+    ['写下一章。', '已完成第1章《当前章》。\n\n阿岚把旧碗放回柜上。铜钱压在碗底。门外脚步声渐远。'],
     ['写下一章，并逐条说明人物和情节的改动。', '阿岚把旧碗放回柜上。铜钱压在碗底。门外脚步声渐远。'],
   ])('uses the same-task write receipt for an unbound Studio closing: %s', async (prompt, expected) => {
     const { enableAgentWritingScope } = await import('../../api/lib/agent/agent-writing-scope.js')
@@ -5178,7 +5195,6 @@ describe('author-directed task ending in the real execution loop', () => {
       expect(events().find(event => event.type === 'tool.call' && event.callId === 'guessed-save')).toBeUndefined()
       expect(events().filter(event => event.type === 'text.final')).toEqual([
         expect.objectContaining({ text: '这一步需要和你确认一个问题。' }),
-        expect.objectContaining({ text: '接下来整理作品信息。' }),
         expect.objectContaining({ type: 'text.final', afterTools: true,
           text: `已保存《${title}》的作品信息。\n\n**简介**\n\n${fields.summary}\n\n**标签** 都市\n\n要不要先设置一下作品封面，还是直接开始写大纲？` }),
       ])
@@ -5255,7 +5271,7 @@ describe('author-directed task ending in the real execution loop', () => {
         { type: 'text', text: progress },
         { type: 'tool-call', callId: 'rename', status: 'success' },
         { type: 'tool-call', callId: 'metadata', status: 'success' },
-        { type: 'text', text: recap },
+        { type: 'text', text: recap, afterTools: true },
       ])
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     } finally {

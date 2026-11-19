@@ -134,7 +134,9 @@ it('removes the initial thinking label when author text arrives and reserves a d
   act(() => store.applyEvent({ ...base, messageId: 'later', type: 'tool.call', callId: 'read', toolName: 'chapter_read', args: {}, title: '核对前文', seq: 4 }))
   expect(view.result.current).toBeUndefined()
   act(() => store.applyEvent({ ...base, messageId: 'later', type: 'tool.result', callId: 'read', toolName: 'chapter_read', ok: true, summary: '已核对', durationMs: 10, seq: 5 }))
-  expect(view.result.current).toBe('梳理刚查到的资料')
+  expect(view.result.current).toBeUndefined()
+  act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
+  expect(view.result.current).toBe('正在处理…')
 })
 
 it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to real %s activity, and restores one timer after silence', type => {

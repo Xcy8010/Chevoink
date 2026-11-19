@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import { useStreamingTextState } from '../../components/use-streaming-text'
 import { useAgentStore } from '../agentStore'
 import { getMemorySpotlight } from '../tool-argument-view'
-import { activityChapterId, activityReviewProblem, projectActivityGroups, type ActivityCall, type ActivityGroup, type MessageActivityGroups } from '../lib/activity-groups'
+import { activityChapterId, activityReviewProblem, isActivityDetailReport, projectActivityGroups, type ActivityCall, type ActivityGroup, type ActivityReportVisibility, type MessageActivityGroups } from '../lib/activity-groups'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
 import { agentRunningToolLabel } from '../../../../../shared/agent-progress.js'
@@ -210,23 +210,24 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   const [open, setOpen] = useState(false)
   const detailsId = useId()
   const calls = group?.calls ?? []
-  const grouped = calls.length > 1
+  const grouped = calls.length - (group?.stageStart ?? 0) > 1
   const unresolved = group?.unsettled
   const running = runActive && active ? [...calls].reverse().find(part => part.status === 'running') : undefined
   const part = running ?? unresolved ?? calls.at(-1)
-  const iconPart = group?.title ? calls[0] : part
+  const iconPart = group?.title ? calls[group.stageStart] : part
   const Icon = iconPart && !workingLabel ? toolIcon(iconPart) : Brain
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
   const waitingForAnswer = runActive && calls.some(call => call.toolName === 'ask_user' && call.status === 'running')
   const waitingForApproval = runActive && awaitingApprovalCallId !== undefined
     && calls.some(call => !call.preparing && call.status === 'running' && call.callId === awaitingApprovalCallId)
+  const namedInProgress = Boolean(group?.title && runActive && active && (running || !group.closed && !group.completed))
   const readLabel = group?.readLabel
   let label = workingLabel
   if (group?.title) {
     const title = group.title
     if (waitingForAnswer) label = `等待你回答 · ${title}`
     else if (importWaiting || waitingForApproval) label = `等待你确认 · ${title}`
-    else if (active && (running || runActive && !group.closed && !group.completed)) label = `正在${title}`
+    else if (namedInProgress) label = `正在${title}`
     else if ((group.closed || group.completed) && !group.unfinished) label = `已${title}`
     else label = `${title}未完成`
   } else if (!label && part) {
@@ -237,6 +238,8 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
     else label = activitySummary(part, runActive && active, titles, false, grouped, group?.staleReviewCalls?.has(part))
   }
   const showingActivity = Boolean(active && running && !importWaiting && !waitingForAnswer && !waitingForApproval)
+  const shimmer = runActive && Boolean(showingActivity || namedInProgress || workingLabel)
+    && !importWaiting && !waitingForAnswer && !waitingForApproval
   const step = group?.title ? label : workingLabel ?? (part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : '')
   const previousStep = useRef(step)
   const headline = useRef<HTMLSpanElement>(null)
@@ -261,7 +264,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
           <span aria-live={group?.title || active || running || workingLabel ? 'polite' : undefined}
             data-activity-preparing={showingActivity && running?.preparing || undefined}
             data-activity-running={showingActivity && !running?.preparing || undefined}
-            className={cn('agent-activity-label', (showingActivity || workingLabel) && 'agent-processing-shimmer')}>{label}</span>
+            className={cn('agent-activity-label', shimmer && 'agent-processing-shimmer')}>{label}</span>
           {group ? <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} /> : null}
         </span>
       </span>
@@ -271,9 +274,13 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
       <ActivityScrollArea><ul>
         {calls.flatMap((call, index) => {
           const key = group.callKeys[index]
-          return [call, ...(group.childrenByCall.get(key) ?? [])].map(detail =>
+          const receipts = [call, ...(group.childrenByCall.get(key) ?? [])].map(detail =>
             <ActivityDetail key={JSON.stringify([key, detail.subagentCallId ?? null, detail.callId])} part={detail} runActive={runActive} titles={titles} readOnly={readOnly}
               stale={group.staleReviewCalls?.has(detail)} />)
+          const reports = group.reportsAfterCall.get(key)?.filter(report => isActivityDetailReport(report, runActive, awaitingApprovalCallId))
+          return [...receipts, ...reports?.map(report => <li key={report.id} data-activity-report className="ml-6 text-[var(--text-secondary)]">
+            <AgentMarkdownText text={report.text} identity={report.id} />
+          </li>) ?? []]
         })}
       </ul></ActivityScrollArea>
     </AgentProcessRegion> : null}
@@ -300,7 +307,7 @@ export function AuthorProgressText({ text, className }: { text: string; classNam
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapterTitles, readOnly, awaitingApprovalCallId,
+  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapterTitles, readOnly, awaitingApprovalCallId, reportVisibility,
 }: {
   parts: AgentMessagePart[]
   messageId: string
@@ -316,14 +323,26 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   activityChapterTitles?: ReadonlyMap<string, string>
   readOnly?: boolean
   awaitingApprovalCallId?: string
+  reportVisibility?: ActivityReportVisibility
 }) {
-  const authorParts = useMemo(() => projectAgentAuthorParts(parts.filter(part => part.type !== 'reasoning'), false, { includePreparing: runActive }), [parts, runActive])
+  const authorParts = useMemo(() => {
+    const projected = projectAgentAuthorParts(parts.filter(part => part.type !== 'reasoning'), false, { includePreparing: runActive })
+    if (!reportVisibility) return projected
+    let textIndex = 0
+    // Preserve the text position across the hold so released reports do not
+    // remount an existing opening or displace the focused activity control.
+    return projected.map(part => part.type === 'text' && reportVisibility.hidden.has(textIndex++) ? { ...part, text: '' } : part)
+  }, [parts, runActive, reportVisibility])
   const localGroups = useMemo(() => groups ?? projectActivityGroups([{ id: messageId, runId: '', role: 'assistant', parts }]).byMessage.get(messageId), [groups, messageId, parts])
   const receivedText = useMemo(() => authorParts.flatMap(part => part.type === 'text' ? [part.text] : []).join(''), [authorParts])
   const revealed = useStreamingTextState(receivedText, revealText !== undefined, messageId, true)
+  const deferred = reportVisibility?.deferred ?? false
   useEffect(() => {
-    if (revealText !== undefined && !revealed.pending) onTextRevealed?.(messageId, receivedText)
-  }, [revealText, revealed.pending, messageId, receivedText, onTextRevealed])
+    if (revealText !== undefined && !deferred && !revealed.pending) {
+      const fullText = parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('')
+      onTextRevealed?.(messageId, fullText)
+    }
+  }, [revealText, deferred, revealed.pending, messageId, parts, onTextRevealed])
   const lastToolIndex = authorParts.reduce((last, part, index) => part.type === 'tool-call' ? index : last, -1)
   let textOffset = 0
   let textOrdinal = 0
@@ -334,6 +353,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   const entries = authorParts.map<ReactNode>((part, index) => {
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
+        if (!part.text) return null
         // Once a tool preview exists, its preceding public report is visible
         // in full. Only unfinished prose needs the typing reveal.
         const text = index < lastToolIndex ? part.text : part.text.slice(0, Math.max(0, revealed.text.length - textOffset))
@@ -360,5 +380,5 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       <ActivityRow key="activity" runActive={runActive} active={false} workingLabel={workingLabel} />
     </AgentProcessRegion>)
   }
-  return <div className="flex flex-col gap-3 font-medium">{entries}</div>
+  return entries.some(Boolean) ? <div className="flex flex-col gap-3 font-medium">{entries}</div> : null
 })

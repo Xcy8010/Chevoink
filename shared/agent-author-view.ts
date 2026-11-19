@@ -208,7 +208,11 @@ export function projectAgentAuthorParts(parts: readonly AgentMessagePart[], stre
 /** An end-of-turn recap follows the tool results and keeps earlier progress text. */
 export function appendAgentFinalTextAfterTools(parts: AgentMessagePart[], text: string): AgentMessagePart[] {
   const tail = parts.at(-1)
-  return !text || tail?.type === 'text' && tail.text === text ? parts : [...parts, { type: 'text', text }]
+  if (!text) return parts
+  if (tail?.type === 'text' && tail.text === text) {
+    return tail.afterTools ? parts : [...parts.slice(0, -1), { ...tail, afterTools: true }]
+  }
+  return [...parts, { type: 'text', text, afterTools: true }]
 }
 
 export function projectAgentToolSummary(summary: string, status: string): string {

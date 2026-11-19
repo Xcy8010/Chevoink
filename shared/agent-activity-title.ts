@@ -3,6 +3,13 @@ import type { AgentMessagePart } from './contracts/agent-events.js'
 const opening = '<activity-title>'
 const closing = '</activity-title>'
 
+/** Generic narration is not a creative activity. Keep titles for the author's
+ * actual subject, including requested chapter summaries and research reports. */
+export function visibleAgentActivityTitle(title: string): string | undefined {
+  const meta = /^(?:正在|已)?(?:准备|开始|收尾)?(?:总结|汇总|整理|梳理|汇报|撰写|生成|输出)(?:一下)?(?:这一步|本步骤|当前步骤|本阶段|当前阶段|本次任务|本轮任务|本次|本轮|最终|最后|结尾|收尾)?(?:的)?(?:执行结果|阶段结果|工作进展|进度汇报|最终回复|最终答复|收尾总结|结果|汇报|总结|答复|回复)?[。…]*$/u
+  return meta.test(title.trim()) ? undefined : title
+}
+
 /** Metadata occupies one complete leading line of an assistant response. */
 export function readAgentActivityTitle(content: string): { title?: string; text: string } {
   const newline = content.indexOf('\n')

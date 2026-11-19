@@ -76,8 +76,8 @@ it('publishes a verified tool-free reply containing the literal marker without i
 it.each([
   [undefined, 'chapter_read', null, '我先核对前文。'],
   ['chapter_read', 'memory_search', '<activity-title>核对前章</activity-title>', ''],
-  ['chapter_read', 'plan_save', '<activity-title>核对前章</activity-title>', '接下来保存创作计划。'],
-] as const)('reports silent durable tool rounds at actual stage boundaries: %s → %s', async (prior, name, priorText, report) => {
+  ['chapter_read', 'plan_save', '<activity-title>核对前章</activity-title>', ''],
+] as const)('introduces only the first silent durable tool round: %s → %s', async (prior, name, priorText, report) => {
   const before = prior ? [{ role: 'assistant', content: priorText, toolCalls: [{ id: 'prior', name: prior, arguments: '{}' }] },
     { role: 'tool', toolCallId: 'prior', content: '已经核对。' }] : []
   const current = { role: 'assistant', content: null, toolCalls: [{ id: 'next', name, arguments: '{}' }] }

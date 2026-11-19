@@ -415,6 +415,8 @@ describe('saved artifact display withdrawal', () => {
     expect(delivery).not.toBeNull()
     expect(completedWritingPresentationText(delivery!, '')).toBe('已完成第1章《旧罗盘》。')
     expect(completedWritingPresentationText(delivery!, '人物的决定让机会变得具体。')).toBe('已完成第1章《旧罗盘》。\n\n人物的决定让机会变得具体。')
+    const recap = '沈桐看见罗盘浮出的价格。他把笑意压下，决定独自把握这次机会。章末留住了旁人还没察觉的秘密。'
+    expect(completedWritingPresentationText(delivery!, recap)).toBe(`已完成第1章《旧罗盘》。\n\n${recap}`)
     expect(f.chapter.content).toBe('沈桐眼前浮起价值数字。他压住笑意，决定抓住这个独享的机会。')
   })
   it('keeps a natural wrap-up with a title and short excerpt under a no-repeat preference', async () => {

@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 
-import { createAgentActivityTextStream, readAgentActivityTitle } from '../../shared/agent-activity-title.js'
+import { createAgentActivityTextStream, readAgentActivityTitle, visibleAgentActivityTitle } from '../../shared/agent-activity-title.js'
 
 it('recognizes only an entire leading title line and preserves reply content verbatim', () => {
   const text = '  窗外的钟响了。\n\n    余音未散。\n'
@@ -13,6 +13,15 @@ it('recognizes only an entire leading title line and preserves reply content ver
     `${title} 一段原话\n${text}`,
     '<activity-title>文字没写完',
   ]) expect(readAgentActivityTitle(reply)).toEqual({ text: reply })
+})
+
+it('omits process-only headlines while keeping summaries of real creative subjects', () => {
+  for (const title of ['总结这一步的结果', '正在整理最终回复', '汇总本阶段的工作进展', '收尾总结']) {
+    expect(visibleAgentActivityTitle(title)).toBeUndefined()
+  }
+  for (const title of ['总结第九章的情节', '整理人物关系', '撰写章节摘要']) {
+    expect(visibleAgentActivityTitle(title)).toBe(title)
+  }
 })
 
 it('does not stream fragments of the title or drop text from a split chunk', () => {

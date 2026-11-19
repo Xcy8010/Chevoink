@@ -1,8 +1,7 @@
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { formatNovelSetupRecap, getNovelSetupFollowup, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
-import { createAgentActivityTextStream, readAgentActivityTitle } from '../../../shared/agent-activity-title.js'
-import { sameAgentToolStage } from '../../../shared/agent-tool-presentation.js'
+import { createAgentActivityTextStream, readAgentActivityTitle, visibleAgentActivityTitle } from '../../../shared/agent-activity-title.js'
 import { askUserTool, DIRECTION_PURPOSE_REQUIRED, formatUnansweredQuestionWrapUp, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
@@ -76,7 +75,7 @@ import { getTaskRunIds } from './task-lineage.js'
 import type { AgentTool, ToolContext } from './tools/types.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
-import { toolActivity, toolActivityReport, type ToolActivity } from './activity-report.js'
+import { toolActivityReport } from './activity-report.js'
 import { SAVED_PLAN_CLOSING_GUIDANCE } from './task-guidance.js'
 import { createExecutionTextDetector, normalizeExecutionText } from './execution-text-detector.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
@@ -1807,7 +1806,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
 
     let lastAssistantText = ''
-    let previousActivity: ToolActivity | undefined
+    let hasPriorActivity = Boolean(params.resume && await prisma.agentRunEvent.findFirst({
+      where: { runId, type: 'tool.call', seq: { lt: continuityOwner.seq } }, select: { seq: true },
+    }))
     // 模型把工具调用写成正文文本而非真正 function calling 时的纠偏重试次数
     let requireNativeToolCall = false
     // C3：规划类任务必须以 plan_save 落盘收尾，只聊天不落盘时回填提醒
@@ -2226,7 +2227,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
                 const draft = readAgentActivityTitle(liveTurn?.streamedText ?? '')
                 activityTextStream.finish(true)
                 const modelReport = humanizeAgentVisibleText(stripAgentProtocolArtifacts(draft.text))
-                const report = modelReport.trim() ? modelReport : toolActivityReport(toolActivity(tool.name, draft.title), previousActivity)
+                const report = modelReport.trim() ? modelReport : toolActivityReport(tool.name, draft.title && visibleAgentActivityTitle(draft.title), hasPriorActivity)
                 if (report) {
                   textBeforePreview = report
                   if (liveTurn) liveTurn.toolReport = report
@@ -2278,7 +2279,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const toolBearing = !textOnlyModel && !bootstrapCall && Boolean(result?.toolCalls.some(call => call.name !== 'task_respond'))
       const resultText = result?.content ?? ''
       const modelText = toolBearing ? readAgentActivityTitle(resultText) : { text: resultText }
-      const activityTitle = modelText.title
+      const activityTitle = modelText.title && visibleAgentActivityTitle(modelText.title)
       if (result) publishAuthorDelta(activityTextStream.finish(toolBearing))
       if (activityTitle) bus.emit({ type: 'activity.title', messageId, title: activityTitle })
       // A generated proposal may be replaced, restricted or served from cache.
@@ -2302,7 +2303,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         : []
       const effectiveToolCalls = textOnlyModel && !bootstrapCall ? [] : result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
       const firstActivityCall = effectiveToolCalls.find(call => call.name !== 'task_respond')
-      const nextActivity = firstActivityCall ? toolActivity(firstActivityCall.name, activityTitle) : undefined
       const responseCall = effectiveToolCalls.length === 1 && result.toolCalls[0]?.name === 'task_respond' ? result.toolCalls[0] : undefined
       const responseSuggestion = responseCall ? readTaskResponseNextPrompt(responseCall.arguments) : undefined
       if (responseCall && responseSuggestion) effectiveToolCalls[0] = { ...responseCall, arguments: responseSuggestion.args }
@@ -2330,20 +2330,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const cleanContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? modelText.text : normalizeExecutionText(stripAgentProtocolArtifacts(modelText.text))
       // This projection affects publication only. Empty-response, promise and
       // saved-delivery decisions below retain baseline execution normalization.
-      const authorProse = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse && !nextActivity
+      const authorProse = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse && !firstActivityCall
         ? modelText.text : humanizeAgentVisibleText(stripAgentProtocolArtifacts(modelText.text))
-      const authorContent = authorProse.trim() || !nextActivity ? authorProse : toolActivityReport(nextActivity, previousActivity)
-      if (nextActivity) {
-        const sameStage = previousActivity && sameAgentToolStage(nextActivity, previousActivity)
-        previousActivity = { ...nextActivity, title: activityTitle ?? (sameStage ? previousActivity?.title : undefined) }
-      }
+      const authorContent = authorProse.trim() || !firstActivityCall ? authorProse : toolActivityReport(firstActivityCall.name, activityTitle, hasPriorActivity)
+      if (firstActivityCall) hasPriorActivity = true
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
       // 模型返回的 reasoning 单独保留，执行旁白不改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
       const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && (requiredWritingPresentation || savedUnboundWriting))
-      if ((result.content || authorContent || textBeforePreview) && (nextActivity || !deferWritingCompletionText) && authorContent !== textBeforePreview) {
+      if ((result.content || authorContent || textBeforePreview) && (firstActivityCall || !deferWritingCompletionText) && authorContent !== textBeforePreview) {
         bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
       }
 
@@ -2581,7 +2578,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
           bus.emit({ type: 'text.final', messageId, text: delivered, asReasoning: false })
         } else if (savedCandidate) {
-          lastAssistantText = completedWritingPresentationText(savedCandidate, authorContent, savedUnboundWriting)
+          lastAssistantText = completedWritingPresentationText(savedCandidate, authorContent)
         } else {
           if (deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)

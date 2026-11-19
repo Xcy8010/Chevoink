@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAgentStore } from './agentStore'
 import { shouldShowProcessingHint } from './lib/panel-helpers'
-import { activityWorkingLabel, type projectActivityGroups } from './lib/activity-groups'
+import type { projectActivityGroups } from './lib/activity-groups'
 import type { AgentUIMessage } from '../../../../shared/contracts/index.js'
 
 export const OUTPUT_SILENCE_MS = 1500
@@ -24,10 +24,9 @@ export function useProcessingHint(messages: AgentUIMessage[], runId: string | nu
 
 export function useActivityWorkingLabel(messages: AgentUIMessage[], runId: string | null, phase: string, enabled: boolean,
   groups: ReturnType<typeof projectActivityGroups>) {
-  const lastCall = runId ? groups.lastCallByRun.get(runId) : undefined
-  const wroteOpening = Boolean(runId && !lastCall && groups.authorSpokeByRun.has(runId))
-  const silent = useProcessingHint(messages, runId, phase, false, enabled && wroteOpening)
+  const hasStarted = Boolean(runId && (groups.authorSpokeByRun.has(runId) || groups.lastGroupByRun.has(runId)))
+  const silent = useProcessingHint(messages, runId, phase, false, enabled && hasStarted)
   if (!enabled) return undefined
-  if (wroteOpening) return silent ? '正在处理…' : undefined
-  return activityWorkingLabel(lastCall)
+  if (!hasStarted) return '正在思考'
+  return silent ? '正在处理…' : undefined
 }

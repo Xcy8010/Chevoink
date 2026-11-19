@@ -3,7 +3,7 @@ import { REVIEW_OUTCOMES } from '../../../shared/review-lifecycle.js'
 import type { AgentExecutionOutbox } from '@prisma/client'
 import type { AgentStreamEventBody, AgentToolDisplayPayload, AgentMessagePart, AgentRollbackSnapshot } from '../../../shared/contracts/index.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
-import { prependAgentActivityTitle, readAgentActivityTitle } from '../../../shared/agent-activity-title.js'
+import { prependAgentActivityTitle, readAgentActivityTitle, visibleAgentActivityTitle } from '../../../shared/agent-activity-title.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
@@ -12,7 +12,7 @@ import { formatNovelSetupRecap, hasNovelDirectionDelivery, isNovelSetupAuthority
 import { failedToolResultSchema, hasAnsweredQuestionBatch } from './runtime-reducer.js'
 import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { isDurablePublicWebOperation, projectDurablePublicWeb } from './runtime-public-web.js'
-import { previousToolActivity, toolActivity, toolActivityReport } from './activity-report.js'
+import { toolActivityReport } from './activity-report.js'
 
 export const durableMessageId = (rootId: string, turn: number) => `dm-${runtimeJson({ rootId, turn }).hash.slice(0, 48)}`
 const sourceSchema = z.object({ revision: z.number().int().nonnegative(), snapshotHash: z.string(), previousHash: z.string().nullable() }).strict()
@@ -119,10 +119,15 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
       const events: AgentStreamEventBody[] = []
       const raw = appended.content ?? ''
       const toolCall = appended.toolCalls?.find(call => call.name !== 'task_respond')
-      const { title, text } = toolCall ? readAgentActivityTitle(raw) : { text: raw }
-      const prose = humanizeAgentVisibleText(text)
-      const report = toolCall && !prose.trim()
-        ? toolActivityReport(toolActivity(toolCall.name, title), previousToolActivity(previous.state.messages)) : prose
+      const metadata = toolCall ? readAgentActivityTitle(raw) : { text: raw }
+      const title = metadata.title && visibleAgentActivityTitle(metadata.title)
+      const prose = humanizeAgentVisibleText(metadata.text)
+      let report = prose
+      if (toolCall && !prose.trim()) {
+        const hasPriorTool = previous.state.messages.some(message =>
+          message.role === 'assistant' && message.toolCalls?.some(call => call.name !== 'task_respond'))
+        report = toolActivityReport(toolCall.name, title, hasPriorTool)
+      }
       if (title) events.push({ type: 'activity.title', messageId, title })
       if (appended.reasoning) events.push({ type: 'reasoning.delta', messageId, delta: appended.reasoning })
       events.push({ type: 'text.final', messageId, text: report, asReasoning: false })

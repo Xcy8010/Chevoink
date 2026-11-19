@@ -87,7 +87,7 @@ import { useActivityWorkingLabel } from '../useProcessingHint'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
-import { activityAnswerText, projectActivityGroups } from '../lib/activity-groups'
+import { activityAnswerText, activityReportVisibility, hasVisibleActivityText, projectActivityGroups } from '../lib/activity-groups'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -1749,7 +1749,8 @@ export function AgentPanel({
               const messageActivities = activityGroups.byMessage.get(message.id)
               const hasActivity = messageActivities && [...messageActivities.values()].some(group => group.messageId === message.id)
               const hasProcess = Boolean(block?.ops)
-              const authorText = getMessageText(message.parts, message.role)
+              const reportVisibility = activityReportVisibility(activityGroups.reportsByMessage.get(message.id), messageRunActive, pendingApproval?.callId)
+              const hasAuthorText = hasVisibleActivityText(message.parts, reportVisibility)
               const finalText = isBlockLast ? activityAnswerText(message.parts) : ''
               const receipt = isBlockLast && !blockRunActive && message.completedAt && !finalText
                 ? activityGroups.savedReplyByRun.get(message.runId) : undefined
@@ -1758,33 +1759,40 @@ export function AgentPanel({
               const settling = settlingBlocks.has(block?.firstId)
               const processOpen = !hasProcess || blockRunActive || settling || isBlockExpanded(block, message.runId)
               const messageWorkingLabel = message.id === workingMessageId ? workingLabel : undefined
-              if (!showSummary && !hasActivity && !authorText && !receipt && !messageWorkingLabel) return null
               const wholeMessageIsProcess = hasProcess && !showSummary && !finalText && !receipt
+              const messageKey = JSON.stringify([novelId, sessionId, voiceScopeKey ?? null, message.id])
+              const revealText = textRevealTargets[message.id]
+              const authorParts = <AuthorActivityParts
+                key={messageKey}
+                parts={message.parts}
+                groups={messageActivities}
+                activeGroupId={currentActivity?.id}
+                messageId={message.id}
+                revealText={revealText}
+                onTextRevealed={finishTextReveal}
+                runActive={messageRunActive}
+                processOpen={hasProcess && !wholeMessageIsProcess ? processOpen : undefined}
+                collapseText={hasProcess && !isBlockLast && !wholeMessageIsProcess}
+                workingLabel={messageWorkingLabel}
+                workingGroupId={workingGroup?.id}
+                activityChapterTitles={activityChapterTitles}
+                awaitingApprovalCallId={pendingApproval?.callId}
+                reportVisibility={reportVisibility}
+              />
+              if (!showSummary && !hasActivity && !hasAuthorText && !receipt && !messageWorkingLabel) {
+                return revealText !== undefined && !reportVisibility?.deferred ? authorParts : null
+              }
 
               return (
                 <AgentProcessRegion
-                  key={JSON.stringify([novelId, sessionId, voiceScopeKey ?? null, message.id])}
+                  key={messageKey}
                   open={!wholeMessageIsProcess || processOpen}
                   id={`agent-message-${message.id}`}
                   className={cn('agent-reading-column group/reply min-w-0', message.id !== lastAssistantId && !messageRunActive && 'agent-msg-cv')}
                 >
                   {showSummary ? <AuthorActivitySummary timing={timing} active={blockRunActive} open={processOpen}
                     onToggle={hasProcess && !blockRunActive && !settling ? () => toggleBlock(message.id) : undefined} /> : null}
-                  <AuthorActivityParts
-                    parts={message.parts}
-                    groups={messageActivities}
-                    activeGroupId={currentActivity?.id}
-                    messageId={message.id}
-                    revealText={textRevealTargets[message.id]}
-                    onTextRevealed={finishTextReveal}
-                    runActive={messageRunActive}
-                    processOpen={hasProcess && !wholeMessageIsProcess ? processOpen : undefined}
-                    collapseText={hasProcess && !isBlockLast && !wholeMessageIsProcess}
-                    workingLabel={messageWorkingLabel}
-                    workingGroupId={workingGroup?.id}
-                    activityChapterTitles={activityChapterTitles}
-                    awaitingApprovalCallId={pendingApproval?.callId}
-                  />
+                  {authorParts}
                   {receipt ? <AuthorProgressText text={receipt} /> : null}
                   {/* Only confirmed completed replies expose copy and branch actions. */}
                   {isBlockLast && !messageRunActive && message.completedAt && (finalText || receipt) ? (

@@ -68,7 +68,7 @@ it('keeps saved setup progress and tool results ahead of the terminal recap on l
   expect(state.messages.at(-1)?.parts).toEqual([
     { type: 'text', text: progress },
     expect.objectContaining({ type: 'tool-call', callId: 'save', status: 'success' }),
-    { type: 'text', text: recap },
+    { type: 'text', text: recap, afterTools: true },
   ])
   expect(state.textRevealTargets.answer).toBe(progress + recap)
   state.finishTextReveal('answer', progress + recap)

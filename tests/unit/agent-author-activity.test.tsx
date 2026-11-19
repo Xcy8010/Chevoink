@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, expect, it, vi } from 'vitest'
 import type { AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
 import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/studio/agent/components/AuthorActivityParts'
-import { activityAnswerText, activityWorkingLabel, projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
+import { activityAnswerText, activityReportVisibility, projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
 import { restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 afterEach(cleanup)
@@ -24,9 +24,13 @@ const saved = (callId: string, toolName = 'chapter_write') => call(callId, toolN
 
 function Transcript({ messages, active, awaitingApprovalCallId }: { messages: AgentUIMessage[]; active?: string; awaitingApprovalCallId?: string }) {
   const projection = projectActivityGroups(messages)
-  return <>{messages.map(item => <AuthorActivityParts key={item.id} messageId={item.id}
-    parts={item.parts} groups={projection.byMessage.get(item.id)} activeGroupId={active ? projection.activeByRun.get(active)?.id : undefined}
-    runActive={(item.runTiming?.sourceRunId ?? item.runId) === active} activityChapterTitles={titles} awaitingApprovalCallId={awaitingApprovalCallId} />)}</>
+  return <>{messages.map(item => {
+    const runActive = (item.runTiming?.sourceRunId ?? item.runId) === active
+    return <AuthorActivityParts key={item.id} messageId={item.id}
+      parts={item.parts} groups={projection.byMessage.get(item.id)} activeGroupId={active ? projection.activeByRun.get(active)?.id : undefined}
+      runActive={runActive} activityChapterTitles={titles} awaitingApprovalCallId={awaitingApprovalCallId}
+      reportVisibility={activityReportVisibility(projection.reportsByMessage.get(item.id), runActive, awaitingApprovalCallId)} />
+  })}</>
 }
 
 const goalTitle = '核对老周的出场时间'
@@ -46,23 +50,40 @@ it('keeps a titled progress row in place through three overlapping tools and a l
   expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(3)
   view.rerender(<Transcript active="r" messages={[message('batch', [activity, asSuccess(first), asSuccess(second), third])]} />)
   expect(screen.getByRole('button', { name: `正在${goalTitle}`, expanded: true })).toBe(button)
-  view.rerender(<Transcript active="r" messages={[message('batch', [activity, asSuccess(first), asSuccess(second), asSuccess(third)]), message('follow-up', [])]} />)
-  expect(screen.getByRole('button', { name: `正在${goalTitle}`, expanded: true })).toBe(button)
-
-  const settled = completed([
+  const followUp = { type: 'text', text: '前三章的出场时间仍需要对照卷内日期。' } as const
+  view.rerender(<Transcript active="r" messages={[
     message('batch', [activity, asSuccess(first), asSuccess(second), asSuccess(third)]),
-    message('follow-up', [call('check', 'chapter_list_summaries')]),
+    message('follow-up', [followUp]),
+  ]} />)
+  expect(screen.getByRole('button', { name: `正在${goalTitle}`, expanded: true })).toBe(button)
+  expect(button.querySelector('.agent-processing-shimmer')?.textContent).toBe(`正在${goalTitle}`)
+  expect(button.querySelector('[data-activity-running]')).toBeNull()
+  expect(screen.queryByText(followUp.text)).toBeNull()
+  const last = call('check', 'chapter_read')
+  const beforeFinish = [
+    message('batch', [activity, asSuccess(first), asSuccess(second), asSuccess(third)]),
+    message('follow-up', [followUp, last]),
     message('answer', [final]),
-  ])
+  ]
+  view.rerender(<Transcript active="r" messages={JSON.parse(JSON.stringify(beforeFinish))} />)
+  expect(screen.getByText(followUp.text).closest('[data-activity-report]')).toBeTruthy()
+  expect(screen.queryByText(final.text)).toBeNull()
+
+  const settled = completed(beforeFinish)
   view.rerender(<Transcript messages={settled} />)
   expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(button)
   expect(Array.from(view.container.querySelectorAll('[data-activity-tool]'), node => node.getAttribute('data-activity-tool')))
-    .toEqual(['project_search', 'memory_search', 'chapter_read', 'chapter_list_summaries'])
+    .toEqual(['project_search', 'memory_search', 'chapter_read', 'chapter_read'])
+  expect(button.compareDocumentPosition(screen.getByText(followUp.text)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   expect(screen.getByText(final.text)).toBeTruthy()
+  expect(button.querySelector('.agent-processing-shimmer')).toBeNull()
   expect(activityAnswerText(settled.at(-1)!.parts)).toBe(final.text)
   view.rerender(<Transcript key="refreshed" messages={JSON.parse(JSON.stringify(settled))} />)
-  expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: false })).toBeTruthy()
+  const restored = screen.getByRole('button', { name: `已${goalTitle}`, expanded: false })
+  expect(screen.queryByText(followUp.text)).toBeNull()
   expect(screen.getByText(final.text)).toBeTruthy()
+  fireEvent.click(restored)
+  expect(screen.getByText(followUp.text).closest('[data-activity-report]')).toBeTruthy()
 })
 
 it('keeps a failed review in details until an actual current-version report exists for the same target', () => {
@@ -173,6 +194,9 @@ it('shows one row per reported stage and preserves the opening, details and shor
   expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(3)
   const checked = { ...first, parts: [readTitle, opening, read, memory, { ...appendix, status: 'success' as const }] }
 
+  view.rerender(<Transcript messages={[checked, message('plan', [handoff])]} active="r" />)
+  expect(screen.queryByText(handoff.text)).toBeNull()
+  expect(row.querySelector('.agent-processing-shimmer')).toBeTruthy()
   view.rerender(<Transcript messages={[checked, message('plan', [handoff, plan])]} active="r" />)
   const second = screen.getByRole('button', { name: '正在准备 · 保存创作计划' })
   const report = screen.getByText(handoff.text)
@@ -190,6 +214,95 @@ it('shows one row per reported stage and preserves the opening, details and shor
   expect(screen.getByRole('button', { name: '已完成创作计划' })).toBeTruthy()
   expect(view.container.querySelectorAll('[data-activity-preparing], [data-activity-running]')).toHaveLength(0)
   expect(activityAnswerText(history[2].parts)).toBe(answer.text)
+})
+
+it('does not release a later-stage report while a previous stage still has an actual running receipt', () => {
+  const initial = call('read', 'chapter_read', { status: 'running' })
+  const report = { type: 'text', text: '相关情节停在仓库门口。' } as const
+  const next = message('outline', [report, call('plan', 'plan_save', { status: 'running' })])
+  const view = render(<Transcript active="r" messages={[message('read', [activity, initial]), next]} />)
+  expect(screen.queryByText(report.text)).toBeNull()
+  expect(screen.queryByRole('button', { name: `已${goalTitle}` })).toBeNull()
+  view.rerender(<Transcript active="r" messages={[message('read', [activity, { ...initial, status: 'success' }]), next]} />)
+  const finished = screen.getByRole('button', { name: `已${goalTitle}` })
+  const narrative = screen.getByText(report.text)
+  const saving = screen.getByRole('button', { name: '正在写入创作计划' })
+  expect(finished.compareDocumentPosition(narrative) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(narrative.compareDocumentPosition(saving) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
+it.each([
+  { tool: 'plan_save', running: '正在写入创作计划', finished: '已完成创作计划', named: false },
+  { tool: 'chapter_write', running: `正在写入《${title}》正文`, finished: `已写入《${title}》正文 · 6 字`, named: false },
+  { tool: 'chapter_write', running: '正在撰写雨夜开场', finished: '已撰写雨夜开场', named: true },
+])('updates the same row when a silent $tool stage follows a failed read ($named)', ({ tool, running, finished, named }) => {
+  const opening = { type: 'text', text: '先核对前章，再接上雨夜。' } as const
+  const final = { type: 'text', text: '雨沿着窗框流了下来，门外却有人在敲玻璃。' } as const
+  const read = message('read', [opening, activity, call('read', 'chapter_read', { status: 'failed' })])
+  const next = tool === 'chapter_write' ? saved('new-action') : call('new-action', tool)
+  const staged = (part: ActivityCall) => message('write', named
+    ? [{ type: 'activity-title', title: '撰写雨夜开场' }, part] : [part])
+  const view = render(<Transcript active="r" messages={[read]} />)
+  const button = screen.getByRole('button', { name: `正在${goalTitle}` })
+  fireEvent.click(button)
+  view.rerender(<Transcript active="r" messages={[read, staged({ ...next, status: 'running' })]} />)
+  expect(screen.getByRole('button', { name: running, expanded: true })).toBe(button)
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
+  expect(view.container.querySelectorAll('.agent-processing-shimmer')).toHaveLength(1)
+  expect(screen.getByText('查看章节未完成')).toBeTruthy()
+  expect(screen.getByText(opening.text)).toBeTruthy()
+
+  const history = completed([read, staged(next), message('answer', [final])])
+  view.rerender(<Transcript messages={history} />)
+  expect(screen.getByRole('button', { name: finished, expanded: true })).toBe(button)
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(2)
+  expect(screen.getByText('查看章节未完成')).toBeTruthy()
+  expect(screen.getByText(final.text)).toBeTruthy()
+  view.rerender(<Transcript key="reload" messages={JSON.parse(JSON.stringify(history))} />)
+  expect(screen.getByRole('button', { name: finished, expanded: false })).toBeTruthy()
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
+})
+
+it('publishes a confirmed terminal passage once the actual calls settle and preserves it after replay', () => {
+  const actual = call('read', 'chapter_read', { status: 'running' })
+  const ending = { type: 'text', text: '月光被云层挡住了。她把来信折好，塞进从未开启的旧铁盒。', afterTools: true } as const
+  const records = (part: ActivityCall) => [message('batch', [activity, part, ending])]
+  const view = render(<Transcript active="r" messages={records(actual)} />)
+  expect(screen.queryByText(ending.text)).toBeNull()
+  expect(screen.getByRole('button', { name: `正在${goalTitle}` })).toBeTruthy()
+  view.rerender(<Transcript active="r" messages={records({ ...actual, status: 'success' })} />)
+  expect(screen.getByRole('button', { name: `已${goalTitle}` })).toBeTruthy()
+  expect(screen.getByText(ending.text).closest('[data-activity-report]')).toBeNull()
+  const restored = JSON.parse(JSON.stringify(records({ ...actual, status: 'failed' })))
+  view.rerender(<Transcript key="cancelled" messages={restored} />)
+  expect(screen.getByRole('button', { name: `${goalTitle}未完成` })).toBeTruthy()
+  expect(screen.getByText(ending.text).closest('[data-activity-report]')).toBeNull()
+})
+
+it('keeps approval and cancellation legible when a stage has a held report', () => {
+  const pending = call('pending', 'chapter_read', { status: 'running' })
+  const report = { type: 'text', text: '发现两个同名人物，请指定北岸或南岸的那一位。' } as const
+  const records = [message('first', [activity, pending]), message('review', [report])]
+  const view = render(<Transcript active="r" messages={records} />)
+  expect(screen.queryByText(report.text)).toBeNull()
+  view.rerender(<Transcript active="r" awaitingApprovalCallId="pending" messages={records} />)
+  expect(screen.getByRole('button', { name: `等待你确认 · ${goalTitle}` })).toBeTruthy()
+  expect(screen.getByText(report.text)).toBeTruthy()
+  expect(view.container.querySelector('.agent-processing-shimmer')).toBeNull()
+  view.rerender(<Transcript messages={records} />)
+  expect(screen.getByRole('button', { name: `${goalTitle}未完成` })).toBeTruthy()
+  expect(screen.getByText(report.text)).toBeTruthy()
+})
+
+it('falls back from a saved meta title and retains an authored chapter-summary title', () => {
+  const meta = { type: 'activity-title', title: '总结这一步的结果' } as const
+  const chapter = { type: 'activity-title', title: '撰写章节摘要' } as const
+  const running = call('read', 'chapter_read', { status: 'running' })
+  const view = render(<Transcript active="r" messages={[message('first', [meta, running])]} />)
+  expect(screen.queryByText(/总结这一步的结果/)).toBeNull()
+  expect(screen.getByRole('button', { name: '正在核对前文' })).toBeTruthy()
+  view.rerender(<Transcript active="r" messages={[message('first', [chapter, running])]} />)
+  expect(screen.getByRole('button', { name: '正在撰写章节摘要' })).toBeTruthy()
 })
 
 it('keeps the same activity while awaiting approval or an answer, and does not claim completion on cancellation', () => {
@@ -448,7 +561,7 @@ it('names review types and groups consecutive matching checks without exposing f
   const view = render(<Transcript active="r" messages={[
     message('a', [continuity]), message('b', [{ ...continuity, callId: 'continuity-again' }, quality]), message('c', [pending]),
   ]} />)
-  expect(screen.getByRole('button', { name: '正在进行章节人类感复查', exact: true })).toBeTruthy()
+  expect(screen.getByRole('button', { name: '正在进行行文自然度复查', exact: true })).toBeTruthy()
   const continuityRow = screen.getByRole('button', { name: '章节衔接复查完成', exact: true })
   fireEvent.click(continuityRow)
   expect(continuityRow.closest('[data-author-activity]')?.querySelectorAll('[data-activity-tool="continuity_validate"]')).toHaveLength(2)
@@ -457,7 +570,7 @@ it('names review types and groups consecutive matching checks without exposing f
   view.rerender(<Transcript messages={[
     message('a', [continuity]), message('b', [{ ...continuity, callId: 'continuity-again' }, quality]),
   ]} />)
-  fireEvent.click(screen.getByRole('button', { name: '章节人类感复查完成', exact: true }))
+  fireEvent.click(screen.getByRole('button', { name: '行文自然度复查完成', exact: true }))
   fireEvent.click(screen.getByRole('button', { name: '展开质量报告' }))
   expect(screen.getByText('人物表达')).toBeTruthy()
   expect(view.container.textContent).not.toMatch(/\d+\s*(?:条建议|条需关注|处待核对|错误)/)
@@ -576,7 +689,7 @@ it('keeps an actual saved result on silent legacy outlines without inserting tra
 it('hands the shimmer between model work, tool execution and the next step, then shows the final reply', () => {
   const opening: AgentMessagePart = { type: 'text', text: '我先核对前文，再写这章。' }
   const read = call('read', 'chapter_read', { status: 'running' })
-  const view = render(<AuthorActivityParts parts={[opening, reasoning]} messageId="run" runActive workingLabel={activityWorkingLabel(undefined)} />)
+  const view = render(<AuthorActivityParts parts={[opening, reasoning]} messageId="run" runActive workingLabel="正在思考" />)
   const shimmer = () => view.container.querySelectorAll('.agent-processing-shimmer')
   expect(shimmer()).toHaveLength(1)
   expect(shimmer()[0].textContent).toBe('正在思考')
@@ -595,9 +708,9 @@ it('hands the shimmer between model work, tool execution and the next step, then
   expect(shimmer()[0].closest('button')?.className).not.toMatch(/hover:bg|rounded/)
   expect(view.container.querySelector('[data-author-working]')).toBeNull()
   const done = { ...read, status: 'success' as const }
-  view.rerender(<AuthorActivityParts parts={[opening, done]} messageId="run" runActive workingLabel={activityWorkingLabel(done)} />)
+  view.rerender(<AuthorActivityParts parts={[opening, done]} messageId="run" runActive workingLabel="正在处理…" />)
   expect(shimmer()).toHaveLength(1)
-  expect(shimmer()[0].textContent).toBe('梳理刚查到的资料')
+  expect(shimmer()[0].textContent).toBe('正在处理…')
   expect(shimmer()[0].closest('button')).toBe(step)
   expect(step?.getAttribute('aria-expanded')).toBe('true')
   view.rerender(<AuthorActivityParts parts={[opening, done, { type: 'text', text: '这是正文信道的答复。' }]} messageId="run" runActive={false} />)

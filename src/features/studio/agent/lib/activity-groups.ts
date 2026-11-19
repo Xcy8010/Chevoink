@@ -1,5 +1,6 @@
 import { projectAgentAuthorParts } from '../../../../../shared/agent-author-view.js'
 import { activityAttemptKey, activityReviewVersion } from '../../../../../shared/agent-activity-receipts.js'
+import { visibleAgentActivityTitle } from '../../../../../shared/agent-activity-title.js'
 import { getAgentToolPresentation, sameAgentToolStage } from '../../../../../shared/agent-tool-presentation.js'
 import type { AgentMessagePart, AgentUIMessage } from '../../../../../shared/contracts/index.js'
 
@@ -12,7 +13,9 @@ export type ActivityGroup = {
   firstCallId: string
   calls: ActivityCall[]
   callKeys: string[]
+  stageStart: number
   childrenByCall: Map<string, ActivityCall[]>
+  reportsAfterCall: Map<string, ActivityReport[]>
   readLabel?: string
   title?: string
   closed?: boolean
@@ -36,17 +39,6 @@ function savedReply(part: ActivityCall) {
   }
 }
 
-export function activityWorkingLabel(part: ActivityCall | undefined) {
-  if (!part) return '正在思考'
-  if (part.status === 'failed' || part.status === 'denied') return '正在处理…'
-  if (part.toolName === 'plan_save') return '核对计划保存结果'
-  const { phase, label } = getAgentToolPresentation(part.toolName)
-  if (phase === 'read') return '梳理刚查到的资料'
-  if (phase === 'write' || phase === 'revise') return '核对刚处理的章节'
-  if (phase === 'review') return label.endsWith('复查') ? `整理${label}结果` : '整理复查结果'
-  return '整理这一步的结果'
-}
-
 export function activityAnswerText(parts: readonly AgentMessagePart[]) {
   const visible = projectAgentAuthorParts(parts)
   const lastTool = visible.reduce((last, part, index) => part.type === 'tool-call' ? index : last, -1)
@@ -54,6 +46,52 @@ export function activityAnswerText(parts: readonly AgentMessagePart[]) {
 }
 
 export type MessageActivityGroups = ReadonlyMap<string, ActivityGroup>
+
+type ActivityReport = {
+  id: string
+  text: string
+  group: ActivityGroup
+  terminal: boolean
+  waitForTools: boolean
+  followingCallId?: string
+}
+
+export type ActivityReportVisibility = { hidden: ReadonlySet<number>; deferred: boolean }
+
+export function isActivityDetailReport(report: ActivityReport, runActive: boolean, awaitingApprovalCallId?: string) {
+  return report.followingCallId !== undefined && (!runActive || report.followingCallId !== awaitingApprovalCallId)
+}
+
+/** Keep pending text in its original slot. Only a report bracketed by actual
+ * reads under the same explicit title belongs in details permanently. */
+export function activityReportVisibility(reports: ReadonlyMap<number, ActivityReport> | undefined, runActive: boolean,
+  awaitingApprovalCallId?: string): ActivityReportVisibility | undefined {
+  if (!reports?.size) return undefined
+  const hidden = new Set<number>()
+  let deferred = false
+  for (const [index, report] of reports) {
+    const { group } = report
+    if (isActivityDetailReport(report, runActive, awaitingApprovalCallId)) {
+      hidden.add(index)
+      continue
+    }
+    if (!runActive) continue
+    const waitingForAuthor = group.calls.some(call => call.status === 'running' && !call.preparing
+      && (call.toolName === 'ask_user' || call.callId === awaitingApprovalCallId || call.importWaiting))
+    const pending = report.terminal ? report.waitForTools
+      : group.calls.some(call => !call.preparing && call.status === 'running') || !group.closed && !group.completed
+    if (!waitingForAuthor && pending) {
+      hidden.add(index)
+      deferred = true
+    }
+  }
+  return hidden.size ? { hidden, deferred } : undefined
+}
+
+export function hasVisibleActivityText(parts: readonly AgentMessagePart[], visibility?: ActivityReportVisibility) {
+  let index = 0
+  return projectAgentAuthorParts(parts).some(part => part.type === 'text' && !visibility?.hidden.has(index++))
+}
 
 export function activityChapterId(part: ActivityCall): string | undefined {
   const display = part.display
@@ -123,7 +161,7 @@ const activityFamilies = new Map([
 const creationReadLabels = new Set(['核对前文', '查看创作设定', '查看创作资料', '查看作品结构'])
 
 function canGroup(current: ActivityGroup, next: ActivityCall, afterText: boolean): boolean {
-  const first = current.calls[0]
+  const first = current.calls[current.stageStart]
   const family = activityFamilies.get(first.toolName)
   if (afterText) return family === 'cover' && first.toolName === 'cover_prompt_set' && next.toolName === 'cover_generate'
   if (family === 'chapter-body') {
@@ -139,11 +177,11 @@ function canGroup(current: ActivityGroup, next: ActivityCall, afterText: boolean
  * and order, even when a preview is upgraded or a result is replayed. */
 export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'id' | 'role' | 'runId' | 'goalId' | 'parts' | 'runTiming' | 'completedAt' | 'goalContinuation'>[]) {
   const byMessage = new Map<string, Map<string, ActivityGroup>>()
+  const reportsByMessage = new Map<string, Map<number, ActivityReport>>()
   const runningByRun = new Map<string, ActivityGroup>()
   const activeByRun = new Map<string, ActivityGroup>()
   const authorSpokeByRun = new Set<string>()
   const savedReplyByRun = new Map<string, string>()
-  const lastCallByRun = new Map<string, ActivityCall>()
   const lastGroupByRun = new Map<string, ActivityGroup>()
   const groups: Array<{ group: ActivityGroup; scope: string }> = []
   const seen = new Map<string, { group?: ActivityGroup; calls: ActivityCall[]; index: number }>()
@@ -174,15 +212,21 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
   let previousScope: string | undefined
   let publicTextSinceAction = false
   let hasPublicReport = false
+  let hasActivityTitle = false
+  let stageReports: ActivityReport[] = []
+  let previousCall: { messageId: string; group: ActivityGroup; key: string; wasRead: boolean; reports: ActivityReport[] } | undefined
   let proposedTitle: string | undefined
 
   for (const { message, scope, parts } of transcript) {
     const newAuthorMessage = message.role !== 'assistant' && !message.goalContinuation
-    if (newAuthorMessage && scope === previousScope && current?.title) current.closed = true
+    if (newAuthorMessage && scope === previousScope && current) current.closed = true
     if (newAuthorMessage || scope !== previousScope) {
       current = undefined
       publicTextSinceAction = false
       hasPublicReport = false
+      hasActivityTitle = false
+      stageReports = []
+      previousCall = undefined
       proposedTitle = undefined
     }
     previousScope = scope
@@ -193,11 +237,29 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
     if (message.completedAt || message.runTiming?.completedAt) completedScopes.add(scope)
     const messageGroups = new Map<string, ActivityGroup>()
     byMessage.set(message.id, messageGroups)
+    let textIndex = 0
     for (const part of parts) {
       if (part.type !== 'tool-call') {
-        if (part.type === 'activity-title') proposedTitle = part.title
+        if (part.type === 'activity-title') {
+          proposedTitle = visibleAgentActivityTitle(part.title)
+          if (proposedTitle) hasActivityTitle = true
+        }
         else if (part.type === 'text') {
-          publicTextSinceAction = true
+          if (current) {
+            const reports = reportsByMessage.get(message.id) ?? new Map<number, ActivityReport>()
+            const terminal = part.afterTools === true
+            const report: ActivityReport = { id: JSON.stringify([message.id, textIndex]), text: part.text,
+              group: current, terminal, waitForTools: terminal && executingScopes.has(scope) }
+            reports.set(textIndex, report)
+            reportsByMessage.set(message.id, reports)
+            if (terminal) current.closed = true
+            else {
+              stageReports.push(report)
+              if (previousCall?.group === current) previousCall.reports.push(report)
+            }
+          }
+          textIndex++
+          publicTextSinceAction ||= !part.afterTools
           hasPublicReport = true
           authorSpokeByRun.add(sourceRunId)
         }
@@ -224,28 +286,39 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
         continue
       }
 
-      const changesStage = current && publicTextSinceAction
-        && !sameAgentToolStage(getAgentToolPresentation(current.calls[0].toolName), getAgentToolPresentation(part.toolName))
+      const nextStage = getAgentToolPresentation(part.toolName)
+      const changesStage = current && (publicTextSinceAction || previousCall?.messageId !== message.id && ['save', 'write', 'revise'].includes(nextStage.phase))
+        && !sameAgentToolStage(getAgentToolPresentation(current.calls[current.stageStart].toolName), nextStage)
       const title = proposedTitle ?? (changesStage ? undefined : current?.title)
       const separate = title ? title !== current?.title : current && (changesStage || !canGroup(current, part, publicTextSinceAction))
-      // A reported run changes rows after public prose. A batch without another
-      // report stays in one row even when the tool types differ. Keep the
-      // original grouping of old, completely silent untitled transcripts.
-      if (!current || separate && (publicTextSinceAction || !hasPublicReport && !current.title)) {
-        if (current?.title) current.closed = true
+      if (!part.preparing && current?.title && !current.closed && !separate && nextStage.phase === 'read'
+        && previousCall?.group === current && previousCall.wasRead && previousCall.reports.length) {
+        for (const report of previousCall.reports) report.followingCallId = part.callId
+        current.reportsAfterCall.set(previousCall.key, previousCall.reports)
+      }
+      // A new stage without a report changes the existing row. Earlier receipts
+      // stay in its details. Old untitled, silent transcripts keep their groups.
+      if (!current || current.closed || separate && (stageReports.some(report => !report.followingCallId) || !hasPublicReport && !hasActivityTitle)) {
+        if (current) current.closed = true
         current = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id,
-          firstCallId: part.callId, calls: [], callKeys: [], childrenByCall: new Map(), ...(title ? { title } : {}) }
+          firstCallId: part.callId, calls: [], callKeys: [], stageStart: 0, childrenByCall: new Map(), reportsAfterCall: new Map(), ...(title ? { title } : {}) }
         groups.push({ group: current, scope })
+        stageReports = []
+      } else if (separate && (changesStage || proposedTitle)) {
+        current.title = title
+        current.stageStart = current.calls.length
+        current.readLabel = undefined
+        stageReports = []
       }
       proposedTitle = undefined
       publicTextSinceAction = false
       const group = current
-      const first = group.calls[0]
+      const first = group.calls[group.stageStart]
       if (!group.title && first) {
         const next = getAgentToolPresentation(part.toolName)
         const firstTool = getAgentToolPresentation(first.toolName)
         if (next.phase !== 'read') group.readLabel = undefined
-        else if (firstTool.label !== next.label && group.calls.every(call => getAgentToolPresentation(call.toolName).phase === 'read')) {
+        else if (firstTool.label !== next.label && group.calls.slice(group.stageStart).every(call => getAgentToolPresentation(call.toolName).phase === 'read')) {
           group.readLabel = '查看创作资料'
         }
       }
@@ -257,6 +330,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       seen.set(identity, { group, calls: group.calls, index: group.calls.length })
       group.calls.push(part)
       group.callKeys.push(identity)
+      if (!part.preparing) previousCall = { messageId: message.id, group, key: identity, wasRead: nextStage.phase === 'read', reports: [] }
       messageGroups.set(part.callId, group)
     }
   }
@@ -279,18 +353,16 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       return activityReviewProblem(part) === 'stale' || review && (chapters?.get(review.chapterId) ?? review.revision) > review.revision
     }))
     group.staleReviewCalls = stale
-    group.unsettled = findUnsettledCall(group.calls, stale)
-    group.unfinished = Boolean(group.unsettled) || group.calls.every(part => part.preparing)
-    if (group.title) {
-      group.completed = completedScopes.has(scope)
-      if (!group.closed && !group.completed) activeByRun.set(sourceRunId, group)
-    }
+    const stageCalls = group.calls.slice(group.stageStart)
+    group.unsettled = findUnsettledCall(stageCalls, stale)
+    group.unfinished = Boolean(group.unsettled) || group.calls.some(part => !part.preparing && part.status === 'running') || stageCalls.every(part => part.preparing)
+    group.completed = completedScopes.has(scope)
+    if (group.title && !group.closed && !group.completed) activeByRun.set(sourceRunId, group)
     for (const part of group.calls) {
-      lastCallByRun.set(sourceRunId, part)
       const reply = savedReply(part)
       if (reply) savedReplyByRun.set(group.runId, reply)
     }
   }
   for (const [runId, group] of runningByRun) activeByRun.set(runId, group)
-  return { byMessage, runningByRun, activeByRun, authorSpokeByRun, savedReplyByRun, lastCallByRun, lastGroupByRun }
+  return { byMessage, reportsByMessage, runningByRun, activeByRun, authorSpokeByRun, savedReplyByRun, lastGroupByRun }
 }

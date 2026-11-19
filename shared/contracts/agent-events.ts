@@ -521,7 +521,7 @@ export type AgentNextPrompt = { runId: EntityId; text: string }
 
 /** 消息分部：AgentMessage.parts 的元素结构，前端按 type 分发渲染 */
 export type AgentMessagePart =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; afterTools?: true }
   | { type: 'activity-title'; title: string }
   | { type: 'reasoning'; text: string; durationMs?: number; activity?: true }
   | {
