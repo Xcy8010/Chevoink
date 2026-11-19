@@ -1,5 +1,17 @@
 # Chevoink Engineering Documentation
 
+English | [简体中文](./ENGINEERING.md) · [Development standards](./DEVELOPMENT-STANDARDS.en.md)
+
+## Story memory, research and progress in Studio
+
+- **Chapter memory.** When memory is enabled, a continuation can create cards for new characters, items and plot threads. To update an existing card, `memory_save` targets its ID and edits the specified section. Omitting the title or passing the section heading as the title preserves the name on the card, graph and receipt. An intentional rename uses `renameTo`. See the [parameter contract](../api/lib/agent/memory-tool-parameters.ts) and [memory write regressions](../tests/integration/agent2-story-memory.test.ts).
+- **Search and source reading.** `web_search` returns candidate sources. Page selection considers relevance and source authority. Source records keep a short extract, a longer summary when available, and the publication date when supplied. `web_read` records what was actually read. When an author explicitly requests web research with a text-only model, the platform can gather material for that model using the task’s existing permissions for automatic search and reading. Resumed tasks reuse recorded sources and receipts. See the [search result schema](../api/lib/web-search-result.ts), [source records](../api/lib/agent/research-sources.ts) and [platform verification](../api/lib/agent/public-web-verification.ts).
+- **Author-visible progress.** The Agent names the action and its target. The interface groups calls for the same goal and uses their receipts to update the activity status. Authors can expand the group to inspect individual calls. Activity titles are parsed separately so refresh, replay and final replies show reader-facing text. See [activity grouping](../src/features/studio/agent/lib/activity-groups.ts) and the [title parsing regressions](../tests/unit/agent-activity-title.test.ts).
+
+## Dated engineering notes
+
+2026-11-05 Studio response timing: sending a prompt immediately shows a preparation indicator. The visible timer starts with the first observed text, reasoning or tool-argument output for the current task, pauses while the task is paused and retains its value on completion. Historical tasks without a local first-output observation use the recorded server timing. Billing and server execution time are tracked separately.
+
 2026-10-24 continuity reference repair: newly frozen reassessment 5 / work 21 collects every invalid citation and dependent row across candidate, fact and proposal tables inside the existing single second slot. The independent response selects frozen source IDs; the server only binds their actual text. Both raw replies and the derived projection remain stored and must replay at proof/commit reads; historical 2/3/4 requests retain their interpretation. Unverified terminal facts and invalid report fields return an honest failed status. Advisory recovery grants neither passage, fact deletion nor additional paid retry authority. Continue retains the existing bounded processing claims and uses the complete current candidate/base. Synthetic tests, offline replay of actual records and live model acceptance are separate evidence; this does not promise infallible external output.
 
 Workspace changes accumulate added and removed characters from each successful edit per document, deduplicated by call ID. Counts retain the review view’s changed-line convention; creating an empty draft does not cancel later removals. Replayed events do not double count, and old edit diffs use weak per-activity memoization. A local review refusal is reconciled only with owned manuscript/source, complete failed-audit reconstruction, closed event timing and known accounting. A first failed report without proposal state still preserves replaced unverified claims for independent review. Original check counts, failed reports and unknown-charge protection remain; receipt waits display an explicit pause reason. Deployment and actual user acceptance are recorded separately from version labels.
@@ -102,8 +114,6 @@ Evidence: 26 targeted learning/context/startup tests passed, including complete 
 
 2026-09-09 output/protocol P0: generic waiting feedback follows actual text/reasoning deltas for the current run and returns after 1.5 seconds of silence without a running tool card. Historical tool summaries are factual status records, not pseudo-call examples. Invalid responses are not fed back as assistant examples; real calls reset the consecutive protocol-failure streak. Recovery remains capped at two consecutive corrections and six per run under existing run budgets. Text is never treated as executed work; model tiers, credit formulas and chapter content are unchanged.
 
-English | [简体中文](./ENGINEERING.md) · [Development standards](./DEVELOPMENT-STANDARDS.en.md)
-
 Verified on 2026-09-08 against code and production revision `71f7adc`; [CI passed](https://github.com/Xcy8010/chevoink/actions/runs/34240086273). Implementation, automated evidence and unverified product outcomes are deliberately distinguished.
 
 ### 2026-09-09 targeted tool-failure fixes
@@ -195,8 +205,8 @@ This is a paired allowance: take the larger utilization, **do not add both pools
 
 Production selectable multiplier snapshot: Speed **1.1**, Standard **1.0**, Performance **3.0**, Ultimate **3.5**. These are deployment settings, not immutable source defaults; published rates and the frozen operation price govern later changes. P=10,000, O=1,000, m=1.1 costs 1.100, not 2.200 Credits.
 
-- Public beta: 450 daily Credits, reset at 15:00 UTC+8; referral balance is separate.
-- Search: 2 Credits per call; image generation: 6 per call. Refunds reference actual original debits.
+- While the public beta is enabled, the default is 450 daily Credits with a 15:00 UTC+8 reset. Referral rewards use a separate balance.
+- Search costs 2 Credits per call. Image generation has a base price of 6 Credits per call, with any promotion frozen at admission. Refunds reference the original debit.
 - BYOK text does not incur platform text Credits; other platform tools and permissions are separate.
 - Reasoning already included in confirmed completion usage is not added again. V1 has no separate cache-hit discount.
 - Provider cash costs and user Credits are different measures.

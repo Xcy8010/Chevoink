@@ -35,21 +35,29 @@
 
 ## Product Preview
 
-**Desktop**
+### Desktop
 
 <table>
   <tr>
-    <td align="center"><img src="public/PCdemo1.png" alt="Desktop demo 1" width="420"><br>Bookstore & reading experience</td>
-    <td align="center"><img src="public/PCdemo2.png" alt="Desktop demo 2" width="420"><br>Studio & AI writing Agent</td>
+    <td align="center"><a href="docs/assets/previews/desktop-discover.png"><img src="docs/assets/previews/desktop-discover.png" alt="Genre filters, book covers and recommended reads" width="420"></a><br>Discover and book recommendations</td>
+    <td align="center"><a href="docs/assets/previews/desktop-studio.png"><img src="docs/assets/previews/desktop-studio.png" alt="Agent conversation beside the chapter outline and project tree" width="420"></a><br>Writing chat and chapter outline</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="docs/assets/previews/desktop-relationships.png"><img src="docs/assets/previews/desktop-relationships.png" alt="A selected character with connected nodes highlighted and relationships listed in the side panel" width="420"></a><br>Character relationships</td>
+    <td align="center"><a href="docs/assets/previews/desktop-galaxy.png"><img src="docs/assets/previews/desktop-galaxy.png" alt="Characters, items and other story entities connected across the galaxy view" width="420"></a><br>3D galaxy view</td>
   </tr>
 </table>
 
-**Mobile**
+### Mobile
 
 <table>
   <tr>
-    <td align="center"><img src="public/MOBILEdemo1.jpg" alt="Mobile demo 1" width="420"><br>Home & community</td>
-    <td align="center"><img src="public/MOBILEdemo2.jpg" alt="Mobile demo 2" width="420"><br>Studio & reading</td>
+    <td align="center"><a href="docs/assets/previews/mobile-writing.jpg"><img src="docs/assets/previews/mobile-writing.jpg" alt="Agent chat, chapter editor and conversations grouped by work, from left to right" width="420"></a><br>Writing workspace, editor and chats</td>
+    <td align="center"><a href="docs/assets/previews/mobile-reading.jpg"><img src="docs/assets/previews/mobile-reading.jpg" alt="New arrivals, a book detail page and a selected passage in the reader" width="420"></a><br>Discovering and reading a book</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="docs/assets/previews/mobile-community.jpg"><img src="docs/assets/previews/mobile-community.jpg" alt="Community feed, message inbox and a reader’s profile with their bookshelf" width="420"></a><br>Community, messages and bookshelf</td>
+    <td align="center"><a href="docs/assets/previews/mobile-memory.jpg"><img src="docs/assets/previews/mobile-memory.jpg" alt="A character card, the story graph and skills enabled for the work" width="420"></a><br>Story memory, relationships and skills</td>
   </tr>
 </table>
 
@@ -60,7 +68,9 @@ Chevoink Agent is an AI writing partner built around your work. It helps authors
 - **Creative workspace**: manage works, chapters and tasks in Work, IDE and on mobile.
 - **Project knowledge and skills**: write with story settings, knowledge collections and creative skills, including personal skills.
 - **Review and revision**: use continuity and writing-quality checks to locate issues, revise passages and save versions.
-- **Visible progress**: view model-provided thinking, tool activity and workspace changes, and review the results.
+- **Story memory** tracks characters, items and plot threads as you continue a novel. Open a card to see what changed, or explore its connections in the relationship graph.
+- **Web research** lets the Agent search and open sources. With a text-only model, explicitly ask to search the web. If the task already has permission, the platform returns sourced material to the same model for its answer.
+- **Writing progress** shows what the Agent is checking or writing. Expand an activity to see the individual tool results.
 
 Use built-in models, custom OpenAI-compatible services, or a local connector for LM Studio and Ollama. The computer hosting a local model must stay online. See [local model setup](docs/LOCAL-MODELS.en.md).
 
@@ -93,6 +103,7 @@ flowchart LR
   subgraph Client[Clients]
     WEB[React Web<br/>Work / IDE / Reader]
     APP[Android Capacitor]
+    WIN[Windows Tauri / WebView2]
   end
   subgraph Edge[Edge]
     NGINX[nginx<br/>HTTPS·enforced CSP·static cache]
@@ -116,6 +127,7 @@ flowchart LR
   end
   WEB --> NGINX
   APP --> NGINX
+  WIN --> NGINX
   NGINX --> API
   API --> LOOP
   LOOP --> SKILL
@@ -130,6 +142,7 @@ flowchart LR
   API --> TTS
   SSE --> WEB
   SSE --> APP
+  SSE --> WIN
 ```
 
 ### Continuing work and choosing models
@@ -165,14 +178,14 @@ Pick either channel:
 2. **Direct download from the official site**
    - Visit <https://chevoink.chevolink.com/download/chevoink.apk> in a mobile browser and install directly.
 
-No manual upgrades needed afterwards: the app checks for new versions on launch, and the in-app banner / settings page will prompt and guide the update. Web users always get the latest version by opening the live site.
+No manual upgrades needed afterwards: the app checks for new versions on launch, and the in-app banner / settings page will prompt and guide the update. The website loads the stable release by default. Accounts assigned to the test channel receive its selected release.
 
 ## User Guide
 
 ### Readers
 
 1. **Create an account or sign in**. New users register with an email verification code and accept the current Terms of Service and Privacy Policy. After registration, you can verify your phone, set a password, and complete your profile. Each step can be skipped. Existing users can sign in with an email address or phone number using a password or a code sent to that address or number. Older phone accounts with no saved email address must add one after signing in.
-2. **Find books**: the bookstore home offers carousels, rankings and category recommendations, plus title/author search;
+2. **Find books**: browse by genre on Discover, explore personalized recommendations, or search for books, authors and community discussions.
 3. **Read**: page-flip navigation inside the reader; tap the center to summon the menu for font size, typeface, paper theme and flip mode; reading progress and bookshelf sync to the cloud, so you can continue on another device;
 4. **Listen**: enable TTS narration in the reader, with selectable voices and speeds; flip mode shows a bottom playback capsule;
 5. **Interact**: comment, like and bookmark on the book detail page; post, join topics, follow authors and chat in the community.
@@ -190,15 +203,15 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 
 ### Public-beta Credits
 
-- Public-beta accounts receive **450 Credits per day**, resetting at **15:00 UTC+8**. Referral rewards live in a separate balance and survive daily resets.
-- Text uses a bundled allowance: **at base multiplier m=1, 1 Credit includes both 10,000 input tokens and 1,000 output tokens**. Charging uses the larger utilization ratio instead of adding input and output charges. Image generation costs 6 Credits per invocation and web search costs 2 Credits per invocation.
+- When the public beta is enabled, the default allowance is **450 Credits per day** and the default reset time is **15:00 UTC+8**. The account usage page shows the allowance in effect. Referral rewards live in a separate balance and survive daily resets.
+- Text uses a bundled allowance: **at base multiplier m=1, 1 Credit includes both 10,000 input tokens and 1,000 output tokens**. Charging uses the larger utilization ratio instead of adding input and output charges. Image generation has a base price of 6 Credits per call. During a promotion, the price is fixed when the request is admitted. A web search costs 2 Credits per call.
 - Every user gets a unique referral URL. Only a brand-new account can redeem it on first registration: the inviter receives 300 Credits and the invitee receives 120 Credits; each invitee can redeem exactly once.
-- Studio warns at 20%, 10%, and 5% remaining. Exhaustion safely stops the task; [`/account/usage`](/account/usage) shows the plan, balances, and itemized ledger.
+- Studio warns at 20%, 10%, and 5% remaining. Exhaustion safely stops the task; [`/account/usage`](https://chevoink.chevolink.com/account/usage) shows the plan, balances, and itemized ledger.
 - Models expose supported reasoning efforts only and use their configured default strength. BYOK text has no platform text charge; keys are encrypted and never returned. Other platform tool fees remain separate.
 
 ## Feature Overview
 
-- **Reading**: bookstore home (carousels, rankings, category picks), cloud-synced bookshelf & reading progress, immersive reader, TTS narration
+- **Reading**: book discovery, rankings and personalized recommendations, cloud-synced bookshelf & reading progress, immersive reader, TTS narration
 - **Studio**: Codex-inspired Work/IDE workspace; Agent 4.0 with Research Dossier, Skill OS, Story Compiler, Chapter Bridge, human-quality gate, licensed craft retrieval, work-private Style DNA, first-three-chapter prototyping, and blind-review pipeline; cross-novel task search/pin/archive; branch/diff/conflict-safe merge; embedded subagents; schedules; permission sandbox; replay; multimodal attachments; web/in-platform research; cross-session memory; relationship graph; AI covers; and scoped ZIP export
 - **Community**: posts & topics, recommendation algorithm, comments/likes/bookmarks, follows & fans, direct messages with online presence
 - **Accounts** with email-code registration, email or phone sign-in, code-based password recovery, HttpOnly cookie sessions and client Bearer tokens, public-beta Credits, and one-time referral rewards
@@ -211,7 +224,7 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 | --- | --- |
 | Frontend | React 18 · Vite 6 · TypeScript · TailwindCSS · React Query 5 · Zustand 5 · React Router 7 |
 | Backend | Express 4 · Prisma 6 · PostgreSQL · Zod |
-| AI | DeepSeek text generation · Zhipu GLM-4.1V image understanding · OpenAI-compatible image generation · Edge TTS speech synthesis · Bocha web search (multi-engine fallback) |
+| AI | built-in and custom text models · configurable vision models · OpenAI-compatible image generation · Edge TTS speech synthesis · platform web search and page fetching with configurable search providers and fallback engines |
 | Agent | Agent 4.0 Runtime (`api/lib/agent`): creative skills, project memory, chapter planning, research, review and real-time events |
 | Testing | Vitest + Supertest + Testing Library (unit, PostgreSQL integration and UI interaction) |
 | Deployment | PM2 + nginx · GitHub Actions (type check, lint, full coverage suite with isolated PostgreSQL, build, Agent evaluation, production and full dependency audits) |

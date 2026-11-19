@@ -35,21 +35,29 @@
 
 ## 产品预览
 
-**桌面端**
+### 桌面端
 
 <table>
   <tr>
-    <td align="center"><img src="public/PCdemo1.png" alt="桌面端演示 1" width="420"><br>书城与阅读链路</td>
-    <td align="center"><img src="public/PCdemo2.png" alt="桌面端演示 2" width="420"><br>创作区与 AI 写作 Agent</td>
+    <td align="center"><a href="docs/assets/previews/desktop-discover.png"><img src="docs/assets/previews/desktop-discover.png" alt="按题材浏览图书封面，下方列出推荐作品" width="420"></a><br>发现页与个性化推荐</td>
+    <td align="center"><a href="docs/assets/previews/desktop-studio.png"><img src="docs/assets/previews/desktop-studio.png" alt="创作对话、章节细纲预览和作品目录并排显示" width="420"></a><br>创作对话与章节细纲</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="docs/assets/previews/desktop-relationships.png"><img src="docs/assets/previews/desktop-relationships.png" alt="选中人物后，关系网突出相连节点，侧栏列出关系" width="420"></a><br>关系网与人物详情</td>
+    <td align="center"><a href="docs/assets/previews/desktop-galaxy.png"><img src="docs/assets/previews/desktop-galaxy.png" alt="作品中的人物、物品与其他实体以星点和连线呈现" width="420"></a><br>三维星系关系网</td>
   </tr>
 </table>
 
-**移动端**
+### 移动端
 
 <table>
   <tr>
-    <td align="center"><img src="public/MOBILEdemo1.jpg" alt="移动端演示 1" width="420"><br>手机端首页与社区</td>
-    <td align="center"><img src="public/MOBILEdemo2.jpg" alt="移动端演示 2" width="420"><br>手机端创作与阅读</td>
+    <td align="center"><a href="docs/assets/previews/mobile-writing.jpg"><img src="docs/assets/previews/mobile-writing.jpg" alt="从左至右为 Agent 对话、章节编辑器和按作品整理的会话" width="420"></a><br>创作工作台、正文编辑与对话列表</td>
+    <td align="center"><a href="docs/assets/previews/mobile-reading.jpg"><img src="docs/assets/previews/mobile-reading.jpg" alt="浏览最近上新、打开作品详情，在阅读器中选择段落" width="420"></a><br>新书发现、作品详情与阅读</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="docs/assets/previews/mobile-community.jpg"><img src="docs/assets/previews/mobile-community.jpg" alt="社区推荐动态、消息列表和个人主页的书架" width="420"></a><br>社区、消息与个人书架</td>
+    <td align="center"><a href="docs/assets/previews/mobile-memory.jpg"><img src="docs/assets/previews/mobile-memory.jpg" alt="人物记忆卡、小说关系网和本作品已启用的技能" width="420"></a><br>创作记忆、关系网与作品技能</td>
   </tr>
 </table>
 
@@ -60,7 +68,9 @@ Chevoink Agent 是围绕作品协作的 AI 创作伙伴，帮助作者研究资�
 - **创作工作区**：在 Work、IDE 和手机端管理作品、章节与创作任务。
 - **作品资料与技能**：结合设定、知识集和创作技能开展写作，支持管理个人技能。
 - **审校与修订**：提供章节连续性与表达质量检查，辅助定位问题、修改和保存版本。
-- **可见进展**：在对话中查看模型返回的思考、工具活动和工作区变更，随时审阅结果。
+- **创作记忆**：续写时可按章补记人物、物品和故事线。在记忆卡中查看最新变化，在关系网中查看人物与物品如何关联。
+- **联网查证**：可以让 Agent 查资料并打开原文。使用仅文本模型时，明确要求联网且任务已有相应权限，平台会将带来源的材料交给原模型作答。
+- **创作进度**：对话中可看到 Agent 正在核对或写作的具体内容。点开一项进度，即可查看相关工具的实际结果。
 
 支持内置模型、自定义 OpenAI 兼容服务，以及通过本地连接器接入 LM Studio、Ollama 等本地模型。本地模型所在电脑需保持在线，配置方式见[本地模型说明](docs/LOCAL-MODELS.md)。
 
@@ -93,6 +103,7 @@ flowchart LR
   subgraph Client[客户端]
     WEB[React Web<br/>Work / IDE / Reader]
     APP[Android Capacitor]
+    WIN[Windows Tauri / WebView2]
   end
   subgraph Edge[接入层]
     NGINX[nginx<br/>HTTPS·强制 CSP·静态缓存]
@@ -116,6 +127,7 @@ flowchart LR
   end
   WEB --> NGINX
   APP --> NGINX
+  WIN --> NGINX
   NGINX --> API
   API --> LOOP
   LOOP --> SKILL
@@ -130,6 +142,7 @@ flowchart LR
   API --> TTS
   SSE --> WEB
   SSE --> APP
+  SSE --> WIN
 ```
 
 ### 连续创作与模型选择
@@ -165,14 +178,14 @@ flowchart LR
 2. **官网直装**
    - 手机浏览器访问 <https://chevoink.chevolink.com/download/chevoink.apk> 直接下载安装。
 
-安装后无需手动升级：APP 启动时会自动检测新版本，站内条幅 / 设置页会提示更新并引导下载。网页端用户打开线上地址即是最新版。
+安装后无需手动升级：APP 启动时会自动检测新版本，站内条幅 / 设置页会提示更新并引导下载。网页版打开时加载稳定版，获分配测试版的账号加载对应测试版本。
 
 ## 使用教程
 
 ### 读者
 
 1. **注册与登录**：新账号使用邮箱验证码注册，并同意当前的服务条款和隐私政策。注册后可以依次验证手机号、设置登录密码和完善个人资料，三步均可跳过。已有账号可用邮箱或手机号登录，选择密码或对应渠道的验证码。旧手机号账号没有保存邮箱时，登录后须补绑邮箱。
-2. **找书**：书城首页有轮播、榜单与分类推荐，也可搜索书名/作者；
+2. **找书**：在发现页按题材筛选、查看个性化推荐，也可以搜索作品、作者和社区讨论。
 3. **阅读**：进入正文后左右翻页，点击屏幕中央呼出菜单，可调字号、字体、纸色主题、翻页方式；阅读进度与书架自动云同步，换设备接着读；
 4. **听书**：阅读器内开启 TTS 听书，支持切换音色与语速，翻页模式下有底部播放胶囊；
 5. **互动**：书籍详情页可评论、点赞、收藏；社区区可发帖、参与话题、关注作者、私信聊天。
@@ -190,15 +203,15 @@ flowchart LR
 
 ### 公测 Credits
 
-- 公测账户每天获得 **450 Credits**，在 **UTC+8 15:00** 重置；邀请奖励为独立余额，不随每日重置清零。
-- 文本采用同时包含两类额度的套餐口径：**基础倍率 m=1 时，1 Credit 同时包含 10,000 输入 Token 与 1,000 输出 Token**，按两者使用比例的较大值扣费，而不是输入、输出分别相加；生图每次 6 Credits，联网搜索每次 2 Credits。
+- 公测开启时，默认每日额度为 **450 Credits**，默认重置时间为 **UTC+8 15:00**，实际额度以账户用量页为准；邀请奖励为独立余额，不随每日重置清零。
+- 文本采用同时包含两类额度的套餐口径：**基础倍率 m=1 时，1 Credit 同时包含 10,000 输入 Token 与 1,000 输出 Token**，按两者使用比例的较大值扣费，而不是输入、输出分别相加；生图基础价为每次 6 Credits，参与活动时按该次请求锁定的价格计费。联网搜索每次 2 Credits。
 - 每位用户都有唯一邀请链接。仅新用户首次注册可领取：邀请人获得 300 Credits，被邀请人获得 120 Credits；同一新用户只能兑现一次。
-- 余额低于 20% / 10% / 5% 时创作区提醒；用尽后安全停止任务，并可在 [`/account/usage`](/account/usage) 查看套餐、余额和逐笔记录。
+- 余额低于 20% / 10% / 5% 时创作区提醒；用尽后安全停止任务，并可在 [`/account/usage`](https://chevoink.chevolink.com/account/usage) 查看套餐、余额和逐笔记录。
 - 模型只显示自身支持的推理档位；默认使用对应模型配置的强度。BYOK 文本不收平台文本 Credits，密钥加密保存、不回显；其他平台工具费用独立。
 
 ## 功能一览
 
-- **阅读区**：书城首页（轮播、榜单、分类推荐）、书架与阅读进度云同步、沉浸式阅读器、TTS 听书
+- **阅读区**：图书发现、榜单与个性化推荐、书架与阅读进度云同步、沉浸式阅读器、TTS 听书
 - **创作区**：Codex 风格 Work/IDE 工作区、Agent 4.0（Research Dossier、Skill OS、Story Compiler、Chapter Bridge、人类感质量门、合法技法检索、作者私有 Style DNA、前三章试制与专家盲评链路）、跨作品任务搜索/置顶/归档、分支/差异/冲突安全合并、内嵌子 Agent、定时任务、权限沙箱、运行回放、多模态附件、联网与站内调研、跨会话记忆、作品关系网、AI 封面与范围化 ZIP 导出
 - **社区**：帖子与话题系统、推荐算法、评论/点赞/收藏、关注与粉丝、私信与在线状态
 - **账号体系**：邮箱验证码注册、邮箱或手机号登录、验证码找回密码、HttpOnly Cookie 会话与客户端 Bearer 通道、公测 Credits 与唯一邀请奖励
@@ -211,7 +224,7 @@ flowchart LR
 | --- | --- |
 | 前端 | React 18 · Vite 6 · TypeScript · TailwindCSS · React Query 5 · Zustand 5 · React Router 7 |
 | 后端 | Express 4 · Prisma 6 · PostgreSQL · Zod |
-| AI | DeepSeek 文本生成 · 智谱 GLM-4.1V 图像理解 · OpenAI 兼容图像生成 · Edge TTS 语音合成 · 博查联网搜索（多引擎降级） |
+| AI | 内置及自定义文本模型 · 可配置的视觉模型 · OpenAI 兼容图像生成 · Edge TTS 语音合成 · 平台联网搜索与网页读取（支持配置搜索服务和备用引擎） |
 | Agent | Agent 4.0 Runtime（`api/lib/agent`）：创作技能、作品记忆、章节编排、研究与审校、实时事件流 |
 | 测试 | Vitest + Supertest + Testing Library（单元、PostgreSQL 集成与界面交互） |
 | 部署 | PM2 + nginx · GitHub Actions（类型检查、Lint、隔离 PostgreSQL 全量覆盖率测试、构建、Agent 评测、生产和全依赖审计） |
