@@ -10,6 +10,7 @@ import { readDurableTodoItems } from './tools/durable-todo.js'
 import { completedWritingTodoGuidance } from './tools/todo-tools.js'
 import { CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_MARKER, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { readEffectiveNativeTooling } from './native-tool-policy.js'
+import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 
 /** Append a server-projected candidate; immutable prior model frames/calls and
  * usage remain in place. No pending operation or unknown outcome is skipped. */
@@ -50,7 +51,7 @@ export async function advanceDurableWritingDelivery(token: RunLeaseToken) {
     const allowsMemory = (authority: typeof state.configuration.toolAuthority) => CHAPTER_MEMORY_TOOLS
       .every(name => authority.some(grant => grant.name === name && grant.permission === 'allow' && !grant.alwaysConfirm))
     if (!token.parent && state.configuration.mode === 'build' && state.configuration.agentType === 'orchestrator'
-      && allowsMemory(state.configuration.toolAuthority)) {
+      && allowsMemory(state.configuration.toolAuthority) && isAgent2FeatureEnabled('memory2', token.userId)) {
       const content = `${CHAPTER_MEMORY_MARKER}${runtimeJson(chapters).hash}] 以下章节已保存：${JSON.stringify(chapters.map(({ id, revision }) => ({ id, revision })))}。只处理这些章涉及的记忆，然后交付现有稿件。\n${CHAPTER_MEMORY_GUIDANCE}`
       const messages = state.frame.state.messages
       const hasCheck = messages.some(message => message.role === 'system' && message.content === content)

@@ -323,7 +323,7 @@ vi.mock('../../api/lib/agent/research-sources.js', async original => ({
 }))
 vi.mock('../../api/lib/agent/research-recovery.js', () => ({ claimResearchReadHandoff: mocks.researchClaim,
   takeResearchReadHandoff: mocks.researchTake, takeResearchDiscoveryHandoff: mocks.researchDiscovery, saveResearchLimitationDelivery: mocks.researchPartial }))
-vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
+vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}), isAgent2FeatureEnabled: (key: string) => key === 'memory2' }))
 vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: (runId: string, initialSeq = 0) => {
   let seq = initialSeq
   const pending: AgentStreamEvent[] = []

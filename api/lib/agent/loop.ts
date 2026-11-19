@@ -52,7 +52,7 @@ import { AGENT_BEHAVIOR_CORE, assembleContext, insertSubagentCatalog } from './c
 import { readWritingCollaborationDigest, COLLABORATION_MARKER } from './writing-collaboration.js'
 import { captureUserDirectives, compactSessionContext } from './context-engine.js'
 import { syncNovelMemoryProjection } from './story-memory.js'
-import { resolveAgent2FeatureFlags } from '../agent2-feature-flags.js'
+import { isAgent2FeatureEnabled, resolveAgent2FeatureFlags } from '../agent2-feature-flags.js'
 import { createRunEventBus, disposeRunEventBus, getRunEventBus, type RunEventBus } from './events.js'
 import {
   cancelAllQuestions,
@@ -1881,7 +1881,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return false
       }
       const exactProse = delivery.titleAndBodyOnly && (!delivery.presentation || delivery.presentation.mode === 'full_text')
-      if (!beforeFinish && !forceWrapUpLocal && params.mode === 'build' && CHAPTER_MEMORY_TOOLS.every(name => {
+      if (!beforeFinish && !forceWrapUpLocal && params.mode === 'build' && isAgent2FeatureEnabled('memory2', params.userId) && CHAPTER_MEMORY_TOOLS.every(name => {
         const grant = toolContext.toolAuthority?.get(name)
         return grant?.permission === 'allow' && !grant.alwaysConfirm
       })) {

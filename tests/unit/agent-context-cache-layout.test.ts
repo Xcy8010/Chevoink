@@ -208,7 +208,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const input = buildInput()
     input.taskSpec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: true, structure: false }
     vi.mocked(searchStoryMemory).mockResolvedValueOnce([])
-    vi.mocked(isAgent2FeatureEnabled).mockImplementation(flag => flag === 'storyCompiler')
+    vi.mocked(isAgent2FeatureEnabled).mockImplementation(flag => flag === 'storyCompiler' || flag === 'memory2')
     vi.mocked(buildStoryCompilerDigest).mockResolvedValueOnce('当前章节检查未完成；原事实与待核提议保留。')
     const { messages } = await assembleContext(input)
     expect(prisma.projectMemoryEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ memoryType: { notIn: ['stylePreference', 'continuityRule'] } }) }))

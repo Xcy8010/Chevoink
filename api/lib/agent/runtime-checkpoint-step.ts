@@ -7,6 +7,7 @@ import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { randomUUID } from 'node:crypto'
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE } from './tool-execution-guidance.js'
+import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { COLLABORATION_MARKER, readWritingCollaborationDigest } from './writing-collaboration.js'
 
 /** Storage-pressure compaction is NOT a budget checkpoint and grants no tokens.
@@ -23,7 +24,8 @@ export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: n
     if (frame.state.messages.at(-1)?.role !== 'assistant') {
       const policies = [AGENT_TOOL_EXECUTION_POLICY]
       if (!lease.parent && configuration.mode === 'build' && configuration.agentType === 'orchestrator'
-        && configuration.toolAuthority.some(grant => grant.name === 'memory_save' && grant.permission !== 'deny')) {
+        && configuration.toolAuthority.some(grant => grant.name === 'memory_save' && grant.permission !== 'deny')
+        && isAgent2FeatureEnabled('memory2', lease.userId)) {
         policies.push(CHAPTER_MEMORY_GUIDANCE)
       }
       const missing = policies.filter(policy => !frame.state.messages.some(message => message.role === 'system' && message.content.includes(policy)))
