@@ -48,14 +48,17 @@ it('keeps server-saved tools and change counts through A -> B -> A when legacy r
   ], 'session-b') })
   expect(activityIds()).toEqual([])
   // Use a fresh server response rather than the in-memory/session cache.
-  act(() => { restoreActiveRunHistory(structuredClone(history()), 'run-a', 'session-a'); hook.result.current.connect('run-a', 0) })
+  act(() => { restoreActiveRunHistory(structuredClone(history()), 'run-a', 'session-a', null, null, 101); hook.result.current.connect('run-a', 0) })
   expect(toolIds()).toEqual(['old-write', 'old-plan'])
   expect(workspaceGroupDelta(useAgentStore.getState().workspaceActivities)).toEqual(initialDelta)
   const tail = Source.opened.at(-1)!
+  expect(useAgentStore.getState().trackLocalRequestTiming).toBe(false)
   act(() => tail.send(start(101)))
+  expect(useAgentStore.getState().liveToolReceiptIds.size).toBe(0)
   expect(activityIds()).toEqual(['old-write', 'old-plan'])
   act(() => tail.send({ ...base, seq: 102, type: 'message.start', role: 'assistant', messageId: 'next-attempt' }))
   act(() => tail.send({ ...base, seq: 103, type: 'tool.result', messageId: 'next-attempt', callId: 'new-volume', toolName: 'volume_create', ok: true, summary: '已新建空卷' }))
+  expect(useAgentStore.getState().liveToolReceiptIds).toEqual(new Set([JSON.stringify(['next-attempt', null, 'new-volume'])]))
   expect(toolIds()).toEqual(['old-write', 'old-plan', 'new-volume'])
   expect(activityIds()).toEqual(['old-write', 'old-plan', 'new-volume'])
   expect(useAgentStore.getState().workspaceActivities.every(activity => activity.status === 'done')).toBe(true)

@@ -13,6 +13,7 @@ export type ActivityGroup = {
   firstCallId: string
   calls: ActivityCall[]
   callKeys: string[]
+  receiptKeys: string[]
   stageStart: number
   childrenByCall: Map<string, ActivityCall[]>
   reportsAfterCall: Map<string, ActivityReport[]>
@@ -301,7 +302,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       if (!current || current.closed || separate && (stageReports.some(report => !report.followingCallId) || !hasPublicReport && !hasActivityTitle)) {
         if (current) current.closed = true
         current = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id,
-          firstCallId: part.callId, calls: [], callKeys: [], stageStart: 0, childrenByCall: new Map(), reportsAfterCall: new Map(), ...(title ? { title } : {}) }
+          firstCallId: part.callId, calls: [], callKeys: [], receiptKeys: [], stageStart: 0, childrenByCall: new Map(), reportsAfterCall: new Map(), ...(title ? { title } : {}) }
         groups.push({ group: current, scope })
         stageReports = []
       } else if (separate && (changesStage || proposedTitle)) {
@@ -330,6 +331,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       seen.set(identity, { group, calls: group.calls, index: group.calls.length })
       group.calls.push(part)
       group.callKeys.push(identity)
+      group.receiptKeys.push(JSON.stringify([message.id, null, part.callId]))
       if (!part.preparing) previousCall = { messageId: message.id, group, key: identity, wasRead: nextStage.phase === 'read', reports: [] }
       messageGroups.set(part.callId, group)
     }

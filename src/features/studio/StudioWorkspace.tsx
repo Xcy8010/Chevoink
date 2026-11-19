@@ -1570,7 +1570,9 @@ export default function StudioWorkspace() {
   }, [currentNovel, myNovelsQuery.data, navigationSessionsQuery.data?.items])
   const activeNovelOptions = useMemo(() => novelOptions.filter(novel => novel.status !== 'archived'), [novelOptions])
 
-  const activityChapterTitles = useMemo(() => new Map(chapters.map(chapter => [chapter.id, chapter.title])), [chapters])
+  const activityChapters = useMemo(() => new Map(
+    chapters.filter(chapter => chapter.novelId === activeNovelId).map(chapter => [chapter.id, chapter]),
+  ), [activeNovelId, chapters])
   const activeChapterListItem = useMemo(
     () => chapters.find((item) => item.id === selectedChapterId) ?? null,
     [chapters, selectedChapterId],
@@ -3915,7 +3917,7 @@ export default function StudioWorkspace() {
           chapterId={
             selectedChapterId && !selectedChapterId.startsWith('local-') ? selectedChapterId : null
           }
-          activityChapterTitles={activityChapterTitles}
+          activityChapters={activityChapters}
           selection={selectionChapter?.id === selectedChapterId && editorSelection.text.trim() ? editorSelection : null}
           ensureSession={ensureAgentLoopSession}
           onGoalSessionCreated={handleGoalSessionCreated}

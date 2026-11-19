@@ -98,7 +98,7 @@ import { AgentComposer } from './AgentComposer'
 import { AgentGoalBar } from './AgentGoalBar'
 import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
 import { AgentQueueTray } from './AgentQueueTray'
-import { AuthorActivityParts, AuthorActivitySummary, AuthorProgressText } from './AuthorActivityParts'
+import { AuthorActivityParts, AuthorActivitySummary, AuthorProgressText, type ActivityChapters } from './AuthorActivityParts'
 import { AuthorRequestBubble } from './AuthorRequestBubble'
 import { AgentProcessRegion } from './AgentProcessRegion'
 import { useMessageBlockExpansion } from './use-message-block-expansion'
@@ -124,7 +124,7 @@ type AgentPanelProps = {
   initializingNovel?: boolean
   emptyStateSeed?: string
   chapterId?: EntityId | null
-  activityChapterTitles?: ReadonlyMap<string, string>
+  activityChapters?: ActivityChapters
   coverAssets?: ReadonlyArray<{ id: string; imageUrl: string }>
   questionAuthorId?: string
   selection?: { text: string; start?: number; end?: number } | null
@@ -191,7 +191,7 @@ export function AgentPanel({
   initializingNovel = false,
   emptyStateSeed,
   chapterId,
-  activityChapterTitles,
+  activityChapters,
   coverAssets,
   questionAuthorId,
   selection,
@@ -249,6 +249,7 @@ export function AgentPanel({
   const activityGroups = useMemo(() => projectActivityGroups(messages), [messages])
   const textRevealTargets = useAgentStore(state => state.textRevealTargets)
   const settlingBlocks = useMemo(() => new Set(Object.keys(textRevealTargets).map(id => blockInfoById.get(id)?.firstId)), [textRevealTargets, blockInfoById])
+  const liveToolReceiptIds = useAgentStore(state => state.liveToolReceiptIds)
   const finishTextReveal = useAgentStore(state => state.finishTextReveal)
   const pendingApproval = useAgentStore((state) => state.pendingApproval)
   const streamedQuestion = useAgentStore((state) => state.pendingQuestion)
@@ -403,7 +404,7 @@ export function AgentPanel({
       const now = useAgentStore.getState()
       if (now.runId === latestId || shouldKeepLiveSessionMessages(now.runId, now.phase, now.activeSessionId, sessionId)) return
       if (payload.activeRunId) {
-        restoreActiveRunHistory(payload.messages, payload.activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId)
+        restoreActiveRunHistory(payload.messages, payload.activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId, payload.activeRunLastSeq)
         connect(payload.activeRunId, 0)
       } else {
         now.restoreMessages(payload.messages, sessionId, payload.todoSnapshot, payload.nextPrompt)
@@ -606,10 +607,13 @@ export function AgentPanel({
   const currentActivity = activityRunActive && runId ? activityGroups.activeByRun.get(runId) : undefined
   const workingLabel = useActivityWorkingLabel(messages, runId, panelPhase, working && !currentActivity, activityGroups)
   const waitingForFirstResponse = lastUserRequest?.runId === runId && lastUserRequest.requestTiming?.elapsedMs === null
-  const workingMessage = workingLabel && runId && !waitingForFirstResponse
-    ? [...messages].reverse().find(message => message.role === 'assistant' && message.runId === runId) : undefined
+  const hasActivityEvidence = runId && (activityGroups.authorSpokeByRun.has(runId) || activityGroups.lastGroupByRun.has(runId))
+  const workingMessage = workingLabel && runId && (!waitingForFirstResponse || hasActivityEvidence)
+    ? [...messages].reverse().find(message => message.role === 'assistant' && (message.runTiming?.sourceRunId ?? message.runId) === runId) : undefined
   const latestWorkingGroup = workingMessage ? [...(activityGroups.byMessage.get(workingMessage.id)?.values() ?? [])].at(-1) : undefined
-  const workingGroup = latestWorkingGroup ?? (workingMessage && runId && !getMessageText(workingMessage.parts)
+  const visibleWorkingText = workingMessage && hasVisibleActivityText(workingMessage.parts,
+    activityReportVisibility(activityGroups.reportsByMessage.get(workingMessage.id), true))
+  const workingGroup = latestWorkingGroup ?? (workingMessage && runId && !visibleWorkingText
     ? activityGroups.lastGroupByRun.get(runId) : undefined)
   const workingMessageId = workingGroup?.messageId ?? workingMessage?.id
   const creditSummaryQuery = useModelCreditSummary(active ? 20_000 : 60_000)
@@ -1037,7 +1041,7 @@ export function AgentPanel({
         }
         if (activeRunId) {
           // Keep saved tools and changes; a legacy live bus may replay only this attempt.
-          restoreActiveRunHistory(history, activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId)
+          restoreActiveRunHistory(history, activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId, payload.activeRunLastSeq)
           connect(activeRunId, 0)
         } else {
           useAgentStore.getState().restoreMessages(history, sessionId, payload.todoSnapshot, payload.nextPrompt)
@@ -1767,6 +1771,7 @@ export function AgentPanel({
                 parts={message.parts}
                 groups={messageActivities}
                 activeGroupId={currentActivity?.id}
+                liveToolReceiptIds={messageRunActive || revealText !== undefined ? liveToolReceiptIds : undefined}
                 messageId={message.id}
                 revealText={revealText}
                 onTextRevealed={finishTextReveal}
@@ -1775,7 +1780,7 @@ export function AgentPanel({
                 collapseText={hasProcess && !isBlockLast && !wholeMessageIsProcess}
                 workingLabel={messageWorkingLabel}
                 workingGroupId={workingGroup?.id}
-                activityChapterTitles={activityChapterTitles}
+                activityChapters={activityChapters}
                 awaitingApprovalCallId={pendingApproval?.callId}
                 reportVisibility={reportVisibility}
               />

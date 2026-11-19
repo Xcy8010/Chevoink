@@ -134,7 +134,14 @@ it('removes the initial thinking label when author text arrives and reserves a d
   act(() => store.applyEvent({ ...base, messageId: 'later', type: 'tool.call', callId: 'read', toolName: 'chapter_read', args: {}, title: '核对前文', seq: 4 }))
   expect(view.result.current).toBeUndefined()
   act(() => store.applyEvent({ ...base, messageId: 'later', type: 'tool.result', callId: 'read', toolName: 'chapter_read', ok: true, summary: '已核对', durationMs: 10, seq: 5 }))
-  expect(view.result.current).toBeUndefined()
+  expect(view.result.current).toBe('正在处理…')
+  for (let seq = 6; seq < 12; seq++) {
+    act(() => { vi.advanceTimersByTime(800); store.applyEvent({ ...base, messageId: 'later', type: 'reasoning.delta', delta: '合成思考。', activity: true, seq }) })
+    expect(view.result.current).toBe('正在处理…')
+  }
+  act(() => store.applyEvent({ ...base, messageId: 'next', type: 'text.final', text: '第十章停在渡口。', asReasoning: false, seq: 12 }))
+  // This paragraph is held in the author view until the phase turns over.
+  expect(view.result.current).toBe('正在处理…')
   act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
   expect(view.result.current).toBe('正在处理…')
 })

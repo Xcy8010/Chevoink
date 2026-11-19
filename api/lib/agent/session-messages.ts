@@ -16,7 +16,7 @@ import { activeChapterScope, assertActiveWriteCount, recalculateNovelStats, upda
 import { normalizeNovelStructure } from '../data/volume.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
-import { getActiveRunIdBySession, hasActiveRunInSession } from './active-runs.js'
+import { getActiveRun, getActiveRunIdBySession, hasActiveRunInSession } from './active-runs.js'
 import { publishDurableEvents } from './runtime-event-projection.js'
 import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
 import { historyClientRequest } from './message-client-request.js'
@@ -111,14 +111,21 @@ async function normalizeLegacyViewedImageUrls(userId: string, parts: AgentMessag
   })
 }
 
+async function activeRunLastSeq(runId: string) {
+  const bus = getActiveRun(runId)?.bus
+  if (bus) return bus.lastSeq
+  const latest = await prisma.agentRunEvent.findFirst({ where: { runId }, orderBy: { seq: 'desc' }, select: { seq: true } })
+  return latest?.seq ?? 0
+}
+
 /** 刷新后「继续执行」按钮的数据来源：当前无活跃 run 时，仅当会话「最近一个」run 停在 failed/paused 才供前端续跑。
  * 不能取历史任意 failed run：旧 run 失败后作者已开新 run 并正常收尾时，任务已闭环，
  * 刷新后不应再冒「继续执行」按钮（作者反馈：收尾完成后刷新仍见按钮）。 */
-async function getSessionRunState(sessionId: string, includeNextPrompt = false): Promise<{ activeRunId: string | null; runGoalId: string | null; resumeRunId: string | null; authorEnded?: AgentRun['authorEnded']; outcome?: AgentRun['outcome']; nextPrompt?: AgentNextPrompt }> {
+async function getSessionRunState(sessionId: string, includeNextPrompt = false): Promise<{ activeRunId: string | null; activeRunLastSeq?: number; runGoalId: string | null; resumeRunId: string | null; authorEnded?: AgentRun['authorEnded']; outcome?: AgentRun['outcome']; nextPrompt?: AgentNextPrompt }> {
   const local = getActiveRunIdBySession(sessionId)
   if (local) {
     const localRun = await prisma.agentRun.findUnique({ where: { id: local }, select: { goalExecution: { select: { goalId: true } } } })
-    return { activeRunId: local, runGoalId: localRun?.goalExecution?.goalId ?? null, resumeRunId: null }
+    return { activeRunId: local, activeRunLastSeq: await activeRunLastSeq(local), runGoalId: localRun?.goalExecution?.goalId ?? null, resumeRunId: null }
   }
   const run = await prisma.agentRun.findFirst({
     where: { sessionId, ...MAIN_RUN_FILTER },
@@ -135,7 +142,7 @@ async function getSessionRunState(sessionId: string, includeNextPrompt = false):
   const payload = terminal?.payload
   const nextPrompt = payload && typeof payload === 'object' && !Array.isArray(payload)
     && payload.status === 'succeeded' && typeof payload.nextPrompt === 'string' && payload.nextPrompt
-  return { activeRunId: durableActive ? run.id : null, runGoalId: durableActive ? run.goalExecution?.goalId ?? null : null, ...ending, ...readRunOutcome(run?.usage),
+  return { activeRunId: durableActive ? run.id : null, ...(durableActive ? { activeRunLastSeq: await activeRunLastSeq(run.id) } : {}), runGoalId: durableActive ? run.goalExecution?.goalId ?? null : null, ...ending, ...readRunOutcome(run?.usage),
     ...(run && nextPrompt ? { nextPrompt: { runId: run.id, text: nextPrompt } } : {}),
     resumeRunId: !ending.authorEnded && run && (run.status === 'failed' || run.status === 'paused') ? run.id : null }
 }
@@ -176,6 +183,8 @@ export async function listLoopSessionMessages(
 ): Promise<{
   messages: AgentUIMessage[]
   activeRunId: string | null
+  /** Presentation watermark. Clients still replay every event to rebuild tool state. */
+  activeRunLastSeq?: number
   /** 服务端确认 activeRunId 的目标归属；普通运行或无活跃 run 为 null。 */
   runGoalId: string | null
   /** 无活跃 run 但存在可续跑的 failed/paused run：前端据此在刷新后仍显示「继续执行」按钮 */

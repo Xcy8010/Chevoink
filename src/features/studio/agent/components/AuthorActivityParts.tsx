@@ -10,7 +10,8 @@ import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
 import { agentRunningToolLabel } from '../../../../../shared/agent-progress.js'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
-import type { AgentMessagePart, AgentToolDisplayPayload } from '../../../../../shared/contracts/index.js'
+import type { AgentMessagePart, AgentToolDisplayPayload, ChapterListItem } from '../../../../../shared/contracts/index.js'
+import { plainChapterTitle } from '../../../../../shared/structure/chapter-title.js'
 import { AgentMarkdownText } from './AgentMarkdownText'
 import { ToolDisplayRenderer } from './AgentMessageParts'
 import { AgentProcessRegion } from './AgentProcessRegion'
@@ -44,18 +45,20 @@ function toolIcon(part: ActivityCall) {
   return FileText
 }
 
-function chapterTitle(part: ActivityCall, titles?: ReadonlyMap<string, string>) {
+export type ActivityChapters = ReadonlyMap<string, Pick<ChapterListItem, 'title' | 'orderIndex'>>
+
+function chapterTitle(part: ActivityCall, chapters?: ActivityChapters) {
   const display = part.display
   if (display?.kind === 'chapterDiff') return display.chapterTitle
   if (display?.kind === 'chapterRef') return display.title
   const id = activityChapterId(part)
-  return id ? titles?.get(id) : undefined
+  return id ? chapters?.get(id)?.title : undefined
 }
 
-function activitySummary(part: ActivityCall, runActive: boolean, titles?: ReadonlyMap<string, string>, detail = false, grouped = false, stale = false): string {
+function activitySummary(part: ActivityCall, runActive: boolean, chapters?: ActivityChapters, detail = false, grouped = false, stale = false): string {
   const presentation = getAgentToolPresentation(part.toolName)
   const action = actionNames[part.toolName] ?? presentation.label
-  const title = grouped ? undefined : chapterTitle(part, titles)
+  const title = grouped ? undefined : chapterTitle(part, chapters)
   const display = part.display
   const named = title ? `《${title}》` : ''
   const isWrite = part.toolName === 'chapter_write' || part.toolName === 'chapter_append'
@@ -155,8 +158,26 @@ function ProjectSearchLocations({ display, onOpen }: {
   </ul></ActivityScrollArea>
 }
 
-const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles, readOnly, stale }: {
-  part: ActivityCall; runActive: boolean; titles?: ReadonlyMap<string, string>; readOnly?: boolean; stale?: boolean
+type ReadSource = Extract<AgentToolDisplayPayload, { kind: 'readSources' }>['items'][number]
+
+function memorySearchSourceTitle({ title, preview, memoryType }: ReadSource, requestedType: unknown, chapters?: ActivityChapters): string {
+  const type = memoryType ?? (typeof requestedType === 'string' ? requestedType : undefined)
+  if (type !== undefined && type !== 'chapterSummary') return title
+  // Automatically generated chapter summaries use their source ID as the stored title.
+  const reference = /^(?:章节|chapter)[:：]\s*(\S+)$/iu.exec(title.trim())?.[1]
+  if (!reference) return title
+  const chapter = chapters?.get(reference)
+  const isChapterId = /^(?:c[a-z0-9]{24}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/iu.test(reference)
+  if (!chapter && !isChapterId) return title
+  // Old mixed results lack a card type. The automatic summary also stored the chapter title at the start of its preview.
+  if (type === undefined && (!chapter?.title.trim() || !preview?.startsWith(`${chapter.title}：`))) return '历史设定（名称暂不可用）'
+  if (!chapter) return '章节摘要（无法定位章节）'
+  const name = plainChapterTitle(chapter.title)
+  return name ? `第 ${chapter.orderIndex} 章 · ${name}` : `第 ${chapter.orderIndex} 章`
+}
+
+const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters, readOnly, stale }: {
+  part: ActivityCall; runActive: boolean; chapters?: ActivityChapters; readOnly?: boolean; stale?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
@@ -164,11 +185,12 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles, r
   const spotlight = useAgentStore(state => state.requestMemorySpotlight)
   const Icon = toolIcon(part)
   const display = part.display
+  const requestedMemoryType = (part.args as { memoryType?: unknown } | null)?.memoryType
   const chapterId = activityChapterId(part)
   const planId = part.toolName === 'plan_read' && !display ? (part.args as { planId?: unknown } | null)?.planId : undefined
   const navigable = Boolean(chapterId) || typeof planId === 'string' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
   const openTarget = !readOnly && navigable ? () => navigate(part.toolName, chapterId ? { chapterId } : part.args, display) : undefined
-  const label = savedReadDetail(part) ?? activitySummary(part, runActive, titles, true, false, stale)
+  const label = savedReadDetail(part) ?? activitySummary(part, runActive, chapters, true, false, stale)
   const memory = !readOnly && part.status === 'success' ? getMemorySpotlight(part.toolName, part.args, display) : null
   const hasResultTarget = display?.kind === 'chapterDiff' || display?.kind === 'chapterRef' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
   const collapsible = display?.kind === 'projectSearch' && new Set(display.matches.map(hit => hit.chapterId)).size > 4
@@ -177,11 +199,15 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles, r
   const result = display ? <div className="agent-activity-detail min-w-0">
     {display.kind === 'projectSearch' ? <ProjectSearchLocations display={display} onOpen={readOnly ? undefined : chapterId => navigate(part.toolName, { chapterId })} />
       : display.kind === 'readSources' ? <ActivityScrollArea detail><ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
-        {display.items.map(({ title, target }, index) => <li key={target?.id ?? index} className="min-w-0 break-words">
-          {target && !readOnly ? <button type="button" className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline"
-            onClick={() => navigate(part.toolName, target.kind === 'chapter' ? { chapterId: target.id } : { planId: target.id })}>《{title}》</button>
-            : <p className="text-[var(--text-primary)]">{title}</p>}
-        </li>)}
+        {display.items.map((item, index) => {
+          const { target } = item
+          const title = part.toolName === 'memory_search' ? memorySearchSourceTitle(item, requestedMemoryType, chapters) : item.title
+          return <li key={target?.id ?? index} className="min-w-0 break-words">
+            {target && !readOnly ? <button type="button" className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline"
+              onClick={() => navigate(part.toolName, target.kind === 'chapter' ? { chapterId: target.id } : { planId: target.id })}>《{title}》</button>
+              : <p className="text-[var(--text-primary)]">{title}</p>}
+          </li>
+        })}
       </ul></ActivityScrollArea>
         : display.kind === 'subagentReport'
           ? <ActivityScrollArea detail><p className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">{projectAgentAuthorText(display.report)}</p></ActivityScrollArea>
@@ -203,9 +229,10 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles, r
   </li>
 })
 
-const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, titles, readOnly, awaitingApprovalCallId }: {
-  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; titles?: ReadonlyMap<string, string>; readOnly?: boolean
+const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, chapters, readOnly, awaitingApprovalCallId, animateLive }: {
+  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; chapters?: ActivityChapters; readOnly?: boolean
   awaitingApprovalCallId?: string
+  animateLive?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
@@ -215,15 +242,17 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   const running = runActive && active ? [...calls].reverse().find(part => part.status === 'running') : undefined
   const part = running ?? unresolved ?? calls.at(-1)
   const iconPart = group?.title ? calls[group.stageStart] : part
-  const Icon = iconPart && !workingLabel ? toolIcon(iconPart) : Brain
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
   const waitingForAnswer = runActive && calls.some(call => call.toolName === 'ask_user' && call.status === 'running')
   const waitingForApproval = runActive && awaitingApprovalCallId !== undefined
     && calls.some(call => !call.preparing && call.status === 'running' && call.callId === awaitingApprovalCallId)
   const namedInProgress = Boolean(group?.title && runActive && active && (running || !group.closed && !group.completed))
+  const waiting = Boolean(importWaiting || waitingForAnswer || waitingForApproval)
+  const fallbackLabel = !running && !namedInProgress && !waiting && runActive ? workingLabel : undefined
+  const Icon = iconPart && !fallbackLabel ? toolIcon(iconPart) : Brain
   const readLabel = group?.readLabel
-  let label = workingLabel
-  if (group?.title) {
+  let label = fallbackLabel
+  if (!label && group?.title) {
     const title = group.title
     if (waitingForAnswer) label = `等待你回答 · ${title}`
     else if (importWaiting || waitingForApproval) label = `等待你确认 · ${title}`
@@ -231,37 +260,38 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
     else if ((group.closed || group.completed) && !group.unfinished) label = `已${title}`
     else label = `${title}未完成`
   } else if (!label && part) {
-    if (readLabel && running) label = activitySummary(running, runActive, titles, true)
+    if (readLabel && running) label = activitySummary(running, runActive, chapters, true)
     else if (readLabel) label = group?.unfinished
       ? `${readLabel}有未完成项` : `已${readLabel}`
     else if (grouped && !running && unresolved) label = `${getAgentToolPresentation(part.toolName).label}有未完成项`
-    else label = activitySummary(part, runActive && active, titles, false, grouped, group?.staleReviewCalls?.has(part))
+    else label = activitySummary(part, runActive && active, chapters, false, grouped, group?.staleReviewCalls?.has(part))
   }
-  const showingActivity = Boolean(active && running && !importWaiting && !waitingForAnswer && !waitingForApproval)
-  const shimmer = runActive && Boolean(showingActivity || namedInProgress || workingLabel)
-    && !importWaiting && !waitingForAnswer && !waitingForApproval
-  const step = group?.title ? label : workingLabel ?? (part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : '')
+  const showingActivity = Boolean(active && running && !waiting)
+  const shimmer = runActive && Boolean(showingActivity || namedInProgress || fallbackLabel) && !waiting
+  const step = fallbackLabel ?? (group?.title ? label : part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : '')
+  const enter = useRef(animateLive && document.visibilityState !== 'hidden'
+    && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches).current
   const previousStep = useRef(step)
   const headline = useRef<HTMLSpanElement>(null)
   useLayoutEffect(() => {
     const changed = previousStep.current !== step
     previousStep.current = step
-    if (!changed || !runActive || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+    if (!changed || !animateLive || document.visibilityState === 'hidden' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
     const animation = headline.current?.animate?.(
       [{ opacity: 0.5, transform: 'translateY(2px)' }, { opacity: 1, transform: 'translateY(0)' }],
       { duration: 160, easing: 'ease-out' },
     )
     return () => animation?.cancel()
-  }, [runActive, step])
+  }, [animateLive, step])
 
-  return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={workingLabel ? '' : undefined} data-author-step>
+  return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={fallbackLabel ? '' : undefined} data-author-step>
     <button type="button" aria-expanded={group ? open : undefined} aria-controls={group ? detailsId : undefined}
       disabled={!group} onClick={() => setOpen(value => !value)}
       className="agent-activity-step min-h-7 w-fit max-w-full text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
-      <span ref={headline} className="agent-activity-line items-center">
+      <span ref={headline} className={cn('agent-activity-line items-center', enter && 'agent-tool-enter')}>
         <Icon aria-hidden className="h-4 w-4" />
         <span className="min-w-0 break-words text-balance">
-          <span aria-live={group?.title || active || running || workingLabel ? 'polite' : undefined}
+          <span aria-live={group?.title || active || running || fallbackLabel ? 'polite' : undefined}
             data-activity-preparing={showingActivity && running?.preparing || undefined}
             data-activity-running={showingActivity && !running?.preparing || undefined}
             className={cn('agent-activity-label', shimmer && 'agent-processing-shimmer')}>{label}</span>
@@ -275,7 +305,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
         {calls.flatMap((call, index) => {
           const key = group.callKeys[index]
           const receipts = [call, ...(group.childrenByCall.get(key) ?? [])].map(detail =>
-            <ActivityDetail key={JSON.stringify([key, detail.subagentCallId ?? null, detail.callId])} part={detail} runActive={runActive} titles={titles} readOnly={readOnly}
+            <ActivityDetail key={JSON.stringify([key, detail.subagentCallId ?? null, detail.callId])} part={detail} runActive={runActive} chapters={chapters} readOnly={readOnly}
               stale={group.staleReviewCalls?.has(detail)} />)
           const reports = group.reportsAfterCall.get(key)?.filter(report => isActivityDetailReport(report, runActive, awaitingApprovalCallId))
           return [...receipts, ...reports?.map(report => <li key={report.id} data-activity-report className="ml-6 text-[var(--text-secondary)]">
@@ -307,7 +337,7 @@ export function AuthorProgressText({ text, className }: { text: string; classNam
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapterTitles, readOnly, awaitingApprovalCallId, reportVisibility,
+  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapters, readOnly, awaitingApprovalCallId, reportVisibility, liveToolReceiptIds,
 }: {
   parts: AgentMessagePart[]
   messageId: string
@@ -320,10 +350,11 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   workingGroupId?: string
   revealText?: string
   onTextRevealed?: (messageId: string, text: string) => void
-  activityChapterTitles?: ReadonlyMap<string, string>
+  activityChapters?: ActivityChapters
   readOnly?: boolean
   awaitingApprovalCallId?: string
   reportVisibility?: ActivityReportVisibility
+  liveToolReceiptIds?: ReadonlySet<string>
 }) {
   const authorParts = useMemo(() => {
     const projected = projectAgentAuthorParts(parts.filter(part => part.type !== 'reasoning'), false, { includePreparing: runActive })
@@ -354,9 +385,10 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
         if (!part.text) return null
-        // Once a tool preview exists, its preceding public report is visible
-        // in full. Only unfinished prose needs the typing reveal.
-        const text = index < lastToolIndex ? part.text : part.text.slice(0, Math.max(0, revealed.text.length - textOffset))
+        // A tool can arrive in the same paint as the opening. Show its first
+        // few characters immediately and keep revealing the rest in place.
+        const opening = textOffset === 0 && index < lastToolIndex ? /^\s*.{1,3}/su.exec(part.text)?.[0].length ?? 0 : 0
+        const text = part.text.slice(0, Math.max(opening, revealed.text.length - textOffset))
         textOffset += part.text.length
         const inProcess = collapseText || index < lastToolIndex
         return <AgentProcessRegion key={identity} open={!inProcess || processOpen !== false}>
@@ -369,15 +401,16 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       const key = rendered.size ? group.id : stepKey
       rendered.add(group.id)
       return <AgentProcessRegion key={key} open={processOpen ?? true}>
-        <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles} readOnly={readOnly}
-          workingLabel={liveGroupId === group.id ? workingLabel : undefined} awaitingApprovalCallId={awaitingApprovalCallId} />
+        <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} chapters={activityChapters} readOnly={readOnly}
+          workingLabel={liveGroupId === group.id ? workingLabel : undefined} awaitingApprovalCallId={awaitingApprovalCallId}
+          animateLive={!readOnly && group.receiptKeys.some(key => liveToolReceiptIds?.has(key))} />
       </AgentProcessRegion>
   })
   if (workingLabel && !liveGroupId) {
     // Public prose stays first. Until a tool arrives, this is the pending
     // activity row, which the first tool takes over in the same position.
     entries.push(<AgentProcessRegion key={stepKey} open={processOpen ?? true}>
-      <ActivityRow key="activity" runActive={runActive} active={false} workingLabel={workingLabel} />
+      <ActivityRow key="activity" runActive={runActive} active={false} workingLabel={workingLabel} animateLive={revealText !== undefined} />
     </AgentProcessRegion>)
   }
   return entries.some(Boolean) ? <div className="flex flex-col gap-3 font-medium">{entries}</div> : null

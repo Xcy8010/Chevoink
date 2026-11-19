@@ -5,11 +5,11 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type { AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
 import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/studio/agent/components/AuthorActivityParts'
 import { activityAnswerText, activityReportVisibility, projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
-import { restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
+import { isRunActive, restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.useRealTimers() })
 const title = '风从窗台进来'
-const titles = new Map([['internal-chapter-id', title]])
+const chapters = new Map([['internal-chapter-id', { title, orderIndex: 1 }]])
 const reasoning: AgentMessagePart = { type: 'reasoning', text: 'RAW_THOUGHT_ONLY。已全部修复。' }
 const message = (id: string, parts: AgentMessagePart[], runId = 'r'): AgentUIMessage => ({ id, runId, role: 'assistant', createdAt: '', parts })
 const call = (callId: string, toolName: string, fields: Partial<ActivityCall> = {}): ActivityCall => ({
@@ -22,13 +22,22 @@ const saved = (callId: string, toolName = 'chapter_write') => call(callId, toolN
   display: { kind: 'chapterDiff', chapterId: 'internal-chapter-id', chapterTitle: title, before: '原文。', after: '正文写好了。', appliedDirectly: true, revision: 5 },
 })
 
-function Transcript({ messages, active, awaitingApprovalCallId }: { messages: AgentUIMessage[]; active?: string; awaitingApprovalCallId?: string }) {
+function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptIds, textRevealTargets, finishTextReveal }: {
+  messages: AgentUIMessage[]
+  active?: string
+  awaitingApprovalCallId?: string
+  liveToolReceiptIds?: ReadonlySet<string>
+  textRevealTargets?: Record<string, string>
+  finishTextReveal?: (messageId: string, text: string) => void
+}) {
   const projection = projectActivityGroups(messages)
   return <>{messages.map(item => {
     const runActive = (item.runTiming?.sourceRunId ?? item.runId) === active
     return <AuthorActivityParts key={item.id} messageId={item.id}
       parts={item.parts} groups={projection.byMessage.get(item.id)} activeGroupId={active ? projection.activeByRun.get(active)?.id : undefined}
-      runActive={runActive} activityChapterTitles={titles} awaitingApprovalCallId={awaitingApprovalCallId}
+      runActive={runActive} activityChapters={chapters} awaitingApprovalCallId={awaitingApprovalCallId}
+      liveToolReceiptIds={runActive ? liveToolReceiptIds : undefined}
+      revealText={textRevealTargets?.[item.id]} onTextRevealed={finishTextReveal}
       reportVisibility={activityReportVisibility(projection.reportsByMessage.get(item.id), runActive, awaitingApprovalCallId)} />
   })}</>
 }
@@ -484,7 +493,8 @@ it('shows one parameter preview and uses actual call events to advance the visib
   const plan = preview('plan', 'plan_read')
   const chapter = preview('read', 'chapter_read')
   const next = preview('save', 'plan_save')
-  const timeline = (...parts: ActivityCall[]) => <Transcript active="r" messages={[message('batch', parts)]} />
+  const recent = new Set([JSON.stringify(['batch', null, plan.callId]), JSON.stringify(['batch', null, chapter.callId])])
+  const timeline = (...parts: ActivityCall[]) => <Transcript active="r" messages={[message('batch', parts)]} liveToolReceiptIds={recent} />
   const view = render(timeline(plan, chapter, next))
   const toggle = screen.getByRole('button', { name: '正在准备 · 查看创作资料' })
   const animate = vi.fn(() => ({ cancel: vi.fn() }))
@@ -506,6 +516,102 @@ it('shows one parameter preview and uses actual call events to advance the visib
   expect(screen.getByRole('button', { name: '正在查看章节', expanded: true })).toBe(toggle)
   expect(document.activeElement).toBe(toggle)
   expect(animate).toHaveBeenCalledTimes(2)
+})
+
+it('keeps a live opening visible and revealing when its tool arrives in the same paint', () => {
+  vi.useFakeTimers()
+  const store = useAgentStore.getState()
+  store.resetRun()
+  store.beginRun('r', '核对上一章', 'session')
+  const base = { runId: 'r', messageId: 'opening', ts: '2026-11-19T16:35:00.000Z' }
+  const opening = '我先核对渡口一节的出场人物，再确认信件从哪里转交。'
+  function LiveTranscript() {
+    const { messages, phase, liveToolReceiptIds, textRevealTargets, finishTextReveal } = useAgentStore()
+    return <Transcript messages={messages.filter(item => item.role === 'assistant')} active={isRunActive(phase) ? base.runId : undefined}
+      liveToolReceiptIds={liveToolReceiptIds} textRevealTargets={textRevealTargets} finishTextReveal={finishTextReveal} />
+  }
+  try {
+    const view = render(<LiveTranscript />)
+    act(() => {
+      store.applyEvent({ ...base, seq: 1, type: 'message.start', role: 'assistant' })
+      store.applyEvent({ ...base, seq: 2, type: 'text.final', text: opening, asReasoning: false })
+      store.applyEvent({ ...base, seq: 3, type: 'tool.delta', callId: 'call_0', toolName: 'chapter_read', argsChars: 4 })
+    })
+    const row = screen.getByRole('button', { name: '正在准备 · 核对前文' })
+    const paragraph = view.container.querySelector('p')!
+    const firstFrame = paragraph.textContent!
+    expect(firstFrame).toBe(opening.slice(0, 3))
+    expect(paragraph.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(row.querySelector('.agent-tool-enter')).toBeTruthy()
+    act(() => vi.advanceTimersByTime(48))
+    expect(paragraph.textContent!.length).toBeGreaterThan(firstFrame.length)
+    expect(paragraph.textContent!.length).toBeLessThan(opening.length)
+    act(() => {
+      store.applyEvent({ ...base, seq: 4, type: 'tool.call', callId: 'call_0', toolName: 'chapter_read', title: '读取', args: {} })
+      store.applyEvent({ ...base, seq: 5, type: 'tool.result', callId: 'call_0', toolName: 'chapter_read', ok: true, summary: '已读取' })
+    })
+    expect(screen.getByRole('button', { name: '已核对前文' })).toBe(row)
+    expect(paragraph.textContent).not.toBe(opening)
+    act(() => vi.advanceTimersByTime(600))
+    expect(screen.getByText(opening)).toBe(paragraph)
+    expect(useAgentStore.getState().textRevealTargets).toEqual({})
+  } finally {
+    act(() => store.resetRun())
+  }
+})
+
+it('animates new receipts only in their own message even when a replayed receipt has the same provider ID', () => {
+  const sharedId = 'call_0'
+  const old = { ...message('old', [call(sharedId, 'chapter_read')]), goalId: 'previous-goal' }
+  const fresh = { ...message('fresh', [activity, call(sharedId, 'memory_search', { status: 'running' })]), goalId: 'new-goal' }
+  const messages = [old, fresh]
+  const recent = new Set([JSON.stringify([fresh.id, null, sharedId])])
+  const view = render(<Transcript active="r" messages={messages} liveToolReceiptIds={recent} />)
+  expect(screen.getByRole('button', { name: /已查看/ }).querySelector('.agent-tool-enter')).toBeNull()
+  expect(screen.getByRole('button', { name: `正在${goalTitle}` }).querySelector('.agent-tool-enter')).toBeTruthy()
+  view.rerender(<Transcript key="restored" active="r" messages={JSON.parse(JSON.stringify(messages))} />)
+  expect(view.container.querySelector('.agent-tool-enter')).toBeNull()
+})
+
+it('animates a held handoff as soon as the next real stage makes it visible', () => {
+  vi.useFakeTimers()
+  const read = message('read', [activity, call('read', 'chapter_read')])
+  const prose = { type: 'text', text: '上一章停在渡口。新细纲从没拆开的信接起。' } as const
+  const textRevealTargets = { next: prose.text }
+  const finishTextReveal = vi.fn()
+  const timeline = (parts: AgentMessagePart[]) => <Transcript active="r" messages={[read, message('next', parts)]}
+    textRevealTargets={textRevealTargets} finishTextReveal={finishTextReveal} />
+  const view = render(timeline([prose]))
+  act(() => vi.advanceTimersByTime(400))
+  expect(view.container.querySelector('p')).toBeNull()
+  expect(finishTextReveal).not.toHaveBeenCalled()
+
+  view.rerender(timeline([prose, call('plan', 'plan_save', { status: 'running' })]))
+  const report = view.container.querySelector('p')!
+  const saving = screen.getByRole('button', { name: '正在写入创作计划' })
+  expect(report.textContent).toBe(prose.text.slice(0, 3))
+  expect(report.compareDocumentPosition(saving) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  act(() => vi.advanceTimersByTime(48))
+  expect(report.textContent!.length).toBeGreaterThan(3)
+  expect(report.textContent).not.toBe(prose.text)
+  act(() => vi.advanceTimersByTime(600))
+  expect(report.textContent).toBe(prose.text)
+  expect(finishTextReveal).toHaveBeenCalledWith('next', prose.text)
+})
+
+it('uses the settled named row for a live gap and restores its real result when work ends', () => {
+  const ending = { type: 'text', text: '信件送抵了渡口。', afterTools: true } as const
+  const parts = [activity, call('read', 'chapter_read'), ending]
+  const groups = projectActivityGroups([message('batch', parts)]).byMessage.get('batch')
+  const view = render(<AuthorActivityParts parts={parts} messageId="batch" groups={groups} runActive workingLabel="正在处理…" activityChapters={chapters} />)
+  const row = screen.getByRole('button', { name: '正在处理…' })
+  expect(row.querySelector('.agent-processing-shimmer')).toBeTruthy()
+  fireEvent.click(row)
+  expect(screen.getByText(`已查看《${title}》`)).toBeTruthy()
+  view.rerender(<AuthorActivityParts parts={parts} messageId="batch" groups={groups} runActive={false} activityChapters={chapters} />)
+  expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(row)
+  expect(row.querySelector('.agent-processing-shimmer')).toBeNull()
+  expect(screen.getByText(ending.text)).toBeTruthy()
 })
 
 it('folds creation settings and the cover workflow while keeping the live row and ordered receipts', () => {
@@ -636,7 +742,7 @@ it('shows elapsed processing time and folds the completed process without hiding
       <AuthorActivitySummary active={active} open={open}
         timing={{ elapsedMs: 65000, activeSince: active ? new Date().toISOString() : null, lastSeq: 2, status: active ? 'running' : 'finished' }}
         onToggle={active ? undefined : () => setExpanded(value => !value)} />
-      <AuthorActivityParts parts={parts} messageId="mixed" runActive={active} processOpen={open} activityChapterTitles={titles} />
+      <AuthorActivityParts parts={parts} messageId="mixed" runActive={active} processOpen={open} activityChapters={chapters} />
     </>
   }
   const view = render(<TimedReply active />)
@@ -698,7 +804,7 @@ it('hands the shimmer between model work, tool execution and the next step, then
   expect(step?.querySelector('.lucide-brain')).toBeTruthy()
   const group = projectActivityGroups([message('run', [opening, read])])
   view.rerender(<AuthorActivityParts parts={[opening, read]} messageId="run" runActive activeGroupId={group.runningByRun.get('r')?.id}
-    groups={group.byMessage.get('run')} activityChapterTitles={titles} />)
+    groups={group.byMessage.get('run')} activityChapters={chapters} />)
   expect(shimmer()).toHaveLength(1)
   expect(shimmer()[0].textContent).toBe('正在核对前文')
   expect(shimmer()[0].closest('button')).toBe(step)
@@ -750,6 +856,78 @@ it('shows one compact location per matching chapter and keeps read targets acces
   expect(screen.getByText('· 章节摘要')).toBeTruthy()
   expect(screen.getByRole('button', { name: '《全书大纲》' })).toBeTruthy()
   expect(view.container.textContent).not.toMatch(/PRIVATE_|她摸到一把|长段摘录|正文第 82 字/)
+  fireEvent.click(screen.getByRole('button', { name: '《全书大纲》' }))
+  expect(useAgentStore.getState().toolNavigationRequest).toMatchObject({ toolName: 'plan_read', args: { planId: 'PRIVATE_PLAN' } })
+  fireEvent.click(screen.getByRole('button', { name: '《交接》' }))
+  expect(useAgentStore.getState().toolNavigationRequest).toMatchObject({ toolName: 'project_search', args: { chapterId: 'PRIVATE_NEXT' } })
+  act(() => useAgentStore.getState().clearToolNavigationRequest())
+})
+
+it('resolves memory search chapter references from the current directory when expanding persisted results', () => {
+  const chapterId = 'cm' + '1'.repeat(23)
+  const untitledId = 'cm' + '2'.repeat(23)
+  const absentId = 'af9d6970-0d7c-4a3c-81b2-ad9346657dfa'
+  const namedCharacterId = 'ba6fe7fa-66e6-4286-ad4c-4c1d346c2fa5'
+  const characterName = `章节:${namedCharacterId}`
+  const stored = call('memory', 'memory_search', {
+    args: { query: '梳理伏笔' },
+    summary: '检索"梳理伏笔" · 命中 6 条',
+    display: { kind: 'readSources', items: [
+      { title: `章节:${chapterId}`, preview: '历史摘要', memoryType: 'chapterSummary' },
+      { title: `chapter：${absentId}`, memoryType: 'chapterSummary' },
+      { title: '沈秋', memoryType: 'characterCard' },
+      { title: '章节：守门人的旧事', memoryType: 'storyArc' },
+      { title: `章节:${untitledId}`, memoryType: 'chapterSummary' },
+      { title: characterName, preview: '同名章节：旧日故事。', memoryType: 'characterCard' },
+    ] },
+  })
+  const restoredParts = JSON.parse(JSON.stringify([stored])) as AgentMessagePart[]
+  const directory = new Map([
+    [chapterId, { title: '第四章 《沿岸的灯》', orderIndex: 11 }],
+    [untitledId, { title: '', orderIndex: 12 }],
+    [namedCharacterId, { title: '同名章节', orderIndex: 13 }],
+  ])
+  const show = (activityChapters?: typeof directory) => <AuthorActivityParts
+    parts={restoredParts} messageId="restored-memory" runActive={false} activityChapters={activityChapters}
+  />
+  const view = render(show(directory))
+  fireEvent.click(screen.getByRole('button', { name: '已核对前文' }))
+  expect(screen.queryByText('第 11 章 · 沿岸的灯')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '已查找作品设定' }))
+  expect(screen.getByText('第 11 章 · 沿岸的灯')).toBeTruthy()
+  expect(screen.getByText('第 12 章')).toBeTruthy()
+  expect(screen.getByText('章节摘要（无法定位章节）')).toBeTruthy()
+  expect(screen.getByText('沈秋')).toBeTruthy()
+  expect(screen.getByText('章节：守门人的旧事')).toBeTruthy()
+  expect(screen.getByText(characterName)).toBeTruthy()
+  expect(screen.queryByText('第 13 章 · 同名章节')).toBeNull()
+  for (const id of [chapterId, untitledId, absentId]) expect(view.container.textContent).not.toContain(id)
+
+  view.rerender(show(new Map([[untitledId, { title: '渡口', orderIndex: 11 }]])))
+  expect(screen.queryByText('第 11 章 · 沿岸的灯')).toBeNull()
+  expect(screen.getByText('第 11 章 · 渡口')).toBeTruthy()
+  expect(screen.getAllByText('章节摘要（无法定位章节）')).toHaveLength(2)
+  expect(view.container.textContent).not.toContain(chapterId)
+  expect(restoredParts).toEqual([stored])
+})
+
+it.each([
+  { label: 'character filter', memoryType: 'characterCard', preview: '雁归时：人物提及当章。', expected: 'literal' },
+  { label: 'chapter filter', memoryType: 'chapterSummary', preview: undefined, expected: '第 7 章 · 雁归时' },
+  { label: 'matching summary preview', memoryType: undefined, preview: '雁归时：抵达旧驿站。', expected: '第 7 章 · 雁归时' },
+  { label: 'ambiguous preview', memoryType: undefined, preview: '人物只在结尾出场。', expected: '历史设定（名称暂不可用）' },
+])('uses original filter and preview evidence in legacy memory search results ($label)', ({ memoryType, preview, expected }) => {
+  const chapterId = 'af9d6970-0d7c-4a3c-81b2-ad9346657dfa'
+  const title = `章节:${chapterId}`
+  const stored = call('legacy-memory', 'memory_search', {
+    args: { query: '梳理伏笔', memoryType },
+    display: { kind: 'readSources', items: [{ title, preview }] },
+  })
+  const view = render(<AuthorActivityParts parts={[stored]} messageId="legacy" runActive={false}
+    activityChapters={new Map([[chapterId, { title: '雁归时', orderIndex: 7 }]])} />)
+  fireEvent.click(screen.getByRole('button', { name: '已核对前文' }))
+  expect(screen.getByText(expected === 'literal' ? title : expected)).toBeTruthy()
+  if (expected !== 'literal') expect(view.container.textContent).not.toContain(chapterId)
 })
 
 it('keeps lengthy read receipts collapsed and signals remaining content independently in each scroll area', () => {

@@ -300,7 +300,9 @@ export const memorySearchTool = defineTool({
     return {
       output: lines.join('\n'),
       summary: `检索"${args.query}" · 命中 ${entries.length} 条`,
-      display: { kind: 'readSources', items: entries.map(entry => ({ title: entry.title, preview: clip(entry.content, 120) })) },
+      display: { kind: 'readSources', items: entries.map(entry => ({
+        title: entry.title, preview: clip(entry.content, 120), memoryType: entry.memoryType,
+      })) },
       ...(ctx.transaction ? { observedMemories: await Promise.all(entries.map(async entry => {
         const memory = await ctx.transaction!.projectMemoryEntry.findUniqueOrThrow({ where: { id: entry.id } })
         const { memoryTargetHash } = await import('../runtime-memory.js')

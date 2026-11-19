@@ -245,7 +245,8 @@ describe.runIf(available)('durable explicit memory save', () => {
           ] }], successfulToolSignatures: [] } })
       if (read) {
         const result = await executeDurableToolStep(lease, new AbortController().signal)
-        expect(result).toMatchObject({ kind: 'tool', result: { output: expect.stringContaining(seeded!.id) } })
+        expect(result).toMatchObject({ kind: 'tool', result: { output: expect.stringContaining(seeded!.id),
+          display: { kind: 'readSources', items: [{ title, memoryType: 'characterCard' }] } } })
       }
       if (scenario === 'stale') await prisma.projectMemoryEntry.update({ where: { id: seeded!.id }, data: { content: '作者刚更新' } })
       if (scenario === 'missing') await prisma.projectMemoryEntry.delete({ where: { id: seeded!.id } })

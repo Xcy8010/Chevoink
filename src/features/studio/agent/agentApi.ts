@@ -158,7 +158,7 @@ export type AgentAuthorEndedPayload = { fulfilled: boolean; todoItems?: AgentTod
 /** 分支溯源：非空说明本任务是副本，forkedAt 之后的对话属于分支内新增 */
 export type AgentSessionForkInfo = { forkedFromSessionId: string; forkedFromMessageId: string | null; forkedAt: string | null }
 
-type AgentSessionMessagesResponse = { messages: AgentUIMessage[]; activeRunId: string | null; runGoalId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; outcome?: import('../../../../shared/contracts/models.js').AgentRunOutcome; nextPrompt?: AgentNextPrompt; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }
+type AgentSessionMessagesResponse = { messages: AgentUIMessage[]; activeRunId: string | null; activeRunLastSeq?: number; runGoalId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; outcome?: import('../../../../shared/contracts/models.js').AgentRunOutcome; nextPrompt?: AgentNextPrompt; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }
 
 export function fetchAgentSessionMessages(
   sessionId: string,

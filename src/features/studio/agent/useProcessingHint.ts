@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAgentStore } from './agentStore'
 import { shouldShowProcessingHint } from './lib/panel-helpers'
-import type { projectActivityGroups } from './lib/activity-groups'
+import { activityReportVisibility, type projectActivityGroups } from './lib/activity-groups'
 import type { AgentUIMessage } from '../../../../shared/contracts/index.js'
 
 export const OUTPUT_SILENCE_MS = 1500
@@ -10,9 +10,13 @@ export const OUTPUT_SILENCE_MS = 1500
  * part alone cannot. One expiring timer restores feedback even without SSE. */
 export function useProcessingHint(messages: AgentUIMessage[], runId: string | null, phase: string, waitingForUser: boolean, enabled = true) {
   const activity = useAgentStore(state => state.lastVisibleOutput)
-  const [, tick] = useState(0)
   const eligible = enabled && shouldShowProcessingHint(messages, runId, phase, waitingForUser)
-  const expiresAt = activity?.runId === runId ? activity.at + OUTPUT_SILENCE_MS : 0
+  return useOutputSilence(eligible, activity?.runId === runId ? activity.at : undefined)
+}
+
+function useOutputSilence(eligible: boolean, lastOutputAt?: number) {
+  const [, tick] = useState(0)
+  const expiresAt = lastOutputAt === undefined ? 0 : lastOutputAt + OUTPUT_SILENCE_MS
   const recent = Date.now() < expiresAt
   useEffect(() => {
     if (!eligible || !recent) return
@@ -25,7 +29,14 @@ export function useProcessingHint(messages: AgentUIMessage[], runId: string | nu
 export function useActivityWorkingLabel(messages: AgentUIMessage[], runId: string | null, phase: string, enabled: boolean,
   groups: ReturnType<typeof projectActivityGroups>) {
   const hasStarted = Boolean(runId && (groups.authorSpokeByRun.has(runId) || groups.lastGroupByRun.has(runId)))
-  const silent = useProcessingHint(messages, runId, phase, false, enabled && hasStarted)
+  const textOutput = useAgentStore(state => state.lastAuthorTextOutput)
+  // Private reasoning and a paragraph held behind a tool can both stream
+  // while the author sees only the last settled receipt.
+  const reports = textOutput ? groups.reportsByMessage.get(textOutput.messageId) : undefined
+  const lastReport = reports && [...reports.keys()].at(-1)
+  const hidden = lastReport !== undefined && activityReportVisibility(reports, enabled)?.hidden.has(lastReport)
+  const eligible = enabled && hasStarted && shouldShowProcessingHint(messages, runId, phase)
+  const silent = useOutputSilence(eligible, !hidden && textOutput?.runId === runId ? textOutput.at : undefined)
   if (!enabled) return undefined
   if (!hasStarted) return '正在思考'
   return silent ? '正在处理…' : undefined

@@ -247,6 +247,7 @@ type AgentStoreState = {
   currentTurn: number
   lastSeq: number
   lastVisibleOutput: { runId: string; at: number } | null
+  lastAuthorTextOutput: { runId: string; messageId: string; at: number } | null
   outputSummary: string
   errorMessage: string | null
   errorCode: string | null
@@ -282,7 +283,9 @@ type AgentStoreState = {
   /** Cosmetic live reveal only; received text/run status remain authoritative. */
   textRevealTargets: Record<string, string>
   motionAfterSeq: number | null
+  trackLocalRequestTiming: boolean
   liveToolCallIds: ReadonlySet<string>
+  liveToolReceiptIds: ReadonlySet<string>
   finishTextReveal: (messageId: string, text: string) => void
   /** 自动追踪：Agent 写入章节时编辑器自动跳转到对应正文（默认开启） */
   autoFollow: boolean
@@ -304,7 +307,7 @@ type AgentStoreState = {
   applyEvent: (event: AgentStreamEvent) => void
   beginRun: (runId: string, userPrompt: string, sessionId: string | null, attachments?: AgentAttachmentMeta[], runGoalId?: string | null, optimisticMessageId?: string, expectedPreviousRunId?: string | null) => void
   /** 续接服务端仍在进行的 run（刷新后恢复）：不追加用户消息，从 seq 0 重放事件重建直播 */
-  resumeRun: (runId: string, sessionId: string | null, runGoalId?: string | null, motionAfterSeq?: number, questionSourceRunId?: string) => void
+  resumeRun: (runId: string, sessionId: string | null, runGoalId?: string | null, motionBoundary?: number | { historyThrough: number }, questionSourceRunId?: string) => void
   reconcileRunTimings: (messages: AgentUIMessage[], sessionId: string, runId: string) => void
   /** 记录刷新后从服务端派生的可续跑 run（拉历史消息时写入，续跑成功后清空） */
   noteResumeableRun: (runId: string | null) => void
@@ -664,6 +667,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   currentTurn: 0,
   lastSeq: 0,
   lastVisibleOutput: null,
+  lastAuthorTextOutput: null,
   outputSummary: '',
   errorMessage: null,
   errorCode: null,
@@ -684,7 +688,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   finalizedTextIds: [],
   textRevealTargets: {},
   motionAfterSeq: null,
+  trackLocalRequestTiming: false,
   liveToolCallIds: new Set<string>(),
+  liveToolReceiptIds: new Set<string>(),
   finishTextReveal: (messageId, text) => set(state => {
     if (state.textRevealTargets[messageId] !== text) return {}
     const targets = { ...state.textRevealTargets }; delete targets[messageId]
@@ -748,6 +754,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       currentTurn: 0,
       lastSeq: 0,
       lastVisibleOutput: null,
+      lastAuthorTextOutput: null,
       outputSummary: '',
       errorMessage: null,
       errorCode: null,
@@ -758,7 +765,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       finalizedTextIds: [],
       textRevealTargets: {},
       motionAfterSeq: 0,
+      trackLocalRequestTiming: true,
       liveToolCallIds: new Set<string>(),
+      liveToolReceiptIds: new Set<string>(),
       // 开新 run 后旧的「可续跑」派生状态失效，避免按钮误留
       resumeableRunId: null,
       // 新 run 开跑：登记运行中供侧栏展示；同一会话的旧终态信号视为已消费
@@ -780,7 +789,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       ],
     }) }),
 
-  resumeRun: (runId, sessionId, runGoalId = null, motionAfterSeq, questionSourceRunId) =>
+  resumeRun: (runId, sessionId, runGoalId = null, motionBoundary, questionSourceRunId) =>
     set((state) => {
       // The answer endpoint has admitted a new attempt of this stopped
       // question's original root. Its replay reuses the same message IDs.
@@ -797,8 +806,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       return ({
       messages,
       textRevealTargets: {},
-      motionAfterSeq: motionAfterSeq ?? null,
+      motionAfterSeq: typeof motionBoundary === 'number' ? motionBoundary : motionBoundary?.historyThrough ?? null,
+      trackLocalRequestTiming: typeof motionBoundary === 'number',
       liveToolCallIds: new Set<string>(),
+      liveToolReceiptIds: new Set<string>(),
       runId,
       runGoalId,
       resumeableRunId: null,
@@ -814,6 +825,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       currentTurn: 0,
       lastSeq: 0,
       lastVisibleOutput: null,
+      lastAuthorTextOutput: null,
       outputSummary: '',
       errorMessage: null,
       errorCode: null,
@@ -841,9 +853,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     set((state) => ({
       textRevealTargets: {},
       motionAfterSeq: null,
+      trackLocalRequestTiming: false,
       liveToolCallIds: new Set<string>(),
+      liveToolReceiptIds: new Set<string>(),
       messages: restored,
       lastVisibleOutput: null,
+      lastAuthorTextOutput: null,
       phase: 'idle',
       runId: null,
       runGoalId: null,
@@ -939,6 +954,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       currentTurn: 0,
       lastSeq: 0,
       lastVisibleOutput: null,
+      lastAuthorTextOutput: null,
       outputSummary: '',
       errorMessage: null,
       errorCode: null,
@@ -950,7 +966,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       finalizedTextIds: [],
       textRevealTargets: {},
       motionAfterSeq: null,
+      trackLocalRequestTiming: false,
       liveToolCallIds: new Set<string>(),
+      liveToolReceiptIds: new Set<string>(),
       // 切换会话视为“离开旧对话”：清空消息，由渲染层按「未水合」展示图标流光；
       // 同会话重挂载/续活走早退路径（loadedSessionId 命中）不会经过这里
       messages: [],
@@ -1222,7 +1240,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
       // Only accepted live events can establish a local response clock. Start
       // metadata and historical replay cannot masquerade as model output.
-      if (state.motionAfterSeq !== null && event.seq > state.motionAfterSeq) useOutgoingMessages.getState().observeEvent(event)
+      if (state.trackLocalRequestTiming && state.motionAfterSeq !== null && event.seq > state.motionAfterSeq) useOutgoingMessages.getState().observeEvent(event)
 
       const timingEvent = ['run.started', 'run.paused', 'run.question_wait', 'run.finished'].includes(event.type) || event.type === 'error' && !event.recoverable
       const timedMessages = timingEvent ? state.messages.map(message => {
@@ -1235,7 +1253,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }) : state.messages
       const liveToolEvent = state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
         && (event.type === 'tool.delta' || event.type === 'tool.call' || event.type === 'tool.result')
-      const base = { lastSeq: event.seq, ...(timingEvent ? { messages: timedMessages } : {}),
+      const liveReceipt = liveToolEvent ? JSON.stringify([event.messageId, 'subagentCallId' in event ? event.subagentCallId ?? null : null, event.callId]) : undefined
+      const base = { lastSeq: event.seq,
+        ...(liveReceipt && !state.liveToolReceiptIds.has(liveReceipt)
+          ? { liveToolReceiptIds: new Set([...state.liveToolReceiptIds, liveReceipt]) } : {}), ...(timingEvent ? { messages: timedMessages } : {}),
         ...(liveToolEvent && !state.liveToolCallIds.has(event.callId)
           ? { liveToolCallIds: new Set([...state.liveToolCallIds, event.callId]) } : {}) }
 
@@ -1311,7 +1332,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const text = messages.find(message => message.id === event.messageId)?.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('') ?? ''
           return {
             ...base,
-            ...(event.runId === state.runId && delta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
+            ...(event.runId === state.runId && delta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() },
+              lastAuthorTextOutput: { runId: event.runId, messageId: event.messageId, at: Date.now() } } : {}),
             ...(delta ? { messages, ...(state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
               ? { textRevealTargets: { ...state.textRevealTargets, [event.messageId]: text } } : {}) } : {}),
           }
@@ -1351,7 +1373,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           }
           return {
             ...base,
-            ...(visible && revealedText !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
+            ...(visible && revealedText !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() },
+              lastAuthorTextOutput: { runId: event.runId, messageId: event.messageId, at: Date.now() } } : {}),
             ...(revealTargets ? { textRevealTargets: revealTargets } : {}),
             finalizedTextIds: state.finalizedTextIds.includes(event.messageId)
               ? state.finalizedTextIds : [...state.finalizedTextIds, event.messageId],
@@ -1540,7 +1563,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               : {}
           return {
             ...base,
-            ...(!event.subagentCallId && visibleResultChanged ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
+            ...(!event.subagentCallId && visibleResultChanged ? { lastVisibleOutput: { runId: event.runId, at: Date.now() }, lastAuthorTextOutput: null } : {}),
             // 工具结果到达同样证明正文流早已结束：兜底登记定稿，确保光标不残留
             ...(state.finalizedTextIds.includes(event.messageId) ? {} : { finalizedTextIds: [...state.finalizedTextIds, event.messageId] }),
             ...(clearQuestion ? { phase: 'running' as const, pendingQuestion: null, ...withoutActiveSessionSignal(state) } : {}),
@@ -1692,10 +1715,10 @@ export function isRunActive(phase: AgentRunPhase): boolean {
 }
 
 /** API history is a saved journal, never disposable scaffolding for SSE replay. */
-export function restoreActiveRunHistory(messages: AgentUIMessage[], runId: string, sessionId: string, todoSnapshot?: AgentTodoSnapshot | null, runGoalId?: string | null) {
+export function restoreActiveRunHistory(messages: AgentUIMessage[], runId: string, sessionId: string, todoSnapshot?: AgentTodoSnapshot | null, runGoalId?: string | null, activeRunLastSeq?: number) {
   const store = useAgentStore.getState()
   store.restoreMessages(messages, sessionId, todoSnapshot)
-  store.resumeRun(runId, sessionId, runGoalId)
+  store.resumeRun(runId, sessionId, runGoalId, activeRunLastSeq === undefined ? undefined : { historyThrough: activeRunLastSeq })
 }
 
 /** A failed older HTTP read cannot discard a newer run or a same-session journal. */

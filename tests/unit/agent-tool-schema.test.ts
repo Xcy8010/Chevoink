@@ -8,7 +8,10 @@ import { coordinatedWriterParameters } from '../../api/lib/agent/coordinated-wri
 import { chapterBridgeCommitTool, continuityValidateTool, storyCompilerPrepareTool, sceneTaskBuildTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { researchReportSaveTool } from '../../api/lib/agent/tools/search-tools.js'
+import { memorySearchTool } from '../../api/lib/agent/tools/read-tools.js'
 import { memorySaveTool } from '../../api/lib/agent/tools/write-tools.js'
+import { legacyMemorySearchParameters } from '../../api/lib/agent/memory-tool-parameters.js'
+import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { researchReportSaveParameters } from '../../api/lib/agent/research-sources.js'
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -21,6 +24,27 @@ import { toolWithNativeView, projectNativeToolViews, hasRetiredNativeArguments, 
 vi.mock('zod', async importOriginal => {
   const actual = await importOriginal<typeof import('zod')>()
   return { ...actual, z: { ...actual.z, toJSONSchema: vi.fn(actual.z.toJSONSchema) } }
+})
+
+it('adds the true memory hit type to the display while retaining frozen arguments and raw output', async () => {
+  expect(originalToolParameterSchemas(memorySearchTool, { novelId: 'n' })).toContainEqual(toOpenAIParameters(legacyMemorySearchParameters))
+  const title = '章节:af9d6970-0d7c-4a3c-81b2-ad9346657dfa'
+  const base = { title, layer: 'L2' as const, status: 'confirmed' as const, score: 1, lexicalScore: 1, semanticScore: 0, graphScore: 0, evidence: [] }
+  const search = vi.spyOn(storyMemory, 'searchStoryMemory').mockResolvedValueOnce([
+    { ...base, memoryType: 'chapterSummary', id: 'summary-entry', content: '雁归时：抵达旧驿站。' },
+    { ...base, memoryType: 'characterCard', id: 'character-entry', content: '守夜人。' },
+  ])
+  try {
+    const result = await memorySearchTool.execute({
+      userId: 'author', novelId: 'n', runId: 'run', sessionId: 'session', chapterId: null, callId: 'read',
+      mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: vi.fn(),
+    }, { query: '雁归时' })
+    expect(result.output).toBe(`[chapterSummary] ${title}（ID：summary-entry）：雁归时：抵达旧驿站。\n[characterCard] ${title}（ID：character-entry）：守夜人。`)
+    expect(result.display).toEqual({ kind: 'readSources', items: [
+      { title, memoryType: 'chapterSummary', preview: '雁归时：抵达旧驿站。' },
+      { title, memoryType: 'characterCard', preview: '守夜人。' },
+    ] })
+  } finally { search.mockRestore() }
 })
 
 it('advertises two to three options and a cover asset ID while retaining exact frozen question schemas', () => {

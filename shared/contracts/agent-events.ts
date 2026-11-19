@@ -119,7 +119,7 @@ export type AgentToolDisplayPayload =
       description: string
     }
   | { kind: 'markdown'; markdown: string }
-  | { kind: 'readSources'; items: Array<{ title: string; preview?: string; target?: { kind: 'chapter' | 'plan'; id: EntityId } }> }
+  | { kind: 'readSources'; items: Array<{ title: string; preview?: string; memoryType?: StoryMemoryCard['memoryType']; target?: { kind: 'chapter' | 'plan'; id: EntityId } }> }
   | { kind: 'chapterRef'; chapterId: EntityId; title: string; wordCount: number; range?: { start: number; end: number }; revision?: number }
   | { kind: 'memoryCard'; memoryId: EntityId; memoryType: StoryMemoryCard['memoryType']; title: string }
   | { kind: 'sessionRename'; sessionId: EntityId; title: string }

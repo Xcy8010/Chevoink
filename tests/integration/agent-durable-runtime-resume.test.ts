@@ -167,7 +167,8 @@ describe.runIf(available)('explicit durable resume admission', () => {
         if (scenario === 'replay') {
           const { listLoopSessionMessages } = await import('../../api/lib/agent/session-messages.js')
           const waiting = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
-          expect(waiting).toMatchObject({ activeRunId: a.run.id, resumeRunId: null })
+          const latest = await prisma.agentRunEvent.findFirst({ where: { runId: a.run.id }, orderBy: { seq: 'desc' }, select: { seq: true } })
+          expect(waiting).toMatchObject({ activeRunId: a.run.id, activeRunLastSeq: latest?.seq ?? 0, resumeRunId: null })
           expect(waiting.messages.some(message => message.id === f.sourceMessageId)).toBe(true)
           const { deleteLoopSessionMessage, rollbackLoopSessionFromMessage } = await import('../../api/lib/agent/session-messages.js')
           await expect(deleteLoopSessionMessage(f.userId, f.sessionId, f.sourceMessageId)).rejects.toMatchObject({ code: 'RUN_IN_PROGRESS' })
