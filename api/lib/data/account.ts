@@ -56,16 +56,24 @@ const dummyPasswordHash = 'scrypt:6a7b37e1c7f68cd8f8ac04c1bed0d398:' + '0'.repea
 
 export async function loginAccountUserData(identity: Identity, password: string) {
   if ('email' in identity) assertPreviewEmailAllowed(identity.email)
-  const user = await findAccountByIdentity(identity)
+  // The provisioned superadmin address is a password login identifier only.
+  const reservedAdmin = 'email' in identity && identity.email === 'admin@chevoink.local'
+    ? await prisma.user.findUnique({
+        where: { email: identity.email, role: 'admin', isSuperAdmin: true, bannedAt: null },
+      })
+    : null
+  const user = reservedAdmin ?? await findAccountByIdentity(identity)
+  // Match the admin login's exact password while preserving account password normalization.
+  const loginPassword = reservedAdmin ? password : password.trim()
   const hashed = user?.passwordHash ?? dummyPasswordHash
   // Keep a password derivation on unknown, unset and historical hash paths.
   const configuredScrypt = hashed.startsWith('scrypt:')
-  const matched = verifyPassword(password, configuredScrypt ? hashed : dummyPasswordHash)
-  if (!user || !(configuredScrypt ? matched : verifyPassword(password, hashed))) return null
+  const matched = verifyPassword(loginPassword, configuredScrypt ? hashed : dummyPasswordHash)
+  if (!user || !(configuredScrypt ? matched : verifyPassword(loginPassword, hashed))) return null
   assertPreviewAccountAllowed(user)
 
   if (isLegacyPasswordHash(hashed)) {
-    await prisma.user.updateMany({ where: { id: user.id, passwordHash: hashed }, data: { passwordHash: hashPassword(password) } })
+    await prisma.user.updateMany({ where: { id: user.id, passwordHash: hashed }, data: { passwordHash: hashPassword(loginPassword) } })
   }
   return { user: toUser(user), tokenVersion: user.tokenVersion }
 }

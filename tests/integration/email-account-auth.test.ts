@@ -361,6 +361,44 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     expect(me.body.data.authoredNovels).toEqual(expect.arrayContaining([expect.objectContaining({ id })]))
   })
 
+  it('admits the reserved superadmin email only to password login and preserves contact verification', async () => {
+    const email = 'admin@chevoink.local'
+    const password = ' Reserved-Superadmin-Fixture-1 '
+    const admin = await prisma.user.create({ data: {
+      email, role: 'admin', isSuperAdmin: true, nickname: 'Reserved superadmin fixture', passwordHash: hashPassword(password),
+    } })
+    const login = async (identifier: string, password: string) => api().post(auth + '/login')
+      .set('X-Forwarded-For', `198.51.100.${ip++}`).send({ identifier, password })
+
+    const result = await login(email.toUpperCase(), password)
+    expect(result.status).toBe(200)
+    expect(result.body.data.user).toMatchObject({ id: admin.id, email, emailVerified: false, phoneVerified: false })
+    const token = result.body.data.tokens.accessToken as string
+    expect((await api().get('/api/users/me').set('Cookie', cookie(token))).body.data.user.id).toBe(admin.id)
+    expect((await login(email, password.trim())).status).toBe(401)
+    for (const [purpose, path, body] of [
+      ['login', '/email/send-code', { email, purpose: 'login' }],
+      ['reset_password', '/reset/send-code', { identifier: email }],
+    ] as const) {
+      await ageEmail(email)
+      const sent = await api().post(auth + path).set('X-Forwarded-For', `198.51.100.${ip++}`)
+        .send({ ...body, ...await captcha() })
+      expect(sent.status).toBe(200)
+      expect(await prisma.emailVerificationCode.findFirst({ where: { email, purpose } }))
+        .toMatchObject({ sendState: 'suppressed', userId: null })
+      expect(mailCodes.has(email)).toBe(false)
+    }
+    expect((await api().post(auth + '/email/login').send({ email, code: '123456' })).body.error.code).toBe('AUTH_CODE_INVALID')
+    expect((await api().post(auth + '/reset').send({ identifier: email, code: '123456', password })).body.error.code)
+      .toBe('AUTH_CODE_INVALID')
+    expect(await prisma.user.findUniqueOrThrow({ where: { id: admin.id } })).toMatchObject({ emailVerifiedAt: null })
+
+    await prisma.user.update({ where: { id: admin.id }, data: { bannedAt: new Date() } })
+    expect((await login(email, password)).status).toBe(401)
+    await prisma.user.update({ where: { id: admin.id }, data: { bannedAt: null, isSuperAdmin: false } })
+    expect((await login(email, password)).status).toBe(401)
+  })
+
   it('quarantines an uncertain SES send and still accepts the delivered proof if it arrives', async () => {
     const email = recipient()
     const { legalConsent } = await integrationLegalConsent()

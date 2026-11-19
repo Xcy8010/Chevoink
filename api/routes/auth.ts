@@ -60,7 +60,13 @@ const loginSchema = z.object({
 })
 
 const accountLoginSchema = z.union([
-  z.object({ identifier: z.string().trim().min(1).max(254), password: z.string().trim().min(1).max(1024) }),
+  z.object({
+    identifier: z.string().trim().min(1).max(254),
+    password: z.string().refine(value => {
+      const length = value.trim().length
+      return length > 0 && length <= 1024
+    }),
+  }),
   loginSchema,
 ])
 
@@ -213,7 +219,7 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
       throw new DataAccessError(429, 'RATE_LIMITED', '登录尝试过于频繁，请稍后再试。')
     }
     const verified = enabled
-      ? await loginAccountUserData('identifier' in body ? accountIdentity(identity) : { phone: normalizePhoneNumber(identity) }, body.password.trim())
+      ? await loginAccountUserData('identifier' in body ? accountIdentity(identity) : { phone: normalizePhoneNumber(identity) }, body.password)
       : null
     const user = enabled ? verified?.user : await loginUserData(identity, body.password)
     if (!user) {
