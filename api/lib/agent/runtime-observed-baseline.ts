@@ -63,6 +63,7 @@ const resultSchema = z.object({ toolResult: z.object({ output: z.string(),
   display: z.union([
     z.object({ kind: z.literal('chapterDiff'), chapterId: z.string(), revision: z.number().int().positive() }).passthrough(),
     z.object({ kind: z.literal('chapterRef'), chapterId: z.string() }).passthrough(),
+    z.object({ kind: z.literal('memoryCard'), memoryId: z.string().min(1), memoryType: z.string().min(1), title: z.string().min(1) }).passthrough(),
     z.object({ kind: z.literal('qualityReport'), chapterId: z.string() }).passthrough(),
     z.object({ kind: z.literal('storyCompiler') }).passthrough(),
     z.object({ kind: z.literal('readSources') }).passthrough(),
