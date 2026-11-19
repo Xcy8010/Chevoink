@@ -26,7 +26,7 @@ function useOutputSilence(eligible: boolean, lastOutputAt?: number) {
   return eligible && !recent
 }
 
-export function useActivityWorkingLabel(messages: AgentUIMessage[], runId: string | null, phase: string, enabled: boolean,
+export function useRunActivityIndicator(messages: AgentUIMessage[], runId: string | null, phase: string, enabled: boolean,
   groups: ReturnType<typeof projectActivityGroups>) {
   const hasStarted = Boolean(runId && (groups.authorSpokeByRun.has(runId) || groups.lastGroupByRun.has(runId)))
   const textOutput = useAgentStore(state => state.lastAuthorTextOutput)
@@ -37,7 +37,5 @@ export function useActivityWorkingLabel(messages: AgentUIMessage[], runId: strin
   const hidden = lastReport !== undefined && activityReportVisibility(reports, enabled)?.hidden.has(lastReport)
   const eligible = enabled && hasStarted && shouldShowProcessingHint(messages, runId, phase)
   const silent = useOutputSilence(eligible, !hidden && textOutput?.runId === runId ? textOutput.at : undefined)
-  if (!enabled) return undefined
-  if (!hasStarted) return '正在思考'
-  return silent ? '正在处理…' : undefined
+  return enabled && (!hasStarted || silent)
 }

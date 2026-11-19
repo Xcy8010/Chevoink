@@ -1,5 +1,5 @@
 import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { BookOpenText, Bot, Brain, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, Search } from 'lucide-react'
+import { BookOpenText, Bot, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, Search } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useStreamingTextState } from '../../components/use-streaming-text'
@@ -73,6 +73,7 @@ function activitySummary(part: ActivityCall, runActive: boolean, chapters?: Acti
   if (part.status === 'running') {
     if (!runActive) return `${action}未完成`
     if (part.preparing) return `正在准备 · ${detail ? action : presentation.label}`
+    if (part.toolName === 'chapter_read' && title) return `正在查看${named}`
     return agentRunningToolLabel(part.toolName, title, detail ? action : undefined)
   }
   if (part.status !== 'success') {
@@ -229,8 +230,8 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters,
   </li>
 })
 
-const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, chapters, readOnly, awaitingApprovalCallId, animateLive }: {
-  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; chapters?: ActivityChapters; readOnly?: boolean
+const ActivityRow = memo(function ActivityRow({ group, runActive, active, showRunIndicator, chapters, readOnly, awaitingApprovalCallId, animateLive }: {
+  group?: ActivityGroup; runActive: boolean; active: boolean; showRunIndicator?: boolean; chapters?: ActivityChapters; readOnly?: boolean
   awaitingApprovalCallId?: string
   animateLive?: boolean
 }) {
@@ -248,29 +249,36 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
     && calls.some(call => !call.preparing && call.status === 'running' && call.callId === awaitingApprovalCallId)
   const namedInProgress = Boolean(group?.title && runActive && active && (running || !group.closed && !group.completed))
   const waiting = Boolean(importWaiting || waitingForAnswer || waitingForApproval)
-  const fallbackLabel = !running && !namedInProgress && !waiting && runActive ? workingLabel : undefined
-  const Icon = iconPart && !fallbackLabel ? toolIcon(iconPart) : Brain
+  const showIndicator = runActive && showRunIndicator && !running && !namedInProgress && !waiting
+  const Icon = iconPart && toolIcon(iconPart)
+  const stageCalls = calls.slice(group?.stageStart ?? 0)
+  const readChapterIds = grouped && stageCalls.every(call => call.toolName === 'chapter_read' && activityChapterId(call))
+    ? new Set(stageCalls.map(activityChapterId)) : undefined
   const readLabel = group?.readLabel
-  let label = fallbackLabel
-  if (!label && group?.title) {
+  let label: string | undefined
+  if (group?.title) {
     const title = group.title
     if (waitingForAnswer) label = `等待你回答 · ${title}`
     else if (importWaiting || waitingForApproval) label = `等待你确认 · ${title}`
     else if (namedInProgress) label = `正在${title}`
     else if ((group.closed || group.completed) && !group.unfinished) label = `已${title}`
     else label = `${title}未完成`
-  } else if (!label && part) {
+  } else if (part) {
     if (readLabel && running) label = activitySummary(running, runActive, chapters, true)
     else if (readLabel) label = group?.unfinished
       ? `${readLabel}有未完成项` : `已${readLabel}`
     else if (grouped && !running && unresolved) label = `${getAgentToolPresentation(part.toolName).label}有未完成项`
-    else label = activitySummary(part, runActive && active, chapters, false, grouped, group?.staleReviewCalls?.has(part))
+    else if (readChapterIds && readChapterIds.size > 1 && stageCalls.every(call => call.status === 'success' && !call.preparing)) label = `已查看 ${readChapterIds.size} 章正文`
+    else label = activitySummary(part, runActive && active, chapters, false, grouped && !readChapterIds, group?.staleReviewCalls?.has(part))
   }
   const showingActivity = Boolean(active && running && !waiting)
-  const shimmer = runActive && Boolean(showingActivity || namedInProgress || fallbackLabel) && !waiting
-  const step = fallbackLabel ?? (group?.title ? label : part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : '')
-  const enter = useRef(animateLive && document.visibilityState !== 'hidden'
-    && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches).current
+  const shimmer = runActive && Boolean(showingActivity || namedInProgress) && !waiting
+  const step = group?.title ? label : part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : ''
+  const enter = useRef<boolean | undefined>(undefined)
+  if (group && enter.current === undefined) {
+    enter.current = Boolean(animateLive && document.visibilityState !== 'hidden'
+      && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
+  }
   const previousStep = useRef(step)
   const headline = useRef<HTMLSpanElement>(null)
   useLayoutEffect(() => {
@@ -284,21 +292,24 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
     return () => animation?.cancel()
   }, [animateLive, step])
 
-  return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={fallbackLabel ? '' : undefined} data-author-step>
-    <button type="button" aria-expanded={group ? open : undefined} aria-controls={group ? detailsId : undefined}
-      disabled={!group} onClick={() => setOpen(value => !value)}
+  return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={showIndicator ? '' : undefined} data-author-step>
+    {group && <button type="button" aria-expanded={open} aria-controls={detailsId}
+      onClick={() => setOpen(value => !value)}
       className="agent-activity-step min-h-7 w-fit max-w-full text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
-      <span ref={headline} className={cn('agent-activity-line items-center', enter && 'agent-tool-enter')}>
-        <Icon aria-hidden className="h-4 w-4" />
+      <span ref={headline} className={cn('agent-activity-line items-center', enter.current && 'agent-tool-enter')}>
+        {Icon && <Icon aria-hidden className="h-4 w-4" />}
         <span className="min-w-0 break-words text-balance">
-          <span aria-live={group?.title || active || running || fallbackLabel ? 'polite' : undefined}
+          <span aria-live={group.title || active || running ? 'polite' : undefined}
             data-activity-preparing={showingActivity && running?.preparing || undefined}
             data-activity-running={showingActivity && !running?.preparing || undefined}
             className={cn('agent-activity-label', shimmer && 'agent-processing-shimmer')}>{label}</span>
-          {group ? <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} /> : null}
+          <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} />
         </span>
       </span>
-    </button>
+    </button>}
+    {showIndicator && <span role="status" aria-label="任务仍在运行" className="inline-flex min-h-7 items-center gap-1 px-2 align-top motion-safe:animate-pulse">
+      <span aria-hidden className="text-xs tracking-widest text-[var(--text-secondary)]">•••</span>
+    </span>}
     {!readOnly && importWaiting?.importWaiting ? <a className="ml-6 text-xs underline" href={importWaiting.importWaiting.url}>核对原文并确认导入</a> : null}
     {group ? <AgentProcessRegion open={open} id={detailsId}>
       <ActivityScrollArea><ul>
@@ -337,7 +348,7 @@ export function AuthorProgressText({ text, className }: { text: string; classNam
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapters, readOnly, awaitingApprovalCallId, reportVisibility, liveToolReceiptIds,
+  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, showRunIndicator, workingGroupId, revealText, onTextRevealed, activityChapters, readOnly, awaitingApprovalCallId, reportVisibility, liveToolReceiptIds,
 }: {
   parts: AgentMessagePart[]
   messageId: string
@@ -346,7 +357,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   runActive: boolean
   processOpen?: boolean
   collapseText?: boolean
-  workingLabel?: string
+  showRunIndicator?: boolean
   workingGroupId?: string
   revealText?: string
   onTextRevealed?: (messageId: string, text: string) => void
@@ -380,7 +391,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   const rendered = new Set<string>()
 
   const stepKey = `${messageId}:step`
-  const liveGroupId = workingGroupId ?? (workingLabel ? [...(localGroups?.values() ?? [])].at(-1)?.id : undefined)
+  const liveGroupId = workingGroupId ?? (showRunIndicator ? [...(localGroups?.values() ?? [])].at(-1)?.id : undefined)
   const entries = authorParts.map<ReactNode>((part, index) => {
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
@@ -402,15 +413,14 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       rendered.add(group.id)
       return <AgentProcessRegion key={key} open={processOpen ?? true}>
         <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} chapters={activityChapters} readOnly={readOnly}
-          workingLabel={liveGroupId === group.id ? workingLabel : undefined} awaitingApprovalCallId={awaitingApprovalCallId}
+          showRunIndicator={liveGroupId === group.id ? showRunIndicator : undefined} awaitingApprovalCallId={awaitingApprovalCallId}
           animateLive={!readOnly && group.receiptKeys.some(key => liveToolReceiptIds?.has(key))} />
       </AgentProcessRegion>
   })
-  if (workingLabel && !liveGroupId) {
-    // Public prose stays first. Until a tool arrives, this is the pending
-    // activity row, which the first tool takes over in the same position.
+  if (showRunIndicator && !liveGroupId) {
+    // Reserve the first tool's position without inventing an action title.
     entries.push(<AgentProcessRegion key={stepKey} open={processOpen ?? true}>
-      <ActivityRow key="activity" runActive={runActive} active={false} workingLabel={workingLabel} animateLive={revealText !== undefined} />
+      <ActivityRow key="activity" runActive={runActive} active={false} showRunIndicator={showRunIndicator} animateLive={revealText !== undefined} />
     </AgentProcessRegion>)
   }
   return entries.some(Boolean) ? <div className="flex flex-col gap-3 font-medium">{entries}</div> : null
