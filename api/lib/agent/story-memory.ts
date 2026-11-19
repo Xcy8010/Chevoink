@@ -157,10 +157,16 @@ function memoryIdentityWhere(memory: MemoryIdentity): Prisma.ProjectMemoryEntryW
 async function findMemoryTarget(
   db: Prisma.TransactionClient, input: MemoryIdentity & { novelId: string; memoryId?: string | null }, current: Prisma.ProjectMemoryEntryWhereInput,
 ) {
-  return db.projectMemoryEntry.findFirst({
+  const criteria = {
     where: { AND: [current, input.memoryId ? { id: input.memoryId, memoryType: input.memoryType } : memoryIdentityWhere(input)] },
     orderBy: latestMemoryFirst,
-  })
+  }
+  if (input.memoryType === 'chapterSummary' && !input.sourceChapterId && !input.memoryId) {
+    const matches = await db.projectMemoryEntry.findMany({ ...criteria, take: 2 })
+    if (matches.length > 1) throw new DataAccessError(409, 'MEMORY_TITLE_CONFLICT', '有多章使用同一标题，请指定来源章节或卡片 ID。')
+    return matches[0] ?? null
+  }
+  return db.projectMemoryEntry.findFirst(criteria)
 }
 
 export async function findAvailableStoryMemory(db: Prisma.TransactionClient, input: MemoryIdentity & { novelId: string; memoryId?: string | null }) {
@@ -251,13 +257,17 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
   await db.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`memory:${input.novelId}`}, 0))::text`
   const title = input.title.trim()
   const content = input.content.trim()
-  const identity = { title, memoryType: input.memoryType, sourceChapterId: input.sourceChapterId }
-  const rebuildingRollup = !!input.systemDerived && !!memoryRollup(identity)
+  const requested = { title, memoryType: input.memoryType, sourceChapterId: input.sourceChapterId }
+  const rebuildingRollup = !!input.systemDerived && !!memoryRollup(requested)
   const current = await currentStoryMemoryWhere(db, input.novelId, rebuildingRollup)
-  const existing = await findMemoryTarget(db, { ...identity, novelId: input.novelId, memoryId: input.memoryId }, current)
+  const existing = await findMemoryTarget(db, { ...requested, novelId: input.novelId, memoryId: input.memoryId }, current)
   if (input.memoryId && !existing) {
     throw new DataAccessError(409, 'MEMORY_TARGET_MISSING', '原卡片不存在或已删除/失效，未覆盖也未新建。')
   }
+  if (input.memoryType === 'chapterSummary' && existing?.sourceChapterId && input.sourceChapterId && existing.sourceChapterId !== input.sourceChapterId) {
+    throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '该摘要属于其他章节，请使用来源章节对应的卡片 ID。')
+  }
+  const identity = { ...requested, sourceChapterId: input.sourceChapterId ?? (input.memoryType === 'chapterSummary' ? existing?.sourceChapterId ?? null : null) }
   const deleted = await db.projectMemoryEntry.findFirst({
     where: { ...deletedMemoryWhere(input.novelId), OR: [memoryIdentityWhere(identity), ...(existing ? [memoryIdentityWhere(existing)] : [])] },
     select: { id: true },
@@ -285,7 +295,7 @@ export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Pris
   const data = {
     title, content, layer: input.layer, importance: input.importance, confidence: input.confidence, status,
     reviewStatus: 'none' as const,
-    sourceChapterId: input.sourceChapterId ?? (input.memoryType === 'chapterSummary' ? existing?.sourceChapterId ?? null : null),
+    sourceChapterId: identity.sourceChapterId,
     embedding: hashVector(`${title}\n${content}`),
   }
   const textChanged = !!existing && (existing.title !== title || existing.content !== content)

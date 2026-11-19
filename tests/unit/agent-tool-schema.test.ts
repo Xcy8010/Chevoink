@@ -8,6 +8,7 @@ import { coordinatedWriterParameters } from '../../api/lib/agent/coordinated-wri
 import { chapterBridgeCommitTool, continuityValidateTool, storyCompilerPrepareTool, sceneTaskBuildTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { researchReportSaveTool } from '../../api/lib/agent/tools/search-tools.js'
+import { memorySaveTool } from '../../api/lib/agent/tools/write-tools.js'
 import { researchReportSaveParameters } from '../../api/lib/agent/research-sources.js'
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -240,6 +241,11 @@ describe('tool schema provider contract', () => {
         }
       }
     } finally { conversion.mockClear() }
+  })
+  it('accepts the exact pre-release memory_save schema for frozen tasks', () => {
+    const schemas = originalToolParameterSchemas(memorySaveTool, { novelId: 'n' })
+    expect(schemas[0]).toEqual(toOpenAIParameters(memorySaveTool.parameters))
+    expect(schemas.map(schema => runtimeJson(schema).hash)).toContain('92ebb9e940d6eec3cf748da8d8c7448e5c20253deee5494d0afbec2c8d3a7571')
   })
   it('keeps the pre-optional-title research report schema exactly without rewriting its frozen title field', () => {
     const previous = toOpenAIParameters(researchReportSaveParameters.extend({ title: z.string().trim().min(1).max(160) }))

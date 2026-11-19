@@ -164,23 +164,20 @@ describe.runIf(available)('story memory graph transaction boundary', () => {
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '保存本次确认的事件与关系' }, { role: 'assistant', content: null,
             toolCalls: [{ id: 'save-memory-graph', name: tool.name, arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
-      const failed = scenario === 'unread-source' || scenario === 'revision-without-source'
-      expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { savedMemoryId: expect.any(String) } })
+      expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool', result: { savedMemoryId: expect.any(String) } })
       expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'idle' })
-      expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(failed ? 0 : 1)
-      expect(await prisma.storyEvent.count({ where: { novelId: f.novelId } })).toBe(0)
-      expect(await prisma.storyEntity.count({ where: { novelId: f.novelId } })).toBe(0)
+      expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(1)
       expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(1)
-      if (!failed) {
-        const memory = await prisma.projectMemoryEntry.findFirstOrThrow({ where: { novelId: f.novelId } })
-        expect(memory.reviewStatus).toBe('pending')
-        await storyMemory.resolveMemoryReview(f.userId, memory.id, true)
-        expect(await prisma.storyEvent.count({ where: { novelId: f.novelId, status: 'confirmed' } })).toBe(scenario === 'event' ? 1 : 0)
+      {
+        const memory = await prisma.projectMemoryEntry.findFirstOrThrow({ where: { novelId: f.novelId }, include: { evidence: true } })
+        expect(memory.reviewStatus).toBe('none')
+        expect(memory.evidence).toEqual([expect.objectContaining({ sourceType: scenario === 'unread-source' ? 'chapter' : 'artifact' })])
+        expect(await prisma.storyEvent.count({ where: { novelId: f.novelId, status: 'confirmed' } })).toBe(scenario === 'relation' ? 0 : 1)
         expect(await prisma.storyEntity.count({ where: { novelId: f.novelId } })).toBe(scenario === 'relation' ? 2 : 0)
         expect(await prisma.entityRelation.count({ where: { sourceId: memory.id } })).toBe(scenario === 'relation' ? 1 : 0)
         await expect(storyMemory.resolveMemoryReview(f.userId, memory.id, true)).rejects.toMatchObject({ code: 'MEMORY_REVIEW_STALE' })
         // Editing prose must not leave previously projected structured facts active.
-        const edited = await storyMemory.updateStoryMemoryEntry(f.userId, memory.id, { content: '作者修改了原事实', expectedVersion: 2 })
+        const edited = await storyMemory.updateStoryMemoryEntry(f.userId, memory.id, { content: '作者修改了原事实', expectedVersion: 1 })
         expect(await prisma.storyEvent.count({ where: { novelId: f.novelId, status: 'confirmed' } })).toBe(0)
         expect(await prisma.entityRelation.count({ where: { sourceId: memory.id } })).toBe(0)
         await storyMemory.deleteStoryMemoryEntry(f.userId, memory.id, edited.version)

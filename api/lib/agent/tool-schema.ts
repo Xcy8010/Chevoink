@@ -78,6 +78,17 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
     return [toOpenAIParameters(tool.parameters), toOpenAIParameters(coordinatedWriterParameters(tool, scope))]
   }
   const current = toOpenAIParameters(tool.parameters)
+  if (tool.name === 'memory_save') {
+    const properties = current.properties as Record<string, Record<string, unknown>>
+    // Previously prepared operations retain their exact published descriptions.
+    return [current, { ...current, properties: {
+      ...properties,
+      sourceChapterId: { ...properties.sourceChapterId, description: '来源章节 ID（章节摘要必填）' },
+      sourceQuote: { ...properties.sourceQuote, description: '仅用于来源章节的逐字原文，必须同时传真实sourceChapterId。规划/待定设定不是章节证据，不把摘要或计划包装成引用；无章节依据时仅提交待审候选，不传revision/sourceQuote' },
+      memoryId: { ...properties.memoryId, description: '要修订的既有记忆卡片id；提交关联候选，作者确认前保留旧卡' },
+      overwrite: { ...properties.overwrite, description: '旧客户端兼容参数，不授予自动覆盖或作者确认权限' },
+    } }]
+  }
   if (tool.name === 'story_charter_save') return [current, toOpenAIParameters(storyCharterInputSchema)]
   if (tool.name === 'ask_user') {
     const legacy = toOpenAIParameters(legacyAskUserParameters)

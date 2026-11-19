@@ -179,6 +179,10 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P4 故事记忆与混合召回（需 DB
     expect(revised.id).toBe(old)
     const distinct = await saveStoryMemory({ ...chapterMemory, sourceChapterId: second, evidence: { ...chapterMemory.evidence, sourceId: second }, content: '第二个章节的摘要' })
     expect(distinct.id).not.toBe(revised.id)
+    await expect(saveStoryMemory({ ...chapterMemory, memoryId: revised.id, sourceChapterId: second,
+      evidence: { ...chapterMemory.evidence, sourceId: second } })).rejects.toMatchObject({ code: 'MEMORY_SOURCE_REQUIRED' })
+    await expect(saveStoryMemory({ ...chapterMemory, sourceChapterId: undefined,
+      evidence: { sourceType: 'artifact', sourceId: 'ambiguous-summary', confidence: 0.5 } })).rejects.toMatchObject({ code: 'MEMORY_TITLE_CONFLICT' })
     await saveStoryMemory({ ...chapterMemory, title: `章节:${first}`, content: '自动摘录', systemDerived: true })
     const cards = await listStoryMemories(userId, novelId, { title: chapterMemory.title, memoryType: 'chapterSummary', page: 1, pageSize: 10 })
     expect(cards.items).toHaveLength(2)
