@@ -19,6 +19,7 @@
         --boot-background: #f4f0e8;
         --boot-mark-base: #7b8593;
         --boot-mark-highlight: #111827;
+        --boot-mark-image: url('__BOOT_MARK_IMAGE__');
         background-color: var(--app-bg, var(--boot-background));
         color-scheme: light;
       }
@@ -43,8 +44,8 @@
         height: 48px;
         overflow: hidden;
         background: var(--boot-mark-base);
-        -webkit-mask: url('%BASE_URL%agent-mark-144.webp') center / contain no-repeat;
-        mask: url('%BASE_URL%agent-mark-144.webp') center / contain no-repeat;
+        -webkit-mask: var(--boot-mark-image) center / contain no-repeat;
+        mask: var(--boot-mark-image) center / contain no-repeat;
       }
       @media (prefers-reduced-motion: no-preference) {
         .agent-loading-mark::after {

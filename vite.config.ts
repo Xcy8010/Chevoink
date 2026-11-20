@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite'
+import { readFileSync } from 'node:fs'
 import react from '@vitejs/plugin-react'
 import tsconfigPaths from "vite-tsconfig-paths";
 
@@ -7,6 +8,16 @@ export default defineConfig({
   plugins: [
     react(),
     tsconfigPaths(),
+    {
+      name: 'inline-boot-mark',
+      transformIndexHtml: {
+        order: 'pre',
+        handler(html) {
+          const mark = readFileSync(new URL('./public/agent-mark-144.webp', import.meta.url))
+          return html.replace('__BOOT_MARK_IMAGE__', 'data:image/webp;base64,' + mark.toString('base64'))
+        },
+      },
+    },
   ],
   build: {
     rollupOptions: {
