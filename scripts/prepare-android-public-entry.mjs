@@ -11,6 +11,7 @@ const originalModule = 'assets/index-Dp04DR7T.js'
 const originalDigest = '6d9e01b9b8603e0af3b192029368804c1969c78ec91f96aaea99a690fdc2e95e'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const normalize = text => text.replaceAll('\r\n', '\n')
+const originalIndexDigest = 'a2a452281520f32fa0364150ae99475d4f07b01fb42a13556a658a08592e7c39'
 
 export function checkedAndroidEntry(original, candidate) {
   const before = normalize(original)
@@ -44,7 +45,9 @@ async function prepare(baseline, destination, liveIndex) {
   await build({...config, build:{outDir:old}})
   const existing = await readFile(liveIndex,'utf8')
   const originalHtml = await readFile(path.join(old,'index.html'),'utf8')
-  if (normalize(existing)!==normalize(originalHtml) || sha256(await readFile(path.join(old,originalModule)))!==originalDigest) {
+  // Two injected tag boundaries in the Windows Vite build have doubled CR.
+  const historicalHtml = originalHtml.replace(/\r+\n/g, '\n')
+  if (sha256(existing)!==originalIndexDigest || normalize(existing)!==historicalHtml || sha256(await readFile(path.join(old,originalModule)))!==originalDigest) {
     throw Error('Rebuilt baseline does not match the observed public launcher')
   }
   await build({...config, build:{outDir:next}, plugins:[{
@@ -57,7 +60,7 @@ async function prepare(baseline, destination, liveIndex) {
   }]})
   const nextHtml = await readFile(path.join(next,'index.html'),'utf8')
   const modulePath = nextHtml.match(/<script type="module" crossorigin src="\/(assets\/index-[\w-]+\.js)"><\/script>/)?.[1]
-  if (!modulePath || modulePath===originalModule || normalize(nextHtml).replace(modulePath,originalModule)!==normalize(existing)) {
+  if (!modulePath || modulePath===originalModule || normalize(nextHtml).replace(modulePath,originalModule)!==normalize(originalHtml)) {
     throw Error('Public entry HTML differs beyond the startup module reference')
   }
   const files=['index.html']
@@ -75,7 +78,7 @@ async function prepare(baseline, destination, liveIndex) {
   execFileSync('tar',['-czf',archive,'-C',next,...files],{windowsHide:true})
   const receipt={revision:git(project,['rev-parse','HEAD']),publicBaseline,originalModule,originalDigest,
     oldIndex:sha256(existing),newIndex:sha256(await readFile(path.join(next,'index.html'))),
-    archive:sha256(await readFile(archive)),modulePath,files:files.length}
+    archive:sha256(await readFile(archive)),modulePath,moduleDigest:sha256(await readFile(path.join(next,modulePath))),files:files.length}
   await writeFile(path.join(destination,'launcher.json'),JSON.stringify(receipt)+'\n',{flag:'wx'})
   console.log(JSON.stringify(receipt))
 }
