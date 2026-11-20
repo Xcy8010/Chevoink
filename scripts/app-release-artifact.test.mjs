@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { prepareAppRelease } from './prepare-app-release.mjs'
+import { checkedAndroidEntry } from './prepare-android-public-entry.mjs'
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -8,6 +9,13 @@ import path from 'node:path'
 import vm from 'node:vm'
 import { sealAppArtifact, verifyPreparedAppArtifact, installPreparedAppArtifact, releaseEntryScript } from './app-release-artifact.mjs'
 const temporary=await mkdtemp(path.join(os.tmpdir(),'chevoink-release-fixture-'))
+test('public Android launcher permits only moving safe-area setup past release selection',()=>{
+  const old='import boot\nsetupSafeAreaFallback()\nsetupKeyboardInsetWatcher()\nasync function start(){\n  if(!await bootstrapAppRelease())return\n  render()\n}'
+  const next='import boot\nsetupKeyboardInsetWatcher()\nasync function start(){\n  if(!await bootstrapAppRelease())return\n  setupSafeAreaFallback()\n  render()\n}'
+  assert.equal(checkedAndroidEntry(old.replaceAll('\n','\r\n'),next),next)
+  assert.throws(()=>checkedAndroidEntry(old,next.replace('render()','otherApp()')),/differs/)
+  assert.throws(()=>checkedAndroidEntry(old,old),/differs/)
+})
 after(async()=>{if(!path.resolve(temporary).startsWith(path.resolve(os.tmpdir())+path.sep))throw Error('Unsafe fixture cleanup');await rm(temporary,{recursive:true,force:true})})
 async function fixture(id){const directory=path.join(temporary,id);await mkdir(path.join(directory,'assets'),{recursive:true});await writeFile(path.join(directory,'index.html'),`<!doctype html><html><head><script type="module" src="/api/app-releases/artifacts/${id}/assets/app.js"></script></head><body><div id="root"></div></body></html>`);await writeFile(path.join(directory,'assets/app.js'),'document.body.dataset.fixture="synthetic";');return directory}
 function metadata(id){return{id,label:'Synthetic version',sourceSha:'a'.repeat(40),compatibility:{api:1,schema:1,task:1,legalConsentUi:true},capabilities:['siteContent'],publicNotes:{features:['Synthetic feature'],fixes:[],changes:[]},validation:{status:'draft'}}}

@@ -10,6 +10,7 @@ param(
   [string]$OperationId,
   [string]$RequestId,
   [string]$RequestSha,
+  [string]$AndroidPublicEntryBaseline,
   [switch]$SkipLocalChecks,
   [switch]$ApiOnly
 )
@@ -36,6 +37,7 @@ if (($ReceiptPath -and $OperationId -notmatch '^[1-9]\d*$') -or ($OperationId -a
 if ($ReceiptPath -and $RequestId -notmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$') { throw 'Receipt requires the originating request UUID.' }
 if ($ReceiptPath -and $RequestSha -notmatch '^[a-f0-9]{40}$') { throw 'Receipt requires the originating request commit.' }
 if ($ReceiptPath -and (Test-Path -LiteralPath $ReceiptPath)) { throw 'Receipt path already exists; do not reuse old evidence.' }
+if ($AndroidPublicEntryBaseline -and ($ApiOnly -or $ReceiptPath)) { throw 'Choose a single publication mode.' }
 Push-Location $ProjectRoot
 try {
   $revision = (Invoke-Checked git @('rev-parse', '--verify', 'HEAD')).Trim()
@@ -53,7 +55,6 @@ try {
   Invoke-Checked node @('scripts/release-ci.mjs', $revision, $ciEvidencePath)
   Write-Host "CI $CiRunId passed for $revision. Reusing those gates; no duplicate local full run."
   $packageDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("chevoink-release-" + [guid]::NewGuid().ToString('N'))
-  $package = (Invoke-Checked node @('scripts/release-package.mjs', '--revision', $revision, '--baseline', $ExpectedCurrentRevision, '--out', $packageDirectory)) -join "`n" | ConvertFrom-Json
   $remoteArchive = "/tmp/chevoink-$revision.tar.gz"
   $remoteManifest = "/tmp/chevoink-$revision-baseline.json"
   # Keepalive options fail stalled sessions fast: blocked data paths otherwise
@@ -64,6 +65,27 @@ try {
   # journal; inspect actual state instead of replaying the whole deployment.
   $scpArguments = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=3', '-i', $KeyPath)
   if ($SourceAddress) { $scpArguments += @('-o', "BindAddress=$SourceAddress") }
+  if ($AndroidPublicEntryBaseline) {
+    $liveIndex = "$packageDirectory.html"
+    Invoke-Checked curl.exe @('--fail', '--silent', '--show-error', '--max-time', '20', '--output', $liveIndex, "$PublicUrl/") | Out-Null
+    Invoke-Checked node @('scripts/prepare-android-public-entry.mjs', $AndroidPublicEntryBaseline, $packageDirectory, $liveIndex)
+    $entry = Get-Content -Raw -LiteralPath (Join-Path $packageDirectory 'launcher.json') | ConvertFrom-Json
+    if ($entry.revision -ne $revision) { throw 'Prepared launcher revision mismatch.' }
+    $remoteBase = "/tmp/chevoink-android-launcher-$revision"
+    $operator = Join-Path $ProjectRoot 'deploy/publish-android-public-entry.sh'
+    $operatorHash = (Get-FileHash -LiteralPath $operator -Algorithm SHA256).Hash.ToLowerInvariant()
+    Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", "test ! -e '$remoteBase.tar.gz' && test ! -e '$remoteBase.sh'")) | Out-Null
+    Invoke-Checked scp.exe ($scpArguments + @((Join-Path $packageDirectory 'launcher.tar.gz'), "${UserName}@${HostName}:$remoteBase.tar.gz")) | Out-Null
+    Invoke-Checked scp.exe ($scpArguments + @($operator, "${UserName}@${HostName}:$remoteBase.sh")) | Out-Null
+    $activate = "set -eu; echo '$operatorHash  $remoteBase.sh' | sha256sum -c -; bash '$remoteBase.sh' '$revision' '$ExpectedCurrentRevision' '$($entry.archive)' '$($entry.oldIndex)' '$($entry.newIndex)'"
+    Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", $activate))
+    $observedIndex = Join-Path $packageDirectory 'observed.html'
+    Invoke-Checked curl.exe @('--fail', '--silent', '--show-error', '--max-time', '20', '--output', $observedIndex, "$PublicUrl/") | Out-Null
+    if ((Get-FileHash -LiteralPath $observedIndex -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.newIndex) { throw 'Public launcher readback mismatch.' }
+    Write-Host "Verified Android public entry. Evidence: $packageDirectory"
+    return
+  }
+  $package = (Invoke-Checked node @('scripts/release-package.mjs', '--revision', $revision, '--baseline', $ExpectedCurrentRevision, '--out', $packageDirectory)) -join "`n" | ConvertFrom-Json
   $preflight = "set -eu; test -d /opt/chevoink/app/current; test ! -L /opt/chevoink/app/current; test ! -e '/opt/chevoink/app/release-$revision'; test ! -e '/opt/chevoink/app/.release-$revision.jsonl'; test ! -e '/opt/chevoink/app/previous-$ExpectedCurrentRevision-for-$revision'; test ! -e '$remoteArchive'; test ! -e '$remoteManifest'"
   Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", $preflight)) | Out-Null
   Invoke-Checked scp.exe ($scpArguments + @($package.archive, "${UserName}@${HostName}:$remoteArchive")) | Out-Null
