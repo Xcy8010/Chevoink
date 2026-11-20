@@ -2,6 +2,18 @@ import type { ReactNode } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { PROFILE_IMAGE_MAX_MB } from '../../../../shared/contracts/api.js'
+
+export const settingsRowClass = 'flex min-h-[64px] w-full items-center gap-3 px-3.5 py-3 text-left sm:px-4'
+
+export const settingsCaptionClass = 'mt-1 block text-[13px] leading-[1.125rem] [overflow-wrap:anywhere]'
+export const avatarCaption = `PNG / JPG / WebP，不超过 ${PROFILE_IMAGE_MAX_MB}MB`
+export const coverCaption = `不超过 ${PROFILE_IMAGE_MAX_MB}MB，上传后可裁剪为 3:1`
+
+export const phoneLoginCaption = '登录入口统一使用手机号'
+export const updatePasswordCaption = '修改前需验证当前密码或手机验证码'
+export const emailPasswordCaption = '使用已验证的邮箱或手机验证码确认身份'
+export const deviceManagementCaption = '查看登录设备、地点和最近活动'
 
 const scrollOffset = 'scroll-mt-[calc(var(--safe-top)+1rem)] md:scroll-mt-[calc(var(--app-header-height,0px)+1rem)]'
 
@@ -42,7 +54,7 @@ export function SettingsRow({
   icon, bareIcon, title, searchKeywords, caption, value, actions, chevron = 'none', onClick, danger,
 }: SettingsRowProps) {
   const rowClass = cn(
-    'flex min-h-[64px] w-full items-center gap-3 px-3.5 py-3 text-left sm:px-4',
+    settingsRowClass,
     scrollOffset,
     actions && 'flex-wrap',
   )
@@ -67,7 +79,7 @@ export function SettingsRow({
         >
           {title}
         </span>
-        {caption ? <span className="mt-1 block text-[13px] leading-[1.125rem] text-[var(--text-secondary)] [overflow-wrap:anywhere]">{caption}</span> : null}
+        {caption ? <span className={settingsCaptionClass + ' text-[var(--text-secondary)]'}>{caption}</span> : null}
       </span>
       {actions ? <span className="ml-auto flex max-w-full shrink-0 items-center justify-end gap-1.5">{actions}</span> : null}
       {value ? <span className="max-w-[42%] shrink-0 break-words text-right text-[13px] font-medium text-[var(--text-secondary)]">{value}</span> : null}

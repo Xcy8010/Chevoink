@@ -8,7 +8,7 @@ import { IdentityVerificationForm, PasswordVerificationForm } from '@/features/a
 import { AccountDialog } from '@/features/account/VerificationCodeField'
 import type { User } from '../../../../shared/contracts'
 import { maskPhoneNumber } from './privacy'
-import { SectionTitle, SettingsGroup, SettingsRow } from './settings-row'
+import { emailPasswordCaption, SectionTitle, SettingsGroup, SettingsRow } from './settings-row'
 
 type AccountDialogKind = 'email' | 'phone' | 'password'
 
@@ -52,7 +52,7 @@ export default function EmailAccountSettings({ user, children }: { user: User; c
           chevron={user.phoneVerified ? 'none' : 'right'} onClick={user.phoneVerified ? undefined : () => open('phone')} />
         <SettingsRow icon={<KeyRound className="h-[18px] w-[18px]" />} title="登录密码"
           searchKeywords="修改密码 设置密码 更改密码"
-          caption="使用已验证的邮箱或手机验证码确认身份"
+          caption={emailPasswordCaption}
           value={hasPassword ? '已设置' : '未设置'}
           chevron="right" onClick={() => open('password')} />
         {children}

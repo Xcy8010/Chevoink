@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react'
 import { ChevronRight, Search, X } from 'lucide-react'
 
 export type SettingsSection = { id: string; label: string }
@@ -16,6 +16,27 @@ function jumpTo(target: HTMLElement | null | undefined) {
     block: 'start',
     behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
   })
+}
+
+export const settingsSearchFieldClass = 'flex h-12 items-center gap-2.5 rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-solid)] px-3.5'
+
+export function SettingsFrame({ heading, searchBox, children, contentRef, loading }: {
+  heading: ReactNode
+  searchBox: ReactNode
+  children: ReactNode
+  contentRef?: Ref<HTMLDivElement>
+  loading?: boolean
+}) {
+  return (
+    <div className="mx-auto w-full max-w-[50rem] pb-5"
+      role={loading ? 'status' : undefined} aria-busy={loading} aria-label={loading ? '设置加载中' : undefined}>
+      <header aria-hidden={loading} className="mb-5 flex items-center gap-3 border-b border-[var(--border-subtle)] pb-4 pt-1 md:mb-6 md:gap-4 md:pb-5">
+        {heading}
+      </header>
+      <div aria-hidden={loading} className="mb-6">{searchBox}</div>
+      <div aria-hidden={loading} ref={contentRef} className="flex min-w-0 flex-col gap-7">{children}</div>
+    </div>
+  )
 }
 
 export default function SettingsLayout({ backButton, sections, children }: {
@@ -69,12 +90,11 @@ export default function SettingsLayout({ backButton, sections, children }: {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[50rem] pb-5">
-      <header className="mb-5 flex items-center gap-3 border-b border-[var(--border-subtle)] pb-4 pt-1 md:mb-6 md:gap-4 md:pb-5">
-        {backButton}
-        <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-primary)] md:text-3xl">设置</h1>
-      </header>
-      <form role="search" aria-label="搜索设置" className="mb-6"
+    <SettingsFrame contentRef={contentRef} heading={<>
+      {backButton}
+      <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-primary)] md:text-3xl">设置</h1>
+    </>} searchBox={
+      <form role="search" aria-label="搜索设置"
         onSubmit={event => {
           event.preventDefault()
           if (search && results[0]) chooseResult(results[0].target)
@@ -85,7 +105,7 @@ export default function SettingsLayout({ backButton, sections, children }: {
             clearSearch()
           }
         }}>
-        <div className="flex h-12 items-center gap-2.5 rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-solid)] px-3.5 focus-within:border-[var(--accent-border)] focus-within:ring-2 focus-within:ring-[var(--focus-ring)]">
+        <div className={settingsSearchFieldClass + ' focus-within:border-[var(--accent-border)] focus-within:ring-2 focus-within:ring-[var(--focus-ring)]'}>
           <Search aria-hidden="true" className="size-[18px] shrink-0 text-[var(--text-secondary)]" />
           <input ref={inputRef} type="search" aria-label="搜索设置" aria-controls={search ? resultsId : undefined}
             placeholder="搜索设置" value={query} onChange={event => setQuery(event.target.value)}
@@ -112,7 +132,8 @@ export default function SettingsLayout({ backButton, sections, children }: {
           ) : <p role="status" className="px-3.5 py-3 text-sm text-[var(--text-secondary)]">未找到匹配的设置</p>}
         </div>}
       </form>
-      <div ref={contentRef} className="flex min-w-0 flex-col gap-7">{children}</div>
-    </div>
+    }>
+      {children}
+    </SettingsFrame>
   )
 }

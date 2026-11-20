@@ -27,7 +27,7 @@ import {
 import { ApiClientError, requestJson } from '@/app/api-client'
 import BottomSheet from '@/components/layout/BottomSheet'
 import AppState from '@/components/ui/AppState'
-import { SettingsSkeleton } from '@/components/ui/Skeleton'
+import SettingsSkeleton from './settings/settings-skeleton'
 import Button from '@/components/ui/Button'
 import ImageCropperDialog from '@/components/ui/ImageCropperDialog'
 import TextInput from '@/components/ui/TextInput'
@@ -37,7 +37,6 @@ import { getMe, updateMyPrivacy } from '@/features/community/api'
 import ConfirmDialog from '@/features/studio/components/ConfirmDialog'
 import { useShellStore } from '@/store/useShellStore'
 import { getProfileImageUploadError, prepareAvatarImage, readFileAsDataUrl } from '@/lib/image-compress'
-import { PROFILE_IMAGE_MAX_MB } from '../../../shared/contracts/api.js'
 import { checkAppUpdate, type VersionManifest } from '@/lib/app-update'
 import { getNativeAppVersion, isNativeApp, openExternalUrl } from '@/lib/native-app'
 import { cn } from '@/lib/utils'
@@ -61,7 +60,7 @@ import {
   maskPhoneNumber,
   type SettingsDialogState,
 } from './settings/privacy'
-import { SectionTitle, SettingsGroup, SettingsRow } from './settings/settings-row'
+import { avatarCaption, coverCaption, deviceManagementCaption, phoneLoginCaption, SectionTitle, SettingsGroup, SettingsRow, updatePasswordCaption } from './settings/settings-row'
 import SettingsLayout, { type SettingsSection } from './settings/settings-layout'
 import CustomModelSettingsDialog from '@/features/account/CustomModelSettingsDialog'
 import DesktopSettings from './settings/desktop-settings'
@@ -793,7 +792,7 @@ export default function SettingsPage() {
     }, { replace: true })
   }
   const devicesRow = <SettingsRow icon={<MonitorSmartphone className="size-[18px]" />} title="设备管理"
-    caption="查看登录设备、地点和最近活动" searchKeywords="下线 退出 安卓 手机 电脑" chevron="right" onClick={() => setAccountSection('devices')} />
+    caption={deviceManagementCaption} searchKeywords="下线 退出 安卓 手机 电脑" chevron="right" onClick={() => setAccountSection('devices')} />
 
   return (
     <SettingsLayout backButton={backButton} sections={[
@@ -827,7 +826,7 @@ export default function SettingsPage() {
             bareIcon
             icon={<Avatar name={sessionUser.nickname} src={sessionUser.avatarUrl} size="md" className="size-10" />}
             title="头像"
-            caption={`PNG / JPG / WebP，不超过 ${PROFILE_IMAGE_MAX_MB}MB`}
+            caption={avatarCaption}
             actions={<>
               {sessionUser.avatarUrl && (
                 <Button variant="ghost" size="sm" onClick={handleResetAvatar} disabled={avatarSubmitting} aria-label="恢复默认头像">恢复默认</Button>
@@ -843,7 +842,7 @@ export default function SettingsPage() {
               : <ImageIcon size={18} />}
             bareIcon={Boolean(sessionUser.profileCoverUrl)}
             title="个人主页封面"
-            caption={`不超过 ${PROFILE_IMAGE_MAX_MB}MB，上传后可裁剪为 3:1`}
+            caption={coverCaption}
             actions={<>
               {sessionUser.profileCoverUrl && (
                 <Button variant="ghost" size="sm" onClick={handleResetCover} disabled={coverSubmitting} aria-label="移除个人主页封面">移除</Button>
@@ -871,14 +870,14 @@ export default function SettingsPage() {
             <SettingsRow
               icon={<Smartphone className="h-[18px] w-[18px]" />}
               title="手机号"
-              caption="登录入口统一使用手机号"
+              caption={phoneLoginCaption}
               value={maskPhoneNumber(sessionUser.phone)}
             />
             <SettingsRow
               icon={<KeyRound className="h-[18px] w-[18px]" />}
               title="登录密码"
               searchKeywords="修改密码 设置密码 更改密码"
-              caption={sessionUser.passwordConfigured ? '修改前需验证当前密码或手机验证码' : '设置后可使用手机号和密码登录'}
+              caption={sessionUser.passwordConfigured ? updatePasswordCaption : '设置后可使用手机号和密码登录'}
               value={sessionUser.passwordConfigured ? '已设置' : '未设置'}
               chevron="right"
               onClick={() => setOpenDialog({ kind: 'password' })}

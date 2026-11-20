@@ -394,22 +394,6 @@ export function StudioSkeleton() {
   )
 }
 
-/** 设置页骨架屏：分区卡片轮廓 */
-export function SettingsSkeleton() {
-  return (
-    <div className="space-y-4 md:space-y-6" aria-busy="true" aria-label="设置加载中">
-      <Skeleton className="h-[140px] w-full rounded-[var(--radius-xl)]" />
-      {Array.from({ length: 3 }).map((_, index) => (
-        <div key={index} className="space-y-3 rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-5">
-          <Skeleton className="h-5 w-28" />
-          <SkeletonText lines={2} />
-          <Skeleton className="h-10 w-full rounded-[var(--radius-lg)]" />
-        </div>
-      ))}
-    </div>
-  )
-}
-
 /** 作品下拉选项骨架：列表未就绪时占位 3-5 行 */
 export function NovelOptionSkeleton({ count = 4 }: { count?: number }) {
   return (

@@ -12,9 +12,9 @@ import {
   PostDetailSkeleton,
   PostListSkeleton,
   ReaderSkeleton,
-  SettingsSkeleton,
   StudioSkeleton,
 } from '@/components/ui/Skeleton'
+import SettingsSkeleton from '@/app/routes/settings/settings-skeleton'
 import Home from '@/pages/Home'
 import StudioPage from '@/pages/StudioPage'
 import { CommunityPageSkeleton } from '@/features/community/components/CommunityPageLayout'
