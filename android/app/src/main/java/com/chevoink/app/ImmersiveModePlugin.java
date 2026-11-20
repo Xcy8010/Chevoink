@@ -147,6 +147,14 @@ public class ImmersiveModePlugin extends Plugin {
         }
     }
 
+    void detachRenderer() {
+        resetDocumentPresentation();
+        desiredAppearance = null;
+        appearanceWindow = null;
+        fittedState = null;
+        normalState = null;
+    }
+
     private EdgeToEdgeLayout edgeLayout() {
         return getActivity().findViewById(R.id.edgeToEdgeLayout);
     }

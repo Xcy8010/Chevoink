@@ -8,4 +8,6 @@
     <string name="offline_hint">请检查网络设置，恢复后将自动加载</string>
     <string name="offline_retry">重新加载</string>
     <string name="offline_image_desc">离线插画</string>
+    <string name="renderer_recovery_title">页面显示已中断</string>
+    <string name="renderer_recovery_hint">重新加载以恢复页面</string>
 </resources>

@@ -1,21 +1,21 @@
 package com.chevoink.app;
 
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
-import android.net.NetworkRequest;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.view.View;
+import android.view.ViewGroup;
 import android.webkit.CookieManager;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
+import android.widget.TextView;
 
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -23,30 +23,37 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebViewClient;
 
-/**
- * 主 Activity：Capacitor 远程壳 + 番茄式断网兜底。
- * - WebView 主文档加载失败（飞行模式/断网）时盖一层原生离线页（插画+重试），不再露出系统错误页；
- * - 注册网络回调：恢复联网后自动重载站点，无需用户手动点；
- * - 离线页上的「重试」按钮手动触发一次重载。
- */
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+
 public class MainActivity extends BridgeActivity {
+    private static final String LAST_RENDERER_RESTART = "chevoink.lastRendererRestart";
+    private static final long RENDERER_RESTART_COOLDOWN_MS = 30_000L;
+    private static final Executor COOKIE_DISK_IO = Executors.newSingleThreadExecutor();
+
     private View offlineOverlay;
-    /** 是否处于离线兜底态（避免联网瞬间重复 reload） */
     private boolean offlineShown = false;
-    /** 本次主文档加载是否已失败：失败后 WebView 仍会回调 onPageFinished（错误页加载完成），
-     * 不能见 onPageFinished 就收离线页，否则离线页刚盖上去就被撤掉、系统错误页重新露出 */
     private boolean mainFrameFailed = false;
+    private boolean reloading = false;
+    private boolean resumed = false;
+    private boolean rendererGone = false;
+    private boolean rendererRestartRequested = false;
+    private long lastRendererRestart = -1L;
     private ConnectivityManager.NetworkCallback networkCallback;
-    private BroadcastReceiver legacyNetworkReceiver;
+    private Network autoRetriedNetwork;
 
     @Override
     @SuppressWarnings("deprecation")
     public void onCreate(Bundle savedInstanceState) {
+        if (savedInstanceState != null) {
+            lastRendererRestart = savedInstanceState.getLong(LAST_RENDERER_RESTART, -1L);
+        }
         // 阅读区全屏沉浸自定义插件（官方 StatusBar 的 overlay 在 Android 15+ 失效，见插件注释）；
         // 必须在 super.onCreate 之前注册，Bridge 初始化时才能收进插件表
         registerPlugin(ImmersiveModePlugin.class);
         registerPlugin(ChevoinkSpeechPlugin.class);
         super.onCreate(savedInstanceState);
+        if (getBridge() == null) return;
         // Older documents start fitted. Updated documents explicitly opt in through the bridge.
         WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
         getBridge().getWebView().setWebChromeClient(new SpeechWebChromeClient(getBridge()));
@@ -73,20 +80,24 @@ public class MainActivity extends BridgeActivity {
         if (webView == null) return;
 
         // 离线覆盖层挂在 WebView 的 CoordinatorLayout 父容器上。
-        android.view.ViewGroup parent = (android.view.ViewGroup) webView.getParent();
+        ViewGroup parent = (ViewGroup) webView.getParent();
         offlineOverlay = getLayoutInflater().inflate(R.layout.layout_offline, parent, false);
         parent.addView(offlineOverlay);
         offlineOverlay.setVisibility(View.GONE);
-        offlineOverlay.findViewById(R.id.offlineRetry).setOnClickListener(v -> reloadSite());
+        offlineOverlay.findViewById(R.id.offlineRetry).setOnClickListener(v -> {
+            if (rendererGone) restartRenderer();
+            else reloadSite();
+        });
 
         // 加载失败接管：主文档失败才出离线页（子资源失败不打断已加载内容）。
         // API 23+ 的错误（如 ERR_INTERNET_DISCONNECTED）走新签名回调，必须覆写新版；
         // 且冷启动首载失败时 view.getUrl() 还是 null，不能用「failingUrl 等于当前 URL」判主文档
-        webView.setWebViewClient(new BridgeWebViewClient(getBridge()) {
+        getBridge().setWebViewClient(new BridgeWebViewClient(getBridge()) {
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 if (request.isForMainFrame()) {
                     mainFrameFailed = true;
+                    reloading = false;
                     showOffline();
                     return;
                 }
@@ -94,19 +105,8 @@ public class MainActivity extends BridgeActivity {
             }
 
             @Override
-            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                String currentUrl = view.getUrl();
-                boolean mainDocument = failingUrl != null && (currentUrl == null || failingUrl.equals(currentUrl));
-                if (mainDocument) {
-                    mainFrameFailed = true;
-                    showOffline();
-                    return;
-                }
-                super.onReceivedError(view, errorCode, description, failingUrl);
-            }
-
-            @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                if (rendererGone) return;
                 super.onPageStarted(view, url, favicon);
                 ImmersiveModePlugin immersive = (ImmersiveModePlugin) getBridge().getPlugin("ImmersiveMode").getInstance();
                 immersive.resetDocumentPresentation();
@@ -115,12 +115,19 @@ public class MainActivity extends BridgeActivity {
             }
 
             @Override
-            public void onPageFinished(WebView view, String url) {
-                super.onPageFinished(view, url);
-                // 站点真正加载成功才收离线页；主文档失败后的 onPageFinished 是错误页加载完成，不能收
-                if (!mainFrameFailed) {
+            public void onPageCommitVisible(WebView view, String url) {
+                super.onPageCommitVisible(view, url);
+                // Only reveal the WebView when the new main document has a drawable frame.
+                if (!mainFrameFailed && !rendererGone) {
+                    reloading = false;
+                    autoRetriedNetwork = null;
                     hideOffline();
                 }
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                return recoverRenderer(view);
             }
         });
 
@@ -132,79 +139,126 @@ public class MainActivity extends BridgeActivity {
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         if (cm == null) return;
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            networkCallback = new ConnectivityManager.NetworkCallback() {
-                @Override
-                public void onAvailable(Network network) {
-                    runOnUiThread(() -> {
-                        if (offlineShown) reloadSite();
-                    });
-                }
-            };
-            cm.registerNetworkCallback(
-                    new NetworkRequest.Builder()
-                            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                            .build(),
-                    networkCallback);
-        } else {
-            // Android 6 以下：走老式广播
-            legacyNetworkReceiver = new BroadcastReceiver() {
-                @Override
-                public void onReceive(Context context, Intent intent) {
-                    if (isOnline() && offlineShown) reloadSite();
-                }
-            };
-            registerReceiver(legacyNetworkReceiver,
-                    new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
-        }
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                boolean validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                runOnUiThread(() -> {
+                    if (validated) retryOverValidatedNetwork(network);
+                    else clearAutoRetriedNetwork(network);
+                });
+            }
+
+            @Override
+            public void onLost(Network network) {
+                runOnUiThread(() -> clearAutoRetriedNetwork(network));
+            }
+        };
+        cm.registerDefaultNetworkCallback(networkCallback);
     }
 
-    private boolean isOnline() {
+    private void clearAutoRetriedNetwork(Network network) {
+        if (network.equals(autoRetriedNetwork)) autoRetriedNetwork = null;
+    }
+
+    private void retryOverValidatedNetwork(Network network) {
+        if (!resumed || isFinishing() || isDestroyed() || !offlineShown || rendererGone || reloading
+                || network == null || network.equals(autoRetriedNetwork)) return;
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (cm == null) return false;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            NetworkCapabilities caps = cm.getNetworkCapabilities(cm.getActiveNetwork());
-            return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        if (cm == null || !network.equals(cm.getActiveNetwork())) return;
+        NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+        if (caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+            autoRetriedNetwork = network;
+            reloadSite();
         }
-        android.net.NetworkInfo info = cm.getActiveNetworkInfo();
-        return info != null && info.isConnected();
     }
 
     private void showOffline() {
         offlineShown = true;
-        if (offlineOverlay != null) offlineOverlay.setVisibility(View.VISIBLE);
+        offlineOverlay.setVisibility(View.VISIBLE);
+        offlineOverlay.findViewById(R.id.offlineRetry).setEnabled(!reloading);
     }
 
     private void hideOffline() {
         offlineShown = false;
-        if (offlineOverlay != null) offlineOverlay.setVisibility(View.GONE);
+        offlineOverlay.setVisibility(View.GONE);
     }
 
     /** 手动/自动重试：有网则重载站点，无网保持离线页 */
     private void reloadSite() {
-        if (!isOnline()) {
-            showOffline();
-            return;
-        }
+        if (!resumed || isFinishing() || isDestroyed() || rendererGone || reloading) return;
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkCapabilities caps = cm == null ? null : cm.getNetworkCapabilities(cm.getActiveNetwork());
+        if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return;
         WebView webView = getBridge().getWebView();
-        if (webView != null) webView.reload();
+        reloading = true;
+        offlineOverlay.findViewById(R.id.offlineRetry).setEnabled(false);
+        if (webView.getUrl() == null) webView.loadUrl(getBridge().getAppUrl());
+        else webView.reload();
+    }
+
+    private boolean recoverRenderer(WebView webView) {
+        if (rendererGone) return true;
+        rendererGone = true;
+        reloading = false;
+        ((TextView) offlineOverlay.findViewById(R.id.offlineTitle)).setText(R.string.renderer_recovery_title);
+        ((TextView) offlineOverlay.findViewById(R.id.offlineHint)).setText(R.string.renderer_recovery_hint);
+        showOffline();
+        // A WebView cannot be used again once its renderer has exited. Recreate
+        // the Activity so Capacitor builds a fresh view and bridge together.
+        ImmersiveModePlugin immersive = (ImmersiveModePlugin) getBridge().getPlugin("ImmersiveMode").getInstance();
+        immersive.detachRenderer();
+        if (webView.getParent() instanceof ViewGroup parent) parent.removeView(webView);
+        webView.destroy();
+        maybeRestartRenderer();
+        return true;
+    }
+
+    private void maybeRestartRenderer() {
+        if (lastRendererRestart < 0 || SystemClock.elapsedRealtime() - lastRendererRestart >= RENDERER_RESTART_COOLDOWN_MS) {
+            restartRenderer();
+        }
+    }
+
+    private void restartRenderer() {
+        if (!resumed || isFinishing() || isDestroyed() || rendererRestartRequested) return;
+        rendererRestartRequested = true;
+        lastRendererRestart = SystemClock.elapsedRealtime();
+        offlineOverlay.findViewById(R.id.offlineRetry).setEnabled(false);
+        recreate();
+    }
+
+    @Override
+    public void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putLong(LAST_RENDERER_RESTART, lastRendererRestart);
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        resumed = true;
+        if (rendererGone) {
+            maybeRestartRenderer();
+        } else if (offlineShown) {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) retryOverValidatedNetwork(cm.getActiveNetwork());
+        }
     }
 
     @Override
     public void onPause() {
+        resumed = false;
         super.onPause();
-        // WebView CookieManager 懒刷盘：退到后台立即落盘，防止杀进程丢登录会话 cookie
-        CookieManager.getInstance().flush();
+        // CookieManager.flush blocks for disk I/O. Keep it off the lifecycle thread.
+        if (getBridge() != null) COOKIE_DISK_IO.execute(() -> CookieManager.getInstance().flush());
     }
 
     @Override
     public void onDestroy() {
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (cm != null && networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        if (cm != null && networkCallback != null) {
             cm.unregisterNetworkCallback(networkCallback);
-        }
-        if (legacyNetworkReceiver != null) {
-            unregisterReceiver(legacyNetworkReceiver);
         }
         super.onDestroy();
     }
