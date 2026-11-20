@@ -470,52 +470,60 @@ describe.runIf(available)('canonical durable child grants', () => {
     expect(await readTaskBudget(f.lease)).toMatchObject({ reservedChildTokens: 500n })
   }, false, 5000, undefined, 5000))
 
-  it.each((['finite', 'selection'] as const).flatMap(target => (['write_denials', 'readonly_critics'] as const).map(check => ({ target, check }))))(
-    'enforces child target ceilings after an owned read ($target, $check)', async ({ target, check }) => fixture(async f => {
+  const targetChecks = [
+    { target: 'finite', check: 'write_chapter' },
+    { target: 'selection', check: 'write_chapter' },
+    { target: 'selection', check: 'edit_prefix' },
+    { target: 'selection', check: 'edit_suffix' },
+    { target: 'finite', check: 'readonly_critics' },
+    { target: 'selection', check: 'readonly_critics' },
+  ] as const
+
+  it.each(targetChecks)('enforces child target ceilings after an owned read ($target, $check)', async ({ target, check }) => fixture(async f => {
     const grant = await admitChildExecution(f.lease, { ...f.input, roleTools: '*' })
     const child = await acquireRunLease({ userId: f.userId, runId: grant.childRunId, ownerId: 'child', claimId: randomUUID() })
     const chapterId = target === 'finite' ? f.chapters[1].id : f.chapters[0].id
-    let state = await loadExecutionState(f.userId, child.runId)
+    const state = await loadExecutionState(f.userId, child.runId)
     await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash, snapshot: { ...state.frame.state,
       messages: [...state.frame.state.messages, { role: 'assistant', content: null, toolCalls: [{ id: 'read-target', name: 'chapter_read', arguments: JSON.stringify({ chapterId }) }] }] } })
     await executeDurableToolStep(child, new AbortController().signal)
-    state = await loadExecutionState(f.userId, child.runId)
-    expect(state.frame.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'read-target' })
-    const calls = target === 'finite' ? [{ name: 'chapter_write', args: { chapterId, content: '覆盖另一个作者自有章节' } }]
-      : [{ name: 'chapter_write', args: { chapterId, content: '前缀被改选区后缀被改' } },
-        { name: 'chapter_edit_range', args: { chapterId, start: 0, end: 2, newText: '修改前缀' } },
-        { name: 'chapter_edit_range', args: { chapterId, start: 4, end: 6, newText: '修改后缀' } }]
-    const indirect = [qualityAnalyzeTool, continuityValidateTool].flatMap(tool => [
-      { name: tool.name, args: { chapterId }, tool }, { name: tool.name, args: { compilationId: 'saved-compilation' }, tool }])
-    if (check === 'write_denials') for (const [index, call] of calls.entries()) {
-      state = await loadExecutionState(f.userId, child.runId)
-      const frame = await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash, snapshot: { ...state.frame.state,
-        messages: [...state.frame.state.messages.slice(0, index > 0 ? -1 : undefined), { role: 'assistant', content: null,
-          toolCalls: [{ id: `write-target-${index}`, name: call.name, arguments: JSON.stringify(call.args) }] }] } })
+    const { frame } = await loadExecutionState(f.userId, child.runId)
+    expect(frame.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'read-target' })
+
+    if (check === 'readonly_critics') {
+      // Both target encodings remain read-only, with no paid critic request.
+      const indirect = [qualityAnalyzeTool, continuityValidateTool].flatMap(tool => [
+        { args: { chapterId }, tool }, { args: { compilationId: 'saved-compilation' }, tool }])
+      let current = await saveExecutionState(child, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+        snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: null,
+          toolCalls: indirect.map(({ tool, args }, index) => ({ id: `readonly-${index}`, name: tool.name, arguments: JSON.stringify(args) })) }] } })
+      for (const [index, { tool, args }] of indirect.entries()) {
+        const effectiveArgs = tool.parameters.parse(args)
+        const prepared = await prepareToolCursorOperation(child, { expectedRevision: current.revision, expectedHash: current.snapshotHash }, {
+          key: `exec:${current.state.nextOperationSequence}`, action: tool.name, callId: `readonly-${index}`, targetId: child.taskRootId,
+          effectDomain: 'read', effectiveArgs, operationInput: { callId: `readonly-${index}`, args: effectiveArgs },
+          normalize: raw => tool.parameters.parse(raw) })
+        expect(prepared.operation.status).toBe('prepared')
+        await recordToolFailure(child, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
+          code: 'FIXTURE_READONLY_ADMISSION', output: '只读准入已核对，未运行检查。', summary: '未运行检查' })
+        current = await reduceExecutionReceipt(child, { expectedRevision: prepared.pending.revision,
+          expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+      }
+    } else {
+      const id = 'write-target'
+      const write = check === 'write_chapter'
+        ? { name: 'chapter_write', args: { chapterId, content: target === 'finite' ? '覆盖另一个作者自有章节' : '前缀被改选区后缀被改' } }
+        : { name: 'chapter_edit_range', args: check === 'edit_prefix'
+          ? { chapterId, start: 0, end: 2, newText: '修改前缀' }
+          : { chapterId, start: 4, end: 6, newText: '修改后缀' } }
+      const proposal = await saveExecutionState(child, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, snapshot: { ...frame.state,
+        messages: [...frame.state.messages, { role: 'assistant', content: null,
+          toolCalls: [{ id, name: write.name, arguments: JSON.stringify(write.args) }] }] } })
       const execute = executeDurableToolStep(child, new AbortController().signal)
       await expect(execute).rejects.toMatchObject({ code: target === 'finite' ? 'RUNTIME_CHILD_TARGET_NOT_AUTHORIZED' : 'RUNTIME_CHILD_SELECTION_READ_ONLY' })
-      expect((await loadExecutionState(f.userId, child.runId)).frame.snapshotHash).toBe(frame.snapshotHash)
+      expect((await loadExecutionState(f.userId, child.runId)).frame.snapshotHash).toBe(proposal.snapshotHash)
     }
-    // Critics are now body-read-only by default. Their admission is allowed;
-    // none can turn a read baseline into author permission to edit this target.
-    if (check === 'readonly_critics') {
-    state = await loadExecutionState(f.userId, child.runId)
-    await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
-      snapshot: { ...state.frame.state, messages: [...state.frame.state.messages, { role: 'assistant', content: null,
-        toolCalls: indirect.map((call, index) => ({ id: `readonly-${index}`, name: call.name, arguments: JSON.stringify(call.args) })) }] } })
-    for (const [index, call] of indirect.entries()) {
-      const { frame } = await loadExecutionState(f.userId, child.runId)
-      const args = call.tool.parameters.parse(call.args)
-      const prepared = await prepareToolCursorOperation(child, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, {
-        key: `exec:${frame.state.nextOperationSequence}`, action: call.name, callId: `readonly-${index}`, targetId: child.taskRootId,
-        effectDomain: 'read', effectiveArgs: args, operationInput: { callId: `readonly-${index}`, args }, normalize: raw => call.tool.parameters.parse(raw) })
-      expect(prepared.operation.status).toBe('prepared')
-      // Stop at the admission boundary; no paid critic or fabricated check pass.
-      await recordToolFailure(child, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
-        code: 'FIXTURE_READONLY_ADMISSION', output: '只读准入已核对，未运行检查。', summary: '未运行检查' })
-      await reduceExecutionReceipt(child, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
-    }
-    }
+
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).content).toBe('前缀选区后缀')
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: child.runId } })).toBe(0)
   }, false, 5000, target))
