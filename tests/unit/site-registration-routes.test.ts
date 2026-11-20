@@ -4,7 +4,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import router from '../../api/routes/auth.js'
 const mocks=vi.hoisted(()=>({register:vi.fn(),session:vi.fn(async()=>({accessToken:'test',refreshToken:'test',expiresInSeconds:60}))}))
 vi.mock('../../api/lib/data-access.js',()=>({registerUserData:mocks.register,getUserByPhoneData:vi.fn(),loginUserData:vi.fn()}))
-vi.mock('../../api/lib/auth-session.js',()=>({createSession:mocks.session,clearSession:vi.fn(),getSessionUserId:vi.fn(),revokeUserSessions:vi.fn()}))
+vi.mock('../../api/lib/auth-session.js',()=>({createSession:mocks.session,clearSession:vi.fn(),getSessionUserId:vi.fn(),revokeCurrentDevice:vi.fn()}))
 vi.mock('../../api/lib/sms-service.js',()=>({verifyAuthSmsCode:vi.fn(),sendAuthSmsCode:vi.fn()}))
 const app=express();app.use(express.json());app.use(router)
 const legalConsent={termsVersionId:'terms-published-id',privacyVersionId:'privacy-published-id'}

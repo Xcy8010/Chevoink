@@ -23,6 +23,7 @@ import {
   Settings2,
   ShieldCheck,
   SlidersHorizontal,
+  Smartphone,
   UserRound,
   type LucideIcon,
 } from 'lucide-react'
@@ -103,7 +104,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
   {
     label: '个人',
     items: [
-      { id: 'general', label: '通用', keywords: '工作区 基础行为 模式 自动追踪 全屏', icon: Settings2 },
+      { id: 'general', label: '通用', keywords: '工作区 基础行为 模式 自动追踪 全屏 账号安全 登录设备 设备管理', icon: Settings2 },
       { id: 'profile', label: '个人资料', keywords: '头像 昵称 简介 作者身份 公开信息 账号', icon: UserRound },
       { id: 'personalization', label: '个性化', keywords: '自定义指令 回答偏好 风格 语气 全局记忆 权限 自定义规则 Agent', icon: SlidersHorizontal },
       { id: 'appearance', label: '外观', keywords: '主题 浅色 深色 正文 排版 字体 字号 行距 宽度 动画', icon: Eye },
@@ -231,6 +232,11 @@ function GeneralPanel(props: Props) {
           </span>
           <ChevronRight className="h-4 w-4 text-[var(--text-tertiary)]" />
         </button>
+        <a href="/settings?section=devices" target={isNativeApp() ? undefined : '_blank'} rel="noopener noreferrer" className="studio-settings-row studio-settings-row-link spacious">
+          <Smartphone className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
+          <span className="min-w-0 flex-1 text-sm font-medium">设备管理</span>
+          <ChevronRight className="h-4 w-4 text-[var(--text-tertiary)]" />
+        </a>
         <div className="flex flex-wrap gap-x-5 gap-y-2 py-3 text-sm text-[var(--text-secondary)]">
           <a href="/legal?kind=terms" target="_blank" rel="noopener noreferrer" className="rounded-sm underline-offset-4 hover:underline">用户协议</a>
           <a href="/legal?kind=privacy" target="_blank" rel="noopener noreferrer" className="rounded-sm underline-offset-4 hover:underline">隐私政策</a>

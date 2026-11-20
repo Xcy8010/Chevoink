@@ -67,7 +67,7 @@ export default function DiscoverPage() {
   )
 
   return (
-    <div className="discover-gallery-page">
+    <div className="discover-gallery-page mobile-empty-column">
       <h1 className="sr-only">发现好书</h1>
       <div className="discover-controls">
         <div className="discover-categories" aria-label="作品分类">

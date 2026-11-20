@@ -9,9 +9,16 @@ export type AgentQueuedRequestView = {
   revision: number
   error: string | null
 }
+export type AgentHistoryHead = {
+  latestRunId: string | null
+  latestRunStatus: import('./models.js').AgentRunStatus | null
+  historyRevision: string
+}
 export type AgentQueueSnapshot = {
   items: AgentQueuedRequestView[]
   latestRunId: string | null
+  latestRunStatus?: import('./models.js').AgentRunStatus | null
+  historyRevision?: string
 }
 export type AgentQueueAction = 'edit' | 'delete' | 'steer' | 'new' | 'fork'
 export type EnqueueAgentRequest = { id: string; input: StartAgentLoopRunRequest }

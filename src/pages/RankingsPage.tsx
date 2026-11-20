@@ -53,7 +53,7 @@ export default function RankingsPage() {
   }
 
   return (
-    <div className="rankings-page">
+    <div className="rankings-page mobile-empty-column">
       <h1 className="sr-only">作品榜单</h1>
       <div className="rankings-controls">
         <nav className="rankings-boards" aria-label="榜单类型">

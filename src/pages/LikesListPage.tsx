@@ -99,7 +99,7 @@ export default function LikesListPage() {
 
   return (
     // 壳层大标题已隐藏；lg 起双栏：左侧 sticky 返回/标题栏 + 右侧明细列表，避免大屏左右留白
-    <div className={detailLayoutClass}>
+    <div className={`${detailLayoutClass} mobile-empty-column`}>
       <div className="lg:sticky lg:top-24 lg:self-start">
         <button
           type="button"
@@ -117,7 +117,7 @@ export default function LikesListPage() {
         </h1>
       </div>
 
-      <div className="mt-4 min-w-0 lg:mt-0">
+      <div className="mobile-empty-column mt-4 min-w-0 lg:mt-0">
         {interactionsQuery.isRefetchError ? <AppStateRefreshNotice retry={interactionsQuery.refetch} busy={interactionsQuery.isFetching} /> : null}
         {!interactionsQuery.data && (interactionsQuery.isPending || interactionsQuery.isFetching) ? (
           <MessageDetailRowsSkeleton variant="interactions" />

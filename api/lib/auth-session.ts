@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { Request, Response } from 'express'
 import { isLegacyAccountMissingEmail } from '../../shared/account-contact.js'
 
+import { openDevice } from './device-session.js'
 import { env } from '../config/env.js'
 import { prisma, DataAccessError } from './prisma.js'
 
@@ -11,7 +12,7 @@ const REFRESH_COOKIE_NAME = 'chevoink_refresh'
 /**
  * v1 存量令牌格式：`${userId}.${expiresAt}.${sig}`（30 天有效期，兼容双读直至自然过期）
  * v2 令牌格式：`v2.${userId}.${expiresAt}.${tokenVersion}.${kind}.${sig}`
- * kind 区分 access / refresh；tokenVersion 与 User.tokenVersion 比对实现即刻吊销。
+ * v3 在 v2 签名内增加设备会话 ID，可单独撤销。tokenVersion 保留用于改密等账号级操作。
  */
 const TOKEN_VERSION_PREFIX = 'v2'
 
@@ -105,20 +106,22 @@ function safeEqual(left: string, right: string): boolean {
 type SessionTokenKind = 'access' | 'refresh'
 
 interface VerifiedToken {
+  deviceId?: string
   userId: string
   /** v1 存量令牌无版本号，无法参与吊销比对（30 天内自然淘汰） */
   tokenVersion: number | null
 }
 
-function buildToken(userId: string, expiresAt: number, tokenVersion: number, kind: SessionTokenKind): string {
-  const payload = `${TOKEN_VERSION_PREFIX}.${userId}.${expiresAt}.${tokenVersion}.${kind}`
+function buildToken(userId: string, expiresAt: number, tokenVersion: number, kind: SessionTokenKind, deviceId?: string): string {
+  const prefix = deviceId ? `v3.${deviceId}` : TOKEN_VERSION_PREFIX
+  const payload = `${prefix}.${userId}.${expiresAt}.${tokenVersion}.${kind}`
   return `${payload}.${signPayload(payload)}`
 }
 
-export function buildSessionTokens(userId: string, tokenVersion: number) {
+export function buildSessionTokens(userId: string, tokenVersion: number, deviceId?: string) {
   const now = Math.floor(Date.now() / 1000)
-  const accessToken = buildToken(userId, now + ACCESS_TTL_SECONDS, tokenVersion, 'access')
-  const refreshToken = buildToken(userId, now + REFRESH_TTL_SECONDS, tokenVersion, 'refresh')
+  const accessToken = buildToken(userId, now + ACCESS_TTL_SECONDS, tokenVersion, 'access', deviceId)
+  const refreshToken = buildToken(userId, now + REFRESH_TTL_SECONDS, tokenVersion, 'refresh', deviceId)
 
   return {
     accessToken,
@@ -127,8 +130,8 @@ export function buildSessionTokens(userId: string, tokenVersion: number) {
   }
 }
 
-function writeSessionCookies(userId: string, tokenVersion: number, res: Response) {
-  const tokens = buildSessionTokens(userId, tokenVersion)
+function writeSessionCookies(userId: string, tokenVersion: number, res: Response, deviceId: string) {
+  const tokens = buildSessionTokens(userId, tokenVersion, deviceId)
   res.append('Set-Cookie', serializeCookie(SESSION_COOKIE_NAME, tokens.accessToken, ACCESS_TTL_SECONDS))
   res.append('Set-Cookie', serializeCookie(REFRESH_COOKIE_NAME, tokens.refreshToken, REFRESH_TTL_SECONDS))
   return tokens
@@ -142,7 +145,8 @@ export async function createSession(userId: string, res: Response, expectedToken
   if (expectedTokenVersion !== undefined && state.tokenVersion !== expectedTokenVersion) {
     throw new DataAccessError(401, 'AUTH_SESSION_CHANGED', '账号状态已变化，请重新登录。')
   }
-  return writeSessionCookies(userId, state.tokenVersion, res)
+  const device = await openDevice(userId, state.tokenVersion, res.req, refreshExpiry())
+  return writeSessionCookies(userId, state.tokenVersion, res, device.id)
 }
 
 export function clearSession(res: Response) {
@@ -177,7 +181,8 @@ export function verifySessionToken(token: string | undefined | null, kind: Sessi
     return { userId, tokenVersion: null }
   }
 
-  if (segments.length !== 6 || segments[0] !== TOKEN_VERSION_PREFIX) {
+  const deviceId = segments.length === 7 && segments[0] === 'v3' ? segments.splice(1, 1)[0] : undefined
+  if (segments.length !== 6 || (deviceId ? segments[0] !== 'v3' || !/^[a-zA-Z0-9-]{1,64}$/.test(deviceId) : segments[0] !== TOKEN_VERSION_PREFIX)) {
     return null
   }
 
@@ -200,14 +205,17 @@ export function verifySessionToken(token: string | undefined | null, kind: Sessi
   }
 
   const expectedSignature = signPayload(
-    `${TOKEN_VERSION_PREFIX}.${userId}.${expiresAtRaw}.${tokenVersionRaw}.${kindSegment}`,
+    `${deviceId ? `v3.${deviceId}` : TOKEN_VERSION_PREFIX}.${userId}.${expiresAtRaw}.${tokenVersionRaw}.${kindSegment}`,
   )
   if (!safeEqual(signature, expectedSignature)) {
     return null
   }
 
-  return { userId, tokenVersion }
+  return deviceId ? { userId, tokenVersion, deviceId } : { userId, tokenVersion }
 }
+
+const refreshExpiry = () => new Date(Date.now() + REFRESH_TTL_SECONDS * 1000)
+const deviceIdentity = new WeakMap<Request, { userId: string; deviceId: string; tokenVersion: number }>()
 
 /* ---------------- 用户会话状态（封禁 + 令牌版本，60 秒进程内缓存） ---------------- */
 
@@ -272,6 +280,30 @@ export type UserAuthLookup =
   | { status: 'verified'; state: UserAuthState }
   | { status: 'notFound' }
   | { status: 'unavailable' }
+
+type DeviceValidity = { userId: string; tokenVersion: number; expiresAt: Date; lastActiveAt: Date; revokedAt: Date | null }
+
+// The hot path reads device revocation and account-wide revocation in the same indexed lookup.
+async function readDeviceAuthState(userId: string, deviceId: string): Promise<UserAuthLookup & { device?: DeviceValidity }> {
+  try {
+    const [row] = await prisma.$queryRaw<(DeviceValidity & {
+      accountVersion: number; bannedAt: Date | null; phone: string | null; email: string | null; emailVerifiedAt: Date | null
+    })[]>`
+      SELECT d.user_id AS "userId", d.token_version AS "tokenVersion", d.expires_at AS "expiresAt",
+             d.last_active_at AS "lastActiveAt", d.revoked_at AS "revokedAt",
+             u.token_version AS "accountVersion", u.banned_at AS "bannedAt", u.phone, u.email, u.email_verified_at AS "emailVerifiedAt"
+      FROM account_device_sessions d JOIN users u ON u.id = d.user_id
+      WHERE d.id = ${deviceId} AND d.user_id = ${userId}`
+    if (!row) return { status: 'notFound' }
+    return { status: 'verified', device: row, state: {
+      banned: row.bannedAt !== null, tokenVersion: row.accountVersion, checkedAt: Date.now(),
+      missingLegacyEmail: isLegacyAccountMissingEmail({ phone: row.phone, email: row.email, emailVerified: Boolean(row.emailVerifiedAt) })
+    } }
+  } catch {
+    warnAuthDegrade('device-unavailable', { userId })
+    return { status: 'unavailable' }
+  }
+}
 
 /** Cached observations are diagnostic only; every authorization/issuance uses fresh:true. */
 export async function readUserAuthState(userId: string, options: { fresh?: boolean } = {}): Promise<UserAuthLookup> {
@@ -344,7 +376,7 @@ function getResolvedUserId(req: Request): string | null | undefined {
  * 登录闸口（app.ts 全局中间件调用）：
  * 1. 按 access cookie → Bearer access → refresh cookie → Bearer refresh 顺序识别会话；
  * 2. 实时封禁检查：命中打标 + 清 cookie；状态不可核实则标记503，不清cookie；
- * 3. v2 令牌与库中 tokenVersion 比对，不一致（改密/登出/封禁后）视为已吊销；
+ * 3. 检查设备会话以及账号版本，分别处理单设备退出和全账号改密/封禁；
  * 4. refresh 命中时静默重签双 cookie（滑动续期 30 天），前端无感知。
  * 判定结果写入 req 标记，getSessionUserId 直接读取，避免下游重复验签。
  */
@@ -367,7 +399,9 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
     return
   }
 
-  const lookup = await readUserAuthState(candidate.userId, { fresh: true })
+  const lookup: UserAuthLookup & { device?: DeviceValidity } = candidate.deviceId
+    ? await readDeviceAuthState(candidate.userId, candidate.deviceId)
+    : await readUserAuthState(candidate.userId, { fresh: true })
   if (lookup.status === 'unavailable') return
   if (lookup.status === 'notFound') {
     clearSession(res)
@@ -383,17 +417,41 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
     return
   }
 
-  if (candidate.tokenVersion !== null && candidate.tokenVersion !== state.tokenVersion) {
-    // 已被吊销的 v2 令牌：清 cookie 并按未登录处理
+  if ((candidate.tokenVersion ?? 0) !== state.tokenVersion) {
+    // 账号版本已失效，清除过期凭据。
     clearSession(res)
     setResolvedUserId(req, null)
     return
   }
 
-  if (!accessCandidate && candidate) {
-    // refresh 命中（access 过期/丢失）：滚动续签
-    writeSessionCookies(candidate.userId, state.tokenVersion, res)
+  // Historical tokens have no device identifier. Keep their revocation record so an
+  // old cookie cannot recreate a revoked device or silently acquire a new identity.
+  const userId = candidate.userId
+  const deviceId = candidate.deviceId ?? 'legacy-' + signPayload(`legacy/${userId}/${state.tokenVersion}`).slice(0, 48)
+  const now = new Date()
+  try {
+    let device = lookup.device ?? await prisma.accountDeviceSession.findUnique({ where: { id: deviceId } })
+    if (!device && !candidate.deviceId) device = await openDevice(userId, state.tokenVersion, req, refreshExpiry(), deviceId)
+    if (!device || device.userId !== userId || device.tokenVersion !== state.tokenVersion || device.revokedAt || (candidate.deviceId && device.expiresAt <= now)) {
+      clearSession(res)
+      setResolvedUserId(req, null)
+      return
+    }
+    if (!accessCandidate || now.getTime() - device.lastActiveAt.getTime() >= 300_000) {
+      const touched = await prisma.accountDeviceSession.updateMany({ where: { id: deviceId, revokedAt: null },
+        data: { lastActiveAt: now, ...(!accessCandidate || device.expiresAt <= now ? { expiresAt: refreshExpiry() } : {}) } })
+      if (!touched.count) {
+        clearSession(res)
+        setResolvedUserId(req, null)
+        return
+      }
+    }
+  } catch {
+    warnAuthDegrade('device-unavailable', { userId })
+    return
   }
+  if (!accessCandidate) writeSessionCookies(userId, state.tokenVersion, res, deviceId)
+  deviceIdentity.set(req, { userId, deviceId, tokenVersion: state.tokenVersion })
 
   setResolvedUserId(req, candidate.userId)
   ;(req as Request & { [key: symbol]: unknown })[RESOLVED_TOKEN_VERSION_KEY] = candidate.tokenVersion
@@ -430,7 +488,7 @@ export function getPublicSessionUserId(req: Request): string | null {
   }
 }
 
-/** 吊销用户全部 v2 会话令牌（改密/登出/封禁时调用）：tokenVersion+1 并清缓存即刻生效 */
+/** 改密或封禁时递增账号版本并清除缓存，让所有设备的凭据失效。 */
 export async function revokeUserSessions(userId: string): Promise<void> {
   try {
     await prisma.user.update({ where: { id: userId }, data: { tokenVersion: { increment: 1 } } })
@@ -447,6 +505,36 @@ export function requireSessionUserId(req: Request): string {
   }
 
   return userId
+}
+
+export function requireDeviceIdentity(req: Request) {
+  requireSessionUserId(req)
+  const identity = deviceIdentity.get(req)
+  if (!identity) throw sessionUnavailable()
+  return identity
+}
+
+export async function isDeviceSessionActive(identity: { userId: string; deviceId: string; tokenVersion: number }) {
+  const { userId, deviceId: id, tokenVersion } = identity
+  return Boolean(await prisma.accountDeviceSession.findFirst({ where: { id, userId, tokenVersion, revokedAt: null,
+    expiresAt: { gt: new Date() }, user: { bannedAt: null, tokenVersion } }, select: { id: true } }))
+}
+
+export async function revokeCurrentDevice(req: Request) {
+  const { userId, deviceId } = requireDeviceIdentity(req)
+  try {
+    await prisma.accountDeviceSession.updateMany({ where: { id: deviceId, userId, revokedAt: null }, data: { revokedAt: new Date() } })
+  } catch {
+    throw new DataAccessError(503, 'AUTH_REVOCATION_UNAVAILABLE', '暂时无法确认设备已退出，请稍后重试。')
+  }
+}
+
+export async function bridgeSessionCookies(req: Request, res: Response) {
+  requireVersionedSessionIdentity(req)
+  const identity = requireDeviceIdentity(req)
+  // A bridge must never outlive the existing device session.
+  if (!await isDeviceSessionActive(identity)) throw new DataAccessError(401, 'AUTH_REQUIRED', '请重新登录。')
+  writeSessionCookies(identity.userId, identity.tokenVersion, res, identity.deviceId)
 }
 
 export function requireVersionedSessionIdentity(req: Request) {

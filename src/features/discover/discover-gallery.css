@@ -1,6 +1,7 @@
 .discover-gallery-page { max-width: 1320px; margin: 0 auto; padding: 12px 12px 40px; }
 .discover-controls { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 4px 0 20px; }
 .discover-categories { display: flex; gap: 8px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.discover-categories::-webkit-scrollbar { display: none; }
 .discover-categories button { flex: 0 0 auto; padding: 9px 15px; border-radius: 999px; color: var(--text-secondary); font-size: 14px; transition: color 180ms, background-color 180ms; }
 .discover-categories button[aria-pressed=true] { background: var(--surface-contrast); color: var(--text-contrast); }
 .discover-categories button:hover:not([aria-pressed=true]) { background: var(--surface-muted); color: var(--text-primary); }

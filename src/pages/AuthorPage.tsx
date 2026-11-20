@@ -56,7 +56,7 @@ function PageChrome({
       >
         <ChevronLeft className="h-5 w-5" />
       </button>
-      <div className={cn('mx-auto w-full px-4', centered ? 'flex min-h-full flex-col py-12' : 'pb-16', CONTENT_MAX_WIDTH)}>
+      <div className={cn('mobile-empty-column mx-auto w-full px-4', centered ? 'flex min-h-full flex-col py-12' : 'min-h-full pb-16', CONTENT_MAX_WIDTH)}>
         {headerContent}
         {children}
       </div>
@@ -428,7 +428,7 @@ export default function AuthorPage() {
   return (
     <PageChrome onBack={handleBack} headerContent={headerContent}>
       {authorQuery.isError ? <AppStateRefreshNotice retry={authorQuery.refetch} busy={authorQuery.isFetching} /> : null}
-      <div className="pt-2">
+      <div className="mobile-empty-column pt-2">
         {activeTab === 'novels' && novelsQuery.isRefetchError ? <AppStateRefreshNotice retry={novelsQuery.refetch} busy={novelsQuery.isFetching} /> : null}
         {activeTab === 'posts' && postsQuery.isRefetchError ? <AppStateRefreshNotice retry={postsQuery.refetch} busy={postsQuery.isFetching} /> : null}
         {activeTab === 'novels' ? (

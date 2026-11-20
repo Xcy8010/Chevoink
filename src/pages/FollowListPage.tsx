@@ -31,7 +31,7 @@ function StandaloneChrome({
   children: ReactNode
 }) {
   return (
-    <div className="min-h-dvh">
+    <div className="mobile-empty-column min-h-dvh">
       <header className="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[color:var(--app-bg)]/85 backdrop-blur">
         <div className="mx-auto flex h-12 w-full max-w-[680px] items-center gap-2 px-2 sm:px-4">
           <button
@@ -47,7 +47,7 @@ function StandaloneChrome({
           </div>
         </div>
       </header>
-      <main className="mx-auto w-full max-w-[680px] px-4 pb-16">{children}</main>
+      <main className="mobile-empty-column mx-auto w-full max-w-[680px] px-4 pb-16">{children}</main>
     </div>
   )
 }
@@ -231,7 +231,7 @@ export default function FollowListPage() {
         })}
       </div>
 
-      <div className="mt-4">
+      <div className="mobile-empty-column mt-4">
         {activeQuery.isRefetchError ? <AppStateRefreshNotice retry={activeQuery.refetch} busy={activeQuery.isFetching} /> : null}
         {!activeQuery.data && (activeQuery.isPending || activeQuery.isFetching) ? (
           <MessageDetailRowsSkeleton variant="follows" />
@@ -362,7 +362,7 @@ export default function FollowListPage() {
 
   return (
     // 壳层大标题已隐藏；lg 起双栏：左侧 sticky 返回/标题栏 + 右侧列表，避免大屏左右留白
-    <div className={detailLayoutClass}>
+    <div className={`${detailLayoutClass} mobile-empty-column`}>
       <div className="lg:sticky lg:top-24 lg:self-start">
         <button
           type="button"
@@ -376,7 +376,7 @@ export default function FollowListPage() {
         <h1 className="mt-3 text-xl font-bold tracking-tight text-[var(--text-primary)]">关注与粉丝</h1>
       </div>
 
-      <div className="min-w-0">{listContent}</div>
+      <div className="mobile-empty-column min-w-0">{listContent}</div>
     </div>
   )
 }

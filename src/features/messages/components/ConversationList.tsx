@@ -220,7 +220,7 @@ export default function ConversationList({
         ) : null}
       </div>
 
-      <div className={listScrollClass} onScroll={handleListScroll}>
+      <div className={`${listScrollClass} mobile-empty-column`} onScroll={handleListScroll}>
         {/* 互关好友横向栏：点击头像直接发起/进入私聊 */}
         {loadingFriends ? <MutualFriendsSkeleton /> : mutualFriends.length > 0 ? (
           <div className="border-b border-[var(--border-subtle)] py-2">
@@ -386,7 +386,7 @@ export default function ConversationList({
         </div>
 
         {/* 互关私聊会话 */}
-        <div className="space-y-1 px-2 pb-2">
+        <div className="mobile-empty-column space-y-1 px-2 pb-2">
           {refreshNotice}
           {loadingConversations ? <ConversationRowsSkeleton /> : conversationError || (friendConversations.length === 0 ? (
             <AppState compact scene="message" title="还没有私聊" description={mutualFriends.length > 0 ? '选择好友开始聊天。' : undefined} />

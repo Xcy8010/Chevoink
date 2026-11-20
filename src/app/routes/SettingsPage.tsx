@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react'
+import { ChangeEvent, FormEvent, lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
@@ -12,6 +12,7 @@ import {
   LogOut,
   Maximize,
   Moon,
+  MonitorSmartphone,
   RefreshCw,
   ShieldCheck,
   Smartphone,
@@ -66,6 +67,8 @@ import CustomModelSettingsDialog from '@/features/account/CustomModelSettingsDia
 import DesktopSettings from './settings/desktop-settings'
 import EmailAccountSettings from './settings/EmailAccountSettings'
 
+const DeviceManagement = lazy(() => import('./settings/DeviceManagement'))
+
 /** 等待指定毫秒（检测更新动画至少展示 1.5 秒，哪怕请求提前返回） */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -75,7 +78,7 @@ function delay(ms: number): Promise<void> {
 
 export default function SettingsPage() {
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const toast = useToast()
   const theme = useShellStore((state) => state.theme)
   const setTheme = useShellStore((state) => state.setTheme)
@@ -777,6 +780,17 @@ export default function SettingsPage() {
     )
   }
 
+  function setAccountSection(section?: string) {
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous)
+      if (section) next.set('section', section)
+      else next.delete('section')
+      return next
+    }, { replace: true })
+  }
+  const devicesRow = <SettingsRow icon={<MonitorSmartphone className="size-[18px]" />} title="设备管理"
+    caption="查看登录设备、地点和最近活动" searchKeywords="下线 退出 安卓 手机 电脑" chevron="right" onClick={() => setAccountSection('devices')} />
+
   return (
     <SettingsLayout backButton={backButton} sections={[
       { id: 'settings-profile', label: '账户' },
@@ -846,7 +860,7 @@ export default function SettingsPage() {
         </SettingsGroup>
       </section>
 
-      {sessionUser.emailAuthEnabled ? <EmailAccountSettings user={sessionUser} /> : (
+      {sessionUser.emailAuthEnabled ? <EmailAccountSettings user={sessionUser}>{devicesRow}</EmailAccountSettings> : (
         <section id="account-security">
           <SectionTitle>账号安全</SectionTitle>
           <SettingsGroup>
@@ -865,6 +879,7 @@ export default function SettingsPage() {
               chevron="right"
               onClick={() => setOpenDialog({ kind: 'password' })}
             />
+            {devicesRow}
           </SettingsGroup>
         </section>
       )}
@@ -929,6 +944,14 @@ export default function SettingsPage() {
       {clientDialog}
 
       <CustomModelSettingsDialog open={customModelsOpen} onClose={() => setCustomModelsOpen(false)} />
+
+      {searchParams.get('section') === 'devices' && <Suspense fallback={<p role="status">正在打开设备管理…</p>}>
+        <DeviceManagement key={sessionUser.id} userId={sessionUser.id} hasPassword={Boolean(sessionUser.hasPassword ?? sessionUser.passwordConfigured)}
+          onClose={() => setAccountSection()} onSetPassword={() => {
+            if (sessionUser.emailAuthEnabled) setAccountSection('password')
+            else { setAccountSection(); setOpenDialog({ kind: 'password' }) }
+          }} />
+      </Suspense>}
 
       {/* 退出登录二次确认弹窗 */}
       <ConfirmDialog

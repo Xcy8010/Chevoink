@@ -20,6 +20,8 @@ import { getActiveRun, getActiveRunIdBySession, hasActiveRunInSession } from './
 import { publishDurableEvents } from './runtime-event-projection.js'
 import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
 import { historyClientRequest } from './message-client-request.js'
+import { sessionHistoryHead } from './session-history-head.js'
+import type { AgentHistoryHead } from '../../../shared/contracts/agent-queue.js'
 import { loadMessageTimings } from './message-timing.js'
 import { projectLegacyQualityBodyChanges } from './quality-body-change-history.js'
 import { QUESTION_CLOSING_ROOT_STATUS, QUESTION_WAITING_ROOT_STATUS } from './run-slots.js'
@@ -121,11 +123,11 @@ async function activeRunLastSeq(runId: string) {
 /** 刷新后「继续执行」按钮的数据来源：当前无活跃 run 时，仅当会话「最近一个」run 停在 failed/paused 才供前端续跑。
  * 不能取历史任意 failed run：旧 run 失败后作者已开新 run 并正常收尾时，任务已闭环，
  * 刷新后不应再冒「继续执行」按钮（作者反馈：收尾完成后刷新仍见按钮）。 */
-async function getSessionRunState(sessionId: string, includeNextPrompt = false): Promise<{ activeRunId: string | null; activeRunLastSeq?: number; runGoalId: string | null; resumeRunId: string | null; authorEnded?: AgentRun['authorEnded']; outcome?: AgentRun['outcome']; nextPrompt?: AgentNextPrompt }> {
+async function getSessionRunState(sessionId: string, includeNextPrompt = false): Promise<{ activeRunId: string | null; activeRunLastSeq?: number; activeRunReplayAfterSeq?: number; runGoalId: string | null; resumeRunId: string | null; authorEnded?: AgentRun['authorEnded']; outcome?: AgentRun['outcome']; nextPrompt?: AgentNextPrompt }> {
   const local = getActiveRunIdBySession(sessionId)
   if (local) {
     const localRun = await prisma.agentRun.findUnique({ where: { id: local }, select: { goalExecution: { select: { goalId: true } } } })
-    return { activeRunId: local, activeRunLastSeq: await activeRunLastSeq(local), runGoalId: localRun?.goalExecution?.goalId ?? null, resumeRunId: null }
+    return { activeRunId: local, activeRunReplayAfterSeq: getActiveRun(local)?.eventStartSeq ?? 0, activeRunLastSeq: await activeRunLastSeq(local), runGoalId: localRun?.goalExecution?.goalId ?? null, resumeRunId: null }
   }
   const run = await prisma.agentRun.findFirst({
     where: { sessionId, ...MAIN_RUN_FILTER },
@@ -182,9 +184,12 @@ export async function listLoopSessionMessages(
   options: ListSessionMessagesOptions = {},
 ): Promise<{
   messages: AgentUIMessage[]
+  historyHead?: AgentHistoryHead
   activeRunId: string | null
   /** Presentation watermark. Clients still replay every event to rebuild tool state. */
   activeRunLastSeq?: number
+  /** The previous execution ended at this sequence when a legacy run was continued in place. */
+  activeRunReplayAfterSeq?: number
   /** 服务端确认 activeRunId 的目标归属；普通运行或无活跃 run 为 null。 */
   runGoalId: string | null
   /** 无活跃 run 但存在可续跑的 failed/paused run：前端据此在刷新后仍显示「继续执行」按钮 */
@@ -199,7 +204,7 @@ export async function listLoopSessionMessages(
 }> {
   const session = await prisma.agentSession.findFirst({
     where: { id: sessionId, userId },
-    select: { id: true, forkedFromSessionId: true, forkedFromMessageId: true, forkedAt: true },
+    select: { id: true, updatedAt: true, forkedFromSessionId: true, forkedFromMessageId: true, forkedAt: true },
   })
 
   if (!session) {
@@ -224,10 +229,13 @@ export async function listLoopSessionMessages(
         ...MAIN_RUN_FILTER,
         ...(options.beforeRunStartedAt ? { createdAt: { lt: new Date(options.beforeRunStartedAt) } } : {}),
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: runLimit + 1,
     })
     const hasMore = runs.length > runLimit
+    // Capture the queue's revision before reading messages. An edit during hydration must still trigger reconciliation.
+    const latestLoop = runs.find(run => run.engine === 'loop')
+    const historyHead = !options.beforeRunStartedAt && (latestLoop || !hasMore) ? sessionHistoryHead(session.updatedAt, latestLoop) : undefined
     const pageRuns = runs.slice(0, runLimit)
     await synchronizeDurableHistory(userId, pageRuns)
     const pageRunIds = pageRuns.map((run) => run.id)
@@ -265,6 +273,7 @@ export async function listLoopSessionMessages(
 
     return {
       messages: pagedMessages,
+      ...(historyHead && { historyHead }),
       ...await getSessionRunState(sessionId, !options.beforeRunStartedAt),
       todoSnapshot: await loadCurrentTodoSnapshot(userId, sessionId),
       pagination: {
@@ -377,7 +386,8 @@ export async function deleteLoopSessionMessage(
     await prepareChildGrantDeletion(tx, userId, [message.runId])
     await tx.projectMemoryEntry.deleteMany({ where: { runId: message.runId } })
     await tx.agentArtifact.deleteMany({ where: { runId: message.runId } })
-    await tx.agentRun.delete({ where: { id: message.runId } }).catch(() => {})
+    await tx.agentRun.deleteMany({ where: { id: message.runId } })
+    await tx.agentSession.update({ where: { id: sessionId }, data: { updatedAt: new Date() } })
   })
 
   return { deleted: true, runId: message.runId }
@@ -614,6 +624,7 @@ export async function rollbackLoopSessionFromMessage(
     await tx.projectMemoryEntry.deleteMany({ where: { runId: { in: runIds } } })
     await tx.agentArtifact.deleteMany({ where: { runId: { in: runIds } } })
     await tx.agentRun.deleteMany({ where: { id: { in: runIds } } })
+    await tx.agentSession.update({ where: { id: sessionId }, data: { updatedAt: new Date() } })
 
     return { protectedChapters: classification.protectedRefs }
   })

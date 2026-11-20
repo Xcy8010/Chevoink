@@ -13,10 +13,10 @@ const cookie = `chevoink_session=${buildSessionTokens(userId, 0).accessToken}`
 // Prisma delegates are proxy-backed; freeze their real bindings before spies so
 // repeated fault injection cannot inherit a restored proxy's stale mock wrapper.
 const findUser = prisma.user.findUnique.bind(prisma.user)
-const updateUser = prisma.user.update.bind(prisma.user)
+const revokeDevice = prisma.accountDeviceSession.updateMany.bind(prisma.accountDeviceSession)
 beforeEach(() => {
   vi.spyOn(prisma.user, 'findUnique').mockImplementation(findUser)
-  vi.spyOn(prisma.user, 'update').mockImplementation(updateUser)
+  vi.spyOn(prisma.accountDeviceSession, 'updateMany').mockImplementation(revokeDevice)
 })
 afterEach(() => { vi.restoreAllMocks(); evictUserBanCache(userId) })
 afterAll(async () => {
@@ -66,7 +66,7 @@ describe.skipIf(!available)('R03 HTTP authentication and public-reader boundarie
     expect(await prisma.novel.count({ where: { authorId: userId } })).toBe(1)
   })
   it.each(['/api/auth/logout', '/api/admin/logout'])('does not report successful revocation or clear cookies when %s fails', async url => {
-    vi.spyOn(prisma.user, 'update').mockRejectedValueOnce(new Error('injected revocation failure'))
+    vi.spyOn(prisma.accountDeviceSession, 'updateMany').mockRejectedValueOnce(new Error('injected revocation failure'))
     const res = await request(app).post(url).set('Cookie', cookie).send({})
     expect(res.status).toBe(503)
     expect(res.body.error.code).toBe('AUTH_REVOCATION_UNAVAILABLE')
@@ -117,7 +117,7 @@ describe.skipIf(!available)('R03 HTTP authentication and public-reader boundarie
   it('revokes a real v2 token before reporting a successful logout', async () => {
     const res = await request(app).post('/api/auth/logout').set('Cookie', cookie).send({})
     expect(res.status).toBe(200)
-    expect((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).tokenVersion).toBe(1)
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).tokenVersion).toBe(0)
     expect((await request(app).get('/api/admin/me').set('Cookie', cookie)).status).toBe(401)
   })
 })

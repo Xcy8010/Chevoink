@@ -17,6 +17,30 @@
   margin-top: 0 !important;
 }
 
+@media (width < 768px) {
+  .app-main-content:has(> .mobile-empty-column [data-app-state='empty']) {
+    display: flex;
+    min-height: 100%;
+    flex-direction: column;
+  }
+
+  .mobile-empty-column:has([data-app-state='empty']) {
+    display: flex;
+    flex-direction: column;
+    flex-grow: 1;
+  }
+
+  :is(.mobile-empty-column, .app-main-content, [data-app-state-layout]) > [data-app-state='empty'] {
+    flex: 1 0 auto;
+    align-items: center;
+  }
+
+  :is(.mobile-empty-column, .app-main-content, [data-app-state-layout]) > [data-app-state='empty'] > div {
+    position: relative;
+    top: var(--empty-center-offset, 0px);
+  }
+}
+
 html.dark .chevoink-mascot {
   filter: drop-shadow(0 0 1px rgb(198 244 232 / 65%)) drop-shadow(0 4px 12px rgb(90 180 157 / 16%));
 }

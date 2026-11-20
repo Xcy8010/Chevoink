@@ -652,7 +652,7 @@ export default function MessagesPage() {
               ) : messagesUnavailable ? (
                 messagesError
               ) : (
-                <div ref={messageScrollRef} className="min-h-0 flex-1 overflow-y-auto" onScroll={handleMessageScroll}>
+                <div ref={messageScrollRef} className="mobile-empty-column min-h-0 flex-1 overflow-y-auto" onScroll={handleMessageScroll}>
                   {messagesQuery.isRefetchError ? <AppStateRefreshNotice retry={messagesQuery.refetch} busy={messagesQuery.isFetching} /> : null}
                   {/* 历史消息分页：触顶自动加载，也保留手动按钮兑底 */}
                   {hasMoreMessages ? (

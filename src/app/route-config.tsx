@@ -1,4 +1,5 @@
-import { lazy, type ComponentType, type ReactElement } from 'react'
+import type { ReactElement } from 'react'
+import { lazyPage } from '@/app/lazy-page'
 import { Navigate } from 'react-router-dom'
 
 import NotFoundPage from '@/app/routes/NotFoundPage'
@@ -15,30 +16,12 @@ import {
   StudioSkeleton,
 } from '@/components/ui/Skeleton'
 import Home from '@/pages/Home'
+import StudioPage from '@/pages/StudioPage'
 import { CommunityPageSkeleton } from '@/features/community/components/CommunityPageLayout'
 import { MessageDetailRouteSkeleton, MessagesRouteSkeleton } from '@/features/messages/components/MessagesLoading'
 import { loadFollowListPage, loadLikesListPage } from '@/features/messages/load-detail-pages'
 import { loadProfilePage } from '@/features/profile/load-profile-page'
 import { ProfileRouteSkeleton } from '@/features/profile/components/ProfileLoading'
-
-const CHUNK_RELOAD_KEY = 'chevoink:chunk-reload-at'
-
-/**
- * 懒加载页面 chunk：发版后旧 chunk 被清理导致 404 时，
- * 3 分钟内只自动刷新一次拿新版本，避免刷新死循环。
- */
-function lazyPage(load: () => Promise<{ default: ComponentType }>) {
-  return lazy(() =>
-    load().catch((error) => {
-      const lastReload = Number(sessionStorage.getItem(CHUNK_RELOAD_KEY) ?? 0)
-      if (Date.now() - lastReload > 180_000) {
-        sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now()))
-        window.location.reload()
-      }
-      throw error
-    }),
-  )
-}
 
 // 首页/登录/404 保持同步导入保障首屏，其余页面按路由拆包懒加载
 const SettingsPage = lazyPage(() => import('@/app/routes/SettingsPage'))
@@ -60,7 +43,6 @@ const ProfilePage = lazyPage(loadProfilePage)
 const RankingsPage = lazyPage(() => import('@/pages/RankingsPage'))
 const ReaderPage = lazyPage(() => import('@/pages/ReaderPage'))
 const SearchPage = lazyPage(() => import('@/pages/SearchPage'))
-const StudioPage = lazyPage(() => import('@/pages/StudioPage'))
 const TopicPage = lazyPage(() => import('@/pages/TopicPage'))
 
 // 后台管理（方案 18）：独立分区，不走主站壳

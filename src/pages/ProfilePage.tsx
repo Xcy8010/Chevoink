@@ -457,7 +457,7 @@ export default function ProfilePage() {
 
   return (
     <>
-      <div className="space-y-5 md:space-y-6">
+      <div className="mobile-empty-column space-y-5 md:space-y-6">
         {meQuery.isRefetchError ? <AppStateRefreshNotice retry={meQuery.refetch} busy={meQuery.isFetching} /> : null}
         <ProfileHeader
           user={currentUser}
@@ -496,7 +496,7 @@ export default function ProfilePage() {
           ))}
         </section>
 
-        <section ref={panelsSectionRef} className="scroll-mt-20">
+        <section ref={panelsSectionRef} className="mobile-empty-column scroll-mt-20">
           {/* 分页入口：与作者页一致的 X 风格文字 + 活动下划线，无胶囊容器（方案 18 §4） */}
           <div className="flex border-b border-[var(--border-subtle)]">
             {panels.map((panel) => {
@@ -529,7 +529,7 @@ export default function ProfilePage() {
           </div>
 
           {activePanel === 'shelf' ? (
-            <div className="mt-5">
+            <div className="mobile-empty-column mt-5">
               <ShelfPanel
                 items={shelfItems}
                 progressMap={progressMap}
@@ -540,7 +540,7 @@ export default function ProfilePage() {
           ) : null}
 
           {activePanel === 'creation' ? (
-            <div className="mt-5">
+            <div className="mobile-empty-column mt-5">
               <CreationPanel
                 drafts={draftItems}
                 novels={visibleAuthoredNovels}
@@ -552,7 +552,7 @@ export default function ProfilePage() {
           ) : null}
 
           {activePanel === 'favorites' ? (
-            <div className="mt-5">
+            <div className="mobile-empty-column mt-5">
               {/* X 风格文字子栏：作品 / 帖子，不加胶囊容器 */}
               <div className="flex items-center gap-5 border-b border-[var(--border-subtle)] pb-2">
                 {([
@@ -579,7 +579,7 @@ export default function ProfilePage() {
               </div>
 
               {favoritesTab === 'novels' ? (
-                <div className="mt-4">
+                <div className="mobile-empty-column mt-4">
                   {favoriteNovelsQuery.isRefetchError && !favoritesAccessDenied
                     ? <AppStateRefreshNotice retry={favoriteNovelsQuery.refetch} busy={favoriteNovelsQuery.isFetching} />
                     : null}
@@ -609,7 +609,7 @@ export default function ProfilePage() {
                   )}
                 </div>
               ) : (
-                <div className="mt-1">
+                <div className="mobile-empty-column mt-1">
                   <ProfileActivity panel="bookmarks" userId={currentUser.id} />
                 </div>
               )}
@@ -617,13 +617,13 @@ export default function ProfilePage() {
           ) : null}
 
           {activePanel === 'liked' ? (
-            <div className="mt-5">
+            <div className="mobile-empty-column mt-5">
               <ProfileActivity panel="liked" userId={currentUser.id} />
             </div>
           ) : null}
 
           {activePanel === 'replies' ? (
-            <div className="mt-5">
+            <div className="mobile-empty-column mt-5">
               <ProfileActivity panel="replies" userId={currentUser.id} />
             </div>
           ) : null}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
@@ -33,6 +33,7 @@ import type {
   AgentRollbackImpactPreview,
   AgentSession,
   AgentStreamEvent,
+  AgentUIMessage,
   CreativeFreedom,
   EntityId,
   PendingAgentQuestion,
@@ -98,7 +99,7 @@ import { AgentComposer } from './AgentComposer'
 import { AgentGoalBar } from './AgentGoalBar'
 import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
 import { AgentQueueTray } from './AgentQueueTray'
-import { AuthorActivityParts, AuthorActivitySummary, AuthorProgressText, type ActivityChapters } from './AuthorActivityParts'
+import type { ActivityChapters } from './AuthorActivityParts'
 import { AuthorRequestBubble } from './AuthorRequestBubble'
 import { AgentProcessRegion } from './AgentProcessRegion'
 import { useMessageBlockExpansion } from './use-message-block-expansion'
@@ -106,6 +107,15 @@ import { AgentPermissionCard } from './AgentPermissionCard'
 import { AgentQuestionCard } from './AgentQuestionCard'
 import AgentEmptyWelcome from './AgentEmptyWelcome'
 import ChevoinkAgentMark from './ChevoinkAgentMark'
+
+function historyRevisionKey(sessionId: string, head: Pick<import('../../../../../shared/contracts/agent-queue.js').AgentQueueSnapshot, 'latestRunId' | 'latestRunStatus' | 'historyRevision'>) {
+  return JSON.stringify([sessionId, head.latestRunId, head.latestRunStatus, head.historyRevision])
+}
+
+const loadAuthorActivity = () => import('./AuthorActivityParts')
+const AuthorActivityParts = lazy(async () => ({ default: (await loadAuthorActivity()).AuthorActivityParts }))
+const AuthorActivitySummary = lazy(async () => ({ default: (await loadAuthorActivity()).AuthorActivitySummary }))
+const AuthorProgressText = lazy(async () => ({ default: (await loadAuthorActivity()).AuthorProgressText }))
 
 /**
  * Agent Loop 主面板（plan/13 §5）：
@@ -131,6 +141,7 @@ type AgentPanelProps = {
   ensureSession: () => Promise<EntityId>
   /** SSE 事件透传：宿主据此同步章节树/编辑器等工作区状态 */
   onStreamEvent?: (event: AgentStreamEvent) => void
+  onRemoteTurnCompleted?: (messages: AgentUIMessage[]) => void
   /** 待审查变更总数（正文审查 + 计划审查）：驱动工作区变更头部的接受/拒绝按钮 */
   pendingReviewCount?: number
   reviewBusy?: boolean
@@ -197,6 +208,7 @@ export function AgentPanel({
   selection,
   ensureSession,
   onStreamEvent,
+  onRemoteTurnCompleted,
   pendingReviewCount = 0,
   reviewBusy = false,
   onApproveAllReviews,
@@ -237,6 +249,7 @@ export function AgentPanel({
   const completedNextPrompt = useAgentStore((state) => state.nextPrompt)
   const resumeableRunId = useAgentStore((state) => state.resumeableRunId)
   const canonicalMessages = useAgentStore((state) => state.messages)
+  const hydratingSessionId = useAgentStore((state) => state.hydratingSessionId)
   const storeLoadedSessionId = useAgentStore((state) => state.loadedSessionId)
   const outgoing = useOutgoingMessages(state => state.items)
   const requestClocks = useOutgoingMessages(state => state.requestClocks)
@@ -334,7 +347,11 @@ export function AgentPanel({
   }, [sessionId])
   const configurationHandler = useRef<(event: Extract<AgentStreamEvent, { type: 'run.configuration' }>) => void>(() => {})
   const preferenceRefresh = useRef<() => void>(() => {})
+  const lastTerminal = useRef<{ runId: string; seq: number; observedAt: number } | null>(null)
   const handleStreamEvent = useCallback((event: AgentStreamEvent) => {
+    if (event.type === 'run.paused' || event.type === 'run.finished' || (event.type === 'error' && !event.recoverable)) {
+      lastTerminal.current = { runId: event.runId, seq: event.seq, observedAt: Date.now() }
+    }
     if (event.type === 'run.configuration') configurationHandler.current(event)
     if (event.type === 'tool.result' && (event.toolName === 'agent_configure' || event.toolName === 'model_assign')) preferenceRefresh.current()
     onStreamEvent?.(event)
@@ -351,7 +368,14 @@ export function AgentPanel({
   const goalSnapshotHandler = useCallback((streamSessionId: string, snapshot: AgentGoalSnapshot | null, sequence: number) => {
     if (viewSession.current === streamSessionId) setGoalSnapshot(snapshot, streamSessionId, sequence)
   }, [setGoalSnapshot])
-  const { connect: connectGoal, disconnect: disconnectGoal } = useAgentGoalStream(goalSnapshotHandler)
+  const refreshConversation = useCallback((changedSessionId: string) => {
+    if (viewSession.current !== changedSessionId || document.visibilityState === 'hidden') return
+    const filter = { queryKey: ['agent-queue', changedSessionId], exact: true }
+    void queryClient.cancelQueries(filter).then(() => {
+      if (viewSession.current === changedSessionId) return queryClient.invalidateQueries(filter)
+    })
+  }, [queryClient])
+  const { connect: connectGoal, disconnect: disconnectGoal } = useAgentGoalStream(goalSnapshotHandler, refreshConversation)
   const goalCapabilitiesQuery = useQuery({
     queryKey: ['agent-goal-capabilities'],
     queryFn: fetchAgentGoalCapabilities,
@@ -362,7 +386,7 @@ export function AgentPanel({
     refetchOnReconnect: false,
   })
   const goalCreationEnabled = goalCapabilitiesQuery.data?.enabled === true
-  const queueQuery = useQuery({ queryKey: ['agent-queue', sessionId], queryFn: () => fetchAgentQueue(sessionId!), enabled: Boolean(sessionId), refetchInterval: 2000 })
+  const queueQuery = useQuery({ queryKey: ['agent-queue', sessionId], queryFn: ({ signal }) => fetchAgentQueue(sessionId!, signal), enabled: Boolean(sessionId), refetchInterval: 30_000, refetchOnWindowFocus: 'always', refetchOnReconnect: 'always' })
   const queueRetry = useRef<{ signature: string; id: string } | null>(null)
 
   useEffect(() => {
@@ -391,30 +415,67 @@ export function AgentPanel({
     }
   }, [connectGoal, disconnectGoal, sessionId, setGoalSnapshot])
 
+  const appliedHistory = useRef<string | null>(null)
   // Server dispatch works even with no browser open. Discover each new run and
   // hydrate its history before connecting, including runs finished between polls.
   useEffect(() => {
-    const latestId = queueQuery.data?.latestRunId
-    if (!sessionId || !latestId) return
+    const head = queueQuery.data
+    if (!sessionId || !head) return
+    const latestId = head.latestRunId
     const live = useAgentStore.getState()
-    if (live.loadedSessionId !== sessionId || live.runId === latestId || live.messages.some(message => message.runId === latestId)) return
+    if (live.loadedSessionId !== sessionId || live.hydratingSessionId === sessionId) return
+    const revision = historyRevisionKey(sessionId, head)
+    const sameActive = Boolean(latestId && live.runId === latestId && isRunActive(live.phase))
+    const remoteActive = ['running', 'queued', 'awaiting_approval'].includes(head.latestRunStatus ?? '')
+    if (sameActive && (!head.latestRunStatus || remoteActive)) { appliedHistory.current = revision; return }
+    if (!head.historyRevision && (!latestId || live.messages.some(message => message.runId === latestId))) return
+    // A pause and same-id resume may both happen between two observer polls.
+    const stopped = lastTerminal.current
+    const verifyResume = remoteActive && !sameActive && stopped?.runId === latestId && queueQuery.dataUpdatedAt > (stopped?.observedAt ?? 0)
+    if (appliedHistory.current === revision && !verifyResume) return
+    if (!latestId && !live.messages.length) { appliedHistory.current = revision; return }
     let cancelled = false
-    void fetchAgentSessionMessages(sessionId, { runLimit: 50 }).then(payload => {
+    // A slow history read survives repeated wakeups. The scoped key prevents old sessions sharing results.
+    void queryClient.fetchQuery({
+      queryKey: ['agent', 'observed-run-history', sessionId, revision],
+      queryFn: () => fetchAgentSessionMessages(sessionId, { runLimit: 50 }),
+      staleTime: 0,
+      gcTime: 0,
+    }).then(payload => {
       if (cancelled || viewSession.current !== sessionId) return
       const now = useAgentStore.getState()
-      if (now.runId === latestId || shouldKeepLiveSessionMessages(now.runId, now.phase, now.activeSessionId, sessionId)) return
+      if (now.loadedSessionId !== sessionId || (now.runId !== live.runId && isRunActive(now.phase))) return
+      if (payload.activeRunId && now.runId === payload.activeRunId && isRunActive(now.phase)) return
+      if (shouldKeepLiveSessionMessages(now.runId, now.phase, now.activeSessionId, sessionId)) {
+        // Another device can begin a new turn while we were offline for the old turn's final frame.
+        const last = payload.messages.at(-1)
+        const newerRunConfirmed = now.runId === live.runId
+          && (payload.activeRunId ?? last?.runTiming?.sourceRunId ?? last?.runId) === latestId
+        if (!newerRunConfirmed && !(sameActive && !remoteActive && head.latestRunStatus)) return
+      }
+      // Keep pages the reader explicitly loaded before this recent-history window.
+      const overlap = payload.messages[0] ? now.messages.findIndex(message => message.id === payload.messages[0].id) : -1
+      const keepOlderPages = overlap > 0 && (!head.historyRevision || (latestId && !now.messages.some(message => message.runId === latestId)))
+      const history = keepOlderPages ? [...now.messages.slice(0, overlap), ...payload.messages] : payload.messages
+      if (!keepOlderPages && payload.pagination) setOlderPagination({ hasMore: payload.pagination.hasMore, before: payload.pagination.earliestRunStartedAt })
+      appliedHistory.current = revision
       if (payload.activeRunId) {
-        restoreActiveRunHistory(payload.messages, payload.activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId, payload.activeRunLastSeq)
-        connect(payload.activeRunId, 0)
+        // A continued run keeps its id. Replaying a previous pause would close the new subscription.
+        const cursor = Math.max(payload.activeRunReplayAfterSeq ?? 0, lastTerminal.current?.runId === payload.activeRunId ? lastTerminal.current.seq : 0)
+        restoreActiveRunHistory(history, payload.activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId, payload.activeRunLastSeq)
+        connect(payload.activeRunId, cursor)
       } else {
-        now.restoreMessages(payload.messages, sessionId, payload.todoSnapshot, payload.nextPrompt)
+        now.restoreMessages(history, sessionId, payload.todoSnapshot, payload.nextPrompt)
         now.setAuthorEnded(payload.authorEnded ?? null)
         now.setRunOutcome(payload.outcome ?? null)
         now.noteResumeableRun(payload.resumeRunId ?? null)
+        const visibleIds = new Set(history.map(message => message.id))
+        const removed = now.messages.filter(message => !visibleIds.has(message.id))
+        onRemoteTurnCompleted?.([...removed, ...payload.messages.filter(message => (message.runTiming?.sourceRunId ?? message.runId) === latestId)])
       }
     }).catch(() => { /* Next queue poll retries; never erase existing history. */ })
     return () => { cancelled = true }
-  }, [sessionId, queueQuery.data, queueQuery.dataUpdatedAt, connect])
+  }, [sessionId, storeLoadedSessionId, hydratingSessionId, phase, queueQuery.data, queueQuery.dataUpdatedAt, queryClient, connect, onRemoteTurnCompleted])
 
   // 开始/结束时仅同步当前任务清单；请求期间有新待办事件或切换任务则丢弃响应。
   const todoSyncStage = phase === 'starting' ? null : isRunActive(phase) ? 'active' : 'settled'
@@ -442,7 +503,6 @@ export function AgentPanel({
   const [shimmerHolding, setShimmerHolding] = useState(false)
   // 历史拉取失败的会话：不能标记成“已恢复”（否则不再重试），但需让渲染层退出加载态，避免流光永久转圈
   const [historyErrorSessionId, setHistoryErrorSessionId] = useState<string | null>(null)
-  const hydratingSessionId = useAgentStore((state) => state.hydratingSessionId)
   // 加载态完全由全局 store 状态派生，不再依赖任何局部标记：
   // 只有 store 明确宣告「本会话已水合」（loadedSessionId 命中）或「本就没有会话」时才允许欢迎页，
   // 其余一切中间态（切换中/拉取中/宿主解析中/水合归属不明）都走图标流光，从结构上杜绍欢迎页闪现
@@ -1019,11 +1079,13 @@ export function AgentPanel({
       useAgentStore.getState().restoreMessages(cached, sessionId)
     } else {
       // 无缓存：进图标流光，并保底一个完整扫光周期
-      useAgentStore.getState().beginSessionHydration(sessionId)
       setShimmerHolding(true)
       holdTimer = window.setTimeout(() => setShimmerHolding(false), MIN_SHIMMER_HOLD_MS)
     }
 
+    useAgentStore.getState().beginSessionHydration(sessionId)
+    // Fetch the formatted timeline alongside its history, without blocking the composer.
+    void loadAuthorActivity().catch(() => undefined)
     const historyRunId = useAgentStore.getState().runId
     fetchAgentSessionMessages(sessionId, { runLimit: 50 })
       .then((payload) => {
@@ -1033,16 +1095,19 @@ export function AgentPanel({
         setOlderPagination(payload.pagination ? { hasMore: payload.pagination.hasMore, before: payload.pagination.earliestRunStartedAt } : null)
         setForkInfo(payload.fork ? { sessionId, forkedAt: payload.fork.forkedAt } : null)
         const history = payload.messages
-        const activeRunId = payload.activeRunId
+        // The tail run state is read after the messages. If a new run appeared in between,
+        // the observer will load its prompt before attaching the stream.
+        const activeRunId = payload.historyHead && payload.historyHead.latestRunId !== payload.activeRunId ? null : payload.activeRunId
         const live = useAgentStore.getState()
         if (shouldKeepLiveSessionMessages(live.runId, live.phase, live.activeSessionId, sessionId)) {
           // 新会话首次发送会与空历史请求并发；直播态始终比更早发出的历史快照新。
           return
         }
+        if (payload.historyHead) appliedHistory.current = historyRevisionKey(sessionId, payload.historyHead)
         if (activeRunId) {
           // Keep saved tools and changes; a legacy live bus may replay only this attempt.
           restoreActiveRunHistory(history, activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId, payload.activeRunLastSeq)
-          connect(activeRunId, 0)
+          connect(activeRunId, payload.activeRunReplayAfterSeq ?? 0)
         } else {
           useAgentStore.getState().restoreMessages(history, sessionId, payload.todoSnapshot, payload.nextPrompt)
           useAgentStore.getState().setAuthorEnded(payload.authorEnded ?? null)
@@ -1702,6 +1767,7 @@ export function AgentPanel({
                 </button>
               </div>
             ) : null}
+            <Suspense fallback={<LoadingMark className="mx-auto" label="正在载入对话" />}>
             {messages.map((message) => {
               if (message.role === 'user') {
                 // Expanding execution history must not turn internal goal
@@ -1834,6 +1900,7 @@ export function AgentPanel({
                 </AgentProcessRegion>
               )
             })}
+            </Suspense>
             {/* 分支副本尚无新对话：底部分隔线提示可从此继续聊，一发新消息就消失 */}
             {branchContinueVisible ? (
               <div className="flex select-none items-center gap-3 py-1 text-[11px] text-[var(--text-tertiary)]">

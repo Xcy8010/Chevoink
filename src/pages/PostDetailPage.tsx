@@ -131,11 +131,11 @@ export default function PostDetailPage() {
   const comments = detailQuery.data.comments
 
   return (
-    <div className="animate-fade-in-up mx-auto w-full max-w-[720px] xl:mx-0 xl:max-w-none">
+    <div className="mobile-empty-column animate-fade-in-up mx-auto w-full max-w-[720px] xl:mx-0 xl:max-w-none">
       {detailQuery.isError ? <AppStateRefreshNotice retry={detailQuery.refetch} busy={detailQuery.isFetching} /> : null}
-      <div className="grid items-start gap-10 xl:grid-cols-[minmax(0,1fr)_300px]">
+      <div className="mobile-empty-column grid items-start gap-10 xl:grid-cols-[minmax(0,1fr)_300px]">
         {/* 主内容列：返回入口 + 帖子正文 + 评论线程，全部平铺 */}
-        <div className="min-w-0">
+        <div className="mobile-empty-column min-w-0 self-stretch">
           <Link
             to={{ pathname: '/community', search: communitySearch }}
             className="press-feedback -ml-1 inline-flex items-center gap-1 rounded-[var(--radius-pill)] px-1.5 py-1 text-sm text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)]"
@@ -148,7 +148,7 @@ export default function PostDetailPage() {
             <PostCard post={detailQuery.data.post} flat />
           </div>
 
-          <section className="mt-8 border-t border-[var(--border-subtle)] pt-6" aria-label="评论线程">
+          <section className="mobile-empty-column mt-8 border-t border-[var(--border-subtle)] pt-6" aria-label="评论线程">
             <h2 className="flex items-baseline gap-2 text-base font-bold tracking-tight text-[var(--text-primary)]">
               <MessageSquareMore className="h-4 w-4 self-center text-[var(--text-tertiary)]" />
               评论
@@ -177,7 +177,7 @@ export default function PostDetailPage() {
               </div>
             </div>
 
-            <div className="mt-5">
+            <div className="mobile-empty-column mt-5">
               {comments.length > 0 ? (
                 <CommentList
                   comments={comments}

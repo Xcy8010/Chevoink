@@ -18,8 +18,6 @@ const defaultRouteFallback = (
   </div>
 )
 
-const immediateRoutePaths = new Set(['/messages', '/me', '/me/follows', '/me/likes'])
-
 function AppRoutes() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -58,7 +56,7 @@ function AppRoutes() {
               ) : (
                 // Suspense 放在壳内：顶栏/底栏立即可交互，只内容区显示骨架
                 <AppShell title={route.title} description={route.description}>
-                  <Suspense key={immediateRoutePaths.has(route.path) ? route.path : undefined} fallback={route.fallback ?? defaultRouteFallback}>
+                  <Suspense key={route.path} fallback={route.fallback ?? defaultRouteFallback}>
                     {route.element}
                   </Suspense>
                 </AppShell>

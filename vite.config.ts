@@ -15,6 +15,8 @@ export default defineConfig({
         manualChunks: {
           'react-vendor': ['react', 'react-dom', 'react-router-dom'],
           'query-vendor': ['@tanstack/react-query', 'zustand'],
+          // 多个页面复用的图标一起交付，避免手机首次切页时逐个请求微小模块。
+          'icons': ['lucide-react'],
         },
       },
     },

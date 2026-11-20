@@ -1,3 +1,4 @@
+import { agentMarkUrl } from '@/lib/brand-assets'
 import { UserRound } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
@@ -35,7 +36,7 @@ export function CommunityPageLayout({ toolbar, topicRail, children }: CommunityP
       data-community-layout
       data-search-open={searchOpen}
       aria-label="社区讨论"
-      className="mx-auto w-full min-w-0 max-w-[720px]"
+      className="mobile-empty-column mx-auto w-full min-w-0 max-w-[720px]"
     >
       <header ref={ref} data-community-header data-hidden={hidden} onFocusCapture={event => setFocusWithin(event.target.matches(':focus-visible'))} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusWithin(false) }} className="community-reveal-header border-b border-[var(--border-subtle)] md:mb-3 md:border-0">
         <div className="relative grid h-14 grid-cols-[1fr_auto_1fr] items-center gap-2 px-3 md:hidden">
@@ -51,7 +52,7 @@ export function CommunityPageLayout({ toolbar, topicRail, children }: CommunityP
             {user ? <Avatar name={user.nickname} src={user.avatarUrl} size="sm" /> : <UserRound className="h-5 w-5" />}
           </Link>
           <Link data-community-search-chrome to="/" aria-label="启创墨域首页" className="press-feedback grid h-12 w-12 place-items-center rounded-full">
-            <img src="/chevoink-agent.png" alt="" width="46" height="46" className="h-[46px] w-[46px] object-contain" />
+            <img src={agentMarkUrl} alt="" width="46" height="46" className="h-[46px] w-[46px] object-contain" />
           </Link>
           <GlobalSearchBox compact onOpenChange={setSearchOpen} className="justify-self-end" />
         </div>
@@ -62,7 +63,7 @@ export function CommunityPageLayout({ toolbar, topicRail, children }: CommunityP
         {topicRail}
         </div>
       </header>
-      <div data-community-feed-content aria-hidden={searchOpen} ref={node => { if (node) node.inert = searchOpen }}>{children}</div>
+      <div className="mobile-empty-column" data-community-feed-content aria-hidden={searchOpen} ref={node => { if (node) node.inert = searchOpen }}>{children}</div>
     </section>
   )
 }

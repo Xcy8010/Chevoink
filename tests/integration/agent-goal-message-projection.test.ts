@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
+import { listQueuedRequests } from '../../api/lib/agent/request-queue.js'
 import { listLoopSessionMessages } from '../../api/lib/agent/session-messages.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 
@@ -66,6 +67,11 @@ describe.skipIf(!dbAvailable)('goal history ownership (isolated test DB)', () =>
         parts: [{ type: 'text', text: `answer ${index}` }], createdAt: new Date(start + index * 10000 + 3) } })
     }
     const history = await listLoopSessionMessages(user.id, session.id, { runLimit })
+    if (runLimit) {
+      const { items: _items, ...queueHead } = await listQueuedRequests(user.id, session.id)
+      expect(history.historyHead).toEqual(queueHead)
+      expect(history.historyHead?.latestRunId).toBe(runIds[3])
+    }
     const byId = new Map(history.messages.map(item => [item.id, item]))
     expect(messageIds.map(id => byId.get(id)?.goalContinuation)).toEqual([false, true, true, false, false])
     expect(history.messages.filter(item => item.runId !== runIds[3]).every(item => item.goalId === goal.id)).toBe(true)

@@ -5,7 +5,7 @@ import router,{ publicAppReleaseRouter } from '../../api/routes/app-releases.js'
 import { env } from '../../api/config/env.js'
 const mocks=vi.hoisted(()=>({admin:vi.fn(),select:vi.fn(),import:vi.fn(),preview:vi.fn(),execute:vi.fn(),reconcile:vi.fn(),session:vi.fn(),clearSession:vi.fn(),installed:vi.fn(),file:vi.fn(),previewLaunch:vi.fn()}))
 vi.mock('../../api/lib/admin-auth.js',()=>({requireAdmin:mocks.admin,getRequestIp:()=>null}))
-vi.mock('../../api/lib/auth-session.js',()=>({getSessionUserId:()=>null,createSession:mocks.session,clearSession:mocks.clearSession}))
+vi.mock('../../api/lib/auth-session.js',()=>({getSessionUserId:()=>null,bridgeSessionCookies:mocks.session,clearSession:mocks.clearSession}))
 vi.mock('../../api/lib/app-releases.js',()=>({importAppRelease:mocks.import,previewAppRelease:mocks.preview,executeAppRelease:mocks.execute,reconcileAppRelease:mocks.reconcile,selectAppRelease:mocks.select,listAppReleases:vi.fn(),verifyEmailAuthPreviewLaunch:mocks.previewLaunch}))
 vi.mock('../../api/lib/app-release-artifacts.js',()=>({readInstalledAppRelease:mocks.installed,readAppReleaseFile:mocks.file}))
 const app=express();app.set('trust proxy',1);app.use(express.json());app.use('/public',publicAppReleaseRouter);app.use('/admin',router)

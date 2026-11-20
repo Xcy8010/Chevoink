@@ -20,10 +20,10 @@ beforeEach(() => {
   mocks.query.mockResolvedValue([{ id: 'n' }])
   mocks.transaction.mockImplementation(work => work({ $queryRaw: mocks.query,
     agentQueuedRequest: { findUnique: mocks.unique, count: mocks.count, create: mocks.create } }))
-  mocks.owned.mockResolvedValue({ id: 's', novelId: 'n', userId: 'u' })
+  mocks.owned.mockResolvedValue({ id: 's', novelId: 'n', userId: 'u', updatedAt: new Date(0) })
   mocks.find.mockResolvedValue(item)
   mocks.many.mockResolvedValue([item])
-  mocks.latest.mockResolvedValue({ id: 'r', status: 'completed' })
+  mocks.latest.mockResolvedValue({ id: 'r', status: 'completed', updatedAt: new Date(1) })
   // Ordinary queue fixture: no active AgentGoal owns this session.
   mocks.goal.mockResolvedValue(null)
   mocks.count.mockResolvedValue(0)
@@ -94,7 +94,7 @@ describe('durable request queue', () => {
     mocks.find.mockResolvedValue({ ...item, status: 'held' })
     await dispatchQueuedRequests()
     expect(mocks.start).not.toHaveBeenCalled()
-    mocks.latest.mockResolvedValue({ id: 'r', status: 'failed' })
+    mocks.latest.mockResolvedValue({ id: 'r', status: 'failed', updatedAt: new Date(2) })
     expect((await listQueuedRequests('u', 's')).items[0].error).toContain('当前任务已停止')
   })
   it('serializes same-account async operations and releases after rejection', async () => {

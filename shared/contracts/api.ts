@@ -55,6 +55,16 @@ export type ApiFailure = {
 
 export type ApiResponse<T> = ApiSuccess<T> | ApiFailure
 
+export type LoginDevice = {
+  id: string
+  legacyGroup: boolean
+  deviceName: string
+  location: string | null
+  createdAt: string
+  lastActiveAt: string
+  current: boolean
+}
+
 export type AuthTokenPair = {
   accessToken: string
   refreshToken: string
@@ -616,6 +626,8 @@ export const apiEndpointCatalog: ApiEndpointDefinition[] = [
   { method: 'POST', path: '/api/auth/sms/register', summary: '通过手机号验证码注册并建立服务端会话' },
   { method: 'POST', path: '/api/auth/sms/login', summary: '通过手机号验证码登录并建立服务端会话' },
   { method: 'POST', path: '/api/auth/logout', summary: '退出当前服务端会话' },
+  { method: 'GET', path: '/api/auth/devices', summary: '查看当前账号的登录设备' },
+  { method: 'POST', path: '/api/auth/devices/:id/revoke', summary: '验证登录密码后退出指定的其他设备' },
   { method: 'GET', path: '/api/users/me', summary: '当前用户信息与未读统计' },
   { method: 'PATCH', path: '/api/users/me/profile', summary: '更新当前用户的个人信息' },
   { method: 'PATCH', path: '/api/users/me/avatar', summary: '更新当前用户头像' },

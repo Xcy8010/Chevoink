@@ -14,13 +14,15 @@ import {
   clearSession,
   createSession,
   getSessionUserId,
-  revokeUserSessions,
+  requireDeviceIdentity,
+  revokeCurrentDevice,
 } from '../lib/auth-session.js'
 import {
   accountIdentity, findAccountByIdentity, getUserByPhoneData, loginAccountSmsCodeData, loginAccountUserData,
   loginUserData, registerUserData,
 } from '../lib/data-access.js'
 import { DataAccessError } from '../lib/prisma.js'
+import { listDevices, removeDevice } from '../lib/device-session.js'
 import { buildError, buildSuccess, createRequestId } from '../lib/http.js'
 import { parseBody } from '../lib/parse-body.js'
 import { sendRouteError } from '../lib/route-error.js'
@@ -220,14 +222,14 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
     }
     const verified = enabled
       ? await loginAccountUserData('identifier' in body ? accountIdentity(identity) : { phone: normalizePhoneNumber(identity) }, body.password)
-      : null
-    const user = enabled ? verified?.user : await loginUserData(identity, body.password)
-    if (!user) {
+      : await loginUserData(identity, body.password)
+    if (!verified) {
       res.status(401).json(buildError(requestId, 'AUTH_INVALID_CREDENTIALS', enabled ? '邮箱、手机号或密码不正确。' : '手机号或密码不正确。'))
       return
     }
 
-    const tokens = await createSession(user.id, res, verified?.tokenVersion)
+    const { user, tokenVersion } = verified
+    const tokens = await createSession(user.id, res, tokenVersion)
     res.status(200).json(buildSuccess(requestId, { user, tokens }))
   } catch (error) {
     sendRouteError(res, requestId, error)
@@ -266,14 +268,33 @@ router.post('/sms/login', async (req: Request, res: Response): Promise<void> => 
   }
 })
 
+router.get('/devices', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const { userId, deviceId, tokenVersion } = requireDeviceIdentity(req)
+    res.setHeader('Cache-Control', 'private, no-store')
+    res.json(buildSuccess(requestId, { devices: await listDevices(userId, deviceId, tokenVersion) }))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.post('/devices/:id/revoke', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const { userId, deviceId, tokenVersion } = requireDeviceIdentity(req)
+    if (!consumePasswordAttempt('device:' + userId)) throw new DataAccessError(429, 'RATE_LIMITED', '尝试次数过多，请稍后再试。')
+    const { password } = parseBody(z.object({ password: z.string().min(1).max(1024) }), req.body, '请输入当前密码。')
+    await removeDevice(userId, deviceId, req.params.id, password, tokenVersion)
+    res.json(buildSuccess(requestId, { revoked: true }))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
 router.post('/logout', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
 
   try {
-    // 登出即吊销该用户全部 v2 会话令牌（tokenVersion+1），Bearer 通道随之失效
     const userId = getSessionUserId(req)
     if (userId) {
-      await revokeUserSessions(userId)
+      await revokeCurrentDevice(req)
     }
   } catch (error) {
     sendRouteError(res, requestId, error)

@@ -899,7 +899,7 @@ export async function registerEmailUserData(input: {
   return toUser(user)
 }
 
-export async function loginUserData(phone: string, password: string): Promise<User | null> {
+export async function loginUserData(phone: string, password: string) {
   const normalizedPhone = normalizePhoneNumber(ensureNonEmptyText(phone, 'phone'))
   const normalizedPassword = ensureNonEmptyText(password, 'password')
 
@@ -924,7 +924,7 @@ export async function loginUserData(phone: string, password: string): Promise<Us
       .catch(() => {})
   }
 
-  return toUser(user)
+  return { user: toUser(user), tokenVersion: user.tokenVersion }
 }
 
 

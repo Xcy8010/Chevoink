@@ -46,7 +46,7 @@ vi.mock('../../api/lib/agent/runtime-child.js', () => ({ MAIN_RUN_FILTER: { inco
 import { listLoopSessionMessages } from '../../api/lib/agent/session-messages'
 beforeEach(() => {
   vi.clearAllMocks()
-  db.agentSession.findFirst.mockResolvedValue({ id: 'session', forkedFromSessionId: null })
+  db.agentSession.findFirst.mockResolvedValue({ id: 'session', updatedAt: new Date(0), forkedFromSessionId: null })
   db.agentRun.findFirst.mockResolvedValue(null)
   db.agentRun.findMany.mockImplementation(async (query: { where: { runtimeProtocolVersion?: number } }) => query.where.runtimeProtocolVersion === 1 ? [] : [{ id: 'run', runtimeProtocolVersion: 0, taskRootId: null, createdAt: new Date('2026-11-05T00:00:00Z') }])
   db.$transaction.mockImplementation(async (body: (tx: typeof db) => unknown) => body(db))

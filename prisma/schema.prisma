@@ -359,7 +359,24 @@ enum PrivacyLevel {
   mutual
 }
 
+model AccountDeviceSession {
+  id           String    @id @db.VarChar(64)
+  userId       String    @map("user_id") @db.VarChar(64)
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenVersion Int       @map("token_version")
+  deviceName   String    @map("device_name")
+  location     String?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastActiveAt DateTime  @default(now()) @map("last_active_at")
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+
+  @@index([userId, tokenVersion])
+  @@map("account_device_sessions")
+}
+
 model User {
+  deviceSessions             AccountDeviceSession[]
   testerEntitlement TesterEntitlement?
   legalConsents UserLegalConsent[]
   announcementReads SiteAnnouncementRead[]

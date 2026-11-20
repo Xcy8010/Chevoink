@@ -63,7 +63,7 @@ router.get('/sessions/:sessionId/goal-events', async (req, res) => {
   const requestId = createRequestId()
   try {
     const userId = requireSessionUserId(req), sessionId = String(req.params.sessionId)
-    const cursor = parseBody(z.coerce.number().int().nonnegative().max(2_147_483_647), req.query.afterSequence ?? req.headers['last-event-id'] ?? 0, '事件位置无效。')
+    const cursor = parseBody(z.coerce.number().int().nonnegative().max(2_147_483_647), req.headers['last-event-id'] ?? req.query.afterSequence ?? 0, '事件位置无效。')
     // Scope is authenticated before headers. Event IDs never authorize another session.
     const snapshot = await readAgentGoal(userId, sessionId)
     res.setHeader('Content-Type', 'text/event-stream')
@@ -72,13 +72,30 @@ router.get('/sessions/:sessionId/goal-events', async (req, res) => {
     res.setHeader('X-Accel-Buffering', 'no')
     res.flushHeaders()
     res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`)
+    let conversationRevision: string | undefined
     let sequence = cursor, closed = false, reading = false, ticks = 0
     const close = () => { closed = true; clearInterval(timer); if (!res.writableEnded) res.end() }
     const poll = async () => {
       if (closed || reading) return
       reading = true
       try {
-        if (!await prisma.agentSession.findFirst({ where: { id: sessionId, userId }, select: { id: true } })) { close(); return }
+        // One indexed read replaces the ownership probe. No prompt, manuscript or tool output travels in this signal.
+        const [revision] = await prisma.$queryRaw<Array<{ run: string | null; queue: string | null; edited: Date }>>`
+          SELECT s.updated_at AS edited, (SELECT concat(r.id, ':', r.status, ':',
+              CASE WHEN r.status IN ('paused', 'completed', 'cancelled', 'failed') THEN r.updated_at END) FROM agent_runs r
+            WHERE r.session_id = s.id AND r.engine = 'loop' AND NOT EXISTS
+              (SELECT 1 FROM agent_child_execution_grants g WHERE g.child_run_id = r.id AND g.kind = 'inline')
+            ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS run,
+            (SELECT string_agg(concat(q.id, ':', q.revision, ':', q.status), ',' ORDER BY q.sequence)
+             FROM agent_queued_requests q WHERE q.session_id = s.id AND q.status IN ('held', 'pending')) AS queue
+          FROM agent_sessions s WHERE s.id = ${sessionId} AND s.user_id = ${userId}
+        `
+        if (!revision || closed) { close(); return }
+        const key = JSON.stringify([revision.edited, revision.run, revision.queue])
+        if (conversationRevision !== key) {
+          conversationRevision = key
+          res.write('event: conversation\ndata: changed\n\n')
+        }
         const events = await prisma.agentGoalEvent.findMany({ where: { sessionId, sequence: { gt: sequence } }, orderBy: { sequence: 'asc' }, take: 201 })
         if (events.length > 200) {
           sequence = events[events.length - 1].sequence

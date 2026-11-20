@@ -28,31 +28,53 @@ function readEvent(value: AgentGoalEvent | AgentGoalSnapshot | null, eventType: 
 }
 
 /** 目标事件流只投影快照；具体状态更新由 store 按 sequence/stateVersion 判定。 */
-export function useAgentGoalStream(onSnapshot?: GoalSnapshotHandler) {
+export function useAgentGoalStream(onSnapshot?: GoalSnapshotHandler, onConversationChange?: (sessionId: string) => void) {
   const sourceRef = useRef<EventSource | null>(null)
+  const visibilityHandler = useRef<(() => void) | null>(null)
+  const conversationCallback = useRef(onConversationChange)
+  conversationCallback.current = onConversationChange
   const callbackRef = useRef(onSnapshot)
   callbackRef.current = onSnapshot
 
   const disconnect = useCallback(() => {
+    if (visibilityHandler.current) document.removeEventListener('visibilitychange', visibilityHandler.current)
+    visibilityHandler.current = null
     sourceRef.current?.close()
     sourceRef.current = null
   }, [])
 
   const connect = useCallback((sessionId: string, afterSequence = 0) => {
     disconnect()
-    const source = new EventSource(buildAgentGoalStreamUrl(sessionId, afterSequence), { withCredentials: true })
-    sourceRef.current = source
-    const handle = (eventType: string) => (raw: MessageEvent) => {
-      if (sourceRef.current !== source) return
-      const parsed = readEvent(parseSnapshot(raw.data), eventType)
-      if (parsed) callbackRef.current?.(sessionId, parsed.goal, parsed.sequence)
+    let cursor = afterSequence
+    const syncVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        sourceRef.current?.close()
+        sourceRef.current = null
+        return
+      }
+      if (sourceRef.current) return
+      const source = new EventSource(buildAgentGoalStreamUrl(sessionId, cursor), { withCredentials: true })
+      sourceRef.current = source
+      const handle = (eventType: string) => (raw: MessageEvent) => {
+        if (sourceRef.current !== source) return
+        const id = Number(raw.lastEventId)
+        if (Number.isSafeInteger(id) && id > cursor) cursor = id
+        const parsed = readEvent(parseSnapshot(raw.data), eventType)
+        if (parsed) callbackRef.current?.(sessionId, parsed.goal, parsed.sequence)
+      }
+      source.addEventListener('conversation', () => {
+        if (sourceRef.current === source) conversationCallback.current?.(sessionId)
+      })
+      source.addEventListener('snapshot', handle('snapshot'))
+      source.addEventListener('goal', handle('goal'))
+      source.addEventListener('reset', handle('reset'))
+      source.onerror = () => {
+        // EventSource 自带重连与 Last-Event-ID；目标流不能因一次网络断开丢状态。
+      }
     }
-    source.addEventListener('snapshot', handle('snapshot'))
-    source.addEventListener('goal', handle('goal'))
-    source.addEventListener('reset', handle('reset'))
-    source.onerror = () => {
-      // EventSource 自带重连与 Last-Event-ID；目标流不能因一次网络断开丢状态。
-    }
+    visibilityHandler.current = syncVisibility
+    document.addEventListener('visibilitychange', syncVisibility)
+    syncVisibility()
   }, [disconnect])
 
   useEffect(() => disconnect, [disconnect])

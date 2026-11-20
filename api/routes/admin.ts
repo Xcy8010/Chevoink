@@ -34,7 +34,7 @@ import {
 import {
   clearSession,
   createSession,
-  revokeUserSessions,
+  revokeCurrentDevice,
 } from '../lib/auth-session.js'
 import {
   adminChangeMyPasswordData,
@@ -304,7 +304,7 @@ router.post('/auth/login', async (req: Request, res: Response): Promise<void> =>
       verifyAuthCaptchaChallenge(body.captchaId!.trim(), body.captchaAnswer!.trim())
     }
 
-    let result: { userId: string; nickname: string } | null = null
+    let result: Awaited<ReturnType<typeof adminLoginByEmailData>> = null
     if (hasEmail) {
       result = await adminLoginByEmailData(identifier, body.password!)
     } else if (hasPassword) {
@@ -321,7 +321,7 @@ router.post('/auth/login', async (req: Request, res: Response): Promise<void> =>
     }
 
     clearAdminLoginFailures(rateLimitKey)
-    const tokens = await createSession(result.userId, res)
+    const tokens = await createSession(result.userId, res, result.tokenVersion)
     await recordAdminAuditLog({
       adminId: result.userId,
       action: 'admin.login',
@@ -387,13 +387,13 @@ router.post('/logout', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
 
   try {
-    // 登出即吊销该管理员全部 v2 会话令牌
+    // 管理后台退出仅撤销当前设备。
     const admin = await requireAdmin(req).catch((error: unknown) => {
       if (error instanceof DataAccessError && error.status === 401) return null
       throw error
     })
     if (admin) {
-      await revokeUserSessions(admin.id)
+      await revokeCurrentDevice(req)
     }
   } catch (error) {
     sendRouteError(res, requestId, error)

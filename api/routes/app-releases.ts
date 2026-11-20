@@ -3,7 +3,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { appReleaseExecuteSchema, appReleaseIdSchema, appReleasePreviewSchema } from '../../shared/contracts/app-release.js'
 import { requireAdmin, getRequestIp } from '../lib/admin-auth.js'
-import { clearSession, createSession, getSessionUserId } from '../lib/auth-session.js'
+import { bridgeSessionCookies, clearSession, getSessionUserId } from '../lib/auth-session.js'
 import { executeAppRelease, importAppRelease, listAppReleases, previewAppRelease, reconcileAppRelease, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../lib/app-releases.js'
 import { writeAccountEmailAuthPreviewGrant } from '../lib/account-email-auth-scope.js'
 import { env } from '../config/env.js'
@@ -19,7 +19,7 @@ publicAppReleaseRouter.get('/bootstrap',async(req,res)=>{
   const selection=await selectAppRelease(req)
   const userId=getSessionUserId(req)
   // A validated Bearer-only WebView session needs same-origin cookies for module requests.
-  if(selection.mode==='artifact'&&userId&&req.headers.authorization?.startsWith('Bearer ')&&!req.headers.cookie?.includes('chevoink_session='))await createSession(userId,res)
+  if(selection.mode==='artifact'&&userId&&req.headers.authorization?.startsWith('Bearer ')&&!req.headers.cookie?.includes('chevoink_session='))await bridgeSessionCookies(req,res)
   res.setHeader('Cache-Control','private, no-store');res.setHeader('Vary','Cookie, Authorization');res.json(buildSuccess(id,selection))
  }catch(error){sendRouteError(res,id,error)}
 })

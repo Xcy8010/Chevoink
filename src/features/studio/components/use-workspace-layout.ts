@@ -1,6 +1,17 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import { WORK_CONVERSATION_WIDTH_LIMITS, useStudioPanelWidths, type ResizablePanel, type StudioPanelWidths } from '../panel-widths'
 import type { WorkInspectorTab } from './WorkInspector'
+
+// Match the studio's Tailwind lg layout. React only rerenders when crossing
+// the breakpoint, including when rotating a tablet or resizing a desktop.
+function subscribeWidth(notify: () => void) {
+  window.addEventListener('resize', notify)
+  return () => window.removeEventListener('resize', notify)
+}
+
+export function useDesktopStudioLayout() {
+  return useSyncExternalStore(subscribeWidth, () => window.innerWidth >= 1024, () => true)
+}
 
 /** Layout ownership only: preserves storage keys, size limits and collapse semantics. */
 export function useWorkspaceLayout(activeNovelId: string) {

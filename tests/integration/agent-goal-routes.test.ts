@@ -273,6 +273,15 @@ describe.skipIf(!dbAvailable)('agent goal HTTP routes (isolated test DB)', () =>
     expect(stream.body()).not.toContain(otherGoal.id)
     expect(stream.body()).not.toContain(fixture.other.sessionId)
 
+    await stream.waitFor(body => body.includes('event: conversation'))
+    const countChanges = (body: string) => body.split('event: conversation').length - 1
+    const initialChanges = countChanges(stream.body())
+    const pending = await prisma.agentQueuedRequest.create({ data: { id: randomUUID(), sessionId: fixture.owner.sessionId,
+      userId: fixture.owner.userId, payload: { prompt: 'private cross-device queued turn' } } })
+    await stream.waitFor(body => countChanges(body) > initialChanges)
+    expect(stream.body()).not.toContain('private cross-device queued turn')
+    await prisma.agentQueuedRequest.delete({ where: { id: pending.id } })
+
     const paused = await request(app)
       .post(`/api/agent/sessions/${fixture.owner.sessionId}/goals/${ownerGoal.id}/actions`)
       .set('Cookie', cookie(fixture.owner.userId))

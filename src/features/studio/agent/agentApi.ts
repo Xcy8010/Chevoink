@@ -1,6 +1,6 @@
 import { buildApiUrl } from '@/app/api-base'
 import { buildAuthHeader } from '@/lib/auth-token'
-import type { AgentQueueAction, AgentQueueSnapshot, EnqueueAgentRequest } from '../../../../shared/contracts/agent-queue.js'
+import type { AgentHistoryHead, AgentQueueAction, AgentQueueSnapshot, EnqueueAgentRequest } from '../../../../shared/contracts/agent-queue.js'
 import type {
   AgentNextPrompt,
   AgentSession,
@@ -158,7 +158,7 @@ export type AgentAuthorEndedPayload = { fulfilled: boolean; todoItems?: AgentTod
 /** 分支溯源：非空说明本任务是副本，forkedAt 之后的对话属于分支内新增 */
 export type AgentSessionForkInfo = { forkedFromSessionId: string; forkedFromMessageId: string | null; forkedAt: string | null }
 
-type AgentSessionMessagesResponse = { messages: AgentUIMessage[]; activeRunId: string | null; activeRunLastSeq?: number; runGoalId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; outcome?: import('../../../../shared/contracts/models.js').AgentRunOutcome; nextPrompt?: AgentNextPrompt; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }
+type AgentSessionMessagesResponse = { historyHead?: AgentHistoryHead; messages: AgentUIMessage[]; activeRunId: string | null; activeRunLastSeq?: number; activeRunReplayAfterSeq?: number; runGoalId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; outcome?: import('../../../../shared/contracts/models.js').AgentRunOutcome; nextPrompt?: AgentNextPrompt; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }
 
 export function fetchAgentSessionMessages(
   sessionId: string,
@@ -189,8 +189,8 @@ export function searchAgentSessions(query: string, signal?: AbortSignal): Promis
 export function enqueueAgentRequest(input: EnqueueAgentRequest): Promise<{ id: string }> {
   return requestData('/api/agent/queue', { method: 'POST', body: JSON.stringify(input) })
 }
-export function fetchAgentQueue(sessionId: string): Promise<AgentQueueSnapshot> {
-  return requestData(`/api/agent/sessions/${sessionId}/queue`)
+export function fetchAgentQueue(sessionId: string, signal?: AbortSignal): Promise<AgentQueueSnapshot> {
+  return requestData(`/api/agent/sessions/${sessionId}/queue`, { signal })
 }
 export function actOnAgentQueue(sessionId: string, id: string, action: AgentQueueAction, revision: number, prompt?: string): Promise<{ session?: AgentSession }> {
   return requestData(`/api/agent/sessions/${sessionId}/queue/${id}`, { method: 'POST', body: JSON.stringify({ action, revision, prompt }) })

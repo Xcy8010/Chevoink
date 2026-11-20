@@ -28,6 +28,7 @@ import usersRoutes from './routes/users.js'
 import creditsRoutes from './routes/credits.js'
 import localModelConnectorRoutes from './routes/local-model-connector.js'
 import { env } from './config/env.js'
+import { guardDeviceStreams } from './lib/device-stream-lifetime.js'
 import { getSessionUserId, markSessionUnavailable, resolveSessionGate } from './lib/auth-session.js'
 import { accountAccessGuard } from './lib/account-access.js'
 import { resolveEmailAuthPreview } from './lib/app-releases.js'
@@ -112,6 +113,7 @@ app.use('/api/app-releases', publicAppReleaseRouter)
 app.use('/api/admin/app-releases', appReleaseRoutes)
 app.use('/api', accountAccessGuard)
 app.use('/api', appReleaseCapabilityGuard)
+app.get(['/api/agent/runs/:runId/stream', '/api/agent/sessions/:sessionId/goal-events'], guardDeviceStreams)
 app.use('/api/agent', agentRoutes)
 app.use('/api/admin/site-content', siteContentRoutes)
 app.use('/api/site-content', publicSiteContentRouter)

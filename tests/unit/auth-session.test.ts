@@ -82,6 +82,15 @@ describe('v2 会话令牌', () => {
   })
 })
 
+describe('device-bound signing', () => {
+  it('signs the device, account, credential kind and account version together', () => {
+    const tokens = buildSessionTokens(USER_ID, TOKEN_VERSION, 'phone-fixture')
+    expect(verifySessionToken(tokens.accessToken, 'access')).toEqual({ userId: USER_ID, tokenVersion: TOKEN_VERSION, deviceId: 'phone-fixture' })
+    expect(verifySessionToken(tokens.refreshToken, 'access')).toBeNull()
+    expect(verifySessionToken(tokens.accessToken.replace('phone-fixture', 'desktop-fixture'), 'access')).toBeNull()
+  })
+})
+
 describe('v1 存量令牌双读兼容', () => {
   it('合法 v1 令牌按 access 语义读取，tokenVersion 为 null', () => {
     const expiresAt = Math.floor(Date.now() / 1000) + 3600

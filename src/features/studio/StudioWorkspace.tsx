@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ComponentProps } from 'react'
 import { hasComposerDraft, promoteComposerDraft } from './agent/composer-drafts'
@@ -20,13 +20,12 @@ import FeedbackDialog from '@/features/feedback/components/FeedbackDialog'
 import { parseTagsText } from '@/lib/novel-tags'
 import { cn } from '@/lib/utils'
 import { DEFAULT_AGENT2_FEATURE_FLAGS } from '../../../shared/contracts/index.js'
-import type { AgentSession, AgentStreamEvent, Chapter, CoverAsset, FeedbackKind, Novel, StudioPayload, UserMePayload, Visibility } from '../../../shared/contracts/index.js'
+import type { AgentSession, AgentStreamEvent, AgentUIMessage, Chapter, CoverAsset, FeedbackKind, Novel, StudioPayload, UserMePayload, Visibility } from '../../../shared/contracts/index.js'
 import { getMissingNovelPublishFields, isNovelPublicationTransition, NOVEL_PUBLISH_FIELDS, NOVEL_PUBLISH_METADATA_REQUIRED, type NovelPublishField } from '../../../shared/contracts/novel-publish.js'
 import { createWritingAgentSession, createNovelWorkspace, createChapterDraft, deleteNovelWorkspace, deleteChapterDraft, getChapterContent, getStudioPayload, getWritingAgentSessionHistory, listNovelPlanFiles, listWritingAgentSessions, publishNovelWorkspace, updateChapterDraft, updateWritingAgentSession, updateNovelMeta } from './api'
 import { downloadCoverAssetImage } from './cover-image'
 import { getMe } from '../community/api'
 import ChapterSettingsPanel from './components/ChapterSettingsPanel'
-import ChapterSidebar from './components/ChapterSidebar'
 import VolumeSettingsDialog from './components/VolumeSettingsDialog'
 import ChangeSetDrawer from './components/ChangeSetDrawer'
 import PlanSettingsPanel from './components/PlanSettingsPanel'
@@ -34,9 +33,8 @@ import CreatePlanDialog from './components/CreatePlanDialog'
 import { StudioSkeleton } from '@/components/ui/Skeleton'
 import ConfirmDialog from './components/ConfirmDialog'
 import CoverPanel from './components/CoverPanel'
-import EditorCanvas from './components/EditorCanvas'
 import ExportDialog from './components/ExportDialog'
-import ImportDialog from './components/ImportDialog'
+import LoadingMark from '@/components/ui/LoadingMark'
 import { useImportCapabilities } from './components/use-import-capabilities'
 import { readImportHandoff, readImportJobId, clearImportHandoff, type ImportAgentAttachment } from './lib/import-handoff'
 import type { NovelImportModelSelection } from '../../../shared/contracts/novel-import.js'
@@ -51,21 +49,15 @@ import StudioMobileHeader from './components/StudioMobileHeader'
 import StudioMobileNavigation from './components/StudioMobileNavigation'
 import StudioMobileMenu from './components/StudioMobileMenu'
 import CreateNovelDialog from './components/CreateNovelDialog'
-import StudioWorkspaceSidebar from './components/StudioWorkspaceSidebar'
 import { AgentConversationRail } from './components/AgentTaskSidebar'
-import StudioSettingsDialog, { type StudioSettingsSection } from './components/StudioSettingsDialog'
+import type { StudioSettingsSection } from './components/StudioSettingsDialog'
 import { agentPersonalizationQueryKey } from './personalization-api'
-import WorkPerspective from './components/WorkPerspective'
 import WorkInspector from './components/WorkInspector'
 import IdePerspective from './components/IdePerspective'
 import IdeNavigationRail from './components/IdeNavigationRail'
-import StudioChapterViewer from './components/StudioChapterViewer'
-import MemoryGraph from './components/MemoryGraph'
-import SkillsPanel from './components/SkillsPanel'
 import { AgentPanel } from './agent/components/AgentPanel'
 import { fetchAgentSessions, updateAgentSessionSettings } from './agent/agentApi'
 import { AgentActivityBar } from './agent/components/AgentActivityBar'
-import AgentMemoryCenter from './agent/components/AgentMemoryCenter'
 import ContextDetailDialog from './agent/components/ContextDetailDialog'
 import { WORKSPACE_WRITE_TOOLS, useAgentStore, type ComposerReference } from './agent/agentStore'
 import { selectAgentActivityRunActive, selectAgentGoalView } from './agent/goal-selectors'
@@ -88,7 +80,7 @@ import { consumeSessionDeepLink, initialTaskWindows, selectInitialTask, selectTa
 import { createCatalogActions } from './components/catalog-actions'
 import { useChapterPersistence } from './components/use-chapter-persistence'
 import { useWorkspaceNovelTransition } from './components/use-workspace-novel-transition'
-import { useWorkspaceLayout } from './components/use-workspace-layout'
+import { useDesktopStudioLayout, useWorkspaceLayout } from './components/use-workspace-layout'
 import { useCoverActions } from './components/use-cover-actions'
 import { usePlanSync } from './components/use-plan-sync'
 import { createPlanDocumentActions } from './components/plan-document-actions'
@@ -97,7 +89,20 @@ import { openWorkDocument } from './components/work-viewer-events'
 import { adoptChapterResult, canApplyChapterSnapshot, claimWorkspaceStreamEvent, isReviewStreamReplay, isStaleChapterReview, isWorkspaceStreamOwnerCurrent, type ReviewStreamCursor } from './components/chapter-stream-handoff'
 import { useChapterSnapshot } from './components/use-chapter-snapshot'
 
+const AgentMemoryCenter = lazy(() => import('./agent/components/AgentMemoryCenter'))
+const MemoryGraph = lazy(() => import('./components/MemoryGraph'))
+const SkillsPanel = lazy(() => import('./components/SkillsPanel'))
+const EditorCanvas = lazy(() => import('./components/EditorCanvas'))
+const ChapterSidebar = lazy(() => import('./components/ChapterSidebar'))
+const StudioWorkspaceSidebar = lazy(() => import('./components/StudioWorkspaceSidebar'))
+const WorkPerspective = lazy(() => import('./components/WorkPerspective'))
+const StudioChapterViewer = lazy(() => import('./components/StudioChapterViewer'))
+const ImportDialog = lazy(() => import('./components/ImportDialog'))
+const StudioSettingsDialog = lazy(() => import('./components/StudioSettingsDialog'))
+const dialogLoading = <LoadingMark className="fixed inset-0 z-[90] grid place-items-center bg-[var(--surface-default)]" />
+
 export default function StudioWorkspace() {
+  const desktopLayout = useDesktopStudioLayout()
   const { novelId } = useParams()
   const navigate = useNavigate()
   const toast = useToast()
@@ -136,7 +141,8 @@ export default function StudioWorkspace() {
     queryKey: ['agent', 'sessions', 'workspace-navigation'],
     queryFn: () => fetchAgentSessions(),
     staleTime: 15_000,
-    refetchOnWindowFocus: false,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
   })
 
   const [currentNovel, setCurrentNovel] = useState<Novel | null>(null)
@@ -218,7 +224,7 @@ export default function StudioWorkspace() {
     ideSidebarTab, setIdeSidebarTab, ideAgentOpen, setIdeAgentOpen,
     panelWidths, beginPanelResize,
   } = useWorkspaceLayout(activeNovelId)
-  const [studioSettingsOpen, setStudioSettingsOpen] = useState(false)
+  const [studioSettingsOpen, setStudioSettingsOpen] = useState<boolean | null>(null)
   const [studioSettingsSection, setStudioSettingsSection] = useState<StudioSettingsSection>('general')
   const featureFlags = studioQuery.data?.featureFlags ?? DEFAULT_AGENT2_FEATURE_FLAGS
   const workspaceActivities = useAgentStore((state) => state.workspaceActivities)
@@ -246,11 +252,17 @@ export default function StudioWorkspace() {
   const platformCapabilities = useMemo(() => getPlatformCapabilities(), [])
   const [agentPrompt, setAgentPrompt] = useState('')
   // 惰性初始化：从快照同步恢复当前会话 id，避免跨路由返回时 AgentPanel 先以 null 挂载冲掉进行中的任务直播
-  const [agentSessionId, setAgentSessionId] = useState<string | null>(() => {
-    const snapshot = readStoredAgentWorkspace(activeNovelId)
-    const initialTask = selectInitialTask(snapshot?.tasks ?? [], snapshot?.activeTaskId, searchParams.get('session'))
-    return initialTask?.sessionId ?? null
-  })
+  // The same snapshot contains every task's artifacts. Parse it once for the
+  // initial state and hand it to the first hydration effect.
+  const mountSnapshot = useRef<{ novelId: string; data: StoredAgentWorkspaceSnapshot | null } | null | undefined>(undefined)
+  if (mountSnapshot.current === undefined) {
+    mountSnapshot.current = { novelId: activeNovelId, data: readStoredAgentWorkspace(activeNovelId) }
+  }
+  const mountData = mountSnapshot.current?.data
+  const mountSession = searchParams.get('session')
+  const [agentSessionId, setAgentSessionId] = useState<string | null>(() =>
+    selectInitialTask(mountData?.tasks ?? [], mountData?.activeTaskId, mountSession)?.sessionId ?? null,
+  )
   const agentGoalView = selectAgentGoalView({ goal: agentGoal, goalSessionId: agentGoalSessionId, sessionId: agentSessionId, runId: agentRunId, phase: agentPhase, runGoalId: agentRunGoalId })
   const activityRunActive = selectAgentActivityRunActive(agentGoalView, agentPhase)
   // 会话解析中：切换作品/首载时任务窗口的 sessionId 需等服务端会话列表合并后才能定案，
@@ -260,15 +272,12 @@ export default function StudioWorkspace() {
   const [sessionResolutionAttempt, setSessionResolutionAttempt] = useState(0)
   // 任务窗口同样从快照惰性恢复：挂载即落在该作品上次活跃的任务窗口，
   // 避免初始空窗口先触发快照写入效应清掉存档、或界面闪现「新任务」
-  const [agentTaskWindows, setAgentTaskWindows] = useState<AgentTaskWindowState[]>(() => {
-    const snapshot = readStoredAgentWorkspace(activeNovelId)
-    return initialTaskWindows(snapshot?.tasks ?? [], searchParams.get('session'), createLocalAgentTaskWindow)
-  })
-  const [activeAgentTaskWindowId, setActiveAgentTaskWindowId] = useState<string | null>(() => {
-    const snapshot = readStoredAgentWorkspace(activeNovelId)
-    const initialTask = selectInitialTask(snapshot?.tasks ?? [], snapshot?.activeTaskId, searchParams.get('session'))
-    return initialTask?.id ?? null
-  })
+  const [agentTaskWindows, setAgentTaskWindows] = useState<AgentTaskWindowState[]>(() =>
+    initialTaskWindows(mountData?.tasks ?? [], mountSession, createLocalAgentTaskWindow),
+  )
+  const [activeAgentTaskWindowId, setActiveAgentTaskWindowId] = useState<string | null>(() =>
+    selectInitialTask(mountData?.tasks ?? [], mountData?.activeTaskId, mountSession)?.id ?? null,
+  )
   // 作者回到任务窗口即清除该窗口的未读信号（绿/黄/红点），无论从同作品还是跨作品路径切入
   const dismissSessionSignal = useAgentStore((state) => state.dismissSessionSignal)
   useEffect(() => {
@@ -729,7 +738,10 @@ export default function StudioWorkspace() {
     const requestedSessionId = searchParams.get('session')
     // 侧栏在其它作品点「新建对话/新建任务」会带 ?session=new 跳过来：置顶一个干净的新对话窗口
     const requestNewTask = requestedSessionId === 'new'
-    const snapshot = readStoredAgentWorkspace(activeNovelId)
+    const snapshot = mountSnapshot.current?.novelId === activeNovelId
+      ? mountSnapshot.current.data
+      : readStoredAgentWorkspace(activeNovelId)
+    mountSnapshot.current = null
     const storedTasks = initialTaskWindows(snapshot?.tasks ?? [], requestedSessionId, createLocalAgentTaskWindow)
     const freshTaskWindow = requestNewTask ? createLocalAgentTaskWindow() : null
     const snapshotTasks = freshTaskWindow ? [freshTaskWindow, ...storedTasks] : storedTasks
@@ -1206,7 +1218,7 @@ export default function StudioWorkspace() {
       // 失效的 selectedChapterId 会让后续发送在后端报章节 404，
       // 此前前端把它误判成会话删除而清空整段对话（P0 数据丢失事故根因）
       const currentChapterId = selectedChapterIdStateRef.current
-      if (currentChapterId && !payload.chapters.some((chapter) => chapter.id === currentChapterId)) {
+      if (currentChapterId && !chapterDirtyRef.current && !payload.chapters.some((chapter) => chapter.id === currentChapterId)) {
         const fallbackChapter = payload.chapters[0] ?? null
         setSelectedChapterId(fallbackChapter?.id ?? null)
         setSelectedTreeItemId(fallbackChapter ? `chapter:${fallbackChapter.id}` : 'catalog')
@@ -1249,6 +1261,21 @@ export default function StudioWorkspace() {
       if (throwOnError) throw error
     }
   }, [activeNovelId, queryClient, syncStudioPayload])
+
+  // A turn can finish on a second device before we attach to its stream.
+  const refreshCompletedRemoteWrites = useCallback((messages: AgentUIMessage[]) => {
+    let wrote = false
+    for (const message of messages) {
+      for (const part of message.parts) {
+        if (part.type !== 'tool-call' || part.status !== 'success' || !WORKSPACE_WRITE_TOOLS.has(part.toolName)) continue
+        wrote = true
+        if (part.display && 'chapterId' in part.display && typeof part.display.chapterId === 'string') {
+          agentChangedChapterIdsRef.current.add(part.display.chapterId)
+        }
+      }
+    }
+    if (wrote) void refreshWorkspaceAfterAgentWrite()
+  }, [refreshWorkspaceAfterAgentWrite])
 
   const deletedNovelCleanupRef = useRef(handleNovelDeletedFromSidebar)
   deletedNovelCleanupRef.current = handleNovelDeletedFromSidebar
@@ -3923,6 +3950,7 @@ export default function StudioWorkspace() {
           ensureSession={ensureAgentLoopSession}
           onGoalSessionCreated={handleGoalSessionCreated}
           onStreamEvent={handleAgentStreamEvent}
+          onRemoteTurnCompleted={refreshCompletedRemoteWrites}
           pendingReviewCount={pendingChapterReviews.length + (pendingPlanReview ? 1 : 0)}
           reviewBusy={pendingChapterReviewBusy || pendingPlanReviewBusy}
           onApproveAllReviews={handleApproveAllPendingReviews}
@@ -4122,7 +4150,7 @@ export default function StudioWorkspace() {
         data-visual-viewport={platformCapabilities.visualViewport ? 'supported' : 'fallback'}
       >
         {studioQuery.isRefetchError ? <AppStateRefreshNotice retry={studioQuery.refetch} busy={studioQuery.isFetching} /> : null}
-        <div className="flex min-h-0 flex-1 flex-col lg:hidden">
+        {!desktopLayout && <div className="flex min-h-0 flex-1 flex-col lg:hidden">
           <StudioMobileHeader
             view={mobileView}
             navigationOpen={mobileMoreOpen}
@@ -4137,6 +4165,7 @@ export default function StudioWorkspace() {
             }}
           />
           <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]">
+            <Suspense fallback={<LoadingMark className="m-auto" label="正在打开创作面板" />}>
 
             {mobileView === 'editor' ? (
               <div className="flex min-h-0 flex-1 flex-col">
@@ -4189,11 +4218,10 @@ export default function StudioWorkspace() {
               </div>
             ) : null}
 
-            {mobileView === 'assistant' ? (
-              <div className="relative z-20 flex min-h-0 flex-1 flex-col overflow-visible">
-                {renderWritingAgent(undefined, false, 'inline', true, true)}
-              </div>
-            ) : null}
+            {/* Keep the one mobile conversation connected while the author edits. */}
+            <div className={cn('relative z-20 min-h-0 flex-1 flex-col overflow-visible', mobileView === 'assistant' ? 'flex' : 'hidden')}>
+              {renderWritingAgent(undefined, false, 'inline', true, true)}
+            </div>
 
             {mobileView === 'memory' && featureFlags.memory2 ? (
               <div className="min-h-0 flex-1 overflow-hidden border-t border-[var(--border-subtle)]">
@@ -4238,6 +4266,7 @@ export default function StudioWorkspace() {
                 />
               </div>
             ) : null}
+            </Suspense>
           </div>
 
           <StudioMobileNavigation
@@ -4320,9 +4349,9 @@ export default function StudioWorkspace() {
                 ]}
             />}
           </StudioMobileNavigation>
-        </div>
+        </div>}
 
-        <div className="hidden min-h-0 flex-1 lg:flex">
+        {desktopLayout && <Suspense fallback={<StudioSkeleton />}><div className="hidden min-h-0 flex-1 lg:flex">
           {workspacePerspective === 'work' ? <StudioWorkspaceSidebar
             open={workspaceSidebarOpen}
             onOpenChange={setWorkspaceSidebarOpen}
@@ -4592,31 +4621,6 @@ export default function StudioWorkspace() {
             )}
             </div>
           </div>
-          <StudioSettingsDialog
-            open={studioSettingsOpen}
-            section={studioSettingsSection}
-            onSectionChange={setStudioSettingsSection}
-            onClose={() => setStudioSettingsOpen(false)}
-            onOpenImportHistory={importHistoryAvailable ? () => { setStudioSettingsOpen(false); openImportHistory() } : undefined}
-            perspective={workspacePerspective}
-            onPerspectiveChange={setWorkspacePerspective}
-            autoFollow={autoFollow}
-            onAutoFollowChange={setAutoFollow}
-            novelId={activeNovelId}
-            novels={novelOptions}
-            sessionId={agentSessionId}
-            taskTitle={activeAgentTaskWindow?.title ?? null}
-            draftScopeKey={taskUiScope}
-            chapterId={selectedChapterId}
-            runIds={agentArtifacts.map((artifact) => artifact.runId).filter((runId): runId is string => Boolean(runId))}
-            onSelectSession={(sessionId) => {
-              setStudioSettingsOpen(false)
-              void handleSelectAgentTaskWindow(sessionId)
-            }}
-            onTaskForked={handleAgentTaskForked}
-            onTaskArchived={handleAgentTaskArchived}
-          />
-
           {activeToolPanel === 'meta' ? (
             <div className="fixed inset-0 z-[90] hidden bg-[rgba(15,23,42,0.18)] md:block" onClick={() => setActiveToolPanel(null)}>
               <div className="absolute inset-y-4 right-4 max-h-[48rem] w-[29rem] max-w-[calc(100vw-2rem)]" onClick={(event) => event.stopPropagation()}>
@@ -4625,7 +4629,35 @@ export default function StudioWorkspace() {
             </div>
           ) : null}
           </div>
-        </div>
+        </div></Suspense>}
+        {studioSettingsOpen !== null && (
+          <Suspense fallback={dialogLoading}>
+            <StudioSettingsDialog
+              open={studioSettingsOpen}
+              section={studioSettingsSection}
+              onSectionChange={setStudioSettingsSection}
+              onClose={() => setStudioSettingsOpen(false)}
+              onOpenImportHistory={importHistoryAvailable ? () => { setStudioSettingsOpen(false); openImportHistory() } : undefined}
+              perspective={workspacePerspective}
+              onPerspectiveChange={setWorkspacePerspective}
+              autoFollow={autoFollow}
+              onAutoFollowChange={setAutoFollow}
+              novelId={activeNovelId}
+              novels={novelOptions}
+              sessionId={agentSessionId}
+              taskTitle={activeAgentTaskWindow?.title ?? null}
+              draftScopeKey={taskUiScope}
+              chapterId={selectedChapterId}
+              runIds={agentArtifacts.map((artifact) => artifact.runId).filter((runId): runId is string => Boolean(runId))}
+              onSelectSession={(sessionId) => {
+                setStudioSettingsOpen(false)
+                void handleSelectAgentTaskWindow(sessionId)
+              }}
+              onTaskForked={handleAgentTaskForked}
+              onTaskArchived={handleAgentTaskArchived}
+            />
+          </Suspense>
+        )}
         {activeToolPanel === 'cover' ? renderCoverToolPanel(true) : null}
       </div>
 
@@ -4722,45 +4754,49 @@ export default function StudioWorkspace() {
         event.target.value = ''
         if (picked && taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId, autoFile: picked })
       }} />
-      {importRequest?.novelId === activeNovelId && importRequest.userId === taskUiUserId ? <ImportDialog
-        open
-        novelId={activeNovelId}
-        novelTitle={novelForm?.title ?? currentNovel.title}
-        currentMetadata={{ title: currentNovel.title, summary: currentNovel.summary, tags: currentNovel.tags }}
-        modelSelection={importModel?.novelId === activeNovelId && importModel.selection ? importModel.selection : { kind: 'basic' }}
-        agentAttachment={importRequest.attachment}
-        autoFile={importRequest.autoFile ?? null}
-        initialJobId={importRequest.jobId}
-        initialView={importRequest.view}
-        beforeImport={async () => {
-          if (importCapabilities.data?.aiEnabled && (importModel?.novelId !== activeNovelId || !importModel.selection)) throw new Error('请先在当前作品打开 Agent 输入框并确认模型选择。')
-          if (chapterSaveState === 'saving' || novelSaveState === 'saving') throw new Error('当前修改正在保存，请稍后重试。')
-          if (chapterDirty) {
-            await persistChapter('manual')
-            // Persistence may return without saving for pending review/validation/in-flight writes.
-            // Ask for a second explicit attempt after React receives the authoritative saved state.
-            throw new Error('已尝试保存当前章节，请确认保存成功后重新打开导入。未保存的内容不会被覆盖。')
-          }
-          if (novelDirty) {
-            await saveNovelMutation.mutateAsync({ reason: 'manual' })
-            throw new Error('作品设置已保存，请重新打开导入以核对最新内容。')
-          }
-          return true
-        }}
-        onClose={() => setImportRequest(null)}
-        onImported={async (receipt) => {
-          await refreshWorkspaceAfterAgentWrite()
-          if (currentNovelStateRef.current?.id !== receipt.novelId) return
-          if (receipt.firstChapterId) {
-            setSelectedChapterId(receipt.firstChapterId)
-            setSelectedTreeItemId(`chapter:${receipt.firstChapterId}`)
-            setChapterDraft(null)
-            setWorkViewer('chapter')
-          }
-        }}
-        onRestored={() => refreshWorkspaceAfterAgentWrite()}
-          onViewChapter={handleSelectWorkChapter}
-      /> : null}
+      {importRequest?.novelId === activeNovelId && importRequest.userId === taskUiUserId ? (
+        <Suspense fallback={dialogLoading}>
+          <ImportDialog
+            open
+            novelId={activeNovelId}
+            novelTitle={novelForm?.title ?? currentNovel.title}
+            currentMetadata={{ title: currentNovel.title, summary: currentNovel.summary, tags: currentNovel.tags }}
+            modelSelection={importModel?.novelId === activeNovelId && importModel.selection ? importModel.selection : { kind: 'basic' }}
+            agentAttachment={importRequest.attachment}
+            autoFile={importRequest.autoFile ?? null}
+            initialJobId={importRequest.jobId}
+            initialView={importRequest.view}
+            beforeImport={async () => {
+              if (importCapabilities.data?.aiEnabled && (importModel?.novelId !== activeNovelId || !importModel.selection)) throw new Error('请先在当前作品打开 Agent 输入框并确认模型选择。')
+              if (chapterSaveState === 'saving' || novelSaveState === 'saving') throw new Error('当前修改正在保存，请稍后重试。')
+              if (chapterDirty) {
+                await persistChapter('manual')
+                // Persistence may return without saving for pending review/validation/in-flight writes.
+                // Ask for a second explicit attempt after React receives the authoritative saved state.
+                throw new Error('已尝试保存当前章节，请确认保存成功后重新打开导入。未保存的内容不会被覆盖。')
+              }
+              if (novelDirty) {
+                await saveNovelMutation.mutateAsync({ reason: 'manual' })
+                throw new Error('作品设置已保存，请重新打开导入以核对最新内容。')
+              }
+              return true
+            }}
+            onClose={() => setImportRequest(null)}
+            onImported={async (receipt) => {
+              await refreshWorkspaceAfterAgentWrite()
+              if (currentNovelStateRef.current?.id !== receipt.novelId) return
+              if (receipt.firstChapterId) {
+                setSelectedChapterId(receipt.firstChapterId)
+                setSelectedTreeItemId(`chapter:${receipt.firstChapterId}`)
+                setChapterDraft(null)
+                setWorkViewer('chapter')
+              }
+            }}
+            onRestored={() => refreshWorkspaceAfterAgentWrite()}
+              onViewChapter={handleSelectWorkChapter}
+          />
+        </Suspense>
+      ) : null}
       {volumeSettings?.novelId === activeNovelId && volumeSettings.epoch === workspaceOwnerRef.current.epoch ? <VolumeSettingsDialog
         key={`${volumeSettings.novelId}:${volumeSettings.volumeId}:${volumeSettings.epoch}`}
         open

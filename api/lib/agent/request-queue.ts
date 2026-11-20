@@ -11,6 +11,7 @@ import { readHumanAdmission, withHumanAdmission } from './goal-activation-author
 import { bindCurrentTaskGoalConsent, goalConsentSchema } from './goal-consent.js'
 import { bindConfigurationConsent, configurationConsentSchema } from './configuration-journal.js'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
+import { sessionHistoryHead } from './session-history-head.js'
 import { fallbackSessionTitle } from './session-title.js'
 
 const editable = ['pending', 'held']
@@ -20,14 +21,14 @@ async function ownedSession(userId: string, sessionId: string) {
   if (!session) throw new DataAccessError(404, 'NOT_FOUND', '会话不存在或无权访问。')
   return session
 }
-const latestRun = (sessionId: string) => prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId, engine: 'loop' }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true, status: true } })
+const latestRun = (sessionId: string) => prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId, engine: 'loop' }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true, status: true, updatedAt: true } })
 
 export function queueCanDispatch(status: string | undefined, priority: number): boolean {
   return !status || status === 'completed' || (priority > 0 && ['paused', 'failed', 'cancelled'].includes(status))
 }
 
 export async function listQueuedRequests(userId: string, sessionId: string): Promise<AgentQueueSnapshot> {
-  await ownedSession(userId, sessionId)
+  const session = await ownedSession(userId, sessionId)
   const [rows, latest] = await Promise.all([
     prisma.agentQueuedRequest.findMany({ where: { userId, sessionId, status: { in: editable } }, orderBy: [{ priority: 'desc' }, { sequence: 'asc' }] }),
     latestRun(sessionId),
@@ -49,7 +50,7 @@ export async function listQueuedRequests(userId: string, sessionId: string): Pro
       return { id: row.id, sessionId, prompt: input.prompt, attachmentCount: input.attachments?.length ?? 0, status: row.status, revision: row.revision,
         error: endedConsent ? '原任务已结束，目标模式尚未登记；请求已保留，请先处理原任务。' : row.error ?? (!queueCanDispatch(latest?.status, row.priority) && ['paused', 'failed', 'cancelled'].includes(latest?.status ?? '') ? '当前任务已停止；可继续原任务，或调整方向发送此需求。' : null) }
     }),
-    latestRunId: latest?.id ?? null,
+    ...sessionHistoryHead(session.updatedAt, latest),
   }
 }
 

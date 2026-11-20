@@ -1,9 +1,11 @@
 import type { Request, Response } from 'express'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const joinedRead = vi.hoisted(() => vi.fn())
+const device = vi.hoisted(() => ({ findUnique: vi.fn(), updateMany: vi.fn() }))
 const db = vi.hoisted(() => ({ findUnique: vi.fn(), update: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', async importOriginal => ({
-  ...await importOriginal<typeof import('../../api/lib/prisma.js')>(), prisma: { user: db },
+  ...await importOriginal<typeof import('../../api/lib/prisma.js')>(), prisma: { user: db, accountDeviceSession: device, $queryRaw: joinedRead },
 }))
 import { buildSessionTokens, createSession, evictUserBanCache, getPublicSessionUserId, getSessionUserId, getUserAuthState, readUserAuthState, requireSessionUserId, resolveSessionGate, revokeUserSessions } from '../../api/lib/auth-session.js'
 
@@ -22,6 +24,8 @@ beforeEach(() => {
   evictUserBanCache(userId)
   db.findUnique.mockResolvedValue({ bannedAt: null, tokenVersion: 3 })
   db.update.mockResolvedValue({})
+  device.findUnique.mockResolvedValue({ userId, tokenVersion: 3, lastActiveAt: new Date(), expiresAt: new Date(Date.now() + 60_000) })
+  device.updateMany.mockResolvedValue({ count: 1 })
   vi.spyOn(console, 'warn').mockImplementation(() => {})
 })
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); evictUserBanCache(userId) })
@@ -97,6 +101,28 @@ describe('R03 authentication unavailable is not authenticated', () => {
       expect(requireSessionUserId(req)).toBe(userId)
       expect(res.append).toHaveBeenCalledTimes(channel === 'refresh-cookie' ? 2 : 0)
     }
+  })
+  it('authorizes a recent v3 session in one indexed read without an activity write', async () => {
+    const deviceId = 'desktop-fixture'
+    const tokens = buildSessionTokens(userId, 3, deviceId)
+    const req = { headers: { authorization: 'Bearer ' + tokens.accessToken } } as Request
+    joinedRead.mockResolvedValue([{ userId, tokenVersion: 3, accountVersion: 3, revokedAt: null, bannedAt: null,
+      lastActiveAt: new Date(), expiresAt: new Date(Date.now() + 60000), phone: null, email: null, emailVerifiedAt: null }])
+    await resolveSessionGate(req, response())
+    expect(requireSessionUserId(req)).toBe(userId)
+    expect(joinedRead).toHaveBeenCalledOnce()
+    expect(db.findUnique).not.toHaveBeenCalled()
+    expect(device.updateMany).not.toHaveBeenCalled()
+  })
+  it('rejects both access and refresh for a removed v3 session without recreating it', async () => {
+    const tokens = buildSessionTokens(userId, 3, 'revoked-fixture')
+    joinedRead.mockResolvedValue([])
+    for (const token of [tokens.accessToken, tokens.refreshToken]) {
+      const req = { headers: { authorization: 'Bearer ' + token } } as Request
+      await resolveSessionGate(req, response())
+      expect(getSessionUserId(req)).toBe(null)
+    }
+    expect(device.findUnique).not.toHaveBeenCalled()
   })
   it('does not access the database for an anonymous request', async () => {
     const req = { headers: {} } as Request

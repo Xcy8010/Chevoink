@@ -8,9 +8,9 @@ import { useShellStore } from '../../src/store/useShellStore'
 
 const initialShell = useShellStore.getState()
 
-const { getMe, createNovelWorkspace } = vi.hoisted(() => ({ getMe: vi.fn(), createNovelWorkspace: vi.fn() }))
+const { getMe, createNovelWorkspace, getStudioPayload } = vi.hoisted(() => ({ getMe: vi.fn(), createNovelWorkspace: vi.fn(), getStudioPayload: vi.fn() }))
 vi.mock('@/features/community/api', () => ({ getMe }))
-vi.mock('@/features/studio/api', () => ({ createNovelWorkspace }))
+vi.mock('@/features/studio/api', () => ({ createNovelWorkspace, getStudioPayload }))
 vi.mock('@/features/studio/StudioWorkspace', () => ({
   default: function WorkspaceRoute() { return <p>{useParams().novelId}</p> },
 }))
@@ -25,6 +25,7 @@ afterEach(() => {
 it('resumes an active work when the last work and most recent draft are archived', async () => {
   useShellStore.setState({ authStatus: 'authenticated', sessionUser: { id: 'synthetic-owner' } as NonNullable<typeof initialShell.sessionUser> })
   localStorage.setItem('studio-last-novel-id', 'archived-work')
+  getStudioPayload.mockResolvedValue({ novel: { id: 'unfinished-work' } })
   getMe.mockResolvedValue({
     user: { id: 'synthetic-owner' },
     authoredNovels: [
@@ -42,5 +43,6 @@ it('resumes an active work when the last work and most recent draft are archived
     </Routes>
   </MemoryRouter></QueryClientProvider>)
   expect(await screen.findByText('unfinished-work')).toBeTruthy()
+  expect(getStudioPayload).toHaveBeenCalledWith('unfinished-work')
   expect(createNovelWorkspace).not.toHaveBeenCalled()
 })

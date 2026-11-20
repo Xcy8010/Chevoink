@@ -23,7 +23,7 @@ export default function CreationPanel({
   onOpenNovel,
 }: CreationPanelProps) {
   return (
-    <div className="space-y-5">
+    <div className="mobile-empty-column space-y-5">
       {/* 顶部入口：左文右钮一行平铺，不包盒子；小屏文案截断不换行 */}
       <div className="flex items-center justify-between gap-3">
         <p className="flex min-w-0 items-center gap-2 text-sm text-[var(--text-secondary)]">

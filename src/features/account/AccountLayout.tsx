@@ -1,3 +1,4 @@
+import { agentMarkUrl } from '@/lib/brand-assets'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, CircleGauge, LogOut, Newspaper, PanelLeftClose, PanelLeftOpen, PenLine, ReceiptText, Settings2, UserRound } from 'lucide-react'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
@@ -158,7 +159,7 @@ export default function AccountLayout({ active, withSidebar = true, children }: 
       <header className="sticky top-0 z-40 border-b border-[#e8e8e5] bg-[#f6f6f4]/95 backdrop-blur-xl dark:border-[var(--border-subtle)] dark:bg-[var(--app-bg)]">
         <div className="flex h-16 items-center gap-1 px-4 sm:px-6">
           <Link to="/" className="flex items-center gap-2.5 pr-3">
-            <AppImage src="/chevoink-agent.png" alt="" className="h-8 w-8 rounded-[9px]" />
+            <AppImage src={agentMarkUrl} alt="" className="h-8 w-8 rounded-[9px]" />
             <span className="text-base font-semibold tracking-tight">Chevoink</span>
           </Link>
           <nav className="hidden items-center md:flex">

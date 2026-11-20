@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { LoaderCircle } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
@@ -104,9 +104,41 @@ export default function AppState({
   icon,
 }: AppStateProps) {
   const loading = tone === 'loading'
+  const sectionRef = useRef<HTMLElement>(null)
+  const groupRef = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const section = sectionRef.current
+    const group = groupRef.current
+    if (tone !== 'empty' || !section?.parentElement?.matches('.mobile-empty-column, .app-main-content, [data-app-state-layout]') || !group || typeof ResizeObserver === 'undefined') return
+
+    function centerGroup() {
+      if (!section || !group || window.innerWidth >= 768) return
+      const bounds = section.getBoundingClientRect()
+      const style = getComputedStyle(section)
+      const top = bounds.top + parseFloat(style.paddingTop)
+      const bottom = bounds.bottom - parseFloat(style.paddingBottom)
+      const midpoint = (top + bottom) / 2
+      // Keep the group in its own panel if headers or a keyboard occupy the screen center.
+      const room = Math.max(0, (bottom - top - group.offsetHeight) / 2)
+      const offset = Math.min(room, Math.max(-room, document.documentElement.clientHeight / 2 - midpoint))
+      section.style.setProperty('--empty-center-offset', offset + 'px')
+    }
+
+    centerGroup()
+    const observer = new ResizeObserver(centerGroup)
+    observer.observe(section)
+    observer.observe(group)
+    observer.observe(document.documentElement)
+    return () => {
+      observer.disconnect()
+      section.style.removeProperty('--empty-center-offset')
+    }
+  }, [tone])
 
   return (
     <section
+      ref={sectionRef}
       data-app-state={tone}
       data-compact={compact}
       className={cn(
@@ -115,7 +147,7 @@ export default function AppState({
         className,
       )}
     >
-      <div className={cn('mx-auto flex min-w-0 max-w-xl flex-col items-center', tone === 'error' && 'max-w-sm')}>
+      <div ref={groupRef} className={cn('mx-auto flex min-w-0 max-w-xl flex-col items-center', tone === 'error' && 'max-w-sm')}>
         {icon ?? (loading ? (
           <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--text-tertiary)]">
             <LoaderCircle aria-hidden="true" className="h-5 w-5 motion-safe:animate-spin" />

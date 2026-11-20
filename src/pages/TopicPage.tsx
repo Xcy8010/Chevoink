@@ -88,7 +88,7 @@ export default function TopicPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[640px]">
+    <div className="mobile-empty-column mx-auto w-full max-w-[640px]">
       {topicQuery.isError ? <AppStateRefreshNotice retry={topicQuery.refetch} busy={topicQuery.isFetching} /> : null}
       {/* 话题头部：返回 + 话题名 + 讨论数 */}
       <div className="flex items-center gap-3">
@@ -135,7 +135,7 @@ export default function TopicPage() {
       </div>
 
       {/* 帖子流 */}
-      <div className="mt-4">
+      <div className="mobile-empty-column mt-4">
         {postsQuery.isRefetchError ? <AppStateRefreshNotice retry={postsQuery.refetch} busy={postsQuery.isFetching} /> : null}
         {postsQuery.isLoading ? (
           <PostListSkeleton />

@@ -161,7 +161,7 @@ export default function CommunityPage() {
           }
         }}
       />
-      <div ref={feedRef} data-community-feed>
+      <div ref={feedRef} data-community-feed className="mobile-empty-column">
         {postsQuery.isRefetchError ? <AppStateRefreshNotice retry={postsQuery.refetch} busy={isFetching} /> : null}
         {postsQuery.isPending ? (
           <CommunityFeedSkeleton />
@@ -182,7 +182,7 @@ export default function CommunityPage() {
             compact
             scene="welcome"
             title={activeTopicId === 'all' ? '还没有讨论' : '这个话题还没有讨论'}
-            description="可以在上方发起讨论。"
+            description="点发帖按钮，聊聊你想讨论的事。"
           />
         )}
         {hasNextPage ? (

@@ -242,7 +242,7 @@ export async function recordAdminAuditLog(input: {
 export async function adminLoginByEmailData(
   email: string,
   password: string,
-): Promise<{ userId: string; nickname: string } | null> {
+): Promise<{ userId: string; nickname: string; tokenVersion: number } | null> {
   const user = await prisma.user.findUnique({
     where: { email: email.trim().toLowerCase() },
   })
@@ -261,7 +261,7 @@ export async function adminLoginByEmailData(
       .catch(() => {})
   }
 
-  return { userId: user.id, nickname: user.nickname }
+  return { userId: user.id, nickname: user.nickname, tokenVersion: user.tokenVersion }
 }
 
 
@@ -270,7 +270,7 @@ export async function adminLoginByEmailData(
 export async function adminLoginByPhoneData(
   phone: string,
   password?: string,
-): Promise<{ userId: string; nickname: string } | null> {
+): Promise<{ userId: string; nickname: string; tokenVersion: number } | null> {
   const user = await prisma.user.findUnique({
     where: { phone },
   })
@@ -289,7 +289,7 @@ export async function adminLoginByPhoneData(
       .catch(() => {})
   }
 
-  return { userId: user.id, nickname: user.nickname }
+  return { userId: user.id, nickname: user.nickname, tokenVersion: user.tokenVersion }
 }
 
 

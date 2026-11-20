@@ -230,7 +230,7 @@ export default function GlobalSearchBox({ className, compact = false, onOpenChan
       {open || (compact && leaving) ? (
         <div className={cn('absolute inset-x-0 top-[calc(100%+8px)] z-50 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[var(--shadow-elevated)]', compact && 'compact-search-results static min-h-0 flex-1 rounded-none border-0 bg-[var(--app-bg)] shadow-none')}>
           {showSuggest ? (
-            <div className={cn('max-h-[420px] overflow-y-auto py-2', compact && 'h-full max-h-none')}>
+            <div className={cn('max-h-[420px] overflow-y-auto overflow-x-hidden scrollbar-none py-2', compact && 'h-full max-h-none')}>
               {suggestions.map((item, index) => (
                 <button
                   key={`${item.type}-${item.id}`}
@@ -277,11 +277,11 @@ export default function GlobalSearchBox({ className, compact = false, onOpenChan
                 )}
               >
                 <Search className="h-4 w-4 shrink-0 text-[var(--color-brand)]" />
-                <span className="text-[var(--color-brand)]">搜索“{keyword.trim()}”</span>
+                <span className="min-w-0 break-words text-[var(--color-brand)]">搜索“{keyword.trim()}”</span>
               </button>
             </div>
           ) : (
-            <div className={cn('max-h-[420px] space-y-4 overflow-y-auto p-4', compact && 'h-full max-h-none')}>
+            <div className={cn('max-h-[420px] space-y-4 overflow-y-auto overflow-x-hidden scrollbar-none p-4', compact && 'h-full max-h-none')}>
               {history.length > 0 ? (
                 <section>
                   <div className="flex items-center justify-between">
@@ -301,7 +301,7 @@ export default function GlobalSearchBox({ className, compact = false, onOpenChan
                     {history.map((item) => (
                       <span
                         key={item}
-                        className="group inline-flex items-center gap-1 rounded-[var(--radius-pill)] bg-[var(--surface-muted)] py-1 pl-3 pr-1.5 text-sm text-[var(--text-secondary)]"
+                        className="group inline-flex max-w-full items-center gap-1 rounded-[var(--radius-pill)] bg-[var(--surface-muted)] py-1 pl-3 pr-1.5 text-sm text-[var(--text-secondary)]"
                       >
                         <button
                           type="button"
@@ -309,7 +309,7 @@ export default function GlobalSearchBox({ className, compact = false, onOpenChan
                             setKeyword(item)
                             submitSearch(item)
                           }}
-                          className="transition-colors hover:text-[var(--text-primary)]"
+                          className="min-w-0 break-words text-left transition-colors hover:text-[var(--text-primary)]"
                         >
                           {item}
                         </button>
@@ -317,7 +317,7 @@ export default function GlobalSearchBox({ className, compact = false, onOpenChan
                           type="button"
                           aria-label={`删除历史记录 ${item}`}
                           onClick={() => setHistory(removeSearchHistory(item))}
-                          className="rounded-full p-0.5 text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)]"
+                          className="shrink-0 rounded-full p-0.5 text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)]"
                         >
                           <X className="h-3 w-3" />
                         </button>
@@ -342,7 +342,7 @@ export default function GlobalSearchBox({ className, compact = false, onOpenChan
                           setKeyword(word)
                           submitSearch(word)
                         }}
-                        className="flex items-center gap-2.5 rounded-[var(--radius-sm)] px-2 py-1.5 text-left transition-colors hover:bg-[var(--surface-muted)]"
+                        className="flex min-w-0 items-center gap-2.5 rounded-[var(--radius-sm)] px-2 py-1.5 text-left transition-colors hover:bg-[var(--surface-muted)]"
                       >
                         <span
                           className={cn(
@@ -352,7 +352,7 @@ export default function GlobalSearchBox({ className, compact = false, onOpenChan
                         >
                           {index + 1}
                         </span>
-                        <span className="truncate text-sm text-[var(--text-secondary)]">{word}</span>
+                        <span className="min-w-0 break-words text-sm text-[var(--text-secondary)] md:truncate">{word}</span>
                         {index < 3 ? <TrendingUp className="h-3.5 w-3.5 shrink-0 text-[#f26a4b]" /> : null}
                       </button>
                     ))}

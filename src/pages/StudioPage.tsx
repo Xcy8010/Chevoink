@@ -1,14 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useMemo, useRef } from 'react'
+import { Suspense, useEffect, useMemo, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { StudioSkeleton } from '@/components/ui/Skeleton'
 import { getMe } from '@/features/community/api'
-import { createNovelWorkspace } from '@/features/studio/api'
+import { createNovelWorkspace, getStudioPayload } from '@/features/studio/api'
 import StudioOpenError from '@/features/studio/components/StudioOpenError'
-import StudioWorkspace from '@/features/studio/StudioWorkspace'
+import { lazyPage } from '@/app/lazy-page'
 import { useShellStore } from '@/store/useShellStore'
 import type { Novel, UserMePayload } from '../../shared/contracts/index.js'
+
+const loadWorkspace = () => import('@/features/studio/StudioWorkspace')
+const StudioWorkspace = lazyPage(loadWorkspace)
 
 const INITIAL_NOVEL_TITLE = '未命名作品'
 const INITIAL_NOVEL_SUMMARY = '先创建一部作品，再继续完善简介、章节和封面。'
@@ -29,6 +32,19 @@ export default function StudioPage() {
   })
 
   const me = meQuery.data?.user?.id === viewerId ? meQuery.data : undefined
+
+  // Start fetching the editor while the entry route resolves the author's work.
+  // Direct links can fetch their data and code together.
+  useEffect(() => {
+    if (novelId) {
+      void queryClient.prefetchQuery({
+        queryKey: ['studio', novelId],
+        queryFn: () => getStudioPayload(novelId),
+      })
+    } else {
+      void loadWorkspace().catch(() => undefined)
+    }
+  }, [novelId, queryClient])
 
   const createNovelMutation = useMutation({
     mutationFn: () =>
@@ -112,7 +128,7 @@ export default function StudioPage() {
   }, [createNovelMutation, me, meQuery.isSuccess, novelId, studioEntryNovelId])
 
   if (novelId) {
-    return <StudioWorkspace />
+    return <Suspense fallback={<StudioSkeleton />}><StudioWorkspace /></Suspense>
   }
 
   if (!me && (meQuery.isPending || meQuery.isFetching)) {

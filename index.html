@@ -2,8 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="preload" as="image" href="/chevoink-agent.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" />
     <!-- interactive-widget=resizes-content：Android Chrome 108+ 软键盘弹出时直接缩小布局视口，输入栏自动被顶起；iOS 由 lib/keyboard-inset.ts 兼容 -->
     <!-- maximum-scale=1 + user-scalable=no：APP/手机端按原生应用体验禁用双指缩放与双击放大 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
@@ -47,8 +46,8 @@
           var(--text-tertiary, var(--boot-mark-base)) 62%
         );
         background-size: 220% 100%;
-        -webkit-mask: url('/chevoink-agent.png') center / contain no-repeat;
-        mask: url('/chevoink-agent.png') center / contain no-repeat;
+        -webkit-mask: url('%BASE_URL%agent-mark-144.webp') center / contain no-repeat;
+        mask: url('%BASE_URL%agent-mark-144.webp') center / contain no-repeat;
       }
       @media (prefers-reduced-motion: no-preference) {
         .agent-loading-mark {

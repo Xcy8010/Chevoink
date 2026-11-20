@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { KeyRound, Mail, Smartphone } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 
@@ -12,7 +12,7 @@ import { SectionTitle, SettingsGroup, SettingsRow } from './settings-row'
 
 type AccountDialogKind = 'email' | 'phone' | 'password'
 
-export default function EmailAccountSettings({ user }: { user: User }) {
+export default function EmailAccountSettings({ user, children }: { user: User; children?: ReactNode }) {
   const [params, setParams] = useSearchParams()
   const [saving, setSaving] = useState(false)
   const toast = useToast()
@@ -55,6 +55,7 @@ export default function EmailAccountSettings({ user }: { user: User }) {
           caption="使用已验证的邮箱或手机验证码确认身份"
           value={hasPassword ? '已设置' : '未设置'}
           chevron="right" onClick={() => open('password')} />
+        {children}
       </SettingsGroup>
       {dialog && <AccountDialog key={dialog} title={title}
         description={dialog === 'email' && reservedAdminEmail ? '请填写可接收验证码的邮箱。' : undefined}

@@ -64,6 +64,8 @@ html.dark .app-bottom-nav .app-bottom-link.is-selected { color: #fff; }
   --surface-default: rgba(255, 252, 247, 0.94);
   --surface-solid: #fffcf7;
   --surface-muted: #ede7de;
+  --skeleton-base: #ded9d1;
+  --skeleton-highlight: #fffdf9;
   /* 浮层表面（下拉卡片 / 弹层节点）：始终实底，避免透出下层内容 */
   --surface-elevated: #ffffff;
   --surface-contrast: #17212d;
@@ -122,6 +124,8 @@ html.dark {
   --surface-default: rgba(22, 26, 33, 0.94);
   --surface-solid: #161a21;
   --surface-muted: #171b22;
+  --skeleton-base: #242932;
+  --skeleton-highlight: #424955;
   --surface-elevated: #1e232d;
   --surface-contrast: #f2f4f7;
   --surface-contrast-hover: #ffffff;
@@ -149,6 +153,8 @@ html.dark {
   --surface-default: #ffffff;
   --surface-solid: #ffffff;
   --surface-muted: #e9ebef;
+  --skeleton-base: var(--surface-muted);
+  --skeleton-highlight: var(--surface-default);
   --surface-elevated: #ffffff;
   --surface-contrast: #1a1d23;
   --surface-contrast-hover: #101216;
@@ -626,15 +632,22 @@ body.autohide-scrollbars *:not([data-scrolling='true'])::-webkit-scrollbar-thumb
   animation: unseen-flash 1.8s var(--easing-default) 0.25s 1 both;
 }
 
+@keyframes skeleton-sweep {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
+}
+
 .skeleton-shimmer {
-  background: linear-gradient(
+  background-color: var(--skeleton-base, var(--surface-muted));
+  background-image: linear-gradient(
     90deg,
     var(--skeleton-base, var(--surface-muted)) 25%,
     var(--skeleton-highlight, var(--surface-default)) 50%,
     var(--skeleton-base, var(--surface-muted)) 75%
   );
   background-size: 200% 100%;
-  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  background-repeat: no-repeat;
+  animation: skeleton-sweep 1.4s linear infinite;
 }
 
 /* Work 默认收起查看器时：44px 轨道 + 44px 检查栏 + 296px 停靠卡 + 920px 对话。 */
@@ -659,7 +672,7 @@ html.dark .studio-workspace :is(
   [data-studio-region='desktop-activity'] { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .skeleton-shimmer { animation: none; }
+  .skeleton-shimmer { animation: none; background-image: none; }
 }
 
 @media (max-width: 767px) {
@@ -1353,6 +1366,7 @@ html.dark .site-reveal-header {
 @media (width < 768px) {
   .site-reveal-header { transition: background-color 220ms ease, border-color 220ms ease; }
   .site-reveal-header[data-hidden='true'] { transform: none; background: transparent; border-color: transparent; }
+  .site-header-search { position: static; }
   .site-header-row { transition: gap 260ms cubic-bezier(.22, 1, .36, 1); }
   .site-header-identity { width: 40px; }
   .site-header-actions { width: 44px; }

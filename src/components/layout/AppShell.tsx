@@ -1,3 +1,4 @@
+import { agentMarkUrl } from '@/lib/brand-assets'
 import { defaultSiteSettings, effectiveSiteSettings } from '@/features/site-content/defaults'
 import { usePublicSiteContent } from '@/features/site-content/public-api'
 import AnnouncementBell from '@/features/site-content/AnnouncementBell'
@@ -669,7 +670,7 @@ export default function AppShell({ title, description, children }: AppShellProps
             >
               <div className="site-header-row relative flex h-14 items-center gap-2 md:h-16">
                 <Link to="/" className="site-header-identity flex shrink-0 items-center gap-2" aria-label={effectiveSettings.name + '首页'}>
-                  <AppImage src={!effectiveSettings.logoUrl || effectiveSettings.logoUrl === defaultSiteSettings.logoUrl ? '/chevoink-agent.png' : effectiveSettings.logoUrl} alt={effectiveSettings.name + ' Logo'} className="h-10 w-10 shrink-0 md:h-11 md:w-11" priority />
+                  <AppImage src={!effectiveSettings.logoUrl || effectiveSettings.logoUrl === defaultSiteSettings.logoUrl ? agentMarkUrl : effectiveSettings.logoUrl} alt={effectiveSettings.name + ' Logo'} className="h-10 w-10 shrink-0 md:h-11 md:w-11" priority />
                   <span className="hidden text-base font-semibold md:block">{effectiveSettings.name}</span>
                 </Link>
                 <nav aria-label="站点导航" className="site-header-navigation hidden min-w-0 items-center overflow-x-auto md:flex">

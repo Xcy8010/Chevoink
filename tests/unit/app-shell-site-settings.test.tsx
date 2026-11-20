@@ -90,7 +90,7 @@ it('keeps the mobile search wide on focus and still responds to scroll direction
 it('updates actual header only from published query data and preserves legacy identity/navigation when no settings are published',async()=>{
  const current=data();current.settings=null;mocks.request.mockResolvedValue(current)
  const client=mount();await act(async()=>{await Promise.resolve()})
- expect(screen.getByRole('img',{name:'启创墨域 Logo'}).getAttribute('src')).toBe('/chevoink-agent.png')
+ expect(screen.getByRole('img',{name:'启创墨域 Logo'}).getAttribute('src')).toBe('/agent-mark-144.webp')
  expect(screen.getAllByRole('navigation',{name:'站点导航'}).every(nav=>within(nav).queryByRole('link',{name:'精选分类'})===null)).toBe(true)
  const published=data();published.settings!.name='新发布站点';mocks.request.mockResolvedValue(published)
  await act(async()=>{client.setQueryData(['site-content','public'],published)})
