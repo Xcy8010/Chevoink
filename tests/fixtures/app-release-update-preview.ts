@@ -15,10 +15,10 @@ content.append(description,output)
 const composer=document.createElement('footer');composer.id='notice-preview-composer';composer.style.cssText='margin:16px;padding:16px;border:1px solid var(--border-strong);border-radius:12px;background:var(--surface-default)'
 const draft=document.createElement('textarea');draft.setAttribute('aria-label','合成未发送草稿');draft.value='保留当前界面的合成未发送草稿';draft.style.cssText='width:100%;height:80px;resize:none;background:transparent'
 composer.append(draft);main.append(header,content,composer);document.body.appendChild(main)
-const preview=Object.assign(window,{__previewRefreshCalls:0,__previewRefreshUrls:[] as string[],__previewLocation:{pathname:'/studio',search:'?novel=synthetic',hash:'#draft',assign:(url:string)=>{preview.__previewRefreshCalls++;preview.__previewRefreshUrls.push(url);output.textContent='刷新调用：'+preview.__previewRefreshCalls+'（合成 spy，未导航）'}},__previewHistory:{replaceState:()=>{}},__previewFetch:async()=>({ok:true,json:async()=>({success:true,data:{mode:'artifact',channel:'test',release:{id:'preview-b',label:'合成新版',entryUrl:'/api/app-releases/artifacts/preview-b/index.html'}}})})})
+const preview=Object.assign(window,{__previewRefreshCalls:0,__previewRefreshUrls:[] as string[],__previewLocation:{pathname:'/studio',search:'?novel=synthetic',hash:'#draft',replace:(url:string)=>{preview.__previewRefreshCalls++;preview.__previewRefreshUrls.push(url);output.textContent='刷新调用：'+preview.__previewRefreshCalls+'（合成 spy，未导航）'}},__previewHistory:{replaceState:()=>{}},__previewFetch:async()=>({ok:true,json:async()=>({success:true,data:{mode:'artifact',channel:'test',release:{id:'preview-b',label:'合成新版',entryUrl:'/api/app-releases/artifacts/preview-b/index.html'}}})})})
 trigger.onclick=()=>{
  trigger.disabled=true;draft.focus()
  if(params.get('source')==='artifact'){
   const script=document.createElement('script');script.src='/__preview-release-entry.js';script.onload=()=>window.dispatchEvent(new Event('focus'));document.body.appendChild(script)
- }else showAppReleaseUpdateNotice('合成新版已可用。',()=>preview.__previewLocation.assign('/api/app-releases/artifacts/preview-b/index.html?route='+encodeURIComponent('/studio?novel=synthetic#draft')))
+ }else showAppReleaseUpdateNotice('合成新版已可用。',()=>preview.__previewLocation.replace('/api/app-releases/artifacts/preview-b/index.html?route='+encodeURIComponent('/studio?novel=synthetic#draft')))
 }

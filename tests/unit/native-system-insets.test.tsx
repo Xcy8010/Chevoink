@@ -54,6 +54,29 @@ afterEach(async () => {
 })
 
 describe('native system-bar safe-area ownership', () => {
+  it('keeps the startup splash in one WebView layout until it is removed', async () => {
+    const splash = document.createElement('div')
+    splash.id = 'app-loading'
+    document.body.append(splash)
+    const enableEdgeToEdge = vi.fn(async () => ({ ...normal, edgeToEdge: true }))
+    installBridge(true, enableEdgeToEdge)
+    stop = setupSafeAreaFallback()
+    const authSplash = document.createElement('div')
+    authSplash.className = 'boot-splash'
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(enableEdgeToEdge).not.toHaveBeenCalled()
+      document.body.append(authSplash)
+      splash.remove()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(enableEdgeToEdge).not.toHaveBeenCalled()
+    } finally {
+      splash.remove()
+      authSplash.remove()
+    }
+    await waitFor(() => expect(enableEdgeToEdge).toHaveBeenCalledOnce())
+  })
+
   it('accepts the real injected synchronous listener handle and cleans it up', async () => {
     stop = setupSafeAreaFallback()
     await waitFor(() => expect(getInsets).toHaveBeenCalled())

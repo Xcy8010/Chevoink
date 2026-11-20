@@ -37,26 +37,26 @@
         background: var(--app-bg, var(--boot-background));
       }
       .agent-loading-mark {
+        position: relative;
         display: block;
         width: 48px;
         height: 48px;
-        background-image: linear-gradient(
-          100deg,
-          var(--text-tertiary, var(--boot-mark-base)) 38%,
-          var(--text-primary, var(--boot-mark-highlight)) 50%,
-          var(--text-tertiary, var(--boot-mark-base)) 62%
-        );
-        background-size: 220% 100%;
+        overflow: hidden;
+        background: var(--boot-mark-base);
         -webkit-mask: url('%BASE_URL%agent-mark-144.webp') center / contain no-repeat;
         mask: url('%BASE_URL%agent-mark-144.webp') center / contain no-repeat;
       }
       @media (prefers-reduced-motion: no-preference) {
-        .agent-loading-mark {
-          animation: agent-icon-shimmer 1.5s linear infinite;
+        .agent-loading-mark::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(105deg, transparent 15%, var(--boot-mark-highlight), transparent 85%);
+          animation: agent-icon-shimmer 1.4s linear infinite;
         }
         @keyframes agent-icon-shimmer {
-          0% { background-position: 220% 0; }
-          100% { background-position: -120% 0; }
+          from { transform: translateX(-100%); }
+          to { transform: translateX(100%); }
         }
       }
     </style>

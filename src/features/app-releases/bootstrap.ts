@@ -1,10 +1,10 @@
 import { requestJson } from '@/app/api-client'
 import { showAppReleaseUpdateNotice } from '../../../shared/app-release-update-notice'
+import { canonicalAppRoute } from '../../../shared/app-release-route'
 import type { AppReleaseBootstrap } from '../../../shared/contracts/app-release'
 export function selectedArtifactUrl(selection:AppReleaseBootstrap,route:string){
  if(selection.mode!=='artifact'||!selection.release)return null
- if(!/^\/(?!\/)/.test(route)||/[\r\n\\]/.test(route))route='/'
- return `${selection.release.entryUrl}?route=${encodeURIComponent(route)}`
+ return `${selection.release.entryUrl}?route=${encodeURIComponent(canonicalAppRoute(route))}`
 }
 export async function bootstrapAppRelease():Promise<boolean>{
  const selection=await requestJson<AppReleaseBootstrap>('/api/app-releases/bootstrap')
@@ -13,7 +13,7 @@ export async function bootstrapAppRelease():Promise<boolean>{
   location.replace(selectedArtifactUrl(selection,location.pathname+location.search+location.hash)!)
   return false
  }
- if(selection.mode==='legacy'&&loaded){location.replace(location.pathname+location.search+location.hash);return false}
+ if(selection.mode==='legacy'&&loaded){location.replace(canonicalAppRoute(location.pathname+location.search+location.hash));return false}
  if(!loaded)watchLegacyRelease()
  return true
 }
@@ -25,7 +25,12 @@ function watchLegacyRelease(){
   try{
    const selection=await requestJson<AppReleaseBootstrap>('/api/app-releases/bootstrap')
    if(selection.mode!=='artifact'||!selection.release)return
-   showAppReleaseUpdateNotice(`版本「${selection.release.label}」已可用。`,()=>location.assign(selectedArtifactUrl(selection,location.pathname+location.search+location.hash)!),selection.release)
+   showAppReleaseUpdateNotice(`版本「${selection.release.label}」已可用。`,()=>{
+    const route=canonicalAppRoute(location.pathname+location.search+location.hash)
+    void requestJson<AppReleaseBootstrap>('/api/app-releases/bootstrap')
+      .then(latest=>location.replace(selectedArtifactUrl(latest,route)??route))
+      .catch(()=>location.replace(route))
+   },selection.release)
   }finally{busy=false}
  }
  window.addEventListener('focus',()=>{void check().catch(()=>{})})

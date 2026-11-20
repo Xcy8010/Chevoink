@@ -102,6 +102,18 @@ export function observeNativeInsets(listener: (insets: ImmersiveInsets) => void)
   let handle: { remove: () => Promise<void> } | undefined
   insetListeners.add(listener)
   const plugin = nativePlugins()?.ImmersiveMode
+  const splash = plugin?.enableEdgeToEdge ? document.getElementById('app-loading') : null
+  const splashParent = splash?.parentNode
+  let releaseSplashWait: (() => void) | undefined
+  const splashFinished = splash && splashParent && new Promise<void>(resolve => {
+    // The WebView changes bounds when switching from fitted to edge-to-edge.
+    // Keep that transition out of the visible startup splash.
+    const observer = new MutationObserver(() => {
+      if (!splash.isConnected && !document.querySelector('.boot-splash')) releaseSplashWait?.()
+    })
+    releaseSplashWait = () => { observer.disconnect(); resolve() }
+    observer.observe(splashParent, { childList: true, subtree: true })
+  })
   // Capacitor's injected bridge can return a synchronous handle or a Promise.
   const subscription = Promise.resolve().then(() => plugin?.addListener?.('insetsChanged', publishInsets)).then(async value => {
     if (disposed) await value?.remove()
@@ -109,6 +121,7 @@ export function observeNativeInsets(listener: (insets: ImmersiveInsets) => void)
   }).catch(() => { /* Older bridges can expose no listener. */ })
   const initialize = async () => {
     await subscription
+    if (splashFinished) await splashFinished
     if (disposed) return
     if (plugin?.enableEdgeToEdge) {
       try {
@@ -125,6 +138,7 @@ export function observeNativeInsets(listener: (insets: ImmersiveInsets) => void)
   else void initialize()
   return () => {
     disposed = true
+    releaseSplashWait?.()
     insetListeners.delete(listener)
     void handle?.remove().catch(() => {})
   }

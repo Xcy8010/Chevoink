@@ -2,6 +2,7 @@ import { Router } from 'express'
 import path from 'node:path'
 import { z } from 'zod'
 import { appReleaseExecuteSchema, appReleaseIdSchema, appReleasePreviewSchema } from '../../shared/contracts/app-release.js'
+import { canonicalAppRoute } from '../../shared/app-release-route.js'
 import { requireAdmin, getRequestIp } from '../lib/admin-auth.js'
 import { bridgeSessionCookies, clearSession, getSessionUserId } from '../lib/auth-session.js'
 import { executeAppRelease, importAppRelease, listAppReleases, previewAppRelease, reconcileAppRelease, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../lib/app-releases.js'
@@ -25,11 +26,22 @@ publicAppReleaseRouter.get('/bootstrap',async(req,res)=>{
 })
 publicAppReleaseRouter.get('/artifacts/:releaseId/*',async(req,res)=>{
  const id=createRequestId()
+ const filename=(req.params as Record<string,string>)['0']
  try{
   const selection=await selectAppRelease(req)
-  if(selection.mode!=='artifact'||selection.release?.id!==req.params.releaseId)throw new DataAccessError(403,'APP_RELEASE_NOT_ASSIGNED','此版本未分配给当前账号。')
+  if(selection.mode!=='artifact'||selection.release?.id!==req.params.releaseId){
+   const fetchMode=req.get('Sec-Fetch-Mode')
+   const pageNavigation=fetchMode==='navigate'||(!fetchMode&&req.get('Accept')?.includes('text/html'))
+   if(filename==='index.html'&&pageNavigation){
+    const route=typeof req.query.route==='string'?req.query.route:null
+    res.setHeader('Cache-Control','private, no-store')
+    res.setHeader('Vary','Cookie, Authorization, Sec-Fetch-Mode, Accept')
+    res.redirect(303, canonicalAppRoute(route))
+    return
+   }
+   throw new DataAccessError(403,'APP_RELEASE_NOT_ASSIGNED','此版本未分配给当前账号。')
+  }
   const installed=await readInstalledAppRelease(req.params.releaseId)
-  const filename=(req.params as Record<string,string>)['0']
   const bytes=await readAppReleaseFile(installed,filename)
   res.setHeader('Cache-Control','private, no-store');res.setHeader('Vary','Cookie, Authorization');res.setHeader('X-Content-Type-Options','nosniff')
   res.type(path.extname(filename));res.send(bytes)

@@ -3,9 +3,48 @@ import { chmod, copyFile, lstat, mkdir, readFile, readdir, writeFile } from 'nod
 import path from 'node:path'
 import { showAppReleaseUpdateNotice } from '../shared/app-release-update-notice.ts'
 import { appReleaseManifestSchema } from '../shared/contracts/app-release.ts'
+import { canonicalAppRoute } from '../shared/app-release-route.ts'
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex')
-export function releaseEntryScript(id){
- return `(function(){var showUpdateNotice=${showAppReleaseUpdateNotice.toString()};var id=${JSON.stringify(id)};document.documentElement.dataset.appRelease=id;var route=new URLSearchParams(location.search).get('route')||'/';if(!/^\\/(?!\\/)/.test(route)||route.indexOf('/api/app-releases')===0||/[\\r\\n\\\\]/.test(route))route='/';history.replaceState(null,'',route);var checking=false;function check(){if(checking)return;checking=true;fetch('/api/app-releases/bootstrap',{credentials:'include',cache:'no-store'}).then(function(response){if(!response.ok)throw Error();return response.json()}).then(function(result){if(!result.success)throw Error();var selection=result.data;if(selection.release&&selection.release.id===id)return;if(document.getElementById('app-release-update'))return;showUpdateNotice(selection.release?'版本「'+selection.release.label+'」已可用。':'应用版本已更新。',function(){var route=location.pathname+location.search+location.hash;location.assign(selection.release?selection.release.entryUrl+'?route='+encodeURIComponent(route):route)},selection.release)}).catch(function(){}).finally(function(){checking=false})}window.addEventListener('focus',check);setInterval(check,60000)})();\n`
+function startReleaseEntry(id, normalizeRoute, showUpdateNotice) {
+ document.documentElement.dataset.appRelease=id
+ const route=normalizeRoute(new URLSearchParams(location.search).get('route'))
+ history.replaceState(null,'',route)
+
+ async function readSelection() {
+  const response=await fetch('/api/app-releases/bootstrap',{credentials:'include',cache:'no-store'})
+  if(!response.ok)throw Error()
+  const result=await response.json()
+  if(!result.success)throw Error()
+  return result.data
+ }
+
+ async function refresh() {
+  const current=normalizeRoute(location.pathname+location.search+location.hash)
+  const latest=await readSelection().catch(()=>null)
+  const entry=latest?.mode==='artifact'&&latest.release?.id!==id ? latest.release?.entryUrl : null
+  location.replace(entry ? entry+'?route='+encodeURIComponent(current) : current)
+ }
+
+ let checking=false
+ async function check() {
+  if(checking||document.getElementById('app-release-update'))return
+  checking=true
+  try {
+   const selection=await readSelection()
+   if(selection.release?.id===id)return
+   showUpdateNotice(selection.release?'版本「'+selection.release.label+'」已可用。':'应用版本已更新。',refresh,selection.release)
+  } catch {
+   // A later focus or interval can refresh the check after a temporary error.
+  } finally {
+   checking=false
+  }
+ }
+ window.addEventListener('focus',check)
+ setInterval(check,60000)
+}
+
+export function releaseEntryScript(id) {
+ return `(${startReleaseEntry.toString()})(${JSON.stringify(id)},${canonicalAppRoute.toString()},${showAppReleaseUpdateNotice.toString()});\n`
 }
 export async function artifactFiles(directory,prefix=''){
  const result=[]

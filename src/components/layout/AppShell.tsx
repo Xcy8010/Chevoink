@@ -105,7 +105,7 @@ export default function AppShell({ title, description, children }: AppShellProps
   const [headerFocus, setHeaderFocus] = useState<'search' | 'controls' | null>(null)
   const mobileHeader = useDeviceType() === 'mobile'
   // 手机收起顶栏后仍可使用搜索，桌面顶栏则需要为搜索保持可见。
-  const keepHeaderVisible = headerFocus === 'controls' || (!mobileHeader && (headerSearchOpen || headerFocus === 'search'))
+  const keepHeaderVisible = headerFocus === 'controls' || (!mobileHeader && (isSettingsRoute || headerSearchOpen || headerFocus === 'search'))
   const { ref: headerRef, hidden: headerHidden } = useRevealHeader(keepHeaderVisible, mainScrollRef, location.pathname)
   const desktopAccountMenuRef = useRef<HTMLDivElement | null>(null)
   // 默认折叠，保证内容区最大宽度；展开状态仅影响桌面端(lg)，平板端常驻收起导航轨

@@ -7,12 +7,12 @@ import { setupSafeAreaFallback } from './lib/safe-area'
 import './index.css'
 import { setupDesktopLifecycle } from './lib/desktop-lifecycle'
 
-setupSafeAreaFallback()
 setupKeyboardInsetWatcher()
 setupDesktopLifecycle()
 
 async function start(){
   if(!await bootstrapAppRelease())return
+  setupSafeAreaFallback()
   const {default:App}=await import('./App')
   createRoot(document.getElementById('root')!).render(<StrictMode><App/></StrictMode>)
 }

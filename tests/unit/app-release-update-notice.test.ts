@@ -73,15 +73,17 @@ it('keeps the launcher watcher and exact route refresh callback without automati
  expect(screen.getByText('Synthetic fixture')).toBeTruthy()
  expect(screen.getByText(/更新时间 .*18:28:59（北京时间）/).getAttribute('datetime')).toBe(selected.release!.activatedAt)
  expect(location.assign).not.toHaveBeenCalled();expect(location.replace).not.toHaveBeenCalled()
+ mocks.request.mockResolvedValueOnce({...selected,release:{...selected.release!,id:'selected-c',entryUrl:'/api/app-releases/artifacts/selected-c/index.html'}})
  fireEvent.click(screen.getByRole('button',{name:'立即刷新'}))
- expect(location.assign).toHaveBeenCalledExactlyOnceWith('/api/app-releases/artifacts/selected-b/index.html?route=%2Fstudio%3Fnovel%3Dsynthetic%23draft')
+ await Promise.resolve()
+ await waitFor(()=>expect(location.replace).toHaveBeenCalledExactlyOnceWith('/api/app-releases/artifacts/selected-c/index.html?route=%2Fstudio%3Fnovel%3Dsynthetic%23draft'))
  fireEvent.click(screen.getByRole('button',{name:'稍后'}));window.dispatchEvent(new Event('focus'));await Promise.resolve()
- expect(mocks.request).toHaveBeenCalledTimes(2);expect(screen.queryByRole('dialog')).toBeNull()
+ expect(mocks.request).toHaveBeenCalledTimes(3);expect(screen.queryByRole('dialog')).toBeNull()
 })
 function artifact(fetch:ReturnType<typeof vi.fn>){
- const location={pathname:'/studio',search:'?draft=synthetic',hash:'#chapter',assign:vi.fn()}
+ const location={pathname:'/studio',search:'?draft=synthetic',hash:'#chapter',replace:vi.fn()}
  const listeners:Record<string,()=>void>={}
- vm.runInNewContext(releaseEntryScript('loaded-a'),{document,HTMLElement,URLSearchParams,location,history:{replaceState:vi.fn()},window:{addEventListener:(event:string,listener:()=>void)=>{listeners[event]=listener}},setInterval:vi.fn(),fetch})
+ vm.runInNewContext(releaseEntryScript('loaded-a'),{document,HTMLElement,URL,URLSearchParams,location,history:{replaceState:vi.fn()},window:{addEventListener:(event:string,listener:()=>void)=>{listeners[event]=listener}},setInterval:vi.fn(),fetch})
  return {location,check:()=>listeners.focus()}
 }
 it.each(['artifact','legacy'] as const)('executes the serialized artifact notice without module closures and preserves the %s refresh route',async mode=>{
@@ -96,11 +98,13 @@ it.each(['artifact','legacy'] as const)('executes the serialized artifact notice
   expect(screen.queryByText(/更新时间/)).toBeNull()
  }
  expect(fetch).toHaveBeenCalledOnce();expect(fetch).toHaveBeenCalledWith('/api/app-releases/bootstrap',{credentials:'include',cache:'no-store'})
- expect(run.location.assign).not.toHaveBeenCalled();fireEvent.click(screen.getByRole('button',{name:'立即刷新'}))
- expect(run.location.assign).toHaveBeenCalledExactlyOnceWith(mode==='artifact'?'/api/app-releases/artifacts/selected-b/index.html?route=%2Fstudio%3Fdraft%3Dsynthetic%23chapter':'/studio?draft=synthetic#chapter')
+ expect(run.location.replace).not.toHaveBeenCalled()
+ if(mode==='artifact')fetch.mockResolvedValueOnce({ok:true,json:async()=>({success:true,data:{...selected,release:{...selected.release!,id:'selected-c',entryUrl:'/api/app-releases/artifacts/selected-c/index.html'}}})})
+ fireEvent.click(screen.getByRole('button',{name:'立即刷新'}))
+ await waitFor(()=>expect(run.location.replace).toHaveBeenCalledExactlyOnceWith(mode==='artifact'?'/api/app-releases/artifacts/selected-c/index.html?route=%2Fstudio%3Fdraft%3Dsynthetic%23chapter':'/studio?draft=synthetic#chapter'))
 })
 it.each(['same','failed','unknown'] as const)('keeps the artifact %s detection outcome unchanged without a prompt or navigation',async outcome=>{
  const fetch=vi.fn(async()=>{if(outcome==='unknown')throw Error('synthetic network result unknown');return {ok:outcome!=='failed',json:async()=>({success:true,data:{...selected,release:{...selected.release!,id:'loaded-a'}}})}}),run=artifact(fetch)
  run.check();await waitFor(()=>expect(fetch).toHaveBeenCalledOnce());await new Promise(resolve=>setTimeout(resolve,0))
- expect(screen.queryByRole('dialog')).toBeNull();expect(run.location.assign).not.toHaveBeenCalled()
+ expect(screen.queryByRole('dialog')).toBeNull();expect(run.location.replace).not.toHaveBeenCalled()
 })

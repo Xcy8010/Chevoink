@@ -82,6 +82,16 @@ describe('actual release and admin routers on isolated PostgreSQL',()=>{
    await prisma.appReleaseChannel.create({data:{channel:'test',releaseId:ids[1],revision:1,enabled:true}})
    const read=(url:string,authorization:string)=>request(app).get(url).set('Authorization',authorization)
    expect((await read('/api/app-releases/bootstrap',test.authorization)).body.data).toMatchObject({channel:'test',release:{id:ids[1]}})
+   const index='/api/app-releases/artifacts/'+ids[1]+'/index.html'
+   const route='/admin/app-releases?tab=history#versions'
+   const requested=index+'?route='+encodeURIComponent(route)
+   expect((await read(requested,test.authorization).set('Sec-Fetch-Mode','navigate')).status).toBe(200)
+   const stale=await read(requested,stable.authorization).set('Sec-Fetch-Mode','navigate')
+   expect(stale.status).toBe(303)
+   expect(stale.headers.location).toBe(route)
+   expect((await read(requested,stable.authorization).set('Sec-Fetch-Mode','cors').set('Accept','text/html')).status).toBe(403)
+   const nestedApi=await read(index+'?route='+encodeURIComponent('/settings%2f..%2fapi'),stable.authorization).set('Accept','text/html')
+   expect(nestedApi.headers.location).toBe('/')
    expect((await read(bindAccess,stable.authorization).set('X-Release-Channel','test')).status).toBe(200)
    expect((await read(bindAccess,superAdminWithEmail.authorization)).status).toBe(200)
    expect((await read('/api/users/me',superAdminWithEmail.authorization)).body.data.user).toMatchObject({emailVerified:false})
