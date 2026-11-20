@@ -54,13 +54,15 @@ afterEach(async () => {
 })
 
 describe('native system-bar safe-area ownership', () => {
-  it('keeps the startup splash in one WebView layout until it is removed', async () => {
+  it('keeps the startup surface fitted through the first paint without either splash', async () => {
     const splash = document.createElement('div')
     splash.id = 'app-loading'
     document.body.append(splash)
     const enableEdgeToEdge = vi.fn(async () => ({ ...normal, edgeToEdge: true }))
     installBridge(true, enableEdgeToEdge)
-    stop = setupSafeAreaFallback()
+    const frames: FrameRequestCallback[] = []
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => frames.push(callback))
+    stop = observeNativeInsets(() => {})
     const authSplash = document.createElement('div')
     authSplash.className = 'boot-splash'
     try {
@@ -70,11 +72,19 @@ describe('native system-bar safe-area ownership', () => {
       splash.remove()
       await new Promise(resolve => setTimeout(resolve, 0))
       expect(enableEdgeToEdge).not.toHaveBeenCalled()
+      authSplash.remove()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(frames).toHaveLength(1)
+      frames.shift()!(0)
+      await Promise.resolve()
+      expect(enableEdgeToEdge).not.toHaveBeenCalled()
+      frames.shift()!(16)
+      await waitFor(() => expect(enableEdgeToEdge).toHaveBeenCalledOnce())
     } finally {
+      raf.mockRestore()
       splash.remove()
       authSplash.remove()
     }
-    await waitFor(() => expect(enableEdgeToEdge).toHaveBeenCalledOnce())
   })
 
   it('accepts the real injected synchronous listener handle and cleans it up', async () => {

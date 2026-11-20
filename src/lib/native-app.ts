@@ -108,10 +108,24 @@ export function observeNativeInsets(listener: (insets: ImmersiveInsets) => void)
   const splashFinished = splash && splashParent && new Promise<void>(resolve => {
     // The WebView changes bounds when switching from fitted to edge-to-edge.
     // Keep that transition out of the visible startup splash.
+    let frame: number | undefined
+    const splashGone = () => !splash.isConnected && !document.querySelector('.boot-splash')
     const observer = new MutationObserver(() => {
-      if (!splash.isConnected && !document.querySelector('.boot-splash')) releaseSplashWait?.()
+      if (frame !== undefined || !splashGone()) return
+      // DOM removal runs before paint. Resizing the Android surface here can
+      // move the last composited logo by the height of the status bar.
+      frame = window.requestAnimationFrame(() => {
+        frame = window.requestAnimationFrame(() => {
+          frame = undefined
+          if (splashGone()) releaseSplashWait?.()
+        })
+      })
     })
-    releaseSplashWait = () => { observer.disconnect(); resolve() }
+    releaseSplashWait = () => {
+      observer.disconnect()
+      if (frame !== undefined) window.cancelAnimationFrame(frame)
+      resolve()
+    }
     observer.observe(splashParent, { childList: true, subtree: true })
   })
   // Capacitor's injected bridge can return a synchronous handle or a Promise.
