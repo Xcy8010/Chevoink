@@ -12,7 +12,7 @@ const m = vi.hoisted(() => ({
     // the new fence on its ordinary path without changing import assertions.
     agentGoalExecution: { findUnique: vi.fn() },
     agentChildExecutionGrant: { findUnique: vi.fn(), findMany: vi.fn() },
-    agentSession: { findFirst: vi.fn() }, agentMessage: { findFirst: vi.fn(), findMany: vi.fn() },
+    agentSession: { findFirst: vi.fn(), update: vi.fn() }, agentMessage: { findFirst: vi.fn(), findMany: vi.fn() },
     agentArtifact: { deleteMany: vi.fn(), count: vi.fn() },
     changeSet: { findFirst: vi.fn(), update: vi.fn() }, changeSetPatch: { updateMany: vi.fn() },
     storyBranch: { findFirst: vi.fn(), update: vi.fn() },
@@ -170,6 +170,7 @@ describe('retained chapter write protection', () => {
     expect(m.db.chapter.deleteMany).not.toHaveBeenCalled()
     expect(m.db.chapter.updateMany).not.toHaveBeenCalled()
     expect(m.db.agentRun.deleteMany).not.toHaveBeenCalled()
+    expect(m.db.agentSession.update).not.toHaveBeenCalled()
     expect(m.normalize).not.toHaveBeenCalled()
   })
 })
@@ -203,6 +204,7 @@ describe('session rollback published chapter protection', () => {
     // 作品信息快照不属于章节保护范围，仍按回退还原
     expect(m.db.novel.update).toHaveBeenCalledWith({ where: { id: 'n' }, data: { summary: '旧简介' } })
     expect(m.db.agentRun.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['r'] } } })
+    expect(m.db.agentSession.update).toHaveBeenCalledWith({ where: { id: 's' }, data: { updatedAt: expect.any(Date) } })
     expect(m.stats).toHaveBeenCalledWith(tx, 'n')
   })
 
@@ -223,6 +225,7 @@ describe('session rollback published chapter protection', () => {
       removedRunCount: 1,
       protectedChapters: [],
     })
+    expect(m.db.agentSession.update).toHaveBeenCalledWith({ where: { id: 's' }, data: { updatedAt: expect.any(Date) } })
     expect(m.db.chapter.deleteMany).toHaveBeenCalledWith({ where: { id: 'c-new', authorId: 'u', ...activeChapterScope('n') } })
     expect(m.db.chapter.updateMany).toHaveBeenCalled()
     expect(m.db.chapter.updateMany.mock.calls[0][0].where.AND[0]).toEqual({ id: 'c-draft', novelId: 'n', authorId: 'u', revision: 5 })
@@ -256,6 +259,7 @@ describe('session rollback published chapter protection', () => {
     expect(m.db.chapter.deleteMany).not.toHaveBeenCalled()
     expect(m.db.chapter.updateMany).not.toHaveBeenCalled()
     expect(m.db.agentRun.deleteMany).not.toHaveBeenCalled()
+    expect(m.db.agentSession.update).not.toHaveBeenCalled()
     expect(m.db.projectMemoryEntry.deleteMany).not.toHaveBeenCalled()
     expect(m.db.agentArtifact.deleteMany).not.toHaveBeenCalled()
   })

@@ -4,18 +4,23 @@ import { prisma, DataAccessError } from './prisma.js'
 import { resolveDeviceLocation } from './device-location.js'
 import { hasConfiguredPassword, verifyPassword } from './password.js'
 
-function deviceName(req: Request) {
-  const agent = req.headers['user-agent'] ?? ''
+function deviceName(req: Request | undefined) {
+  const agent = req?.headers['user-agent'] ?? ''
   const os = /Android/i.test(agent) ? 'Android' : /iPad/i.test(agent) ? 'iPad' : /iPhone/i.test(agent) ? 'iPhone' : /Windows/i.test(agent) ? 'Windows' : /Macintosh/i.test(agent) ? 'Mac' : /Linux/i.test(agent) ? 'Linux' : ''
   const browser = /; wv\)/i.test(agent) ? '应用' : /Edg/i.test(agent) ? 'Edge' : /Firefox|FxiOS/i.test(agent) ? 'Firefox' : /Chrome|CriOS/i.test(agent) ? 'Chrome' : /Safari/i.test(agent) ? 'Safari' : ''
   return [os, browser].filter(Boolean).join(' · ') || '未知设备'
 }
 
-export async function openDevice(userId: string, tokenVersion: number, req: Request, expiresAt: Date, legacyId?: string) {
+export async function openDevice(userId: string, tokenVersion: number, req: Request | undefined, expiresAt: Date, legacyId?: string) {
   const data = { id: legacyId ?? randomUUID(), userId, tokenVersion, expiresAt,
     deviceName: legacyId ? '旧版登录（合并显示）' : deviceName(req),
-    location: legacyId ? null : await resolveDeviceLocation(req) }
-  if (legacyId) return prisma.accountDeviceSession.upsert({ where: { id: legacyId }, create: data, update: {} })
+    location: !legacyId && req ? await resolveDeviceLocation(req) : null }
+  if (legacyId) {
+    // Concurrent requests can present the same historical cookie before its first device record exists.
+    // ON CONFLICT DO NOTHING also preserves a previously revoked record.
+    await prisma.accountDeviceSession.createMany({ data: [data], skipDuplicates: true })
+    return prisma.accountDeviceSession.findUniqueOrThrow({ where: { id: legacyId } })
+  }
   await prisma.accountDeviceSession.deleteMany({ where: { userId, OR: [
     { expiresAt: { lt: new Date() }, id: { not: { startsWith: 'legacy-' } } },
     { tokenVersion: { lt: tokenVersion } },
