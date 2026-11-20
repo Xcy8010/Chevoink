@@ -1,8 +1,7 @@
 import { useRef, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { MapPin, Monitor, Smartphone } from 'lucide-react'
-import type { LoginDevice } from '../../../../shared/contracts/api'
-
+import { CheckCircle2, ChevronRight, Layers, LogOut, MapPin, Monitor, Smartphone, Tablet } from 'lucide-react'
+import type { LoginDevice, RevokeLoginDeviceResult } from '../../../../shared/contracts/api'
 import { requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -11,34 +10,66 @@ import { AccountDialog } from '@/features/account/VerificationCodeField'
 import { authError, postAuth } from '@/features/account/auth-api'
 
 const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' })
+const platforms = {
+  Windows: { name: 'Windows 电脑', Icon: Monitor },
+  Mac: { name: 'Mac 电脑', Icon: Monitor },
+  Linux: { name: 'Linux 电脑', Icon: Monitor },
+  Android: { name: 'Android 设备', Icon: Smartphone },
+  iPhone: { name: 'iPhone', Icon: Smartphone },
+  iPad: { name: 'iPad', Icon: Tablet },
+}
+
+function describeDevice(deviceName: string) {
+  const [os, ...parts] = deviceName.split(' · ')
+  const platform = Object.prototype.hasOwnProperty.call(platforms, os) ? platforms[os as keyof typeof platforms] : undefined
+  const last = parts.at(-1) ?? ''
+  const client = /^(应用|Edge|Chrome|Safari|Firefox)$/.test(last) ? parts.pop() : undefined
+  const model = parts.join(' · ')
+  return {
+    group: platform?.name ?? '其他设备',
+    Icon: platform?.Icon ?? Layers,
+    title: model ? os + ' · ' + model : platform?.name ?? deviceName,
+    model, os: platform ? os : undefined, client,
+  }
+}
+
 function deviceTime(iso: string) {
   return <time dateTime={iso}>{dateFormat.format(new Date(iso))}</time>
 }
 
-export default function DeviceManagement({ userId, hasPassword, onClose, onSetPassword }: {
+function CurrentDevice() {
+  return <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-brand)]">
+    <CheckCircle2 size={14} aria-hidden />当前设备
+  </span>
+}
+
+export default function DeviceManagement({ userId, hasPassword, onClose, onSetPassword, onSignedOut }: {
   userId: string
   hasPassword: boolean
   onClose: () => void
   onSetPassword: () => void
+  onSignedOut: () => void
 }) {
-  const client = useQueryClient()
+  const cache = useQueryClient()
   const queryKey = ['account', userId, 'devices']
   const query = useQuery({
     queryKey,
     queryFn: ({ signal }) => requestJson<{ devices: LoginDevice[] }>('/api/auth/devices', { signal }),
-    retry: false,
-    gcTime: 0,
-    refetchInterval: 30_000,
+    retry: false, gcTime: 0, refetchInterval: 30_000,
   })
-  const [target, setTarget] = useState<LoginDevice | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const pending = useRef(false)
+  const devices = query.data?.devices ?? []
+  const target = devices.find(device => device.id === selectedId)
 
-  function selectDevice(device: LoginDevice | null) {
-    setTarget(device)
+  function select(id: string | null) {
+    setSelectedId(id)
+    setConfirming(false)
     setPassword('')
     setError('')
     setNotice('')
@@ -51,14 +82,19 @@ export default function DeviceManagement({ userId, hasPassword, onClose, onSetPa
     setSubmitting(true)
     setError('')
     try {
-      await postAuth('/devices/' + encodeURIComponent(target.id) + '/revoke', { password })
-      await client.cancelQueries({ queryKey })
-      client.setQueryData<{ devices: LoginDevice[] }>(queryKey, previous => previous && ({
+      const result = await postAuth<RevokeLoginDeviceResult>('/devices/' + encodeURIComponent(target.id) + '/revoke', { password })
+      await cache.cancelQueries({ queryKey })
+      if (result.signedOutCurrent) {
+        cache.setQueryData(queryKey, { devices: [] })
+        onSignedOut()
+        return
+      }
+      cache.setQueryData<{ devices: LoginDevice[] }>(queryKey, previous => previous && ({
         devices: previous.devices.filter(device => device.id !== target.id && !(target.legacyGroup && device.legacyGroup)),
       }))
-      selectDevice(null)
+      select(null)
       setNotice(target.legacyGroup ? '这组旧版登录已退出。' : target.deviceName + ' 已退出登录。')
-      if (target.legacyGroup) void client.invalidateQueries({ queryKey })
+      if (target.legacyGroup) void cache.invalidateQueries({ queryKey })
     } catch (cause) {
       setError(authError(cause, '退出设备失败，请稍后重试。'))
     } finally {
@@ -67,14 +103,14 @@ export default function DeviceManagement({ userId, hasPassword, onClose, onSetPa
     }
   }
 
-  if (target) return (
-    <AccountDialog key="verify" title={target.legacyGroup ? '退出旧版登录？' : '退出这台设备？'}
+  if (target && confirming) return (
+    <AccountDialog key="verify" title={target.legacyGroup ? '退出旧版登录？' : target.current ? '退出当前设备？' : '退出这台设备？'}
       description={target.legacyGroup
         ? '这组旧设备将同时退出，之后需要重新登录。请输入当前账号的登录密码确认。'
         : target.firstSeenOnly
           ? '这台设备将退出。已识别的其他设备可继续使用，尚未识别的旧设备需要重新登录。请输入账号密码确认。'
           : target.deviceName + ' 将需要重新登录。请输入当前账号的登录密码确认。'}
-      onClose={() => { if (!pending.current) selectDevice(null) }}>
+      onClose={() => { if (!pending.current) select(target.id) }}>
       <form onSubmit={revoke} className="space-y-4">
         <label className="block space-y-2 text-sm font-medium">
           <span>登录密码</span>
@@ -83,49 +119,78 @@ export default function DeviceManagement({ userId, hasPassword, onClose, onSetPa
         </label>
         {error && <p role="alert" className="text-sm text-[var(--color-error)]">{error}</p>}
         <div className="flex justify-end gap-2">
-          <Button disabled={submitting} onClick={() => selectDevice(null)}>取消</Button>
+          <Button disabled={submitting} onClick={() => select(target.id)}>取消</Button>
           <Button variant="primary" type="submit" disabled={!password || submitting}>{submitting ? '正在退出…' : '确认退出'}</Button>
         </div>
       </form>
     </AccountDialog>
   )
 
-  const devices = query.data?.devices ?? []
-  return (
-    <AccountDialog key="list" title="设备管理" onClose={onClose}>
-      {query.isPending && <div role="status" aria-label="正在加载设备" className="space-y-3"><Skeleton className="h-20 w-full" /><Skeleton className="h-20 w-full" /></div>}
-      {query.isError && <div role="alert" className="flex items-center justify-between gap-2 text-sm"><p>设备列表加载失败</p><Button size="sm" onClick={() => void query.refetch()}>重试</Button></div>}
-      {notice && <p role="status" className="text-sm text-[var(--color-success)]">{notice}</p>}
-      {query.isSuccess && !devices.length && <p className="text-sm text-[var(--text-secondary)]">暂时没有登录设备记录。</p>}
-      <ul aria-label="登录设备" className="divide-y divide-[var(--border-subtle)]">
-        {[...devices.filter(device => device.current), ...devices.filter(device => !device.current)].map(device => {
-          const Icon = /android|ios|iphone|ipad|手机|平板/i.test(device.deviceName) ? Smartphone : Monitor
-          return <li key={device.id} className="grid grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-x-3 py-5 first:pt-1 last:pb-0">
-            <Icon size={22} strokeWidth={1.65} aria-hidden className="mt-0.5 text-[var(--text-secondary)]" />
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                <h3 className="break-words text-base font-semibold leading-6">{device.deviceName}</h3>
-                {device.current && <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)]">
-                  <span aria-hidden className="size-1.5 rounded-full bg-[var(--color-success)]" />当前设备
-                </span>}
-              </div>
-              <p className="mt-1 flex items-start gap-1.5 text-sm text-[var(--text-secondary)]">
-                <MapPin size={14} aria-hidden className="mt-1 shrink-0" />{device.location || '地点未知'}
-              </p>
-              <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs leading-5">
-                <dt className="text-[var(--text-secondary)]">{device.firstSeenOnly || device.legacyGroup ? '首次识别' : '登录时间'}</dt>
-                <dd>{deviceTime(device.createdAt)}</dd>
-                <dt className="text-[var(--text-secondary)]">最近活动</dt>
-                <dd>{deviceTime(device.lastActiveAt)}</dd>
-              </dl>
-            </div>
-            {!device.current && hasPassword && <Button variant="ghost" size="sm"
-              className="col-span-2 mt-1.5 justify-self-end text-[var(--color-error)] hover:text-[var(--color-error)]"
-              aria-label={'退出 ' + device.deviceName} onClick={() => selectDevice(device)}>退出登录</Button>}
-          </li>
-        })}
-      </ul>
-      {!hasPassword && devices.some(device => !device.current) && <div className="space-y-2 text-sm"><p>退出其他设备前，请先设置登录密码。</p><Button size="sm" onClick={onSetPassword}>设置登录密码</Button></div>}
+  if (target) {
+    const { title, Icon, os, client, model } = describeDevice(target.deviceName)
+    const fields = [
+      ['设备型号', model || '设备未提供'],
+      ['操作系统', os || '未知'],
+      ['浏览器或应用', client === '应用' ? '启创墨域 App' : client || '未知'],
+      ['网络所在地', target.location || '地点未知'],
+      [target.firstSeenOnly || target.legacyGroup ? '首次识别' : '登录时间', deviceTime(target.createdAt)],
+      ['最近活动', deviceTime(target.lastActiveAt)],
+    ] as const
+    return <AccountDialog key="detail" wide title="设备详情" onBack={() => select(null)} onClose={onClose}>
+      <div className="flex items-center gap-4 py-3">
+        <span className="grid size-14 shrink-0 place-items-center rounded-full bg-[var(--accent-soft)] text-[var(--accent-strong)]"><Icon size={27} strokeWidth={1.6} aria-hidden /></span>
+        <div className="min-w-0">
+          <h3 className="break-words text-xl font-semibold">{title}</h3>
+          {target.current && <CurrentDevice />}
+        </div>
+      </div>
+      <dl className="my-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-5 gap-y-4 border-y border-[var(--border-subtle)] py-5 text-sm">
+        {fields.map(([label, value]) => <div key={label} className="contents"><dt className="text-[var(--text-secondary)]">{label}</dt><dd className="break-words text-right">{value}</dd></div>)}
+      </dl>
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        {!hasPassword && <p className="text-sm text-[var(--text-secondary)]">退出设备前，请先设置登录密码。</p>}
+        {hasPassword ? <Button className="text-[var(--color-error)]" onClick={() => setConfirming(true)}><LogOut size={16} aria-hidden />退出登录</Button>
+          : <Button onClick={onSetPassword}>设置登录密码</Button>}
+      </div>
     </AccountDialog>
-  )
+  }
+
+  const groups = new Map<string, LoginDevice[]>()
+  for (const device of [...devices.filter(item => item.current), ...devices.filter(item => !item.current)]) {
+    const { group } = describeDevice(device.deviceName)
+    const rows = groups.get(group)
+    if (rows) rows.push(device)
+    else groups.set(group, [device])
+  }
+
+  return <AccountDialog key="list" wide title="设备管理" onClose={onClose}>
+    {query.isPending && <div role="status" aria-label="正在加载设备" className="space-y-3"><Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" /></div>}
+    {query.isError && <div role="alert" className="flex items-center justify-between gap-2 text-sm"><p>设备列表加载失败</p><Button size="sm" onClick={() => void query.refetch()}>重试</Button></div>}
+    {notice && <p role="status" className="mb-3 text-sm text-[var(--color-success)]">{notice}</p>}
+    {query.isSuccess && !devices.length && <p className="text-sm text-[var(--text-secondary)]">暂时没有登录设备记录。</p>}
+    {Array.from(groups, ([group, rows]) => {
+      const { Icon } = describeDevice(rows[0].deviceName)
+      return <section key={group} aria-label={group} className="border-t border-[var(--border-subtle)] py-3 last:pb-0">
+        <div className="mb-1 flex items-center gap-2.5">
+          <span className="grid size-9 shrink-0 place-items-center rounded-full bg-[var(--accent-soft)] text-[var(--accent-strong)]"><Icon size={18} aria-hidden /></span>
+          <h3 className="text-sm font-semibold">{group}</h3>
+          <span className="ml-auto text-xs text-[var(--text-secondary)]">{rows.length} 个设备</span>
+        </div>
+        <ul className="sm:ml-8">
+          {rows.map(device => {
+            const { title, model, client } = describeDevice(device.deviceName)
+            const name = model ? title : device.deviceName
+            return <li key={device.id}><button type="button" onClick={() => select(device.id)} aria-label={'查看 ' + name}
+              className="group flex w-full items-center gap-3 rounded-lg px-2.5 py-3 text-left hover:bg-[var(--surface-muted)] focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1"><span className="break-words font-semibold">{name}</span>{device.current && <CurrentDevice />}</div>
+                <p className="mt-1 flex items-start gap-1.5 text-[13px] leading-5 text-[var(--text-secondary)]"><MapPin size={13} className="mt-1 shrink-0" aria-hidden /><span>{device.location || '地点未知'}{model && client ? ' · ' + client : ''}</span></p>
+                <p className="mt-0.5 text-xs leading-5 text-[var(--text-secondary)]">最近活动 <span className="ml-1">{deviceTime(device.lastActiveAt)}</span></p>
+              </div><ChevronRight size={17} aria-hidden className="shrink-0 text-[var(--text-secondary)]" />
+            </button></li>
+          })}
+        </ul>
+      </section>
+    })}
+  </AccountDialog>
 }

@@ -89,7 +89,7 @@ describe.skipIf(!dbAvailable)('应用冒烟（需 DB）', () => {
     const password = 'Smoke-Test-123!'
 
     const registerRes = await request(app)
-      .post('/api/auth/register')
+      .post('/api/auth/register').set('User-Agent', 'Mozilla/5.0 (Linux; Android 10; K) Chrome/131.0')
       .send({ ...await integrationSmsRegistration(phone), phone, nickname: `冒烟测试用户${unique}`, password })
     expect(registerRes.status).toBe(201)
     expect(registerRes.body.data.tokens.accessToken).toMatch(/^v3\./)
@@ -109,22 +109,32 @@ describe.skipIf(!dbAvailable)('应用冒烟（需 DB）', () => {
       currentStreakDays: 0,
     })
 
-    const loginRes = await request(app).post('/api/auth/login').send({ phone, password })
+    const loginRes = await request(app).post('/api/auth/login')
+      .set('User-Agent', 'Mozilla/5.0 (Linux; Android 14; SM-S9210 Build/UP1A.231005.007; wv) Chrome/130.0')
+      .send({ phone, password })
     expect(loginRes.status).toBe(200)
 
     const desktop = `Bearer ${registerRes.body.data.tokens.accessToken}`
     const phoneSession = `Bearer ${loginRes.body.data.tokens.accessToken}`
     const list = await request(app).get('/api/auth/devices').set('Authorization', desktop)
+      .set('User-Agent', 'Mozilla/5.0 (Linux; Android 10; K) Chrome/131.0').set('Sec-CH-UA-Model', '"Pixel 8 Pro"')
     expect(list.status).toBe(200)
     expect(list.body.data.devices).toHaveLength(2)
     const [current] = list.body.data.devices.filter((device: { current: boolean }) => device.current)
     const [other] = list.body.data.devices.filter((device: { current: boolean }) => !device.current)
+    expect(current.deviceName).toBe('Android · Pixel 8 Pro · Chrome')
+    expect(other.deviceName).toBe('Android · SM-S9210 · 应用')
     const remove = (id: string, value: string) => request(app).post(`/api/auth/devices/${id}/revoke`)
       .set('Authorization', desktop).send({ password: value })
     expect((await remove(other.id, 'wrong-password')).status).toBe(403)
-    expect((await remove(current.id, password)).status).toBe(400)
+    const denied = await remove(current.id, 'wrong-password')
+    expect(denied.status).toBe(403)
+    expect(denied.headers['set-cookie']).toBeUndefined()
     expect((await request(app).get('/api/auth/devices').set('Authorization', phoneSession)).status).toBe(200)
-    expect((await remove(other.id, password)).status).toBe(200)
+    const removedOther = await remove(other.id, password)
+    expect(removedOther.status).toBe(200)
+    expect(removedOther.body.data).toEqual({ revoked: true, signedOutCurrent: false })
+    expect(removedOther.headers['set-cookie']).toBeUndefined()
     for (const token of Object.values(loginRes.body.data.tokens).filter((value): value is string => typeof value === 'string')) {
       expect((await request(app).get('/api/auth/devices').set('Authorization', 'Bearer ' + token)).status).toBe(401)
     }
@@ -143,5 +153,14 @@ describe.skipIf(!dbAvailable)('应用冒烟（需 DB）', () => {
       .post('/api/auth/logout')
       .set('Cookie', `chevoink_refresh=${relogin.body.data.tokens.refreshToken}`)
     expect(revoked.status).toBe(200)
+    const signedOut = await remove(current.id, password)
+    expect(signedOut.status).toBe(200)
+    expect(signedOut.body.data).toEqual({ revoked: true, signedOutCurrent: true })
+    expect(signedOut.headers['set-cookie']).toEqual([
+      expect.stringMatching(/^chevoink_session=;.*Max-Age=0/), expect.stringMatching(/^chevoink_refresh=;.*Max-Age=0/),
+    ])
+    for (const token of [registerRes.body.data.tokens.accessToken, registerRes.body.data.tokens.refreshToken]) {
+      expect((await request(app).get('/api/auth/devices').set('Authorization', 'Bearer ' + token)).status).toBe(401)
+    }
   })
 })

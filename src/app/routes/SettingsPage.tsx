@@ -253,6 +253,10 @@ export default function SettingsPage() {
       setLogoutSubmitting(false)
     }
     setLogoutConfirmOpen(false)
+    finishLocalLogout()
+  }
+
+  function finishLocalLogout() {
     setGuest()
     navigate('/login', { replace: true })
   }
@@ -946,7 +950,7 @@ export default function SettingsPage() {
       <CustomModelSettingsDialog open={customModelsOpen} onClose={() => setCustomModelsOpen(false)} />
 
       {searchParams.get('section') === 'devices' && <Suspense fallback={<p role="status">正在打开设备管理…</p>}>
-        <DeviceManagement key={sessionUser.id} userId={sessionUser.id} hasPassword={Boolean(sessionUser.hasPassword ?? sessionUser.passwordConfigured)}
+        <DeviceManagement onSignedOut={finishLocalLogout} key={sessionUser.id} userId={sessionUser.id} hasPassword={Boolean(sessionUser.hasPassword ?? sessionUser.passwordConfigured)}
           onClose={() => setAccountSection()} onSetPassword={() => {
             if (sessionUser.emailAuthEnabled) setAccountSection('password')
             else { setAccountSection(); setOpenDialog({ kind: 'password' }) }

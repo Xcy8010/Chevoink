@@ -283,8 +283,9 @@ router.post('/devices/:id/revoke', async (req, res) => {
     const { userId, deviceId, tokenVersion } = requireDeviceIdentity(req)
     if (!consumePasswordAttempt('device:' + userId)) throw new DataAccessError(429, 'RATE_LIMITED', '尝试次数过多，请稍后再试。')
     const { password } = parseBody(z.object({ password: z.string().min(1).max(1024) }), req.body, '请输入当前密码。')
-    await removeDevice(userId, deviceId, req.params.id, password, tokenVersion)
-    res.json(buildSuccess(requestId, { revoked: true }))
+    const result = await removeDevice(userId, deviceId, req.params.id, password, tokenVersion)
+    if (result.signedOutCurrent) clearSession(res)
+    res.json(buildSuccess(requestId, result))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 

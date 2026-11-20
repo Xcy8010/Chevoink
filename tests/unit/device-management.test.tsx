@@ -16,26 +16,28 @@ vi.mock('../../src/features/account/VerificationCodeField', () => ({
 const login = '2026-01-09T12:00:00Z'
 const devices = [
   { id: 'this', deviceName: 'Android', firstSeenOnly: true, location: '中国 · 广东省 · 深圳市', current: true, createdAt: login, lastActiveAt: login },
-  { id: 'desktop', deviceName: 'Windows', location: null, current: false, createdAt: login, lastActiveAt: login },
+  { id: 'desktop', deviceName: 'Windows · Edge', location: null, current: false, createdAt: login, lastActiveAt: login },
 ]
-function mount(hasPassword: boolean) {
+function mount(hasPassword: boolean, onSignedOut = vi.fn()) {
   const onSetPassword = vi.fn()
   const client = new QueryClient()
-  render(<QueryClientProvider client={client}><DeviceManagement userId="u" hasPassword={hasPassword} onClose={vi.fn()} onSetPassword={onSetPassword} /></QueryClientProvider>)
+  render(<QueryClientProvider client={client}><DeviceManagement onSignedOut={onSignedOut} userId="u" hasPassword={hasPassword} onClose={vi.fn()} onSetPassword={onSetPassword} /></QueryClientProvider>)
   return onSetPassword
 }
 afterEach(() => { cleanup(); vi.resetAllMocks() })
 
 it('lists login and activity per device and requires a password to sign out a different device', async () => {
-  vi.mocked(requestJson).mockResolvedValueOnce({ devices }).mockRejectedValueOnce(new ApiClientError('密码错误', 403)).mockResolvedValueOnce({ revoked: true })
+  vi.mocked(requestJson).mockResolvedValueOnce({ devices }).mockRejectedValueOnce(new ApiClientError('密码错误', 403)).mockResolvedValueOnce({ revoked: true, signedOutCurrent: false })
   mount(true)
   await screen.findByText('Android')
-  expect(screen.queryByRole('button', { name: '退出 Android' })).toBeNull()
-  expect(screen.getByText('首次识别')).toBeTruthy()
+  expect(screen.getByRole('button', { name: '查看 Android' })).toBeTruthy()
   expect(screen.getByText('中国 · 广东省 · 深圳市')).toBeTruthy()
-  expect(screen.getAllByText('最近活动')).toHaveLength(2)
+  expect(screen.getAllByText(/最近活动/)).toHaveLength(2)
   expect(screen.getByText('地点未知')).toBeTruthy()
-  fireEvent.click(screen.getByRole('button', { name: '退出 Windows' }))
+  fireEvent.click(screen.getByRole('button', { name: '查看 Windows · Edge' }))
+  expect(screen.getByText('设备未提供')).toBeTruthy()
+  expect(screen.getByText('Edge')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
   const confirm = screen.getByRole('button', { name: '确认退出' }) as HTMLButtonElement
   expect(confirm.disabled).toBe(true)
   const password = screen.getByLabelText('登录密码')
@@ -44,9 +46,9 @@ it('lists login and activity per device and requires a password to sign out a di
   await screen.findByText('密码错误')
   fireEvent.change(password, { target: { value: 'verified-password' } })
   fireEvent.click(confirm)
-  await screen.findByText('Windows 已退出登录。')
+  await screen.findByText('Windows · Edge 已退出登录。')
   expect(requestJson).toHaveBeenLastCalledWith('/api/auth/devices/desktop/revoke', { method: 'POST', body: JSON.stringify({ password: 'verified-password' }) })
-  expect(screen.queryByText('Windows')).toBeNull()
+  expect(screen.queryByText('Windows · Edge')).toBeNull()
   expect(screen.getByText('Android')).toBeTruthy()
 })
 
@@ -55,7 +57,9 @@ it('allows viewing devices without a password and directs management to password
   const setup = mount(false)
   fireEvent.click(await screen.findByText('重试'))
   await screen.findByText('Android')
-  expect(screen.queryByRole('button', { name: '退出 Windows' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '查看 Android' }))
+  expect(screen.getByText('首次识别')).toBeTruthy()
+  expect(screen.queryByRole('button', { name: '退出登录' })).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: '设置登录密码' }))
   await waitFor(() => expect(setup).toHaveBeenCalledOnce())
 })
@@ -64,9 +68,10 @@ it('shows the scope of a grouped sign-out and refreshes the device list after co
   const linked = [{ ...devices[1], id: 'old-a', deviceName: '旧电脑', legacyGroup: true },
     { ...devices[1], id: 'old-b', deviceName: '旧手机', legacyGroup: true }]
   vi.mocked(requestJson).mockResolvedValueOnce({ devices: [devices[0], ...linked] })
-    .mockResolvedValueOnce({ revoked: true }).mockResolvedValueOnce({ devices: [devices[0]] })
+    .mockResolvedValueOnce({ revoked: true, signedOutCurrent: false }).mockResolvedValueOnce({ devices: [devices[0]] })
   mount(true)
-  fireEvent.click(await screen.findByRole('button', { name: '退出 旧电脑' }))
+  fireEvent.click(await screen.findByRole('button', { name: '查看 旧电脑' }))
+  fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
   expect(screen.getByRole('dialog', { name: '退出旧版登录？' })).toBeTruthy()
   fireEvent.change(screen.getByLabelText('登录密码'), { target: { value: 'verified-password' } })
   fireEvent.click(screen.getByRole('button', { name: '确认退出' }))
@@ -74,4 +79,30 @@ it('shows the scope of a grouped sign-out and refreshes the device list after co
   expect(screen.queryByText('旧手机')).toBeNull()
   expect(screen.getByText('Android')).toBeTruthy()
   expect(requestJson).toHaveBeenCalledTimes(3)
+})
+
+it('shows the reported model and clears the local session after verified current-device logout', async () => {
+  const current = { ...devices[0], deviceName: 'Android · Pixel 8 Pro · Chrome' }
+  vi.mocked(requestJson).mockResolvedValueOnce({ devices: [current] }).mockResolvedValueOnce({ revoked: true, signedOutCurrent: true })
+  const onSignedOut = vi.fn()
+  mount(true, onSignedOut)
+  fireEvent.click(await screen.findByRole('button', { name: '查看 Android · Pixel 8 Pro' }))
+  expect(screen.getByText('Pixel 8 Pro')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
+  expect(screen.getByRole('dialog', { name: '退出当前设备？' })).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('登录密码'), { target: { value: 'verified-password' } })
+  fireEvent.click(screen.getByRole('button', { name: '确认退出' }))
+  await waitFor(() => expect(onSignedOut).toHaveBeenCalledOnce())
+})
+
+it('keeps the replacement session when another tab has signed in since the device list loaded', async () => {
+  vi.mocked(requestJson).mockResolvedValueOnce({ devices }).mockResolvedValueOnce({ revoked: true, signedOutCurrent: false })
+  const onSignedOut = vi.fn()
+  mount(true, onSignedOut)
+  fireEvent.click(await screen.findByRole('button', { name: '查看 Android' }))
+  fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
+  fireEvent.change(screen.getByLabelText('登录密码'), { target: { value: 'verified-password' } })
+  fireEvent.click(screen.getByRole('button', { name: '确认退出' }))
+  await screen.findByText('Android 已退出登录。')
+  expect(onSignedOut).not.toHaveBeenCalled()
 })

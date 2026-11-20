@@ -39,6 +39,22 @@ afterAll(async () => {
 })
 
 describe.skipIf(!dbAvailable)('upgrade signed sessions on first visit', () => {
+  it('checks ownership on password verification and keeps an independent device active after self-removal', async () => {
+    const id = await account(), outsider = await account(), issued = Math.floor(Date.now() / 1000) - 3
+    const first = pair(id, issued), other = pair(id, issued + 1), foreign = pair(outsider, issued)
+    const firstId = current(await byBearer(first.access)).id
+    current(await byBearer(other.access))
+    const foreignId = current(await byBearer(foreign.access)).id
+    const remove = (target: string) => request(app).post(endpoint + '/' + target + '/revoke').set('Authorization', 'Bearer ' + first.access).send({ password })
+    const denied = await remove(foreignId)
+    expect(denied.status).toBe(404)
+    expect(denied.headers['set-cookie']).toBeUndefined()
+    expect((await remove(firstId)).body.data).toEqual({ revoked: true, signedOutCurrent: true })
+    expect((await byBearer(first.refresh)).status).toBe(401)
+    expect((await byBearer(other.refresh)).status).toBe(200)
+    expect((await byBearer(foreign.refresh)).status).toBe(200)
+  })
+
   it('registers desktop and Android separately, matches concurrent cookie and native access/refresh, and revokes every form', async () => {
     const id = await account(), issued = Math.floor(Date.now() / 1000) - 5
     const desktop = pair(id, issued), phone = pair(id, issued + 1)
@@ -92,7 +108,7 @@ describe.skipIf(!dbAvailable)('upgrade signed sessions on first visit', () => {
     expect(await prisma.accountDeviceSession.count({ where: { userId: another } })).toBe(0)
   })
 
-  it('revokes Android WebView cookies and the retained, older native Bearer together without affecting new logins', async () => {
+  it.each(['standalone', 'grouped'] as const)('revokes WebView cookies and the retained native Bearer from a %s device without affecting new logins', async mode => {
     const id = await account(), issued = Math.floor(Date.now() / 1000) - 9
     const original = pair(id, issued)
     const group = 'legacy-' + sign('legacy/' + id + '/0').slice(0, 48)
@@ -105,8 +121,14 @@ describe.skipIf(!dbAvailable)('upgrade signed sessions on first visit', () => {
     const newDevice = randomUUID(), standalone = pair(id, issued, newDevice)
     await prisma.accountDeviceSession.create({ data: { id: newDevice, userId: id, tokenVersion: 0,
       expiresAt: new Date(Date.now() + 100000), deviceName: 'Desktop' } })
-    expect((await request(app).post(endpoint + '/' + current(result).id + '/revoke')
-      .set('Authorization', 'Bearer ' + standalone.access).send({ password })).status).toBe(200)
+    const removal = await request(app).post(endpoint + '/' + current(result).id + '/revoke')
+      .set('Authorization', 'Bearer ' + (mode === 'standalone' ? standalone.access : original.access)).send({ password })
+    expect(removal.status).toBe(200)
+    expect(removal.body.data.signedOutCurrent).toBe(mode === 'grouped')
+    if (mode === 'grouped') expect(removal.headers['set-cookie']).toEqual([
+      expect.stringMatching(/^chevoink_session=;.*Max-Age=0/), expect.stringMatching(/^chevoink_refresh=;.*Max-Age=0/),
+    ])
+    else expect(removal.headers['set-cookie']).toBeUndefined()
     for (const token of [original.access, original.refresh, webview.access, webview.refresh]) expect((await byBearer(token)).status).toBe(401)
     expect((await request(app).get(endpoint).set('Cookie', responseCookies(result))).status).toBe(401)
     expect((await byBearer(standalone.access)).body.data.devices).toHaveLength(1)

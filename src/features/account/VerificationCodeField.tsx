@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { RotateCw, X } from 'lucide-react'
+import { ArrowLeft, RotateCw, X } from 'lucide-react'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
@@ -12,8 +12,10 @@ import { authError, type CaptchaAnswer, type CodeReceipt } from './auth-api'
 
 type Captcha = { captchaId: string; imageBase64: string }
 
-export function AccountDialog({ title, description, step, mascotPose, children, onClose }: {
+export function AccountDialog({ title, description, step, mascotPose, children, onClose, wide, onBack }: {
   title: string
+  wide?: boolean
+  onBack?: () => void
   description?: string
   step?: 1 | 2 | 3
   mascotPose?: 'welcome' | 'privacy'
@@ -58,7 +60,7 @@ export function AccountDialog({ title, description, step, mascotPose, children, 
       onCancel={event => { event.preventDefault(); event.stopPropagation(); onClose?.() }}
       className={cn(
         'account-dialog fixed inset-0 m-auto w-[calc(100%-2rem)] overflow-hidden rounded-3xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-0 text-[var(--text-primary)] shadow-xl backdrop:bg-black/25 backdrop:backdrop-blur-sm',
-        step ? 'max-w-[480px] md:max-w-[50rem]' : 'max-w-[440px]',
+        step ? 'max-w-[480px] md:max-w-[50rem]' : wide ? 'max-w-[580px]' : 'max-w-[440px]',
       )}
     >
       <div key={step} data-step-direction={step ? (backward ? 'back' : 'forward') : undefined} className={cn(
@@ -67,6 +69,7 @@ export function AccountDialog({ title, description, step, mascotPose, children, 
       )}>
         <header className={cn('mb-5', step && 'md:mb-0')}>
           <div className="flex items-center gap-3">
+            {onBack && <Button variant="ghost" size="sm" className="-ml-2 w-9 shrink-0 px-0" aria-label="返回设备列表" onClick={onBack}><ArrowLeft size={18} aria-hidden /></Button>}
             {mascotPose && <ChevoinkMascot pose={mascotPose} className="size-14 shrink-0" />}
             <h2 id={titleId} tabIndex={-1} className={cn(
               'min-w-0 flex-1 font-semibold tracking-tight outline-none',

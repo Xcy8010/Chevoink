@@ -5,6 +5,7 @@ import { isLegacyAccountMissingEmail } from '../../shared/account-contact.js'
 
 import { isRecognizedDevice, openDevice, registerRecognizedDevice, revokeDevice } from './device-session.js'
 import { resolveDeviceLocation } from './device-location.js'
+import { enrichDeviceName } from './device-name.js'
 import { env } from '../config/env.js'
 import { prisma, DataAccessError } from './prisma.js'
 
@@ -336,7 +337,7 @@ export type UserAuthLookup =
   | { status: 'notFound' }
   | { status: 'unavailable' }
 
-type DeviceValidity = { userId: string; tokenVersion: number; expiresAt: Date; lastActiveAt: Date; revokedAt: Date | null }
+type DeviceValidity = { userId: string; tokenVersion: number; deviceName: string; expiresAt: Date; lastActiveAt: Date; revokedAt: Date | null }
 
 // The hot path reads device revocation and account-wide revocation in the same indexed lookup.
 async function readDeviceAuthState(userId: string, deviceId: string, tokenVersion: number): Promise<UserAuthLookup & { device?: DeviceValidity }> {
@@ -348,7 +349,7 @@ async function readDeviceAuthState(userId: string, deviceId: string, tokenVersio
       accountVersion: number; bannedAt: Date | null; phone: string | null; email: string | null; emailVerifiedAt: Date | null
     })[]>`
       SELECT d.user_id AS "userId", d.token_version AS "tokenVersion", d.expires_at AS "expiresAt",
-             d.last_active_at AS "lastActiveAt", d.revoked_at AS "revokedAt",
+             d.last_active_at AS "lastActiveAt", d.revoked_at AS "revokedAt", d.device_name AS "deviceName",
              u.token_version AS "accountVersion", u.banned_at AS "bannedAt", u.phone, u.email, u.email_verified_at AS "emailVerifiedAt"
       FROM account_device_sessions d JOIN users u ON u.id = d.user_id
       WHERE d.id = ${deviceId} AND d.user_id = ${userId} ${historicalGuard}`
@@ -521,6 +522,11 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
       return
     }
     const stale = now.getTime() - device.lastActiveAt.getTime() >= activityWindowMs
+    const improvedName = enrichDeviceName(req, device.deviceName)
+    if (improvedName) {
+      await prisma.accountDeviceSession.updateMany({ where: { id: deviceId, deviceName: device.deviceName, revokedAt: null }, data: { deviceName: improvedName } })
+        .catch(() => { /* Optional display metadata can be enriched on a later request. */ })
+    }
     const extend = refreshing ? refreshExpiry() : historical && recognizedExpiry > device.expiresAt ? recognizedExpiry : null
     if (stale || extend) {
       const touched = await prisma.accountDeviceSession.updateMany({ where: { id: deviceId, revokedAt: null },

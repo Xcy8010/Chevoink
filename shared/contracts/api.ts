@@ -66,6 +66,8 @@ export type LoginDevice = {
   current: boolean
 }
 
+export type RevokeLoginDeviceResult = { revoked: true; signedOutCurrent: boolean }
+
 export type AuthTokenPair = {
   accessToken: string
   refreshToken: string
