@@ -12,6 +12,7 @@ import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex,
   userNotificationsMigrationName, userNotificationsMigrationChecksum,
   emailAccountMigrationName, emailAccountMigrationChecksum,
   agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum,
+  deviceSessionsMigrationName, deviceSessionsMigrationChecksum,
   storyProfilesMigrationName, storyProfilesMigrationChecksum, readStoryProfilesState, assertStoryProfilesState,
   assertAgentPersonalizationState, readAgentPersonalizationState } from '../../scripts/verify-release-migration.mjs'
 
@@ -455,16 +456,19 @@ model AgentPersonalizationMemory {
     rmSync(path.dirname(f.candidate), { recursive: true })
   })
 
-  it('allows only the frozen story profile schema pair, unmodified SQL and API-only deployment', () => {
+  it.each([storyProfilesMigrationName, deviceSessionsMigrationName])('allows only the frozen %s schema pair, unmodified SQL and API-only deployment', plan => {
     const v1 = personalizationFixture()
     const f = fixture()
     const file = (root: string) => path.join(root, 'prisma/schema.prisma')
     const delta = JSON.parse(readFileSync(new URL('../fixtures/release-story-profile-schema-additions.json', import.meta.url), 'utf8'))
     const insert = (schema: string, additions: [string, string][]) => additions.reduce(
       (text, [anchor, addition]) => text.replace(anchor, addition + anchor), schema)
-    const baseline = insert(readFileSync(file(v1.candidate), 'utf8').replaceAll('\r\n', '\n'), delta.baseline)
-    const candidate = insert(baseline, delta.candidate)
-    const relative = `prisma/migrations/${storyProfilesMigrationName}/migration.sql`
+    const ruleTexts = insert(readFileSync(file(v1.candidate), 'utf8').replaceAll('\r\n', '\n'), delta.baseline)
+    const story = insert(ruleTexts, delta.candidate)
+    const baseline = plan === storyProfilesMigrationName ? ruleTexts : story
+    const candidate = plan === storyProfilesMigrationName ? story : insert(story,
+      JSON.parse(readFileSync(new URL('../fixtures/release-device-session-schema-additions.json', import.meta.url), 'utf8')))
+    const relative = `prisma/migrations/${plan}/migration.sql`
     const target = path.join(f.candidate, relative)
     try {
       writeFileSync(file(f.baseline), baseline)
@@ -472,12 +476,12 @@ model AgentPersonalizationMemory {
       mkdirSync(path.dirname(target))
       const sql = readFileSync(relative, 'utf8').replaceAll('\r\n', '\n')
       writeFileSync(target, sql)
-      expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(storyProfilesMigrationName)
+      expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(plan)
       const sh = readFileSync('deploy/deploy-production.sh', 'utf8')
-      const guard = sh.indexOf(`"$MIGRATION_PLAN" == "${storyProfilesMigrationName}" && "$PUBLICATION" != api-only`)
+      const guard = sh.indexOf(`"$MIGRATION_PLAN" == "${plan}" && "$PUBLICATION" != api-only`)
       expect(guard).toBeGreaterThan(0)
       expect(guard).toBeLessThan(sh.indexOf('phase preparing'))
-      expect(sh.slice(sh.indexOf('phase prepared'), sh.indexOf('phase migrating'))).toContain(`"$MIGRATION_PLAN" == "${storyProfilesMigrationName}"`)
+      expect(sh.slice(sh.indexOf('phase prepared'), sh.indexOf('phase migrating'))).toContain(`"$MIGRATION_PLAN" == "${plan}"`)
       expect(sh.slice(sh.indexOf('phase prepared'), sh.indexOf('phase migrated'))).toMatch(
         /verify-release-migration\.mjs before[^\n]*\s+phase migrating\s+npx prisma migrate deploy\s+[^\n]*verify-release-migration\.mjs after/)
       for (const [filename, value] of [[file(f.baseline), baseline], [file(f.candidate), candidate], [target, sql],
@@ -546,6 +550,7 @@ model AgentPersonalizationMemory {
     [emailAccountMigrationName, emailAccountMigrationChecksum],
     [agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum],
     [storyProfilesMigrationName, storyProfilesMigrationChecksum],
+    [deviceSessionsMigrationName, deviceSessionsMigrationChecksum],
   ])('requires only %s pending, one exact successful row afterwards and unchanged full history', (migration, checksum) => {
     const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1, historyHash: 'a'.repeat(32) }
     const target = { ...old, migration_name: migration, checksum }

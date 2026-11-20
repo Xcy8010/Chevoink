@@ -1,0 +1,10 @@
+[
+  [
+    "model User {",
+    "model AccountDeviceSession {\n  id           String    @id @db.VarChar(64)\n  userId       String    @map(\"user_id\") @db.VarChar(64)\n  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)\n  tokenVersion Int       @map(\"token_version\")\n  deviceName   String    @map(\"device_name\")\n  location     String?\n  createdAt    DateTime  @default(now()) @map(\"created_at\")\n  lastActiveAt DateTime  @default(now()) @map(\"last_active_at\")\n  expiresAt    DateTime  @map(\"expires_at\")\n  revokedAt    DateTime? @map(\"revoked_at\")\n\n  @@index([userId, tokenVersion])\n  @@map(\"account_device_sessions\")\n}\n\n"
+  ],
+  [
+    "  testerEntitlement TesterEntitlement?",
+    "  deviceSessions             AccountDeviceSession[]\n"
+  ]
+]

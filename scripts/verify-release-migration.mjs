@@ -37,6 +37,10 @@ const personalizationRuleTextsCandidateSchema = 'cc3c8a349ef54e3baf3e7881202e3c4
 export const storyProfilesMigrationName = '20261119090000_story_profiles'
 export const storyProfilesMigrationChecksum = 'dec7e25ff65d8d191d277c3477587cede647dd31673ad61eaff86ead7cc58bc6'
 const storyProfilesCandidateSchema = 'e2f391cb7853325160d21ef619b0cc94e2ef60e10fcdd5df75050c673ef686a1'
+export const deviceSessionsMigrationName = '20261120000100_account_device_sessions'
+export const deviceSessionsMigrationChecksum = '0963c42ab6ab7fb1ea765ef8c68491913e76356c976298a0e56841a389913dc7'
+const deviceSessionsCandidateSchema = 'e2703020e367b55b2f7df900d6f0f0935364b50f3534625c529ecdc3c5ad3e5e'
+const deviceSessionsTable = 'account_device_sessions'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -60,8 +64,9 @@ reviewed.set(emailAccountMigrationName, emailAccountMigrationChecksum)
 reviewed.set(agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum)
 reviewed.set(personalizationRulesMigrationName, personalizationRulesMigrationChecksum)
 reviewed.set(personalizationRuleTextsMigrationName, personalizationRuleTextsMigrationChecksum)
+reviewed.set(deviceSessionsMigrationName, deviceSessionsMigrationChecksum)
 reviewed.set(storyProfilesMigrationName, storyProfilesMigrationChecksum)
-const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName, personalizationRuleTextsMigrationName, storyProfilesMigrationName])
+const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName, personalizationRuleTextsMigrationName, storyProfilesMigrationName, deviceSessionsMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -85,6 +90,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const deviceTarget = `${deviceSessionsMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === storyProfilesCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === deviceSessionsCandidateSchema
+    && !oldFiles.some(([name]) => name === deviceTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== deviceTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === deviceTarget)?.[1] === deviceSessionsMigrationChecksum) return deviceSessionsMigrationName
   const profileTarget = `${storyProfilesMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === personalizationRuleTextsCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === storyProfilesCandidateSchema
@@ -486,7 +497,7 @@ const personalizationEnums = [
 const personalizationTimestamp = 'timestamp(3) without time zone'
 const personalizationDegree = '"AgentPersonalizationDegree"'
 
-function addedPersonalizationTable(table, columnSpecs, indexSpecs, primaryKey, foreignTable, foreignKey) {
+function expectedUserOwnedTable(table, columnSpecs, indexSpecs, primaryKey, foreignTable, foreignKey) {
   return {
     tables: [{ name: table, kind: 'r' }],
     columns: columnSpecs.map(([name, type, required = true, defaultValue = null]) => ({ name, type, required, defaultValue })),
@@ -504,7 +515,35 @@ function addedPersonalizationTable(table, columnSpecs, indexSpecs, primaryKey, f
   }
 }
 
-const personalizationState = addedPersonalizationTable(personalizationTable, [
+const deviceSessionsState = expectedUserOwnedTable(deviceSessionsTable, [
+  ['id', 'character varying(64)'], ['user_id', 'character varying(64)'], ['token_version', 'integer'],
+  ['device_name', 'text'], ['location', 'text', false],
+  ['created_at', personalizationTimestamp, true, 'CURRENT_TIMESTAMP'], ['last_active_at', personalizationTimestamp, true, 'CURRENT_TIMESTAMP'],
+  ['expires_at', personalizationTimestamp], ['revoked_at', personalizationTimestamp, false],
+], [['pkey', true, ['id']], ['user_id_token_version_idx', false, ['user_id', 'token_version']]], 'id', 'users', 'id')
+
+export async function readDeviceSessionsState(tx, phase) {
+  if (phase === 'before') {
+    const reserved = await tx.$queryRaw`SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname=current_schema() AND c.relname IN ('account_device_sessions_pkey','account_device_sessions_user_id_token_version_idx')`
+    if (reserved.length) throw Error('Account device sessions index names already exist')
+  }
+  return readAddedTableState(tx, phase, deviceSessionsTable)
+}
+
+export function assertDeviceSessionsState(state, phase, before) {
+  // PG18 also exposes NOT NULL in pg_constraint. Earlier versions represent it in pg_attribute.
+  let expected = deviceSessionsState
+  if (phase === 'after' && state.constraints.some(row => row.kind === 'n')) {
+    const notNull = expected.columns.filter(column => column.required).map(({ name }) => ({
+      name: `${deviceSessionsTable}_${name}_not_null`, kind: 'n', definition: `NOT NULL ${name}`, valid: true,
+    }))
+    expected = { ...expected, constraints: [...expected.constraints, ...notNull] }
+  }
+  assertAddedTableState(state, phase, before, expected, 'Account device sessions')
+}
+
+const personalizationState = expectedUserOwnedTable(personalizationTable, [
   ['user_id', 'character varying(64)'],
   ['revision', 'integer', true, '0'],
   ['memory_revision', 'integer', true, '0'],
@@ -519,7 +558,7 @@ const personalizationState = addedPersonalizationTable(personalizationTable, [
   ['emoji', personalizationDegree, true, `'less'::${personalizationDegree}`],
 ], [['pkey', true, ['user_id']]], 'user_id', 'users', 'id')
 
-const memoriesState = addedPersonalizationTable(memoriesTable, [
+const memoriesState = expectedUserOwnedTable(memoriesTable, [
   ['id', 'character varying(64)'],
   ['user_id', 'character varying(64)'],
   ['text', 'character varying(500)'],
@@ -863,6 +902,11 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === deviceSessionsMigrationName) {
+        const devices = await readDeviceSessionsState(tx, phase)
+        assertDeviceSessionsState(devices, phase, before?.devices)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, devices }
+      }
       if (plan === storyProfilesMigrationName) {
         const profiles = await readStoryProfilesState(tx, phase)
         assertStoryProfilesState(profiles, phase, before?.profiles)
