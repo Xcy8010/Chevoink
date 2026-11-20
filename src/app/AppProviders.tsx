@@ -62,7 +62,11 @@ export default function AppProviders({ children }: PropsWithChildren) {
     let refreshingRequirements = false
 
     async function bootstrapShellSession(requirementsOnly = false) {
-      const owner = useShellStore.getState().sessionUser?.id
+      const { sessionUser, authTokens } = useShellStore.getState()
+      const isCurrentSession = () => {
+        const current = useShellStore.getState()
+        return !disposed && current.sessionUser?.id === sessionUser?.id && current.authTokens === authTokens
+      }
       if (!requirementsOnly) setSessionChecking()
 
       try {
@@ -74,7 +78,7 @@ export default function AppProviders({ children }: PropsWithChildren) {
           retry: false,
         })
 
-        if (!disposed && (!requirementsOnly || useShellStore.getState().sessionUser?.id === owner)) {
+        if (isCurrentSession()) {
           if (!payload.user) {
             setGuest()
             return
@@ -96,7 +100,7 @@ export default function AppProviders({ children }: PropsWithChildren) {
           }
         }
       } catch (error) {
-        if (disposed || requirementsOnly) {
+        if (!isCurrentSession() || requirementsOnly) {
           return
         }
 

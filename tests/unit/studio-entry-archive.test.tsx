@@ -4,6 +4,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import StudioPage from '../../src/pages/StudioPage'
+import { useShellStore } from '../../src/store/useShellStore'
+
+const initialShell = useShellStore.getState()
 
 const { getMe, createNovelWorkspace } = vi.hoisted(() => ({ getMe: vi.fn(), createNovelWorkspace: vi.fn() }))
 vi.mock('@/features/community/api', () => ({ getMe }))
@@ -15,10 +18,12 @@ vi.mock('@/features/studio/StudioWorkspace', () => ({
 afterEach(() => {
   cleanup()
   localStorage.clear()
+  useShellStore.setState(initialShell)
   vi.resetAllMocks()
 })
 
 it('resumes an active work when the last work and most recent draft are archived', async () => {
+  useShellStore.setState({ authStatus: 'authenticated', sessionUser: { id: 'synthetic-owner' } as NonNullable<typeof initialShell.sessionUser> })
   localStorage.setItem('studio-last-novel-id', 'archived-work')
   getMe.mockResolvedValue({
     user: { id: 'synthetic-owner' },

@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 
 import AppState from '@/components/ui/AppState'
-import LoadingMark from '@/components/ui/LoadingMark'
+import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import { useShellStore } from '@/store/useShellStore'
 
 type RequireAuthRouteProps = {
@@ -29,7 +29,13 @@ export default function RequireAuthRoute({
     : state
 
   if (authStatus === 'checking') {
-    return renderState(checkingFallback ?? <LoadingMark className="grid min-h-40 flex-1 place-items-center" />)
+    return renderState(checkingFallback ?? (
+      <div className="space-y-4 py-2" role="status" aria-label="页面加载中">
+        <Skeleton className="h-7 w-48" />
+        <SkeletonText lines={4} />
+        <Skeleton className="h-40 w-full rounded-[var(--radius-xl)]" />
+      </div>
+    ))
   }
 
   if (authStatus === 'unavailable') {

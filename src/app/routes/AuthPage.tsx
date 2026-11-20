@@ -8,7 +8,7 @@ import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
 import LoadingMark from '@/components/ui/LoadingMark'
 import TextInput from '@/components/ui/TextInput'
-import { hydrateReadingSync } from '@/features/home/reading-sync'
+import { completeInteractiveSignIn } from '@/features/account/complete-interactive-sign-in'
 import { brandMeta } from '@/lib/theme/tokens'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
@@ -111,7 +111,6 @@ function LegacyAuthPage({ mode, onClose, redirectPath }: AuthPageProps & { redir
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
-  const setAuthenticated = useShellStore((state) => state.setAuthenticated)
   const toast = useToast()
 
   const referralCode = useMemo(() => searchParams.get('ref')?.trim().toUpperCase() || undefined, [searchParams])
@@ -277,22 +276,8 @@ function LegacyAuthPage({ mode, onClose, redirectPath }: AuthPageProps & { redir
               } satisfies SmsLoginRequest),
             })
 
-      setAuthenticated({
-        user: payload.user,
-        tokens: payload.tokens,
-        unreadMessageCount: payload.user.unreadMessageCount,
-        unreadNotificationCount: payload.user.unreadNotificationCount,
-      })
+      completeInteractiveSignIn(queryClient, payload)
       toast.success(authSuccessMessage(isSmsFlow && shouldCollectProfile))
-
-      // 重新登录后：游客期的 /me 等缓存全部作废，并立即水合云端书架/阅读进度，
-      // 避免个人中心的书架短暂为空（启动时的水合在游客态下已静默失败过）
-      void queryClient.invalidateQueries()
-      void hydrateReadingSync().then((changed) => {
-        if (changed) {
-          void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
-        }
-      })
     } catch (error) {
       const message = error instanceof ApiClientError ? error.message : '暂时无法完成提交，请稍后再试。'
       setErrorMessage(message)

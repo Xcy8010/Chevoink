@@ -4,6 +4,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
+import RequireAuthRoute from '@/app/routes/RequireAuthRoute'
+import { ApiClientError } from '@/app/api-client'
+import { completeInteractiveSignIn } from '@/features/account/complete-interactive-sign-in'
 import { ToastContext } from '@/components/ui/toast-context'
 import { getMe, listFavoriteNovels, listPosts, listUserBookmarkedPosts } from '@/features/community/api'
 import { listNovelCardsByIds } from '@/features/discover/api'
@@ -23,6 +26,8 @@ vi.mock('@/features/discover/api', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/features/discover/api')>(),
   listNovelCardsByIds: vi.fn(),
 }))
+
+vi.mock('@/features/home/reading-sync', () => ({ hydrateReadingSync: async () => false }))
 
 const date = '2026-11-13T01:00:00Z'
 const user: User = {
@@ -56,7 +61,7 @@ function renderProfile(client = new QueryClient({ defaultOptions: { queries: { r
     <QueryClientProvider client={client}>
       <ToastContext.Provider value={toast}>
         <MemoryRouter>
-          <ProfilePage />
+          <RequireAuthRoute><ProfilePage /></RequireAuthRoute>
         </MemoryRouter>
       </ToastContext.Provider>
     </QueryClientProvider>,
@@ -75,6 +80,38 @@ afterEach(() => {
   window.localStorage.clear()
   vi.resetAllMocks()
   vi.restoreAllMocks()
+})
+
+it('replaces a cached guest failure with the profile skeleton when login succeeds', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  useShellStore.getState().setGuest()
+  await expect(client.fetchQuery({
+    queryKey: ['community', 'me'],
+    queryFn: async () => { throw new ApiClientError('请登录', 401) },
+  })).rejects.toThrow('请登录')
+  let resolveProfile!: (result: UserMePayload) => void
+  vi.mocked(getMe).mockImplementation(() => new Promise(resolve => { resolveProfile = resolve }))
+  renderProfile(client)
+  expect(screen.getByRole('link', { name: '去登录' })).toBeTruthy()
+
+  act(() => completeInteractiveSignIn(client, {
+    user, tokens: { accessToken: 'access', refreshToken: 'refresh', expiresInSeconds: 3600 },
+  }))
+  expect(screen.getByRole('status', { name: '个人中心加载中' }).querySelector('.skeleton-shimmer')).toBeTruthy()
+  expect(screen.queryByText('个人中心暂时没有打开')).toBeNull()
+  await act(async () => resolveProfile(profile))
+  expect(await screen.findByRole('heading', { name: user.nickname })).toBeTruthy()
+})
+
+it('keeps the profile skeleton until an authenticated request really fails', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  let rejectProfile!: (error: Error) => void
+  vi.mocked(getMe).mockImplementation(() => new Promise((_, reject) => { rejectProfile = reject }))
+  renderProfile(client)
+  expect(screen.queryByText('个人中心暂时没有打开')).toBeNull()
+  expect(screen.getByRole('status', { name: '个人中心加载中' })).toBeTruthy()
+  await act(async () => rejectProfile(new Error('offline')))
+  expect(await screen.findByText('个人中心暂时没有打开')).toBeTruthy()
 })
 
 it('shows the profile, shelf and editable controls while the post counts are pending', async () => {

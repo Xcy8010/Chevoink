@@ -154,6 +154,7 @@ export const appRoutes: AppRouteDefinition[] = [
     description: '在创作中心集中处理作品信息、章节草稿、AI 辅助写作和封面挑选，保持思路不断线。',
     element: (
       <RequireAuthRoute
+        checkingFallback={<StudioSkeleton />}
         title="登录后即可进入创作中心"
         centered
         description="登录后，你就可以继续整理灵感、编辑章节并管理自己的作品。"
@@ -169,6 +170,7 @@ export const appRoutes: AppRouteDefinition[] = [
     description: '聚焦当前作品的章节推进、内容润色和封面选择，让每一步都更连贯。',
     element: (
       <RequireAuthRoute
+        checkingFallback={<StudioSkeleton />}
         title="登录后即可继续这部作品的创作"
         centered
         description="登录后，你可以回到当前作品，继续编辑章节、整理内容并准备发布。"
@@ -197,7 +199,7 @@ export const appRoutes: AppRouteDefinition[] = [
     title: '消息中心',
     description: '在这里查看私聊、互动提醒和更新通知，不错过与你有关的内容。',
     element: (
-      <RequireAuthRoute centered title="登录后即可查看消息" description="登录后，即可查看私聊、互动提醒和更新通知。">
+      <RequireAuthRoute centered checkingFallback={<MessagesRouteSkeleton />} title="登录后即可查看消息" description="登录后，即可查看私聊、互动提醒和更新通知。">
         <MessagesPage />
       </RequireAuthRoute>
     ),
@@ -224,6 +226,7 @@ export const appRoutes: AppRouteDefinition[] = [
     description: '关注与粉丝集中在同一页管理，随时回访、回关或取消关注。',
     element: (
       <RequireAuthRoute
+        checkingFallback={<MessageDetailRouteSkeleton variant="follows" />}
         title="登录后即可查看关注与粉丝"
         description="登录后，你关注的人和关注你的人都会展示在这里。"
       >
@@ -238,6 +241,7 @@ export const appRoutes: AppRouteDefinition[] = [
     description: '收到的赞、收藏和评论都会汇总在这里。',
     element: (
       <RequireAuthRoute
+        checkingFallback={<MessageDetailRouteSkeleton variant="interactions" />}
         title="登录后即可查看互动消息"
         description="登录后，你收到的赞、收藏和评论会展示在这里。"
       >

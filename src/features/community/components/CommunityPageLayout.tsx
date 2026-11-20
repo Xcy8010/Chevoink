@@ -75,7 +75,7 @@ export function CommunityFeedSkeleton() {
   return (
     <div
       data-community-feed-skeleton
-      className="mobile:[&_.skeleton-shimmer]:animate-none"
+      className="mobile:[&_.skeleton-shimmer:not(.community-feed-skeleton-line)]:animate-none"
       aria-busy="true"
       aria-label="讨论加载中"
     >
@@ -88,9 +88,10 @@ export function CommunityFeedSkeleton() {
               <Skeleton className="h-3 w-8" />
               <Skeleton className="ml-auto h-3 w-4" />
             </div>
+            {/* Keep the content shimmer on mobile without animating every small detail in the row. */}
             <div className="col-start-2 mt-0.5 space-y-2 md:col-span-2 md:col-start-1 md:mt-2.5">
-              <Skeleton className="h-3.5 w-full" />
-              <Skeleton className="h-3.5 w-3/4" />
+              <Skeleton className="community-feed-skeleton-line h-3.5 w-full" />
+              <Skeleton className="community-feed-skeleton-line h-3.5 w-3/4" />
             </div>
             <div className="col-start-2 mt-2 flex h-9 items-center gap-8 md:col-span-2 md:col-start-1">
               {[0, 1, 2].map((action) => <Skeleton key={action} className="h-3.5 w-8" />)}
@@ -107,14 +108,14 @@ export function CommunityPageSkeleton() {
     <CommunityPageLayout
       toolbar={(
         <div className="grid w-full grid-cols-2 items-center justify-items-center md:w-40" aria-hidden>
-          <Skeleton className="h-4 w-10 mobile:animate-none" />
-          <Skeleton className="h-4 w-10 mobile:animate-none" />
+          <Skeleton className="h-4 w-10" />
+          <Skeleton className="h-4 w-10" />
         </div>
       )}
       topicRail={(
         <div className="flex h-11 items-center gap-3 overflow-hidden px-3 md:px-1" aria-hidden>
           {['w-12', 'w-16', 'w-14', 'w-[68px]'].map((width) => (
-            <Skeleton key={width} className={`h-8 ${width} shrink-0 rounded-full motion-reduce:animate-none mobile:animate-none`} />
+            <Skeleton key={width} className={`h-8 ${width} shrink-0 rounded-full`} />
           ))}
         </div>
       )}

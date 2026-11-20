@@ -1,9 +1,10 @@
 import LedgerActivityPrice from './LedgerActivityPrice'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronDown, LoaderCircle, ReceiptText, RefreshCcw } from 'lucide-react'
+import { ChevronDown, ReceiptText, RefreshCcw } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import Button from '@/components/ui/Button'
+import AccountLedgerSkeleton from './AccountLedgerSkeleton'
 import AccountLayout from './AccountLayout'
 import { fetchCreditUsage } from './credits-api'
 import { formatCreditAmount, roundCreditAmount } from './credit-format'
@@ -92,8 +93,8 @@ export default function AccountBillingPage() {
     })
   }
 
-  if (usageQuery.isLoading) {
-    return <AccountLayout active="billing"><div className="flex min-h-[70vh] items-center justify-center"><LoaderCircle className="h-5 w-5 animate-spin text-[var(--text-tertiary)]" /></div></AccountLayout>
+  if (usageQuery.isPending || (usageQuery.isError && usageQuery.isFetching)) {
+    return <AccountLayout active="billing"><AccountLedgerSkeleton label="账单加载中" /></AccountLayout>
   }
   if (usageQuery.isError || !usageQuery.data) {
     return (

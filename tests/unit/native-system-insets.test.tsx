@@ -71,6 +71,18 @@ describe('native system-bar safe-area ownership', () => {
     expect(document.documentElement.style.getPropertyValue('--safe-top')).toBe('0px')
   })
 
+  it('reads native insets once for the same frame of foreground and viewport notifications', async () => {
+    stop = setupSafeAreaFallback()
+    await waitFor(() => expect(getInsets).toHaveBeenCalledOnce())
+    current = { ...normal, bottom: 24, edgeToEdge: true }
+    window.dispatchEvent(new Event('resize'))
+    window.dispatchEvent(new Event('orientationchange'))
+    window.dispatchEvent(new Event('pageshow'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue('--bottom-bar-inset')).toBe('24px'))
+    expect(getInsets).toHaveBeenCalledTimes(2)
+  })
+
   it('does not invent a top band when a fitted native viewport matches screen height', async () => {
     stop = setupSafeAreaFallback()
     await waitFor(() => expect(getInsets).toHaveBeenCalled())

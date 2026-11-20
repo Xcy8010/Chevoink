@@ -529,7 +529,8 @@ export default function MessagesPage() {
     }
   }
 
-  const conversationError = conversationsQuery.isError && !conversationsQuery.data ? (
+  const conversationsLoading = !conversationsQuery.data && (conversationsQuery.isPending || conversationsQuery.isFetching)
+  const conversationError = conversationsQuery.isError && !conversationsQuery.data && !conversationsLoading ? (
     <AppState
       compact
       tone="error"
@@ -570,7 +571,7 @@ export default function MessagesPage() {
             hasMoreConversations={conversationHasMore}
             loadingMoreConversations={loadingMoreConversations}
             onLoadMoreConversations={loadMoreConversations}
-            loadingConversations={conversationsQuery.isLoading}
+            loadingConversations={conversationsLoading}
             loadingFriends={followersQuery.isLoading}
             conversationError={conversationError}
             refreshNotice={conversationsQuery.isRefetchError
@@ -716,7 +717,7 @@ export default function MessagesPage() {
                 </>
               )}
             </>
-          ) : pendingFriend || selectedConversationId || conversationsQuery.isLoading ? (
+          ) : pendingFriend || selectedConversationId || conversationsLoading ? (
             <>
               <PendingConversationHeader onBack={isSplitLayout ? undefined : handleBackToList} person={pendingFriend} />
               {!pendingFriend && messagesQuery.isError ? (

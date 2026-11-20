@@ -38,6 +38,7 @@ export function setupSafeAreaFallback(): (() => void) | undefined {
     probe.style.cssText = 'position:fixed;width:0;height:env(safe-area-inset-top,0px);pointer-events:none;visibility:hidden;'
     root.append(probe)
   }
+  let refreshFrame: number | undefined
   const apply = () => {
     const style = root.style
     if (native) {
@@ -48,7 +49,9 @@ export function setupSafeAreaFallback(): (() => void) | undefined {
         const fallback = nativeImmersive ? inset(nativeHint?.[edge], edge === 'top' ? 32 : edge === 'bottom' ? 24 : 0) : 0
         const property = `--safe-${edge}`
         const pixels = inset(current?.[edge], fallback)
-        if (edge === 'bottom') style.setProperty('--bottom-bar-inset', `${pixels}px`)
+        if (edge === 'bottom' && style.getPropertyValue('--bottom-bar-inset') !== `${pixels}px`) {
+          style.setProperty('--bottom-bar-inset', `${pixels}px`)
+        }
         // Ordinary pages draw to the bottom. Fixed controls own their inset as
         // internal padding, so there is no separate page-colored strip.
         const value = `${edge === 'bottom' && !nativeReader && !nativeImmersive ? 0 : pixels}px`
@@ -65,7 +68,18 @@ export function setupSafeAreaFallback(): (() => void) | undefined {
   }
   applyFn = apply
   const stop = observeNativeInsets(insets => { measured = insets; apply() })
-  const refresh = () => { apply(); if (native) void refreshNativeInsets() }
+  const refresh = () => {
+    if (!native) {
+      apply()
+      return
+    }
+    if (refreshFrame !== undefined) return
+    refreshFrame = window.requestAnimationFrame(() => {
+      refreshFrame = undefined
+      apply()
+      void refreshNativeInsets()
+    })
+  }
   const onVisibility = () => { if (document.visibilityState === 'visible') refresh() }
   apply()
   window.addEventListener('resize', refresh)
@@ -75,6 +89,7 @@ export function setupSafeAreaFallback(): (() => void) | undefined {
   document.addEventListener('fullscreenchange', apply)
   return () => {
     stop()
+    if (refreshFrame !== undefined) window.cancelAnimationFrame(refreshFrame)
     probe?.remove()
     window.removeEventListener('resize', refresh)
     window.removeEventListener('orientationchange', refresh)

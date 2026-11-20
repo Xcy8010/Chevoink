@@ -430,11 +430,10 @@ export default function ProfilePage() {
     }
   }
 
-  if (!currentUser && meQuery.isLoading) {
+  const meAccessDenied = meQuery.error instanceof ApiClientError && [401, 403, 404].includes(meQuery.error.status)
+  if ((!currentUser || meAccessDenied) && (meQuery.isPending || meQuery.isFetching)) {
     return <ProfileRouteSkeleton />
   }
-
-  const meAccessDenied = meQuery.error instanceof ApiClientError && [401, 403, 404].includes(meQuery.error.status)
   if (!currentUser || meAccessDenied) {
     return (
       <AppState

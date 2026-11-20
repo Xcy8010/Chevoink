@@ -28,7 +28,7 @@ export function useNativeSystemSurface<T extends HTMLElement>(edge: 'top' | 'bot
     const themeObserver = new MutationObserver(() => refresh())
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] })
     themeObserver.observe(element, { attributes: true, attributeFilter: ['class', 'style'] })
-    const sizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(viewport)
+    const sizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => refresh())
     sizeObserver?.observe(element)
     window.addEventListener('resize', viewport)
     window.addEventListener('orientationchange', viewport)

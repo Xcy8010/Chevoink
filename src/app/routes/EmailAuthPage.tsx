@@ -8,7 +8,7 @@ import TextInput from '@/components/ui/TextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { authError, authSuccessMessage, emailAddress, mainlandPhone, postAuth, type CaptchaAnswer, type CodeReceipt } from '@/features/account/auth-api'
 import VerificationCodeField, { AccountDialog } from '@/features/account/VerificationCodeField'
-import { hydrateReadingSync } from '@/features/home/reading-sync'
+import { completeInteractiveSignIn } from '@/features/account/complete-interactive-sign-in'
 import { useRegistrationPolicies } from '@/features/site-content/public-api'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
@@ -22,7 +22,6 @@ export default function EmailAuthPage({ mode, onClose, redirectPath }: { mode: A
   const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const toast = useToast()
-  const setAuthenticated = useShellStore(state => state.setAuthenticated)
   const setGuest = useShellStore(state => state.setGuest)
   const isAuthenticated = useShellStore(state => state.authStatus === 'authenticated')
   const [method, setMethod] = useState<LoginMethod>('password')
@@ -102,12 +101,8 @@ export default function EmailAuthPage({ mode, onClose, redirectPath }: { mode: A
       else if (!usesCode) result = await postAuth('/login', { identifier: target, password })
       else if (email) result = await postAuth('/email/login', { email, code })
       else result = await postAuth('/sms/login', { phone, code })
-      setAuthenticated({ user: result.user, tokens: result.tokens })
+      completeInteractiveSignIn(queryClient, result)
       toast.success(authSuccessMessage(isRegister))
-      void queryClient.invalidateQueries()
-      void hydrateReadingSync().then(changed => {
-        if (changed) void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
-      })
     } catch (error) {
       const message = authError(error, '暂时无法完成，请稍后重试。')
       setError(message)

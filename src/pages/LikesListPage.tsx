@@ -119,7 +119,7 @@ export default function LikesListPage() {
 
       <div className="mt-4 min-w-0 lg:mt-0">
         {interactionsQuery.isRefetchError ? <AppStateRefreshNotice retry={interactionsQuery.refetch} busy={interactionsQuery.isFetching} /> : null}
-        {interactionsQuery.isLoading ? (
+        {!interactionsQuery.data && (interactionsQuery.isPending || interactionsQuery.isFetching) ? (
           <MessageDetailRowsSkeleton variant="interactions" />
         ) : interactionsQuery.isError && !interactionsQuery.data ? (
           <AppState

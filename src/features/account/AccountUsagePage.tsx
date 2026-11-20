@@ -4,6 +4,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { CalendarDays, Gift, LoaderCircle, RefreshCcw, UserPlus } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
+import AccountLedgerSkeleton from './AccountLedgerSkeleton'
 import { fetchReferral, fetchTaskCreditUsage } from './credits-api'
 import { useCreditUsageWithModelPrices } from './use-model-prices'
 import InviteCreditsDialog from './InviteCreditsDialog'
@@ -119,8 +120,8 @@ export default function AccountUsagePage() {
     void copyInviteLink()
   }, [copyInviteLink, inviteOpen, referralQuery.data?.inviteUrl])
 
-  if (usageQuery.isLoading) {
-    return <AccountLayout active="usage"><div className="flex min-h-[70vh] items-center justify-center"><LoaderCircle className="h-5 w-5 animate-spin text-[var(--text-tertiary)]" /></div></AccountLayout>
+  if (usageQuery.isPending || (usageQuery.isError && usageQuery.isFetching)) {
+    return <AccountLayout active="usage"><AccountLedgerSkeleton label="额度用量加载中" /></AccountLayout>
   }
   if (!summary || !usage || usageQuery.isError) {
     return (

@@ -3745,6 +3745,7 @@ export default function StudioWorkspace() {
   const workspaceError = studioQuery.error
   const unavailableWorkspace = workspaceError instanceof ApiClientError && [401, 403, 404].includes(workspaceError.status)
   if (studioQuery.isError && (studioQuery.data?.novel.id !== activeNovelId || unavailableWorkspace)) {
+    if (studioQuery.isFetching) return <StudioSkeleton />
     return <StudioOpenError error={studioQuery.error} retry={() => studioQuery.refetch()} />
   }
 

@@ -233,7 +233,7 @@ export default function FollowListPage() {
 
       <div className="mt-4">
         {activeQuery.isRefetchError ? <AppStateRefreshNotice retry={activeQuery.refetch} busy={activeQuery.isFetching} /> : null}
-        {activeQuery.isLoading ? (
+        {!activeQuery.data && (activeQuery.isPending || activeQuery.isFetching) ? (
           <MessageDetailRowsSkeleton variant="follows" />
         ) : activeQuery.isError && !activeQuery.data ? (
           <AppState

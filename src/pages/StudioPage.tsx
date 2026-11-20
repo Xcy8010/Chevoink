@@ -7,6 +7,7 @@ import { getMe } from '@/features/community/api'
 import { createNovelWorkspace } from '@/features/studio/api'
 import StudioOpenError from '@/features/studio/components/StudioOpenError'
 import StudioWorkspace from '@/features/studio/StudioWorkspace'
+import { useShellStore } from '@/store/useShellStore'
 import type { Novel, UserMePayload } from '../../shared/contracts/index.js'
 
 const INITIAL_NOVEL_TITLE = '未命名作品'
@@ -18,6 +19,7 @@ export default function StudioPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const bootstrapRequestedRef = useRef(false)
+  const viewerId = useShellStore(state => state.sessionUser?.id)
 
   const meQuery = useQuery({
     queryKey: ['community', 'me'],
@@ -25,6 +27,8 @@ export default function StudioPage() {
     enabled: !novelId,
     refetchOnWindowFocus: false,
   })
+
+  const me = meQuery.data?.user?.id === viewerId ? meQuery.data : undefined
 
   const createNovelMutation = useMutation({
     mutationFn: () =>
@@ -54,12 +58,12 @@ export default function StudioPage() {
   })
 
   const studioEntryNovelId = useMemo(() => {
-    const allNovels = meQuery.data?.authoredNovels ?? []
+    const allNovels = me?.authoredNovels ?? []
     const archivedNovelIds = new Set(allNovels.filter(novel => novel.status === 'archived').map(novel => novel.id))
     const authoredNovels = allNovels.filter(novel => !archivedNovelIds.has(novel.id)).sort(
       (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
     )
-    const draftNovelId = meQuery.data?.drafts?.find(draft => !archivedNovelIds.has(draft.novelId))?.novelId ?? null
+    const draftNovelId = me?.drafts?.find(draft => !archivedNovelIds.has(draft.novelId))?.novelId ?? null
     const draftNovel = authoredNovels.find((item) => item.id === draftNovelId) ?? null
     const lastNovelId =
       typeof window !== 'undefined' ? window.localStorage.getItem(STUDIO_LAST_NOVEL_STORAGE_KEY) : null
@@ -82,40 +86,40 @@ export default function StudioPage() {
       return draftNovelId
     }
 
-    if (!meQuery.data?.user?.id) {
-      return null
-    }
-
     return null
-  }, [meQuery.data?.authoredNovels, meQuery.data?.drafts, meQuery.data?.user?.id])
+  }, [me])
 
   useEffect(() => {
     if (novelId) {
       return
     }
 
-    if (!meQuery.isSuccess || !studioEntryNovelId) {
+    if (!meQuery.isSuccess || !me || !studioEntryNovelId) {
       return
     }
 
     navigate(`/studio/novel/${studioEntryNovelId}`, { replace: true })
-  }, [meQuery.isSuccess, navigate, novelId, studioEntryNovelId])
+  }, [me, meQuery.isSuccess, navigate, novelId, studioEntryNovelId])
 
   // 零作品用户直接进入完整 Agent 工作台。占位作品不会出现在公开作品列表中，
   // 首次真正发送后由 Agent 按提示补齐书名、简介与标签；示例点击本身不会创建额外作品。
   useEffect(() => {
-    if (novelId || !meQuery.isSuccess || studioEntryNovelId || createNovelMutation.isPending || createNovelMutation.isSuccess || bootstrapRequestedRef.current) {
+    if (novelId || !meQuery.isSuccess || !me || studioEntryNovelId || createNovelMutation.isPending || createNovelMutation.isSuccess || bootstrapRequestedRef.current) {
       return
     }
     bootstrapRequestedRef.current = true
     createNovelMutation.mutate()
-  }, [createNovelMutation, meQuery.isSuccess, novelId, studioEntryNovelId])
+  }, [createNovelMutation, me, meQuery.isSuccess, novelId, studioEntryNovelId])
 
   if (novelId) {
     return <StudioWorkspace />
   }
 
-  if (meQuery.isError) {
+  if (!me && (meQuery.isPending || meQuery.isFetching)) {
+    return <StudioSkeleton />
+  }
+
+  if (meQuery.isError || !me) {
     return (
       <StudioOpenError error={meQuery.error} retry={() => meQuery.refetch()} />
     )
