@@ -1,24 +1,45 @@
 import { randomUUID } from 'node:crypto'
 import request from 'supertest'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import app from '../../api/app.js'
 import { buildSessionTokens, evictUserBanCache } from '../../api/lib/auth-session.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 
+const faults = vi.hoisted(() => ({ nextUserRead: false, revoking: '', revokedRows: 0 }))
+vi.mock('../../api/lib/prisma.js', async original => {
+  const actual = await original<typeof import('../../api/lib/prisma.js')>()
+  const prisma = actual.prisma.$extends({ query: {
+    user: { async findUnique({ args, query }) {
+      if (faults.nextUserRead) {
+        faults.nextUserRead = false
+        throw new Error('injected auth lookup failure')
+      }
+      return query(args)
+    } },
+    accountDeviceSession: { async updateMany({ args, query }) {
+      const result = await query(args)
+      if (faults.revoking && args.where?.id === faults.revoking && args.data.revokedAt instanceof Date) {
+        faults.revokedRows = result.count
+        throw new Error('injected revocation transaction failure before commit')
+      }
+      return result
+    } },
+  } })
+  return { ...actual, prisma }
+})
+
 const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 const userId = randomUUID(), novelId = randomUUID(), volumeId = randomUUID()
 const publishedId = randomUUID(), privateId = randomUUID(), draftId = randomUUID(), futureId = randomUUID()
 const cookie = `chevoink_session=${buildSessionTokens(userId, 0).accessToken}`
-// Prisma delegates are proxy-backed; freeze their real bindings before spies so
-// repeated fault injection cannot inherit a restored proxy's stale mock wrapper.
-const findUser = prisma.user.findUnique.bind(prisma.user)
-const revokeDevice = prisma.accountDeviceSession.updateMany.bind(prisma.accountDeviceSession)
-beforeEach(() => {
-  vi.spyOn(prisma.user, 'findUnique').mockImplementation(findUser)
-  vi.spyOn(prisma.accountDeviceSession, 'updateMany').mockImplementation(revokeDevice)
+afterEach(() => {
+  faults.nextUserRead = false
+  faults.revoking = ''
+  faults.revokedRows = 0
+  vi.restoreAllMocks()
+  evictUserBanCache(userId)
 })
-afterEach(() => { vi.restoreAllMocks(); evictUserBanCache(userId) })
 afterAll(async () => {
   try {
     if (available) await prisma.$transaction([
@@ -49,7 +70,7 @@ describe.skipIf(!available)('R03 HTTP authentication and public-reader boundarie
   })
   function failAuthRead() {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.spyOn(prisma.user, 'findUnique').mockRejectedValueOnce(new Error('injected auth lookup failure'))
+    faults.nextUserRead = true
   }
 
   it.each(['/api/users/me', '/api/admin/me'])('returns recoverable 503 for %s, not an authenticated response or logout', async url => {
@@ -66,12 +87,20 @@ describe.skipIf(!available)('R03 HTTP authentication and public-reader boundarie
     expect(await prisma.novel.count({ where: { authorId: userId } })).toBe(1)
   })
   it.each(['/api/auth/logout', '/api/admin/logout'])('does not report successful revocation or clear cookies when %s fails', async url => {
-    vi.spyOn(prisma.accountDeviceSession, 'updateMany').mockRejectedValueOnce(new Error('injected revocation failure'))
+    // Register the historical cookie before injecting the failure, so this targets
+    // the logout transaction rather than the first-visit registration transaction.
+    const session = await request(app).get('/api/auth/devices').set('Cookie', cookie)
+    expect(session.status).toBe(200)
+    const deviceId = session.body.data.devices.find((device: { current: boolean }) => device.current).id
+    faults.revoking = deviceId
     const res = await request(app).post(url).set('Cookie', cookie).send({})
+    expect(faults.revokedRows).toBe(1)
     expect(res.status).toBe(503)
     expect(res.body.error.code).toBe('AUTH_REVOCATION_UNAVAILABLE')
     expect(res.headers['set-cookie']).toBeUndefined()
     expect((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).tokenVersion).toBe(0)
+    expect((await prisma.accountDeviceSession.findUniqueOrThrow({ where: { id: deviceId } })).revokedAt).toBeNull()
+    expect((await request(app).get('/api/admin/me').set('Cookie', cookie)).status).toBe(200)
   })
   it('serves only the published public reader snapshot and public navigation on auth failure', async () => {
     failAuthRead()
