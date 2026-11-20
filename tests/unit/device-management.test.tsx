@@ -15,7 +15,7 @@ vi.mock('../../src/features/account/VerificationCodeField', () => ({
 
 const login = '2026-01-09T12:00:00Z'
 const devices = [
-  { id: 'this', deviceName: 'Android', location: '香港', current: true, createdAt: login, lastActiveAt: login },
+  { id: 'this', deviceName: 'Android', firstSeenOnly: true, location: '中国 · 广东省 · 深圳市', current: true, createdAt: login, lastActiveAt: login },
   { id: 'desktop', deviceName: 'Windows', location: null, current: false, createdAt: login, lastActiveAt: login },
 ]
 function mount(hasPassword: boolean) {
@@ -31,6 +31,8 @@ it('lists login and activity per device and requires a password to sign out a di
   mount(true)
   await screen.findByText('Android')
   expect(screen.queryByRole('button', { name: '退出 Android' })).toBeNull()
+  expect(screen.getByText('首次识别')).toBeTruthy()
+  expect(screen.getByText('中国 · 广东省 · 深圳市')).toBeTruthy()
   expect(screen.getAllByText('最近活动')).toHaveLength(2)
   expect(screen.getByText('地点未知')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '退出 Windows' }))
@@ -56,4 +58,20 @@ it('allows viewing devices without a password and directs management to password
   expect(screen.queryByRole('button', { name: '退出 Windows' })).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: '设置登录密码' }))
   await waitFor(() => expect(setup).toHaveBeenCalledOnce())
+})
+
+it('shows the scope of a grouped sign-out and refreshes the device list after confirmation', async () => {
+  const linked = [{ ...devices[1], id: 'old-a', deviceName: '旧电脑', legacyGroup: true },
+    { ...devices[1], id: 'old-b', deviceName: '旧手机', legacyGroup: true }]
+  vi.mocked(requestJson).mockResolvedValueOnce({ devices: [devices[0], ...linked] })
+    .mockResolvedValueOnce({ revoked: true }).mockResolvedValueOnce({ devices: [devices[0]] })
+  mount(true)
+  fireEvent.click(await screen.findByRole('button', { name: '退出 旧电脑' }))
+  expect(screen.getByRole('dialog', { name: '退出旧版登录？' })).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('登录密码'), { target: { value: 'verified-password' } })
+  fireEvent.click(screen.getByRole('button', { name: '确认退出' }))
+  await screen.findByText('这组旧版登录已退出。')
+  expect(screen.queryByText('旧手机')).toBeNull()
+  expect(screen.getByText('Android')).toBeTruthy()
+  expect(requestJson).toHaveBeenCalledTimes(3)
 })

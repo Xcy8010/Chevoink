@@ -65,7 +65,7 @@
 
 Chevoink Agent is an AI writing partner built around your work. It helps authors research, develop story settings, plan plots, draft chapters and revise manuscripts.
 
-- **Creative workspace** supports Work, IDE and mobile layouts. Send a message on your phone and follow the same conversation and writing task on your computer. Under Settings → Devices, you can see where you’re signed in and use your password to sign out another device.
+- **Creative workspace** supports Work, IDE and mobile layouts. Send a message on your phone and follow the same conversation and writing task on your computer. Under Settings → Devices, you can check each device’s network location and last activity, and use your password to sign out a particular device.
 - **Project knowledge and skills**: write with story settings, knowledge collections and creative skills, including personal skills.
 - **Review and revision**: use continuity and writing-quality checks to locate issues, revise passages and save versions.
 - **Story memory** tracks characters, items and plot threads as you continue a novel. Open a card to see what changed, or explore its connections in the relationship graph.

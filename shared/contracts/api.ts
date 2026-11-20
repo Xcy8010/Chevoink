@@ -58,6 +58,7 @@ export type ApiResponse<T> = ApiSuccess<T> | ApiFailure
 export type LoginDevice = {
   id: string
   legacyGroup: boolean
+  firstSeenOnly?: boolean
   deviceName: string
   location: string | null
   createdAt: string

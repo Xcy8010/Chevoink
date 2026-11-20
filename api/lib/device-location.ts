@@ -3,7 +3,7 @@ import { BlockList, isIP } from 'node:net'
 import { promisify } from 'node:util'
 import { gunzip } from 'node:zlib'
 import type { Request } from 'express'
-import { Reader, type CountryResponse } from 'mmdb-lib'
+import { IPv4, IPv6, newWithBuffer, type Searcher } from 'ip2region.js'
 
 const decompress = promisify(gunzip)
 const countryNames = new Intl.DisplayNames(['zh-CN'], { type: 'region', fallback: 'none' })
@@ -15,16 +15,19 @@ localNetworks.addSubnet('169.254.0.0', 16)
 localNetworks.addSubnet('fc00::', 7, 'ipv6')
 localNetworks.addSubnet('fe80::', 10, 'ipv6')
 
-let countries: Promise<Reader<CountryResponse>> | undefined
-function countryDatabase() {
-  countries ??= readFile(new URL('../data/dbip-country-lite.mmdb.gz', import.meta.url))
+const databases = new Map<4 | 6, Promise<Searcher>>()
+function database(family: 4 | 6) {
+  const existing = databases.get(family)
+  if (existing) return existing
+  const loading = readFile(new URL(`../data/ip2region_v${family}.xdb.gz`, import.meta.url))
     .then(bytes => decompress(bytes))
-    .then(bytes => new Reader<CountryResponse>(bytes))
+    .then(bytes => newWithBuffer(family === 4 ? IPv4 : IPv6, bytes))
     .catch((error: unknown) => {
-      countries = undefined
+      databases.delete(family)
       throw error
     })
-  return countries
+  databases.set(family, loading)
+  return loading
 }
 
 function normalize(address: string | undefined) {
@@ -37,17 +40,20 @@ function isLoopback(address: string) {
 
 export async function resolveDeviceLocation(req: Request): Promise<string | null> {
   const peer = normalize(req.socket?.remoteAddress)
-  // The project's loopback nginx overwrites X-Real-IP with its connection peer.
+  // The loopback nginx overwrites X-Real-IP with its connection peer.
   const ip = normalize(isLoopback(peer) ? req.get('x-real-ip') || peer : peer)
   const family = isIP(ip)
-  if (!family) return null
+  if (family !== 4 && family !== 6) return null
   if (isLoopback(ip)) return '本机'
   if (localNetworks.check(ip, family === 6 ? 'ipv6' : 'ipv4')) return '局域网'
   try {
-    const code = (await countryDatabase()).get(ip)?.country?.iso_code
-    return code && /^[A-Z]{2}$/.test(code) ? countryNames.of(code) ?? null : null
+    const result = await (await database(family)).search(ip)
+    const [, province, city, , code] = result.split('|')
+    if (!code || !/^[A-Z]{2}$/.test(code)) return null
+    const country = countryNames.of(code)
+    const parts = [country, province, city].filter(value => value && value !== '0')
+    return [...new Set(parts)].join(' · ') || null
   } catch {
-    // A missing location must not interrupt sign-in.
     return null
   }
 }

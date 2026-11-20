@@ -1,8 +1,10 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { Request, Response } from 'express'
+import { Prisma } from '@prisma/client'
 import { isLegacyAccountMissingEmail } from '../../shared/account-contact.js'
 
-import { openDevice } from './device-session.js'
+import { isRecognizedDevice, openDevice, registerRecognizedDevice, revokeDevice } from './device-session.js'
+import { resolveDeviceLocation } from './device-location.js'
 import { env } from '../config/env.js'
 import { prisma, DataAccessError } from './prisma.js'
 
@@ -156,6 +158,12 @@ export function clearSession(res: Response) {
 
 /** 验签（v1 双读兼容 / v2 含 kind 与版本校验）；导出仅供单元测试使用 */
 export function verifySessionToken(token: string | undefined | null, kind: SessionTokenKind): VerifiedToken | null {
+  return readCredential(token, kind)?.identity ?? null
+}
+
+type Credential = { raw: string; identity: VerifiedToken; expiresAt: number; kind: SessionTokenKind }
+
+function readCredential(token: string | undefined | null, kind: SessionTokenKind): Credential | null {
   if (!token) {
     return null
   }
@@ -178,7 +186,7 @@ export function verifySessionToken(token: string | undefined | null, kind: Sessi
       return null
     }
 
-    return { userId, tokenVersion: null }
+    return { raw: token, identity: { userId, tokenVersion: null }, expiresAt, kind: 'access' }
   }
 
   const deviceId = segments.length === 7 && segments[0] === 'v3' ? segments.splice(1, 1)[0] : undefined
@@ -211,11 +219,58 @@ export function verifySessionToken(token: string | undefined | null, kind: Sessi
     return null
   }
 
-  return deviceId ? { userId, tokenVersion, deviceId } : { userId, tokenVersion }
+  return { raw: token, identity: deviceId ? { userId, tokenVersion, deviceId } : { userId, tokenVersion }, expiresAt, kind }
 }
 
 const refreshExpiry = () => new Date(Date.now() + REFRESH_TTL_SECONDS * 1000)
-const deviceIdentity = new WeakMap<Request, { userId: string; deviceId: string; tokenVersion: number }>()
+const deviceIdentity = new WeakMap<Request, { userId: string; deviceId: string; tokenVersion: number; accessOnlyUntil?: number }>()
+
+// Issuers before v3 signed the two expiry timestamps from the same second.
+// Keep their historical offset fixed across future changes to v3 token lifetimes.
+const legacyPairOffset = 30 * 86400 - 15 * 60
+function legacyGroupId(userId: string, tokenVersion: number) {
+  return 'legacy-' + signPayload(`legacy/${userId}/${tokenVersion}`).slice(0, 48)
+}
+
+async function recognitionId(credential: Credential, groupId: string) {
+  const { userId, tokenVersion } = credential.identity
+  const shared = 'shared-' + groupId.slice('legacy-'.length)
+  // Once chosen, keep the historical interpretation across later config changes.
+  // The shared row is retained even after expiry or revocation.
+  if (await prisma.accountDeviceSession.findUnique({ where: { id: shared }, select: { id: true } })) return shared
+  if (ACCESS_TTL_SECONDS !== 900 || REFRESH_TTL_SECONDS !== 2592000) {
+    const previouslyRecognized = await prisma.accountDeviceSession.findFirst({
+      where: { userId, tokenVersion: tokenVersion ?? 0, id: { startsWith: 'carry-' } }, select: { id: true },
+    })
+    if (!previouslyRecognized) return shared
+  }
+  return recognizedDeviceId(credential)
+}
+
+function recognizedDeviceId({ identity, expiresAt, kind }: Credential) {
+  const accessExpiry = kind === 'refresh' ? expiresAt - legacyPairOffset : expiresAt
+  const format = identity.deviceId ?? (identity.tokenVersion === null ? 'v1' : 'v2')
+  return 'carry-' + signPayload(`device/${format}/${identity.userId}/${identity.tokenVersion}/${accessExpiry}`).slice(0, 48)
+}
+
+function writeUpgradedCookie(res: Response, identity: VerifiedToken, deviceId: string, kind: SessionTokenKind, expiresAt: number) {
+  const token = buildToken(identity.userId, expiresAt, identity.tokenVersion ?? 0, kind, deviceId)
+  const name = kind === 'access' ? SESSION_COOKIE_NAME : REFRESH_COOKIE_NAME
+  res.append('Set-Cookie', serializeCookie(name, token, Math.max(0, expiresAt - Math.floor(Date.now() / 1000))))
+}
+
+const pendingLocations = new Set<string>()
+const activityWindowMs = 300_000
+function refreshLocation(req: Request, id: string, observed: Date) {
+  if (pendingLocations.has(id)) return
+  pendingLocations.add(id)
+  void resolveDeviceLocation(req)
+    .then(location => prisma.accountDeviceSession.updateMany({
+      where: { id, revokedAt: null, lastActiveAt: { gte: observed, lt: new Date(observed.getTime() + activityWindowMs) } }, data: { location },
+    }))
+    .catch(() => { /* Location is optional; authorization already checked the account and device. */ })
+    .finally(() => pendingLocations.delete(id))
+}
 
 /* ---------------- 用户会话状态（封禁 + 令牌版本，60 秒进程内缓存） ---------------- */
 
@@ -284,8 +339,11 @@ export type UserAuthLookup =
 type DeviceValidity = { userId: string; tokenVersion: number; expiresAt: Date; lastActiveAt: Date; revokedAt: Date | null }
 
 // The hot path reads device revocation and account-wide revocation in the same indexed lookup.
-async function readDeviceAuthState(userId: string, deviceId: string): Promise<UserAuthLookup & { device?: DeviceValidity }> {
+async function readDeviceAuthState(userId: string, deviceId: string, tokenVersion: number): Promise<UserAuthLookup & { device?: DeviceValidity }> {
   try {
+    const historicalGuard = isRecognizedDevice(deviceId)
+      ? Prisma.sql`AND NOT EXISTS (SELECT 1 FROM account_device_sessions WHERE id = ${legacyGroupId(userId, tokenVersion)} AND revoked_at IS NOT NULL)`
+      : Prisma.empty
     const [row] = await prisma.$queryRaw<(DeviceValidity & {
       accountVersion: number; bannedAt: Date | null; phone: string | null; email: string | null; emailVerifiedAt: Date | null
     })[]>`
@@ -293,7 +351,7 @@ async function readDeviceAuthState(userId: string, deviceId: string): Promise<Us
              d.last_active_at AS "lastActiveAt", d.revoked_at AS "revokedAt",
              u.token_version AS "accountVersion", u.banned_at AS "bannedAt", u.phone, u.email, u.email_verified_at AS "emailVerifiedAt"
       FROM account_device_sessions d JOIN users u ON u.id = d.user_id
-      WHERE d.id = ${deviceId} AND d.user_id = ${userId}`
+      WHERE d.id = ${deviceId} AND d.user_id = ${userId} ${historicalGuard}`
     if (!row) return { status: 'notFound' }
     return { status: 'verified', device: row, state: {
       banned: row.bannedAt !== null, tokenVersion: row.accountVersion, checkedAt: Date.now(),
@@ -387,20 +445,18 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
   const authHeader = req.headers.authorization
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length).trim() : null
 
-  const accessCandidate =
-    verifySessionToken(cookies[SESSION_COOKIE_NAME], 'access') ?? verifySessionToken(bearerToken, 'access')
-  const candidate =
-    accessCandidate ??
-    verifySessionToken(cookies[REFRESH_COOKIE_NAME], 'refresh') ??
-    verifySessionToken(bearerToken, 'refresh')
+  const access = readCredential(cookies[SESSION_COOKIE_NAME], 'access') ?? readCredential(bearerToken, 'access')
+  const readRefresh = () => readCredential(cookies[REFRESH_COOKIE_NAME], 'refresh') ?? readCredential(bearerToken, 'refresh')
+  const credential = access ?? readRefresh()
 
-  if (!candidate) {
+  if (!credential) {
     setResolvedUserId(req, null)
     return
   }
 
+  const candidate = credential.identity
   const lookup: UserAuthLookup & { device?: DeviceValidity } = candidate.deviceId
-    ? await readDeviceAuthState(candidate.userId, candidate.deviceId)
+    ? await readDeviceAuthState(candidate.userId, candidate.deviceId, candidate.tokenVersion!)
     : await readUserAuthState(candidate.userId, { fresh: true })
   if (lookup.status === 'unavailable') return
   if (lookup.status === 'notFound') {
@@ -424,34 +480,69 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
     return
   }
 
-  // Historical tokens have no device identifier. Keep their revocation record so an
-  // old cookie cannot recreate a revoked device or silently acquire a new identity.
   const userId = candidate.userId
-  const deviceId = candidate.deviceId ?? 'legacy-' + signPayload(`legacy/${userId}/${state.tokenVersion}`).slice(0, 48)
+  const historical = !candidate.deviceId || candidate.deviceId.startsWith('legacy-')
+  let deviceId = candidate.deviceId!
+  // A lone access credential must not gain a new refresh lifetime through migration or the native bridge.
+  const refresh = historical && access && candidate.tokenVersion !== null ? readRefresh() : null
+  const sibling = refresh?.kind === 'refresh' && recognizedDeviceId(refresh) === recognizedDeviceId(credential) ? refresh : null
+  const recognizedExpiry = new Date((sibling ?? credential).expiresAt * 1000)
+  const refreshing = credential.kind === 'refresh'
   const now = new Date()
+  let hasGroup = false
   try {
-    let device = lookup.device ?? await prisma.accountDeviceSession.findUnique({ where: { id: deviceId } })
-    if (!device && !candidate.deviceId) device = await openDevice(userId, state.tokenVersion, req, refreshExpiry(), deviceId)
-    if (!device || device.userId !== userId || device.tokenVersion !== state.tokenVersion || device.revokedAt || (candidate.deviceId && device.expiresAt <= now)) {
+    if (historical) {
+      const groupId = legacyGroupId(userId, state.tokenVersion)
+      const group = lookup.device ?? await prisma.accountDeviceSession.findUnique({ where: { id: groupId } })
+      if (group && (group.revokedAt || group.expiresAt <= now)) {
+        clearSession(res)
+        setResolvedUserId(req, null)
+        return
+      }
+      hasGroup = Boolean(group)
+      deviceId = await recognitionId(credential, groupId)
+    }
+    let mixedGroup: string | undefined
+    if (!hasGroup && deviceId.startsWith('carry-') && bearerToken && credential.raw !== bearerToken) {
+      // WebView keeps its original refresh Bearer even after its access or refresh
+      // cookie has rotated. Detect that association for both old and upgraded cookies.
+      const fallback = readCredential(bearerToken, 'refresh')
+      if (fallback && !fallback.identity.deviceId && fallback.identity.userId === userId &&
+          fallback.identity.tokenVersion === candidate.tokenVersion && recognizedDeviceId(fallback) !== deviceId) {
+        const groupId = legacyGroupId(userId, state.tokenVersion)
+        if (historical || !await prisma.accountDeviceSession.findUnique({ where: { id: groupId }, select: { id: true } })) mixedGroup = groupId
+      }
+    }
+    let device = historical ? await prisma.accountDeviceSession.findUnique({ where: { id: deviceId } }) : lookup.device
+    if ((historical && !device) || mixedGroup) device = await registerRecognizedDevice(userId, state.tokenVersion, req, recognizedExpiry, deviceId, mixedGroup, historical)
+    if (!device || device.userId !== userId || device.tokenVersion !== state.tokenVersion || device.revokedAt || (!historical && device.expiresAt <= now)) {
       clearSession(res)
       setResolvedUserId(req, null)
       return
     }
-    if (!accessCandidate || now.getTime() - device.lastActiveAt.getTime() >= 300_000) {
+    const stale = now.getTime() - device.lastActiveAt.getTime() >= activityWindowMs
+    const extend = refreshing ? refreshExpiry() : historical && recognizedExpiry > device.expiresAt ? recognizedExpiry : null
+    if (stale || extend) {
       const touched = await prisma.accountDeviceSession.updateMany({ where: { id: deviceId, revokedAt: null },
-        data: { lastActiveAt: now, ...(!accessCandidate || device.expiresAt <= now ? { expiresAt: refreshExpiry() } : {}) } })
+        data: { ...(stale ? { lastActiveAt: now } : {}), ...(extend ? { expiresAt: extend } : {}) } })
       if (!touched.count) {
         clearSession(res)
         setResolvedUserId(req, null)
         return
       }
+      if (stale) refreshLocation(req, deviceId, now)
     }
   } catch {
     warnAuthDegrade('device-unavailable', { userId })
     return
   }
-  if (!accessCandidate) writeSessionCookies(userId, state.tokenVersion, res, deviceId)
-  deviceIdentity.set(req, { userId, deviceId, tokenVersion: state.tokenVersion })
+  if (refreshing) writeSessionCookies(userId, state.tokenVersion, res, deviceId)
+  else if (historical && sibling) {
+    writeUpgradedCookie(res, candidate, deviceId, 'access', credential.expiresAt)
+    writeUpgradedCookie(res, candidate, deviceId, 'refresh', sibling.expiresAt)
+  }
+  deviceIdentity.set(req, { userId, deviceId, tokenVersion: state.tokenVersion,
+    ...(isRecognizedDevice(deviceId) && !refreshing && !sibling ? { accessOnlyUntil: credential.expiresAt } : {}) })
 
   setResolvedUserId(req, candidate.userId)
   ;(req as Request & { [key: symbol]: unknown })[RESOLVED_TOKEN_VERSION_KEY] = candidate.tokenVersion
@@ -517,13 +608,15 @@ export function requireDeviceIdentity(req: Request) {
 export async function isDeviceSessionActive(identity: { userId: string; deviceId: string; tokenVersion: number }) {
   const { userId, deviceId: id, tokenVersion } = identity
   return Boolean(await prisma.accountDeviceSession.findFirst({ where: { id, userId, tokenVersion, revokedAt: null,
-    expiresAt: { gt: new Date() }, user: { bannedAt: null, tokenVersion } }, select: { id: true } }))
+    expiresAt: { gt: new Date() }, user: { bannedAt: null, tokenVersion,
+      ...(isRecognizedDevice(id) ? { deviceSessions: { none: { id: legacyGroupId(userId, tokenVersion), revokedAt: { not: null } } } } : {})
+    } }, select: { id: true } }))
 }
 
 export async function revokeCurrentDevice(req: Request) {
-  const { userId, deviceId } = requireDeviceIdentity(req)
+  const { userId, deviceId, tokenVersion } = requireDeviceIdentity(req)
   try {
-    await prisma.accountDeviceSession.updateMany({ where: { id: deviceId, userId, revokedAt: null }, data: { revokedAt: new Date() } })
+    await revokeDevice(userId, tokenVersion, deviceId)
   } catch {
     throw new DataAccessError(503, 'AUTH_REVOCATION_UNAVAILABLE', '暂时无法确认设备已退出，请稍后重试。')
   }
@@ -534,7 +627,8 @@ export async function bridgeSessionCookies(req: Request, res: Response) {
   const identity = requireDeviceIdentity(req)
   // A bridge must never outlive the existing device session.
   if (!await isDeviceSessionActive(identity)) throw new DataAccessError(401, 'AUTH_REQUIRED', '请重新登录。')
-  writeSessionCookies(identity.userId, identity.tokenVersion, res, identity.deviceId)
+  if (identity.accessOnlyUntil) writeUpgradedCookie(res, identity, identity.deviceId, 'access', identity.accessOnlyUntil)
+  else writeSessionCookies(identity.userId, identity.tokenVersion, res, identity.deviceId)
 }
 
 export function requireVersionedSessionIdentity(req: Request) {

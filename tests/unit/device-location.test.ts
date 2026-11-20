@@ -8,8 +8,10 @@ function request(peer: string, realIp?: string) {
 
 describe('offline device location', () => {
   it('uses the peer observed by the local reverse proxy', async () => {
-    expect(await resolveDeviceLocation(request('::ffff:127.0.0.1', '8.8.8.8'))).toBe('美国')
-    expect(await resolveDeviceLocation(request('::1', '2001:4860:4860::8888'))).toBeTruthy()
+    expect(await resolveDeviceLocation(request('::ffff:127.0.0.1', '8.8.8.8'))).toBe('美国 · California')
+    expect(await resolveDeviceLocation(request('::1', '113.118.113.77'))).toBe('中国 · 广东省 · 深圳市')
+    expect(await resolveDeviceLocation(request('::1', '240e:3b7:3272:d8d0:db09:c067:8d59:539e'))).toBe('中国 · 广东省 · 深圳市')
+    expect(await resolveDeviceLocation(request('::1', '1.2.3.4'))).toBe('澳大利亚 · Queensland · Brisbane')
   })
 
   it('uses the connection address for direct clients and keeps unknown locations unknown', async () => {
