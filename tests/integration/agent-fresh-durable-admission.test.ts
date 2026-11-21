@@ -6,6 +6,7 @@ vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: vi.fn(async () 
 vi.mock('../../api/lib/agent/runtime-bootstrap.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/runtime-bootstrap.js')>(), dispatchFreshDurableRun: vi.fn(async () => {}) }))
 import { prisma, DataAccessError } from '../../api/lib/prisma.js'
 import * as credits from '../../api/lib/credits.js'
+import { getAgentDefinition } from '../../api/lib/agent/agents.js'
 import * as context from '../../api/lib/agent/context.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as executor from '../../api/lib/agent/runtime-executor.js'
@@ -150,8 +151,14 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     expect(fetcher).toHaveBeenCalledExactlyOnceWith(terra ? 'https://yunshu.chevolink.com/v1/responses' : 'https://provider.invalid/v1/chat/completions', expect.any(Object))
   }))
 
-  it('suggests a concrete follow-up for a verified current plan when the model returns no footer', () => fixture(async f => {
+  it('suggests a concrete follow-up for a verified current plan when the model returns no footer', ({ onTestFinished }) => fixture(async f => {
     await ready(f)
+    // Admission and both model turns read this profile. Give the fixture the real
+    // plan tool without persisting unrelated schemas on every durable step.
+    const orchestrator = getAgentDefinition('orchestrator')
+    const originalTools = orchestrator.tools
+    onTestFinished(() => { orchestrator.tools = originalTools })
+    orchestrator.tools = ['plan_save']
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000,
       periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
@@ -159,6 +166,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
       const request = JSON.parse(String(init.body))
       const afterTool = request.messages.some((message: { role: string }) => message.role === 'tool')
+      expect(request.tools.map((tool: { function: { name: string } }) => tool.function.name).sort()).toEqual(['execution_context_read', 'plan_save'])
       const choice = afterTool ? { delta: { content: answer }, finish_reason: 'stop' } : { delta: { tool_calls: [{
         index: 0, id: 'call_save_plan', function: { name: 'plan_save', arguments: JSON.stringify({ title, content: '渡桥发生在第一卷收尾。', planKind: 'outline' }) },
       }] }, finish_reason: 'tool_calls' }
