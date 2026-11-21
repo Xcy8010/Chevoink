@@ -12,7 +12,7 @@ export const coverCaption = `不超过 ${PROFILE_IMAGE_MAX_MB}MB，上传后可�
 
 export const phoneLoginCaption = '登录入口统一使用手机号'
 export const updatePasswordCaption = '修改前需验证当前密码或手机验证码'
-export const emailPasswordCaption = '使用已验证的邮箱或手机验证码确认身份'
+export const emailPasswordCaption = '管理账号登录密码'
 export const deviceManagementCaption = '查看登录设备、地点和最近活动'
 
 const scrollOffset = 'scroll-mt-20 md:scroll-mt-[5.25rem]'

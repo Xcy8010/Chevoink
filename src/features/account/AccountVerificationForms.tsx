@@ -128,7 +128,7 @@ export function SetupPasswordForm({ disabled, onSave }: { disabled: boolean; onS
         <TextInput wrapperAs="span" id={passwordId} type="password" autoComplete="new-password" minLength={6} maxLength={128}
           aria-describedby={`${passwordId}-hint`}
           value={password} onChange={event => { setPassword(event.target.value); setError('') }} disabled={disabled} required />
-        <p id={`${passwordId}-hint`} className="text-xs text-[var(--text-secondary)]">密码需6位数以上</p>
+        <p id={`${passwordId}-hint`} className="text-xs text-[var(--text-secondary)]">6 至 128 个字符</p>
       </div>
       <div className="space-y-1.5">
         <label className="block text-sm font-medium" htmlFor={confirmationId}>确认登录密码</label>
@@ -142,8 +142,11 @@ export function SetupPasswordForm({ disabled, onSave }: { disabled: boolean; onS
 }
 
 export function PasswordVerificationForm({ user, onSaved, onSaving, disabled }: FormCallbacks & { user: User }) {
+  const hasPassword = user.hasPassword ?? user.passwordConfigured
   const canEmail = Boolean(user.email && user.emailVerified)
   const canSms = Boolean(user.phone && user.phoneVerified)
+  const [recovering, setRecovering] = useState(false)
+  const [oldPassword, setOldPassword] = useState('')
   const [channel, setChannel] = useState<'email' | 'sms'>(canEmail ? 'email' : 'sms')
   const [code, setCode] = useState('')
   const [password, setPassword] = useState('')
@@ -155,11 +158,12 @@ export function PasswordVerificationForm({ user, onSaved, onSaving, disabled }: 
   const passwordId = useId()
   const confirmationId = useId()
   const canVerify = channel === 'email' ? canEmail : canSms
-  const buttonLabel = user.passwordConfigured || user.hasPassword ? '更新密码' : '设置密码'
+  const useCode = !hasPassword || recovering
+  const buttonLabel = hasPassword ? '更新密码' : '设置密码'
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (saving || disabled || !canVerify) return
+    if (saving || disabled || (useCode && !canVerify)) return
     if (password !== confirmation) {
       setError('两次输入的密码不一致。')
       return
@@ -168,7 +172,8 @@ export function PasswordVerificationForm({ user, onSaved, onSaving, disabled }: 
     setSaving(true)
     onSaving?.(true)
     try {
-      const result = await postAuth<AuthSessionPayload>('/account/password', { channel, code, password })
+      const proof = useCode ? { channel, code } : { oldPassword }
+      const result = await postAuth<AuthSessionPayload>('/account/password', { ...proof, password })
       if (updateSession(result.user, result.tokens)) onSaved()
     } catch (error) {
       setError(authError(error, '暂时无法保存密码，请稍后重试。'))
@@ -178,15 +183,22 @@ export function PasswordVerificationForm({ user, onSaved, onSaving, disabled }: 
     }
   }
 
-  if (!canEmail && !canSms) {
+  if (!hasPassword && !canEmail && !canSms) {
     return <p className="text-sm leading-6 text-[var(--text-secondary)]">请先验证邮箱或手机号，再设置登录密码。</p>
   }
 
   return (
     <form className="space-y-4" onSubmit={event => void submit(event)}>
       <div className="space-y-1.5">
-        <label className="block text-sm font-medium" htmlFor={modeId}>发送验证码到</label>
-        <select
+        <div className="flex items-center justify-between gap-2">
+          <label className="block text-sm font-medium" htmlFor={modeId}>{useCode ? '发送验证码到' : '当前密码'}</label>
+          {hasPassword && (canEmail || canSms) && <button type="button" disabled={saving || disabled}
+            className="rounded px-1 py-1 text-sm text-[var(--color-brand)] underline-offset-4 hover:underline focus-visible:outline focus-visible:outline-2"
+            onClick={() => { setRecovering(!recovering); setOldPassword(''); setCode(''); setError('') }}>
+            {recovering ? '使用当前密码' : '忘记密码？'}
+          </button>}
+        </div>
+        {useCode ? <select
           id={modeId}
           className="h-11 w-full rounded-[var(--radius-pill)] border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 text-sm text-[var(--text-primary)]"
           value={channel}
@@ -195,23 +207,25 @@ export function PasswordVerificationForm({ user, onSaved, onSaving, disabled }: 
         >
           {canEmail && <option value="email">已验证邮箱</option>}
           {canSms && <option value="sms">已验证手机号</option>}
-        </select>
+        </select> : <TextInput wrapperAs="span" id={modeId} type="password" autoComplete="current-password"
+          placeholder="请输入当前密码" value={oldPassword} onChange={event => { setOldPassword(event.target.value); setError('') }}
+          disabled={saving || disabled} required />}
       </div>
-      <VerificationCodeField
+      {useCode && <VerificationCodeField
         key={channel}
         value={code}
         onChange={setCode}
         canSend={canVerify}
         disabled={saving || disabled}
         onSend={captcha => postAuth('/account/password/send-code', { channel, ...captcha })}
-      />
+      />}
       <div className="space-y-1.5">
         <label className="block text-sm font-medium" htmlFor={passwordId}>新登录密码</label>
         <TextInput wrapperAs="span" id={passwordId} type="password" autoComplete="new-password" minLength={6} maxLength={128}
           aria-describedby={`${passwordId}-hint`}
           placeholder="请输入新密码"
           value={password} onChange={event => setPassword(event.target.value)} disabled={saving || disabled} required />
-        <p id={`${passwordId}-hint`} className="text-xs text-[var(--text-secondary)]">密码需6位数以上</p>
+        <p id={`${passwordId}-hint`} className="text-xs text-[var(--text-secondary)]">6 至 128 个字符</p>
       </div>
       <div className="space-y-1.5">
         <label className="block text-sm font-medium" htmlFor={confirmationId}>再次输入新密码</label>

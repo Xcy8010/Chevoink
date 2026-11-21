@@ -1,7 +1,7 @@
 import { useId, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff, Lock, Mail, Smartphone } from 'lucide-react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 
 import Button from '@/components/ui/Button'
 import TextInput from '@/components/ui/TextInput'
@@ -19,6 +19,7 @@ type LoginMethod = 'password' | 'code'
 
 export default function EmailAuthPage({ mode, onClose, redirectPath }: { mode: AuthMode; onClose: () => void; redirectPath: string }) {
   const navigate = useNavigate()
+  const { state } = useLocation()
   const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const toast = useToast()
@@ -93,7 +94,7 @@ export default function EmailAuthPage({ mode, onClose, redirectPath }: { mode: A
           queryClient.clear()
         }
         toast.success('登录密码已重置。')
-        navigate(loginPath, { replace: true })
+        navigate(loginPath, { replace: true, state })
         return
       }
       let result: AuthSessionPayload
@@ -175,7 +176,7 @@ export default function EmailAuthPage({ mode, onClose, redirectPath }: { mode: A
             minLength={isRecovery ? 6 : undefined}
             maxLength={isRecovery ? 128 : 1024}
           />
-          {isRecovery && <p id={`${passwordId}-hint`} className="text-xs text-[var(--text-secondary)]">密码需6位数以上</p>}
+          {isRecovery && <p id={`${passwordId}-hint`} className="text-xs text-[var(--text-secondary)]">6 至 128 个字符</p>}
         </div>}
         {isRecovery && <label className="block space-y-1.5 text-sm font-medium">
           <span>再次输入新密码</span>
@@ -203,8 +204,8 @@ export default function EmailAuthPage({ mode, onClose, redirectPath }: { mode: A
       <nav className="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--color-brand)]" aria-label="账户操作">
         {isRegister && <button type="button" onClick={() => setCodeHelpOpen(true)}
           className="rounded text-blue-600 underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 dark:text-blue-400">收不到验证码</button>}
-        <Link to={mode === 'login' ? registerPath : loginPath}>{mode === 'login' ? '还没有账户？点击创建！' : '返回登录'}</Link>
-        {mode === 'login' && <Link to={loginPath + '&recovery=1'}>找回密码</Link>}
+        <Link state={state} to={mode === 'login' ? registerPath : loginPath}>{mode === 'login' ? '还没有账户？点击创建！' : '返回登录'}</Link>
+        {mode === 'login' && <Link state={state} to={loginPath + '&recovery=1'}>找回密码</Link>}
       </nav>
       {codeHelpOpen && <AccountDialog title="收不到验证码" onClose={() => setCodeHelpOpen(false)}>
         <ol className="list-decimal space-y-3 pl-5 text-sm leading-6 text-[var(--text-secondary)]">

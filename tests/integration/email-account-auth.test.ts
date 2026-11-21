@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import app from '../../api/app.js'
@@ -11,6 +11,13 @@ import { hashPassword } from '../../api/lib/password.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 import { integrationLegalConsent } from '../support/legal-consent.js'
+import { openReservedAdminFixture } from '../support/reserved-admin-database.js'
+
+const fixture = vi.hoisted(() => ({ reserved: undefined as Awaited<ReturnType<typeof openReservedAdminFixture>> | undefined }))
+vi.mock('../../api/lib/prisma.js', async original => {
+  const actual = await original<typeof import('../../api/lib/prisma.js')>()
+  return { ...actual, get prisma() { return fixture.reserved ?? actual.prisma } }
+})
 
 const smsCodes = vi.hoisted(() => new Map<string, string>())
 vi.mock('tencentcloud-sdk-nodejs-sms', () => ({
@@ -33,7 +40,9 @@ const recipient = () => `${randomUUID()}@example.test`
 const cookie = (token: string) => `chevoink_session=${token}`
 const api = () => request(app)
 const auth = '/api/auth'
-let ip = 1
+const requesterPrefix = '2001:db8:' + randomUUID().slice(0, 8).replace(/^(.{4})(.{4})$/, '$1:$2')
+let requestNumber = 0
+const nextRequester = () => requesterPrefix + '::' + (++requestNumber).toString(16)
 
 async function captcha(answer = 'test') {
   const response = await api().get(auth + '/captcha')
@@ -49,7 +58,7 @@ async function ageEmail(email: string) {
 
 async function emailCode(path: string, body: object, address: string, token?: string) {
   await ageEmail(address)
-  const req = api().post(auth + path).set('X-Forwarded-For', `198.51.100.${ip++}`)
+  const req = api().post(auth + path).set('X-Forwarded-For', nextRequester())
   if (token) req.set('Cookie', cookie(token))
   const sent = await req.send({ ...body, ...await captcha() })
   expect(sent.status, JSON.stringify(sent.body)).toBe(200)
@@ -68,7 +77,7 @@ async function smsCode(path: string, body: object, phone: string, token?: string
   await prisma.smsVerificationCode.updateMany({
     where: { phone }, data: { createdAt: new Date(Date.now() - 70_000) },
   })
-  const req = api().post(auth + path).set('X-Forwarded-For', `198.51.100.${ip++}`)
+  const req = api().post(auth + path).set('X-Forwarded-For', nextRequester())
   if (token) req.set('Cookie', cookie(token))
   const sent = await req.send({ ...body, ...await captcha() })
   expect(sent.status, JSON.stringify(sent.body)).toBe(200)
@@ -113,10 +122,11 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
       selection: { mode: 'legacy', channel: 'stable', release: null } as const,
     }
     await withAccountEmailAuthPreview(preview, async () => {
-      const send = () => sendAccountEmailCode({ email, purpose: 'register', userId: null }, '198.51.100.200', true)
-      await expect(sendAccountEmailCode({ email: recipient(), purpose: 'register', userId: null }, '198.51.100.200', true))
+      const requester = nextRequester()
+      const send = () => sendAccountEmailCode({ email, purpose: 'register', userId: null }, requester, true)
+      await expect(sendAccountEmailCode({ email: recipient(), purpose: 'register', userId: null }, requester, true))
         .rejects.toMatchObject({ code: 'AUTH_PREVIEW_RECIPIENT_REQUIRED' })
-      await expect(sendAccountEmailCode({ email, purpose: 'login', userId: null }, '198.51.100.200', true))
+      await expect(sendAccountEmailCode({ email, purpose: 'login', userId: null }, requester, true))
         .rejects.toMatchObject({ code: 'AUTH_PREVIEW_REGISTRATION_ONLY' })
       expect(assertPreviewSmsSendAllowed).toThrow(expect.objectContaining({ code: 'AUTH_PREVIEW_SMS_DISABLED' }))
       const results = await Promise.allSettled([send(), send()])
@@ -142,7 +152,7 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
       accountSetupSkippedSteps: [1, 2, 3], nickname: 'Email preview fixture', passwordHash: 'unset:fixture',
     } })
     const ordinary = await prisma.user.create({ data: {
-      phone: '+8613800000067', nickname: 'Ordinary stable fixture', passwordHash: 'unset:fixture',
+      phone: `+86138${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`, nickname: 'Ordinary stable fixture', passwordHash: 'unset:fixture',
     } })
     const previouslyEnabled = env.accountEmailAuthEnabled
     env.accountEmailAuthEnabled = false
@@ -189,6 +199,107 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     const profile = await api().get(`/api/users/${user.id}`)
     expect(profile.status).toBe(200)
     expect(JSON.stringify(profile.body)).not.toContain(email)
+  })
+
+  it('changes a password with current credentials and invalidates previous sessions and recovery codes', async () => {
+    const email = recipient()
+    const user = await prisma.user.create({ data: {
+      email, emailVerifiedAt: new Date(), nickname: 'Password settings fixture', passwordHash: 'unset:fixture',
+    } })
+    try {
+      const url = auth + '/account/password'
+      const initial = buildSessionTokens(user.id, user.tokenVersion)
+      const oldSession = cookie(initial.accessToken)
+      const change = { oldPassword: 'current-secret', password: 'replacement-secret' }
+      expect((await api().post(url).send(change)).status).toBe(401)
+      expect((await api().post(url).set('Cookie', oldSession).send(change)).body.error.code).toBe('AUTH_INVALID_CREDENTIALS')
+      const setupCode = await emailCode('/account/password/send-code', { channel: 'email' }, email, initial.accessToken)
+      const set = await api().post(url).set('Cookie', oldSession).send({ channel: 'email', code: setupCode, password: change.oldPassword })
+      expect(set.status).toBe(200)
+      const configured = set.body.data.tokens
+      const changeRequest = () => api().post(url).set('Cookie', cookie(configured.accessToken))
+      expect((await changeRequest().send({ ...change, oldPassword: 'incorrect' })).body.error.code).toBe('AUTH_INVALID_CREDENTIALS')
+      const pending = await emailCode('/account/password/send-code', { channel: 'email' }, email, configured.accessToken)
+      const results = await Promise.all([changeRequest().send(change), changeRequest().send(change)])
+      expect(results.filter(res => res.status === 200)).toHaveLength(1)
+      expect([401, 403, 409]).toContain(results.find(res => res.status !== 200)?.status)
+      const renewed = results.find(res => res.status === 200)!.body.data.tokens.accessToken
+      const me = () => api().get('/api/users/me')
+      expect((await me().set('Cookie', cookie(configured.accessToken))).status).toBe(401)
+      expect((await me().set('Cookie', `chevoink_refresh=${configured.refreshToken}`)).status).toBe(401)
+      expect((await me().set('Cookie', cookie(renewed))).body.data.user.id).toBe(user.id)
+      expect((await api().post(url).set('Cookie', cookie(renewed)).send({
+        channel: 'email', code: pending, password: 'unused-password',
+      })).body.error.code).toBe('AUTH_CODE_INVALID')
+      expect((await api().post(auth + '/login').send({ identifier: email, password: change.password })).body.data.user.id).toBe(user.id)
+    } finally {
+      await prisma.user.delete({ where: { id: user.id } })
+    }
+  })
+
+  it('observes an email password failure burst followed by a foreign login without interrupting sign-in', async () => {
+    const email = recipient()
+    const password = 'observation-fixture-password'
+    const user = await prisma.user.create({ data: {
+      email, emailVerifiedAt: new Date(), nickname: 'Observation fixture', passwordHash: hashPassword(password),
+    } })
+    const output = vi.spyOn(console, 'info').mockImplementation(() => {})
+    const login = (candidate: string, address: string) => api().post(auth + '/login')
+      .set('X-Forwarded-For', '198.51.100.197').set('X-Real-IP', address)
+      .send({ identifier: email, password: candidate })
+    try {
+      expect((await login(password, '113.118.113.77')).status).toBe(200)
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const failed = await login('incorrect-fixture-password', '8.8.8.8')
+        expect(failed.status).toBe(401)
+        expect(failed.body.error.code).toBe('AUTH_INVALID_CREDENTIALS')
+      }
+      expect(output).toHaveBeenCalledWith('[account-security-observation]', expect.objectContaining({
+        action: 'password_login', stage: 'failed', decision: 'notice',
+      }))
+      const accepted = await login(password, '8.8.8.8')
+      expect(accepted.status).toBe(200)
+      expect(accepted.body.data.user.id).toBe(user.id)
+      expect(accepted.body.data.tokens.accessToken).toBeTruthy()
+      await vi.waitFor(() => expect(output).toHaveBeenCalledWith('[account-security-observation]', {
+        action: 'password_login', stage: 'succeeded', decision: 'would_verify',
+        repeatedFailures: true, countryChanged: true, deviceEvidence: 'unknown',
+      }))
+      const previous = await prisma.accountDeviceSession.findFirstOrThrow({
+        where: { userId: user.id, location: { startsWith: '中国' } }, select: { id: true },
+      })
+      const removed = await api().post(auth + '/devices/' + previous.id + '/revoke')
+        .set('Cookie', cookie(accepted.body.data.tokens.accessToken)).set('X-Real-IP', '8.8.8.8').send({ password })
+      expect(removed.status).toBe(200)
+      expect(removed.body.data.revoked).toBe(true)
+      await vi.waitFor(() => expect(output).toHaveBeenCalledWith('[account-security-observation]', {
+        action: 'device_revoke', stage: 'succeeded', decision: 'notice',
+        repeatedFailures: false, countryChanged: true, deviceEvidence: 'recent_session',
+      }))
+    } finally {
+      output.mockRestore()
+      await prisma.user.delete({ where: { id: user.id } })
+    }
+  })
+
+  it('accepts a valid v1 session for an old-password change and revokes it after renewal', async () => {
+    const oldPassword = 'historical-password'
+    const user = await prisma.user.create({ data: {
+      email: recipient(), emailVerifiedAt: new Date(), nickname: 'Legacy password fixture', passwordHash: hashPassword(oldPassword),
+    } })
+    try {
+      const payload = user.id + '.' + (Math.floor(Date.now() / 1000) + 600)
+      const signature = createHmac('sha256', env.authSessionSecret).update(payload).digest('hex')
+      const oldSession = cookie(payload + '.' + signature)
+      const response = await api().post(auth + '/account/password').set('Cookie', oldSession)
+        .send({ oldPassword, password: 'renewed-password' })
+      expect(response.status).toBe(200)
+      const me = () => api().get('/api/users/me')
+      expect((await me().set('Cookie', oldSession)).status).toBe(401)
+      expect((await me().set('Cookie', cookie(response.body.data.tokens.accessToken))).body.data.user.id).toBe(user.id)
+    } finally {
+      await prisma.user.delete({ where: { id: user.id } })
+    }
   })
 
   it('persists each onboarding step, enforces the studio boundary and uses both verified identifiers', async () => {
@@ -292,7 +403,7 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
       expect((await api().post(auth + '/login').send({ identifier: email, password: 'legacy-fixture-password' })).status).toBe(401)
     }
 
-    const conflict = await api().post(auth + '/email/send-code').set('Cookie', cookie(access)).send({
+    const conflict = await api().post(auth + '/email/send-code').set('X-Forwarded-For', nextRequester()).set('Cookie', cookie(access)).send({
       email: occupied.toUpperCase(), purpose: 'bind', ...await captcha(),
     })
     expect(conflict.status).toBe(200)
@@ -361,14 +472,17 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     expect(me.body.data.authoredNovels).toEqual(expect.arrayContaining([expect.objectContaining({ id })]))
   })
 
-  it('admits the reserved superadmin email only to password login and preserves contact verification', async () => {
+  it('admits the reserved superadmin email only to password login and preserves contact verification', async ({ onTestFinished }) => {
+    const isolated = await openReservedAdminFixture()
+    fixture.reserved = isolated
+    onTestFinished(async () => { fixture.reserved = undefined; await isolated.$disconnect() })
     const email = 'admin@chevoink.local'
     const password = ' Reserved-Superadmin-Fixture-1 '
     const admin = await prisma.user.create({ data: {
       email, role: 'admin', isSuperAdmin: true, nickname: 'Reserved superadmin fixture', passwordHash: hashPassword(password),
     } })
     const login = async (identifier: string, password: string) => api().post(auth + '/login')
-      .set('X-Forwarded-For', `198.51.100.${ip++}`).send({ identifier, password })
+      .set('X-Forwarded-For', nextRequester()).send({ identifier, password })
 
     const result = await login(email.toUpperCase(), password)
     expect(result.status).toBe(200)
@@ -381,7 +495,7 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
       ['reset_password', '/reset/send-code', { identifier: email }],
     ] as const) {
       await ageEmail(email)
-      const sent = await api().post(auth + path).set('X-Forwarded-For', `198.51.100.${ip++}`)
+      const sent = await api().post(auth + path).set('X-Forwarded-For', nextRequester())
         .send({ ...body, ...await captcha() })
       expect(sent.status).toBe(200)
       expect(await prisma.emailVerificationCode.findFirst({ where: { email, purpose } }))
@@ -403,7 +517,7 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     const email = recipient()
     const { legalConsent } = await integrationLegalConsent()
     uncertainAddresses.add(email)
-    const send = async () => api().post(auth + '/email/send-code').set('X-Forwarded-For', `198.51.100.${ip++}`)
+    const send = async () => api().post(auth + '/email/send-code').set('X-Forwarded-For', nextRequester())
       .send({ email, purpose: 'register', ...await captcha() })
     const first = await send()
     expect(first.status).toBe(200)

@@ -66,9 +66,12 @@ export type LoginDevice = {
   current: boolean
 }
 
-export type RevokeLoginDeviceResult = { revoked: true; signedOutCurrent: boolean }
+export type LoginDeviceList = { devices: LoginDevice[]; otherDeviceVerificationExpiresAt: number | null }
+export type RevokeLoginDeviceResult = { revoked: true; signedOutCurrent: true }
+  | { revoked: true; signedOutCurrent: false; otherDeviceVerificationExpiresAt: number }
 
 export type AuthTokenPair = {
+  deviceSessionId?: string
   accessToken: string
   refreshToken: string
   expiresInSeconds: number

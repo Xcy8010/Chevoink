@@ -64,12 +64,37 @@ it('allows viewing devices without a password and directs management to password
   await waitFor(() => expect(setup).toHaveBeenCalledOnce())
 })
 
+it('confirms each target, reuses verified remote sign-out and returns to password verification on a server challenge', async () => {
+  const desktop = { ...devices[1], deviceName: 'Windows · 启创墨域客户端' }
+  const other = { ...devices[1], id: 'browser' }
+  const expires = Date.now() + 600_000
+  vi.mocked(requestJson).mockResolvedValueOnce({ devices: [devices[0], desktop, other], otherDeviceVerificationExpiresAt: null })
+    .mockResolvedValueOnce({ revoked: true, signedOutCurrent: false, otherDeviceVerificationExpiresAt: expires })
+    .mockRejectedValueOnce(new ApiClientError('请输入当前账号的登录密码。', 403, undefined, 'DEVICE_PASSWORD_REQUIRED'))
+  mount(true)
+  expect(await screen.findByText('2 个会话')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '查看 Windows桌面端' }))
+  expect(screen.getByText('Windows桌面端')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
+  fireEvent.change(screen.getByLabelText('登录密码'), { target: { value: 'verified-password' } })
+  fireEvent.click(screen.getByRole('button', { name: '确认退出' }))
+  fireEvent.click(await screen.findByRole('button', { name: '查看 Windows · Edge' }))
+  fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
+  expect(screen.queryByLabelText('登录密码')).toBeNull()
+  expect(requestJson).toHaveBeenCalledTimes(2)
+  fireEvent.click(screen.getByRole('button', { name: '确认退出' }))
+  expect((await screen.findByLabelText('登录密码') as HTMLInputElement).value).toBe('')
+  expect(requestJson).toHaveBeenLastCalledWith('/api/auth/devices/browser/revoke', { method: 'POST', body: '{}' })
+})
+
 it('shows the scope of a grouped sign-out and refreshes the device list after confirmation', async () => {
   const linked = [{ ...devices[1], id: 'old-a', deviceName: '旧电脑', legacyGroup: true },
     { ...devices[1], id: 'old-b', deviceName: '旧手机', legacyGroup: true }]
   vi.mocked(requestJson).mockResolvedValueOnce({ devices: [devices[0], ...linked] })
     .mockResolvedValueOnce({ revoked: true, signedOutCurrent: false }).mockResolvedValueOnce({ devices: [devices[0]] })
   mount(true)
+  expect(await screen.findByText('含旧版登录组')).toBeTruthy()
+  expect(screen.queryByText('2 个会话')).toBeNull()
   fireEvent.click(await screen.findByRole('button', { name: '查看 旧电脑' }))
   fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
   expect(screen.getByRole('dialog', { name: '退出旧版登录？' })).toBeTruthy()
@@ -83,7 +108,8 @@ it('shows the scope of a grouped sign-out and refreshes the device list after co
 
 it('shows the reported model and clears the local session after verified current-device logout', async () => {
   const current = { ...devices[0], deviceName: 'Android · Pixel 8 Pro · Chrome' }
-  vi.mocked(requestJson).mockResolvedValueOnce({ devices: [current] }).mockResolvedValueOnce({ revoked: true, signedOutCurrent: true })
+  vi.mocked(requestJson).mockResolvedValueOnce({ devices: [current], otherDeviceVerificationExpiresAt: Date.now() + 600_000 })
+    .mockResolvedValueOnce({ revoked: true, signedOutCurrent: true })
   const onSignedOut = vi.fn()
   mount(true, onSignedOut)
   fireEvent.click(await screen.findByRole('button', { name: '查看 Android · Pixel 8 Pro' }))

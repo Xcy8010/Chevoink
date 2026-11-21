@@ -1,8 +1,8 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { CheckCircle2, ChevronRight, Layers, LogOut, MapPin, Monitor, Smartphone, Tablet } from 'lucide-react'
-import type { LoginDevice, RevokeLoginDeviceResult } from '../../../../shared/contracts/api'
-import { requestJson } from '@/app/api-client'
+import type { LoginDevice, LoginDeviceList, RevokeLoginDeviceResult } from '../../../../shared/contracts/api'
+import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
 import { Skeleton } from '@/components/ui/Skeleton'
 import TextInput from '@/components/ui/TextInput'
@@ -23,13 +23,15 @@ function describeDevice(deviceName: string) {
   const [os, ...parts] = deviceName.split(' · ')
   const platform = Object.prototype.hasOwnProperty.call(platforms, os) ? platforms[os as keyof typeof platforms] : undefined
   const last = parts.at(-1) ?? ''
-  const client = /^(应用|Edge|Chrome|Safari|Firefox)$/.test(last) ? parts.pop() : undefined
+  const storedClient = /^(应用|启创墨域客户端|Windows桌面端|Edge|Chrome|Safari|Firefox)$/.test(last) ? parts.pop() : undefined
+  const client = storedClient === '启创墨域客户端' ? 'Windows桌面端' : storedClient
   const model = parts.join(' · ')
   return {
     group: platform?.name ?? '其他设备',
     Icon: platform?.Icon ?? Layers,
     title: model ? os + ' · ' + model : platform?.name ?? deviceName,
     model, os: platform ? os : undefined, client,
+    name: model ? os + ' · ' + model : client === 'Windows桌面端' ? client : deviceName,
   }
 }
 
@@ -54,7 +56,7 @@ export default function DeviceManagement({ userId, hasPassword, onClose, onSetPa
   const queryKey = ['account', userId, 'devices']
   const query = useQuery({
     queryKey,
-    queryFn: ({ signal }) => requestJson<{ devices: LoginDevice[] }>('/api/auth/devices', { signal }),
+    queryFn: ({ signal }) => requestJson<LoginDeviceList>('/api/auth/devices', { signal }),
     retry: false, gcTime: 0, refetchInterval: 30_000,
   })
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -66,6 +68,17 @@ export default function DeviceManagement({ userId, hasPassword, onClose, onSetPa
   const pending = useRef(false)
   const devices = query.data?.devices ?? []
   const target = devices.find(device => device.id === selectedId)
+  const expiresAt = query.data?.otherDeviceVerificationExpiresAt
+  const signsOutCurrent = target?.current || (target?.legacyGroup && devices.some(device => device.current && device.legacyGroup))
+  const needsPassword = signsOutCurrent || !expiresAt || expiresAt <= Date.now()
+  useEffect(() => {
+    if (!expiresAt) return
+    const timeout = window.setTimeout(() => {
+      cache.setQueryData<LoginDeviceList>(['account', userId, 'devices'], previous => previous?.otherDeviceVerificationExpiresAt === expiresAt
+        ? { ...previous, otherDeviceVerificationExpiresAt: null } : previous)
+    }, Math.max(0, expiresAt - Date.now()))
+    return () => window.clearTimeout(timeout)
+  }, [expiresAt, cache, userId])
 
   function select(id: string | null) {
     setSelectedId(id)
@@ -77,25 +90,29 @@ export default function DeviceManagement({ userId, hasPassword, onClose, onSetPa
 
   async function revoke(event: FormEvent) {
     event.preventDefault()
-    if (!target || !password || pending.current) return
+    if (!target || (needsPassword && !password) || pending.current) return
     pending.current = true
     setSubmitting(true)
     setError('')
     try {
-      const result = await postAuth<RevokeLoginDeviceResult>('/devices/' + encodeURIComponent(target.id) + '/revoke', { password })
+      const result = await postAuth<RevokeLoginDeviceResult>('/devices/' + encodeURIComponent(target.id) + '/revoke', needsPassword ? { password } : {})
       await cache.cancelQueries({ queryKey })
       if (result.signedOutCurrent) {
         cache.setQueryData(queryKey, { devices: [] })
         onSignedOut()
         return
       }
-      cache.setQueryData<{ devices: LoginDevice[] }>(queryKey, previous => previous && ({
+      cache.setQueryData<LoginDeviceList>(queryKey, previous => previous && ({
         devices: previous.devices.filter(device => device.id !== target.id && !(target.legacyGroup && device.legacyGroup)),
+        otherDeviceVerificationExpiresAt: result.otherDeviceVerificationExpiresAt,
       }))
       select(null)
-      setNotice(target.legacyGroup ? '这组旧版登录已退出。' : target.deviceName + ' 已退出登录。')
+      setNotice(target.legacyGroup ? '这组旧版登录已退出。' : describeDevice(target.deviceName).name + ' 已退出登录。')
       if (target.legacyGroup) void cache.invalidateQueries({ queryKey })
     } catch (cause) {
+      if (cause instanceof ApiClientError && cause.code === 'DEVICE_PASSWORD_REQUIRED') {
+        cache.setQueryData<LoginDeviceList>(queryKey, previous => previous && ({ ...previous, otherDeviceVerificationExpiresAt: null }))
+      }
       setError(authError(cause, '退出设备失败，请稍后重试。'))
     } finally {
       pending.current = false
@@ -105,22 +122,22 @@ export default function DeviceManagement({ userId, hasPassword, onClose, onSetPa
 
   if (target && confirming) return (
     <AccountDialog key="verify" title={target.legacyGroup ? '退出旧版登录？' : target.current ? '退出当前设备？' : '退出这台设备？'}
-      description={target.legacyGroup
-        ? '这组旧设备将同时退出，之后需要重新登录。请输入当前账号的登录密码确认。'
+      description={(target.legacyGroup
+        ? '这组旧设备将同时退出，之后需要重新登录。'
         : target.firstSeenOnly
-          ? '这台设备将退出。已识别的其他设备可继续使用，尚未识别的旧设备需要重新登录。请输入账号密码确认。'
-          : target.deviceName + ' 将需要重新登录。请输入当前账号的登录密码确认。'}
+          ? '这台设备将退出。已识别的其他设备可继续使用，尚未识别的旧设备需要重新登录。'
+          : describeDevice(target.deviceName).name + ' 将需要重新登录。') + (needsPassword ? '请输入当前账号的登录密码确认。' : '')}
       onClose={() => { if (!pending.current) select(target.id) }}>
       <form onSubmit={revoke} className="space-y-4">
-        <label className="block space-y-2 text-sm font-medium">
+        {needsPassword && <label className="block space-y-2 text-sm font-medium">
           <span>登录密码</span>
           <TextInput autoComplete="current-password" type="password" required value={password}
             disabled={submitting} onChange={event => { setPassword(event.target.value); setError('') }} />
-        </label>
+        </label>}
         {error && <p role="alert" className="text-sm text-[var(--color-error)]">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button disabled={submitting} onClick={() => select(target.id)}>取消</Button>
-          <Button variant="primary" type="submit" disabled={!password || submitting}>{submitting ? '正在退出…' : '确认退出'}</Button>
+          <Button variant="primary" type="submit" disabled={(needsPassword && !password) || submitting}>{submitting ? '正在退出…' : '确认退出'}</Button>
         </div>
       </form>
     </AccountDialog>
@@ -174,12 +191,12 @@ export default function DeviceManagement({ userId, hasPassword, onClose, onSetPa
         <div className="mb-1 flex items-center gap-2.5">
           <span className="grid size-9 shrink-0 place-items-center rounded-full bg-[var(--accent-soft)] text-[var(--accent-strong)]"><Icon size={18} aria-hidden /></span>
           <h3 className="text-sm font-semibold">{group}</h3>
-          <span className="ml-auto text-xs text-[var(--text-secondary)]">{rows.length} 个设备</span>
+          <span className="ml-auto text-xs text-[var(--text-secondary)]">{rows.some(row => row.legacyGroup) ? '含旧版登录组' : rows.length + ' 个会话'}</span>
         </div>
         <ul className="sm:ml-8">
           {rows.map(device => {
-            const { title, model, client } = describeDevice(device.deviceName)
-            const name = model ? title : device.deviceName
+            const { name, model, client } = describeDevice(device.deviceName)
+
             return <li key={device.id}><button type="button" onClick={() => select(device.id)} aria-label={'查看 ' + name}
               className="group flex w-full items-center gap-3 rounded-lg px-2.5 py-3 text-left hover:bg-[var(--surface-muted)] focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]">
               <div className="min-w-0 flex-1">

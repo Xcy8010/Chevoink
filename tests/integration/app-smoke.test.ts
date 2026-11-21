@@ -133,8 +133,15 @@ describe.skipIf(!dbAvailable)('应用冒烟（需 DB）', () => {
     expect((await request(app).get('/api/auth/devices').set('Authorization', phoneSession)).status).toBe(200)
     const removedOther = await remove(other.id, password)
     expect(removedOther.status).toBe(200)
-    expect(removedOther.body.data).toEqual({ revoked: true, signedOutCurrent: false })
-    expect(removedOther.headers['set-cookie']).toBeUndefined()
+    const { otherDeviceVerificationExpiresAt } = removedOther.body.data
+    expect(removedOther.body.data).toEqual({ revoked: true, signedOutCurrent: false, otherDeviceVerificationExpiresAt: expect.any(Number) })
+    expect(removedOther.headers['set-cookie']).toEqual([expect.stringMatching(/^chevoink_device_verification=.*HttpOnly;.*Max-Age=600/)])
+    const grant = (removedOther.headers['set-cookie'] as unknown as string[])[0].split(';')[0]
+    const reloaded = await request(app).get('/api/auth/devices').set('Authorization', desktop).set('Cookie', grant)
+    expect(reloaded.body.data.otherDeviceVerificationExpiresAt).toBe(otherDeviceVerificationExpiresAt)
+    const selfWithoutPassword = await request(app).post(`/api/auth/devices/${current.id}/revoke`)
+      .set('Authorization', desktop).set('Cookie', grant).send({})
+    expect(selfWithoutPassword.body.error.code).toBe('DEVICE_PASSWORD_REQUIRED')
     for (const token of Object.values(loginRes.body.data.tokens).filter((value): value is string => typeof value === 'string')) {
       expect((await request(app).get('/api/auth/devices').set('Authorization', 'Bearer ' + token)).status).toBe(401)
     }

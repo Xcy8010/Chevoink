@@ -3,6 +3,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import { ACCOUNT_REQUIREMENT_EVENT, ApiClientError, requestJson } from '@/app/api-client'
 import { useLiveConfiguration } from './live-configuration'
+import { requestSessionSignIn } from './session-activity'
+import { DEVICE_SELECTION_KEY, readDeviceSelection, selectedDevice } from '@/lib/auth-token'
 import { DeviceProvider } from '@/components/layout/DeviceProvider'
 import { ToastProvider } from '@/components/ui/Toast'
 import UpdateBanner from '@/components/ui/UpdateBanner'
@@ -61,11 +63,22 @@ export default function AppProviders({ children }: PropsWithChildren) {
     let disposed = false
     let refreshingRequirements = false
 
-    async function bootstrapShellSession(requirementsOnly = false) {
+    async function bootstrapShellSession(requirementsOnly = false, canRetrySelection = true) {
       const { sessionUser, authTokens } = useShellStore.getState()
+      const selection = selectedDevice()
       const isCurrentSession = () => {
         const current = useShellStore.getState()
         return !disposed && current.sessionUser?.id === sessionUser?.id && current.authTokens === authTokens
+      }
+      function selectionChanged(confirmedId?: string) {
+        const selected = selectedDevice()
+        if (selected === selection || (selected && selected === confirmedId)) return false
+        if (!requirementsOnly) {
+          queryClient.removeQueries({ queryKey: ['community', 'me'], exact: true })
+          if (canRetrySelection) void bootstrapShellSession(false, false)
+          else setSessionUnavailable()
+        }
+        return true
       }
       if (!requirementsOnly) setSessionChecking()
 
@@ -74,11 +87,13 @@ export default function AppProviders({ children }: PropsWithChildren) {
         const payload = await queryClient.fetchQuery({
           queryKey: ['community', 'me'],
           queryFn: () => requestJson<UserMePayload>('/api/users/me'),
-          staleTime: requirementsOnly ? 0 : 30_000,
+          // Share in-flight requests with the route, but always verify this login at open.
+          staleTime: 0,
           retry: false,
         })
 
         if (isCurrentSession()) {
+          if (selectionChanged(payload.deviceSessionId)) return
           if (!payload.user) {
             setGuest()
             return
@@ -86,6 +101,7 @@ export default function AppProviders({ children }: PropsWithChildren) {
 
           syncSessionUser({
             user: payload.user,
+            deviceSessionId: payload.deviceSessionId,
             unreadMessageCount: payload.unreadMessageCount ?? 0,
             unreadNotificationCount: payload.unreadNotificationCount ?? 0,
           })
@@ -103,8 +119,14 @@ export default function AppProviders({ children }: PropsWithChildren) {
         if (!isCurrentSession() || requirementsOnly) {
           return
         }
+        if (selectionChanged()) return
 
         if (error instanceof ApiClientError && (error.status === 401 || error.status === 403)) {
+          const previous = readDeviceSelection()?.userId ?? useShellStore.getState().lastVerifiedUserId
+          if (error.status === 401 && (previous || error.code === 'AUTH_SESSION_IDLE')) {
+            requestSessionSignIn()
+            return
+          }
           setGuest()
           return
         }
@@ -119,12 +141,22 @@ export default function AppProviders({ children }: PropsWithChildren) {
       void bootstrapShellSession(true).finally(() => { refreshingRequirements = false })
     }
 
+    function onDeviceSelection(event: StorageEvent) {
+      if (event.key !== DEVICE_SELECTION_KEY) return
+      const current = useShellStore.getState()
+      if (current.authStatus === 'authenticated' && current.deviceSessionId && current.deviceSessionId !== selectedDevice()) {
+        requestSessionSignIn()
+      }
+    }
+
     void bootstrapShellSession()
     window.addEventListener(ACCOUNT_REQUIREMENT_EVENT, refreshAccountRequirements)
+    window.addEventListener('storage', onDeviceSelection)
 
     return () => {
       disposed = true
       window.removeEventListener(ACCOUNT_REQUIREMENT_EVENT, refreshAccountRequirements)
+      window.removeEventListener('storage', onDeviceSelection)
     }
   }, [setGuest, setSessionChecking, setSessionUnavailable, syncSessionUser])
 

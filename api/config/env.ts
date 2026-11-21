@@ -57,6 +57,7 @@ export const env = {
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
   authAccessTokenExpiresIn: process.env.AUTH_ACCESS_TOKEN_EXPIRES_IN ?? '15m',
   authRefreshTokenExpiresIn: process.env.AUTH_REFRESH_TOKEN_EXPIRES_IN ?? '30d',
+  authForegroundActivityOrigin: process.env.AUTH_FOREGROUND_ACTIVITY_ORIGIN?.trim() ?? '',
   authSessionSecret: process.env.AUTH_SESSION_SECRET ?? '',
   modelConfigEncryptionKey: process.env.MODEL_CONFIG_ENCRYPTION_KEY ?? '',
   authCookieDomain: process.env.AUTH_COOKIE_DOMAIN ?? '',

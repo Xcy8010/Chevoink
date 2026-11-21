@@ -8,6 +8,7 @@ import type { LegalConsent } from '../../../shared/contracts/site-content.js'
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { requiresStudioPhoneVerification } from '../account-email-auth-scope.js'
+import { recordAccountPasswordFailure } from '../account-security-observation.js'
 import { lockAccountKey, prepareAccountEmailCode } from '../email-verification.js'
 import type { CommentTargetType, FollowUserItem, InteractionBadges, InteractionItem, Post, PrivacyLevel, PrivacySettings, ProfileVisibility, ReceivedLikeItem, User, UserMePayload, UserReplyItem } from '../../../shared/contracts/index.js'
 import { createUnsetPasswordHash, hashPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
@@ -914,6 +915,7 @@ export async function loginUserData(phone: string, password: string) {
   }
 
   if (!verifyPassword(normalizedPassword, user.passwordHash)) {
+    recordAccountPasswordFailure('password_login', user.id)
     return null
   }
 

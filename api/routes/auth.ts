@@ -10,10 +10,14 @@ import type {
   SmsAccountStatus,
 } from '../../shared/contracts/index.js'
 import { createAuthCaptchaChallenge, verifyAuthCaptchaChallenge } from '../lib/auth-captcha.js'
+import { observeOtherDeviceRemoval } from '../lib/account-security-observation.js'
 import {
   clearSession,
   createSession,
   getSessionUserId,
+  issueDeviceVerification,
+  readDeviceVerification,
+  recordDeviceActivity,
   requireDeviceIdentity,
   revokeCurrentDevice,
 } from '../lib/auth-session.js'
@@ -129,7 +133,7 @@ function consumePasswordAttempt(ip: string) {
   return true
 }
 
-router.use(accountAuthRoutes(consumeSmsIpQuota))
+router.use(accountAuthRoutes(consumeSmsIpQuota, consumePasswordAttempt))
 
 router.get('/captcha', (_req: Request, res: Response): void => {
   const requestId = createRequestId()
@@ -200,7 +204,7 @@ async function registerWithSms(req: Request, res: Response, schema: typeof smsRe
       referralCode: body.referralCode?.trim() || undefined,
     })
 
-    const tokens = await createSession(user.id, res)
+    const tokens = await createSession(user.id, res, undefined, 'interactive')
     res.status(201).json(buildSuccess(requestId, { user, tokens }))
   } catch (error) {
     sendRouteError(res, requestId, error)
@@ -229,7 +233,7 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
     }
 
     const { user, tokenVersion } = verified
-    const tokens = await createSession(user.id, res, tokenVersion)
+    const tokens = await createSession(user.id, res, tokenVersion, 'password_login')
     res.status(200).json(buildSuccess(requestId, { user, tokens }))
   } catch (error) {
     sendRouteError(res, requestId, error)
@@ -244,7 +248,7 @@ router.post('/sms/login', async (req: Request, res: Response): Promise<void> => 
 
     if (accountEmailAuthEnabled()) {
       const { user, tokenVersion } = await loginAccountSmsCodeData(normalizePhoneNumber(body.phone), body.code)
-      const tokens = await createSession(user.id, res, tokenVersion)
+      const tokens = await createSession(user.id, res, tokenVersion, 'interactive')
       res.json(buildSuccess(requestId, { user, tokens }))
       return
     }
@@ -261,31 +265,61 @@ router.post('/sms/login', async (req: Request, res: Response): Promise<void> => 
       return
     }
 
-    const tokens = await createSession(user.id, res)
+    const tokens = await createSession(user.id, res, undefined, 'interactive')
     res.status(200).json(buildSuccess(requestId, { user, tokens }))
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
 })
 
+router.get('/session/activity', (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const { userId, deviceId } = requireDeviceIdentity(req)
+    res.set('Cache-Control', 'private, no-store')
+    res.json(buildSuccess(requestId, { ok: true, userId, deviceId }))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.post('/session/activity', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    requireDeviceIdentity(req)
+    if (!req.is('application/json')) throw new DataAccessError(415, 'VALIDATION_ERROR', '请通过应用报告活动。')
+    const activity = parseBody(z.object({ userId: z.string().min(1), deviceId: z.string().min(1),
+      elapsedMs: z.number().int().nonnegative().safe().default(0) }), req.body, '活动信息无效。')
+    await recordDeviceActivity(req, res, activity)
+    res.json(buildSuccess(requestId, { ok: true }))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
 router.get('/devices', async (req, res) => {
   const requestId = createRequestId()
   try {
-    const { userId, deviceId, tokenVersion } = requireDeviceIdentity(req)
+    const identity = requireDeviceIdentity(req)
+    const { userId, deviceId, tokenVersion } = identity
     res.setHeader('Cache-Control', 'private, no-store')
-    res.json(buildSuccess(requestId, { devices: await listDevices(userId, deviceId, tokenVersion) }))
+    res.json(buildSuccess(requestId, { devices: await listDevices(userId, deviceId, tokenVersion),
+      otherDeviceVerificationExpiresAt: readDeviceVerification(req, identity) }))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 
 router.post('/devices/:id/revoke', async (req, res) => {
   const requestId = createRequestId()
   try {
-    const { userId, deviceId, tokenVersion } = requireDeviceIdentity(req)
-    if (!consumePasswordAttempt('device:' + userId)) throw new DataAccessError(429, 'RATE_LIMITED', '尝试次数过多，请稍后再试。')
-    const { password } = parseBody(z.object({ password: z.string().min(1).max(1024) }), req.body, '请输入当前密码。')
-    const result = await removeDevice(userId, deviceId, req.params.id, password, tokenVersion)
+    const identity = requireDeviceIdentity(req)
+    const { userId, deviceId, tokenVersion } = identity
+    const { password } = parseBody(z.object({ password: z.string().min(1).max(1024).optional() }), req.body, '请输入当前密码。')
+    if (password === undefined && !req.is('application/json')) throw new DataAccessError(415, 'VALIDATION_ERROR', '请通过设备管理确认退出。')
+    if (password !== undefined && !consumePasswordAttempt('device:' + userId)) throw new DataAccessError(429, 'RATE_LIMITED', '尝试次数过多，请稍后再试。')
+    const verifiedUntil = readDeviceVerification(req, identity)
+    const result = await removeDevice(userId, deviceId, req.params.id, tokenVersion, password, verifiedUntil)
+    if (!result.signedOutCurrent) {
+      void observeOtherDeviceRemoval(req, identity).catch(() => { /* Optional observation cannot block revocation. */ })
+    }
     if (result.signedOutCurrent) clearSession(res)
-    res.json(buildSuccess(requestId, result))
+    res.json(buildSuccess(requestId, result.signedOutCurrent ? result : { ...result,
+      otherDeviceVerificationExpiresAt: verifiedUntil ?? issueDeviceVerification(res, identity) }))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 

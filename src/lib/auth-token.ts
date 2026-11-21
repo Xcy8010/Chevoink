@@ -9,6 +9,25 @@
 import { isWindowsDesktopApp } from './desktop-app'
 
 const STORAGE_KEY = 'chevoink-session-token'
+export const DEVICE_SELECTION_KEY = 'chevoink-selected-device'
+
+export function readDeviceSelection(): { id: string; userId?: string } | null {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(DEVICE_SELECTION_KEY) ?? 'null')
+    return typeof value?.id === 'string' ? value : null
+  } catch { return null }
+}
+
+export function selectedDevice(): string | null {
+  return readDeviceSelection()?.id ?? null
+}
+
+export function selectDevice(id: string | null, userId?: string) {
+  try {
+    if (id) window.localStorage.setItem(DEVICE_SELECTION_KEY, JSON.stringify({ id, userId }))
+    else window.localStorage.removeItem(DEVICE_SELECTION_KEY)
+  } catch { /* HttpOnly primary cookies still authenticate when storage is unavailable. */ }
+}
 
 export function getSessionToken(): string | null {
   if (isWindowsDesktopApp()) return null
@@ -39,5 +58,6 @@ export function setSessionToken(token: string | null): void {
 /** 拼接鉴权请求头：有令牌时附带 Bearer 头（cookie 丢失时服务端以此恢复会话） */
 export function buildAuthHeader(): Record<string, string> {
   const token = getSessionToken()
-  return token ? { Authorization: `Bearer ${token}` } : {}
+  const device = selectedDevice()
+  return { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(device ? { 'X-Chevoink-Device': device } : {}) }
 }

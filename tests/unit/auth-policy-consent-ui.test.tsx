@@ -6,6 +6,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import AuthPage from '../../src/app/routes/AuthPage'
 import AppRouter from '../../src/app/AppRouter'
+import { requestSessionSignIn } from '../../src/app/session-activity'
+import { ApiClientError } from '../../src/app/api-client'
 import AuthPromptDialog from '../../src/components/ui/AuthPromptDialog'
 import { useShellStore } from '../../src/store/useShellStore'
 import type { AuthSessionPayload, User } from '../../shared/contracts'
@@ -80,10 +82,27 @@ function submitEmailBinding(dialog: HTMLElement, email: string) {
   fireEvent.click(fields.getByRole('button', { name: '验证并绑定' }))
 }
 
+it.each([true, false])('opens real sign-in after expiry and returns to the private location only for its owner (same=%s)', async same => {
+  const owner = { ...legacyUser, emailVerified: true, phoneVerified: true }
+  const path = '/studio/novel/n1?chapter=preview#cursor'
+  mocks.requestJson.mockImplementation(async path => path === '/api/auth/options' ? { emailAuthEnabled: true } : { legal: published })
+  mountApp(path, owner)
+  expect(await screen.findByText('创作内容')).toBeTruthy()
+  const savedFor: string[] = []
+  window.addEventListener('chevoink:session-expired', () => savedFor.push(useShellStore.getState().sessionUser!.id), { once: true })
+  act(requestSessionSignIn)
+  expect(await screen.findByRole('dialog', { name: '登录启创墨域' })).toBeTruthy()
+  expect(new URLSearchParams(window.location.search).get('redirect')).toBe(path)
+  expect(savedFor).toEqual([owner.id])
+  expect(screen.queryByText('创作内容')).toBeNull()
+  act(() => useShellStore.getState().setAuthenticated({ user: same ? owner : { ...owner, id: 'another-verified-account' } }))
+  await waitFor(() => expect(window.location.pathname + window.location.search + window.location.hash).toBe(same ? path : '/'))
+})
+
 function expectNewPasswordHint(dialog: HTMLElement, label: string) {
   const fields = within(dialog)
   const password = fields.getByLabelText(label) as HTMLInputElement
-  const hint = fields.getByText('密码需6位数以上')
+  const hint = fields.getByText('6 至 128 个字符')
   expect(password.getAttribute('aria-describedby')).toBe(hint.id)
   expect([password.minLength, password.maxLength]).toEqual([6, 128])
 }
@@ -342,14 +361,68 @@ it('keeps password recovery available before email verification', async () => {
   expectNewPasswordHint(recovery, '新登录密码')
 })
 
-it('continues to require a verification code for password changes in settings', () => {
-  mountApp('/settings?section=password', { ...legacyUser, emailVerified: true, passwordConfigured: true })
+it('changes a configured password with the current password and keeps the renewed session', async () => {
+  const user = { ...legacyUser, emailVerified: true, passwordConfigured: true }
+  const tokens = { accessToken: 'fresh-access', refreshToken: 'fresh-refresh', expiresInSeconds: 3600 }
+  mocks.requestJson.mockRejectedValueOnce(new ApiClientError('当前密码不正确。', 403)).mockResolvedValueOnce({ user, tokens })
+  mountApp('/settings?section=password', user)
   const dialog = screen.getByRole('dialog', { name: '修改登录密码' })
-  expect(within(dialog).getByRole('combobox', { name: '发送验证码到' })).toBeTruthy()
-  expect(within(dialog).getByRole('textbox', { name: '验证码' })).toBeTruthy()
-  expect(within(dialog).getByRole('button', { name: '获取验证码' })).toBeTruthy()
-  expect(within(dialog).queryByRole('progressbar')).toBeNull()
+  const fields = within(dialog)
+  expect(fields.queryByRole('combobox')).toBeNull()
+  expect(fields.queryByRole('button', { name: '获取验证码' })).toBeNull()
+  const current = fields.getByLabelText('当前密码')
+  expect(document.activeElement).toBe(current)
+  expect(current.getAttribute('autocomplete')).toBe('current-password')
   expectNewPasswordHint(dialog, '新登录密码')
+  fireEvent.change(current, { target: { value: 'incorrect' } })
+  fireEvent.change(fields.getByLabelText('新登录密码'), { target: { value: 'new-password' } })
+  fireEvent.change(fields.getByLabelText('再次输入新密码'), { target: { value: 'mismatch' } })
+  fireEvent.click(fields.getByRole('button', { name: '更新密码' }))
+  expect(fields.getByRole('alert').textContent).toBe('两次输入的密码不一致。')
+  expect(mocks.requestJson).not.toHaveBeenCalled()
+  fireEvent.change(fields.getByLabelText('再次输入新密码'), { target: { value: 'new-password' } })
+  fireEvent.click(fields.getByRole('button', { name: '更新密码' }))
+  await waitFor(() => expect(fields.getByRole('alert').textContent).toBe('当前密码不正确。'))
+  fireEvent.change(current, { target: { value: 'old-password' } })
+  fireEvent.click(fields.getByRole('button', { name: '更新密码' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(mocks.requestJson).toHaveBeenLastCalledWith('/api/auth/account/password', {
+    method: 'POST', body: JSON.stringify({ oldPassword: 'old-password', password: 'new-password' }),
+  })
+  expect(useShellStore.getState().authTokens).toEqual(tokens)
+})
+
+it('shows verified recovery channels on demand and submits only the selected proof', async () => {
+  const user = { ...phoneOnlyUser, email: legacyUser.email, emailVerified: true, passwordConfigured: true }
+  mountApp('/settings?section=password', user)
+  const fields = within(screen.getByRole('dialog', { name: '修改登录密码' }))
+  fireEvent.click(fields.getByRole('button', { name: '忘记密码？' }))
+  expect(fields.queryByLabelText('当前密码')).toBeNull()
+  expect(fields.getAllByRole('option').map(option => option.textContent)).toEqual(['已验证邮箱', '已验证手机号'])
+  fireEvent.click(fields.getByRole('button', { name: '使用当前密码' }))
+  expect(fields.queryByRole('combobox')).toBeNull()
+  fireEvent.click(fields.getByRole('button', { name: '忘记密码？' }))
+  fireEvent.change(fields.getByRole('combobox'), { target: { value: 'sms' } })
+  fireEvent.change(fields.getByLabelText('验证码'), { target: { value: '123456' } })
+  fireEvent.change(fields.getByLabelText('新登录密码'), { target: { value: 'new-password' } })
+  fireEvent.change(fields.getByLabelText('再次输入新密码'), { target: { value: 'new-password' } })
+  expect(mocks.requestJson).not.toHaveBeenCalled()
+  mocks.requestJson.mockResolvedValueOnce({ user })
+  fireEvent.click(fields.getByRole('button', { name: '更新密码' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(mocks.requestJson).toHaveBeenCalledExactlyOnceWith('/api/auth/account/password', {
+    method: 'POST', body: JSON.stringify({ channel: 'sms', code: '123456', password: 'new-password' }),
+  })
+})
+
+it('sets a first password in Settings with a verified contact', () => {
+  mountApp('/settings?section=password', { ...legacyUser, emailVerified: true, passwordConfigured: false })
+  const fields = within(screen.getByRole('dialog', { name: '设置登录密码' }))
+  expect(fields.queryByLabelText('当前密码')).toBeNull()
+  expect(fields.queryByRole('button', { name: '忘记密码？' })).toBeNull()
+  expect(fields.getAllByRole('option').map(option => option.textContent)).toEqual(['已验证邮箱'])
+  expect(fields.getByRole('textbox', { name: '验证码' })).toBeTruthy()
+  expect(fields.getByRole('button', { name: '获取验证码' })).toBeTruthy()
 })
 
 it.each([

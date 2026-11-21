@@ -1,7 +1,8 @@
 import { createHmac } from 'node:crypto'
+import type { Request, Response } from 'express'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { buildSessionTokens, evictUserBanCache, getUserAuthState, verifySessionToken } from '../../api/lib/auth-session.js'
+import { buildSessionTokens, evictUserBanCache, getUserAuthState, issueDeviceVerification, readDeviceVerification, verifySessionToken } from '../../api/lib/auth-session.js'
 import { env } from '../../api/config/env.js'
 import { prisma } from '../../api/lib/prisma.js'
 
@@ -83,6 +84,23 @@ describe('v2 会话令牌', () => {
 })
 
 describe('device-bound signing', () => {
+  it('binds remote sign-out verification to the account, login and credential version until its fixed deadline', () => {
+    vi.useFakeTimers()
+    const identity = { userId: USER_ID, deviceId: 'first-login', tokenVersion: TOKEN_VERSION }
+    const append = vi.fn()
+    const start = Date.now()
+    const deadline = issueDeviceVerification({ append } as unknown as Response, identity)
+    const cookie = append.mock.calls[0][1].split(';')[0]
+    const req = { headers: { cookie } } as Request
+    expect(deadline).toBe(start + 600_000)
+    vi.setSystemTime(deadline - 1)
+    expect(readDeviceVerification(req, identity)).toBe(deadline)
+    for (const change of [{ userId: 'another-account' }, { deviceId: 'another-login' }, { tokenVersion: TOKEN_VERSION + 1 }]) {
+      expect(readDeviceVerification(req, { ...identity, ...change })).toBeNull()
+    }
+    vi.setSystemTime(deadline)
+    expect(readDeviceVerification(req, identity)).toBeNull()
+  })
   it('signs the device, account, credential kind and account version together', () => {
     const tokens = buildSessionTokens(USER_ID, TOKEN_VERSION, 'phone-fixture')
     expect(verifySessionToken(tokens.accessToken, 'access')).toEqual({ userId: USER_ID, tokenVersion: TOKEN_VERSION, deviceId: 'phone-fixture' })

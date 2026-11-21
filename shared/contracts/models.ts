@@ -732,6 +732,7 @@ export interface PostDetailPayload {
 }
 
 export interface UserMePayload {
+  deviceSessionId?: string
   user: User | null
   shelf: ProfileShelfItem[]
   drafts: ProfileDraftItem[]

@@ -18,7 +18,8 @@ function validModel(value: string) {
 function deviceProfile(req: Request | undefined) {
   const agent = (req?.headers['user-agent'] ?? '').slice(0, 512)
   const os = /Android/i.test(agent) ? 'Android' : /iPad/i.test(agent) ? 'iPad' : /iPhone/i.test(agent) ? 'iPhone' : /Windows/i.test(agent) ? 'Windows' : /Macintosh/i.test(agent) ? 'Mac' : /Linux/i.test(agent) ? 'Linux' : ''
-  const client = /; wv\)/i.test(agent) ? '应用' : /Edg/i.test(agent) ? 'Edge' : /Firefox|FxiOS/i.test(agent) ? 'Firefox' : /Chrome|CriOS/i.test(agent) ? 'Chrome' : /Safari/i.test(agent) ? 'Safari' : ''
+  const desktop = os === 'Windows' && /\bChevoinkDesktop\/\d+\.\d+\.\d+\b/.test(agent)
+  const client = desktop ? 'Windows桌面端' : /; wv\)/i.test(agent) ? '应用' : /Edg/i.test(agent) ? 'Edge' : /Firefox|FxiOS/i.test(agent) ? 'Firefox' : /Chrome|CriOS/i.test(agent) ? 'Chrome' : /Safari/i.test(agent) ? 'Safari' : ''
   const hint = req?.headers['sec-ch-ua-model']
   let model = typeof hint === 'string' && os ? validModel(/^"([^"]{1,40})"$/.exec(hint)?.[1] ?? '') : ''
   if (!model && os === 'Android') {
@@ -38,10 +39,17 @@ export function deviceName(req: Request | undefined) {
 
 export function enrichDeviceName(req: Request, stored: string) {
   if (!stored || stored.startsWith('旧版登录')) return
-  if (!req.headers['sec-ch-ua-model'] && !stored.startsWith('Android') && stored !== '未知设备') return
+  if (!req.headers['sec-ch-ua-model'] && !stored.startsWith('Android') && !stored.startsWith('Windows') && stored !== '未知设备') return
+  const { os, client, model } = deviceProfile(req)
+  if (os === 'Windows' && client === 'Windows桌面端' && (stored.startsWith('Windows') || stored === '未知设备')) {
+    const parts = stored === '未知设备' ? [] : stored.split(' · ').slice(1)
+    const last = parts.at(-1)
+    if (last && (clients.has(last) || last === client || last === '启创墨域客户端')) parts.pop()
+    const updated = [os, parts.join(' · ') || model, client].filter(Boolean).join(' · ')
+    return updated === stored ? undefined : updated
+  }
   const [previousOs, previousClient, detail] = stored.split(' · ')
   if (detail || (previousClient && !clients.has(previousClient))) return
-  const { os, client, model } = deviceProfile(req)
   if (!model || (stored !== '未知设备' && os !== previousOs)) return
   return [os, model, previousClient || client].filter(Boolean).join(' · ')
 }

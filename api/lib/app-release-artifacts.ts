@@ -6,6 +6,12 @@ import { DataAccessError } from './prisma.js'
 
 export const appReleaseArtifactRoot=()=>path.resolve(process.env.APP_RELEASE_ARTIFACT_ROOT ?? '/srv/chevoink-data/beta-releases')
 export const artifactDigest=(bytes:Uint8Array|string)=>createHash('sha256').update(bytes).digest('hex')
+/** Adapt only the verified HTML response. Stored bytes and manifest hashes stay intact. */
+export function withLegacyForeground(document: Buffer): Buffer | string {
+ const html=document.toString('utf8')
+ if(html.includes('data-session-activity="native"'))return document
+ return html.replace('<head>','<head><script src="/api/app-releases/legacy-foreground.js"></script>')
+}
 function invalid():never{throw new DataAccessError(503,'APP_RELEASE_ARTIFACT_INVALID','应用版本文件不可用或校验不一致，请管理员核对。')}
 async function regularFile(root:string,relative:string){
  const target=path.resolve(root,relative)

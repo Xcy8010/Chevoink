@@ -1,21 +1,28 @@
 import { randomUUID } from 'node:crypto'
 import type { Request } from 'express'
 import type { Prisma } from '@prisma/client'
-import type { RevokeLoginDeviceResult } from '../../shared/contracts/api.js'
 import { prisma, DataAccessError } from './prisma.js'
 import { resolveDeviceLocation } from './device-location.js'
+import { recordAccountPasswordFailure } from './account-security-observation.js'
 import { deviceName } from './device-name.js'
 import { hasConfiguredPassword, verifyPassword } from './password.js'
 
 const legacyRows = { OR: ['legacy-', 'carry-', 'shared-'].map(prefix => ({ id: { startsWith: prefix } })) }
+// This server-issued id is immutable across access/refresh rotation and bridge use.
+// An activity report from one page cannot prove coverage of older, resident tabs.
+const foregroundPrefix = 'fg1-'
+export const enforcesForegroundIdle = (id: string) => id.startsWith(foregroundPrefix)
+const idleCutoff = (now: Date) => new Date(now.getTime() - 30 * 86_400_000)
+export const sessionIdleCutoff = (id: string, now: Date) => enforcesForegroundIdle(id) ? idleCutoff(now) : undefined
 export function isRecognizedDevice(id: string) { return id.startsWith('carry-') || id.startsWith('shared-') }
 
 async function lockLegacyAccount(tx: Prisma.TransactionClient, userId: string) {
   await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext('device-migration'), hashtext(${userId}))`
 }
 
-export async function openDevice(userId: string, tokenVersion: number, req: Request | undefined, expiresAt: Date) {
-  const data = { id: randomUUID(), userId, tokenVersion, expiresAt,
+export async function openDevice(userId: string, tokenVersion: number, req: Request | undefined, refreshTtlSeconds: number, foreground: boolean) {
+  const lastActiveAt = new Date()
+  const data = { id: (foreground ? foregroundPrefix : '') + randomUUID(), userId, tokenVersion, lastActiveAt, expiresAt: new Date(lastActiveAt.getTime() + refreshTtlSeconds * 1000),
     deviceName: deviceName(req), location: req ? await resolveDeviceLocation(req) : null }
   await prisma.accountDeviceSession.deleteMany({ where: { userId, OR: [
     { expiresAt: { lt: new Date() }, NOT: legacyRows },
@@ -24,8 +31,8 @@ export async function openDevice(userId: string, tokenVersion: number, req: Requ
   return prisma.accountDeviceSession.create({ data })
 }
 
-export async function registerRecognizedDevice(userId: string, tokenVersion: number, req: Request, expiresAt: Date, recognizedId: string, mixedGroup: string | undefined, allowCreation: boolean) {
-  const data = { id: recognizedId, userId, tokenVersion, expiresAt,
+export async function registerRecognizedDevice(userId: string, tokenVersion: number, req: Request, expiresAt: Date, recognizedId: string, mixedGroup: string | undefined, allowCreation: boolean, lastActiveAt: Date) {
+  const data = { id: recognizedId, userId, tokenVersion, expiresAt, lastActiveAt,
     deviceName: recognizedId?.startsWith('shared-') ? '旧版登录（合并显示）' : deviceName(req), location: req ? await resolveDeviceLocation(req) : null }
   return prisma.$transaction(async tx => {
     await lockLegacyAccount(tx, userId)
@@ -43,8 +50,11 @@ export async function registerRecognizedDevice(userId: string, tokenVersion: num
 }
 
 export async function listDevices(userId: string, current: string, tokenVersion: number) {
+  const now = new Date()
   const rows = await prisma.accountDeviceSession.findMany({ where: { userId, tokenVersion, OR: [
-    { id: { startsWith: 'legacy-' } }, { revokedAt: null, expiresAt: { gt: new Date() } },
+    { id: { startsWith: 'legacy-' } }, { revokedAt: null, expiresAt: { gt: now }, OR: [
+      { NOT: { id: { startsWith: foregroundPrefix } } }, { lastActiveAt: { gt: idleCutoff(now) } },
+    ] },
   ] }, select: { id: true, deviceName: true, location: true, createdAt: true, lastActiveAt: true, revokedAt: true }, orderBy: { lastActiveAt: 'desc' } })
   const group = rows.find(row => row.id.startsWith('legacy-'))
   return rows.filter(row => row !== group && !(isRecognizedDevice(row.id) && group?.revokedAt))
@@ -52,7 +62,12 @@ export async function listDevices(userId: string, current: string, tokenVersion:
       legacyGroup: row.id.startsWith('shared-') || Boolean(group && isRecognizedDevice(row.id)), firstSeenOnly: isRecognizedDevice(row.id) }))
 }
 
-export async function revokeDevice(userId: string, tokenVersion: number, id: string, passwordHash?: string) {
+function requireDevicePassword() {
+  return new DataAccessError(403, 'DEVICE_PASSWORD_REQUIRED', '请输入当前账号的登录密码。')
+}
+
+export async function revokeDevice(userId: string, tokenVersion: number, id: string, passwordHash?: string, protectCurrent?: string) {
+  if (id === protectCurrent) throw requireDevicePassword()
   const where = { id, userId, tokenVersion, revokedAt: null, user: { tokenVersion, passwordHash, bannedAt: null } }
   const data = { revokedAt: new Date() }
   if (!isRecognizedDevice(id) && !id.startsWith('legacy-')) {
@@ -63,6 +78,7 @@ export async function revokeDevice(userId: string, tokenVersion: number, id: str
     await lockLegacyAccount(tx, userId)
     const result = await tx.accountDeviceSession.updateMany({ where, data })
     if (result.count && await tx.accountDeviceSession.findFirst({ where: { userId, tokenVersion, id: { startsWith: 'legacy-' } }, select: { id: true } })) {
+      if (protectCurrent && isRecognizedDevice(protectCurrent)) throw requireDevicePassword()
       await tx.accountDeviceSession.updateMany({ where: { userId, tokenVersion, revokedAt: null, ...legacyRows }, data })
       return { count: result.count, revokedLegacyGroup: true }
     }
@@ -70,11 +86,16 @@ export async function revokeDevice(userId: string, tokenVersion: number, id: str
   })
 }
 
-export async function removeDevice(userId: string, current: string, target: string, password: string, tokenVersion: number): Promise<RevokeLoginDeviceResult> {
+export async function removeDevice(userId: string, current: string, target: string, tokenVersion: number, password: string | undefined, verifiedUntil: number | null) {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { passwordHash: true, role: true, tokenVersion: true } })
   if (!hasConfiguredPassword(user.passwordHash)) throw new DataAccessError(409, 'PASSWORD_REQUIRED', '请先设置账号密码。')
-  if (!verifyPassword(user.role === 'admin' ? password : password.trim(), user.passwordHash)) throw new DataAccessError(403, 'INVALID_PASSWORD', '密码不正确。')
-  const result = await revokeDevice(userId, tokenVersion, target, user.passwordHash)
+  if (password !== undefined) {
+    if (!verifyPassword(user.role === 'admin' ? password : password.trim(), user.passwordHash)) {
+      recordAccountPasswordFailure('device_revoke', current)
+      throw new DataAccessError(403, 'INVALID_PASSWORD', '密码不正确。')
+    }
+  } else if (!verifiedUntil || verifiedUntil <= Date.now()) throw requireDevicePassword()
+  const result = await revokeDevice(userId, tokenVersion, target, user.passwordHash, password === undefined ? current : undefined)
   if (!result.count) throw new DataAccessError(404, 'DEVICE_NOT_FOUND', '此设备已退出或不存在。')
-  return { revoked: true, signedOutCurrent: target === current || (result.revokedLegacyGroup && isRecognizedDevice(current)) }
+  return { revoked: true as const, signedOutCurrent: target === current || (result.revokedLegacyGroup && isRecognizedDevice(current)) }
 }

@@ -32,6 +32,8 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      ...(init?.method === 'POST' && /^\/api\/auth\/(?:(?:email|sms)\/)?(?:login|register)$/.test(path)
+        ? { 'X-Chevoink-Foreground-Protocol': '1' } : {}),
       ...buildAuthHeader(),
       ...(init?.headers ?? {}),
     },

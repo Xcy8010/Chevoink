@@ -2,7 +2,7 @@ import { useRegistrationPolicies } from '@/features/site-content/public-api'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff, Lock, MessageSquareText, Smartphone, UserRound } from 'lucide-react'
-import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
@@ -78,6 +78,8 @@ function buildPhoneSubmitValue(input: string): string {
 
 export default function AuthPage({ mode, onClose }: AuthPageProps) {
   const [params] = useSearchParams()
+  const { state } = useLocation()
+  const viewer = useShellStore(shell => shell.sessionUser?.id)
   const isAuthenticated = useShellStore(state => state.authStatus === 'authenticated' && Boolean(state.sessionUser))
   const isRecovery = mode === 'login' && params.get('recovery') === '1'
   const redirectPath = authRedirectPath(params.get('redirect'))
@@ -88,7 +90,8 @@ export default function AuthPage({ mode, onClose }: AuthPageProps) {
     retry: false,
     staleTime: 0,
   })
-  if (isAuthenticated && !isRecovery) return <Navigate to={redirectPath} replace />
+  const destination = state?.resumeOwner !== undefined && state.resumeOwner !== viewer ? '/' : redirectPath
+  if (isAuthenticated && !isRecovery) return <Navigate to={destination} replace />
   if (options.isPending) return <LoadingMark className="boot-splash" />
   if (options.isError && !(options.error instanceof ApiClientError && options.error.status === 404)) {
     return <AccountDialog title="暂时无法读取登录方式" onClose={onClose}>
@@ -99,7 +102,7 @@ export default function AuthPage({ mode, onClose }: AuthPageProps) {
     const nextMode = isRecovery ? 'recovery' : mode
     return <EmailAuthPage key={nextMode} mode={nextMode} onClose={onClose} redirectPath={redirectPath} />
   }
-  if (isAuthenticated) return <Navigate to={redirectPath} replace />
+  if (isAuthenticated) return <Navigate to={destination} replace />
   return <LegacyAuthPage key={mode} mode={mode} onClose={onClose} redirectPath={redirectPath} />
 }
 
@@ -109,6 +112,7 @@ function LegacyAuthPage({ mode, onClose, redirectPath }: AuthPageProps & { redir
   const legal = legalQuery.data?.legal
   const legalKey = legal?.terms && legal.privacy ? `${legal.terms.id}:${legal.privacy.id}` : ''
   const navigate = useNavigate()
+  const { state } = useLocation()
   const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const toast = useToast()
@@ -450,6 +454,7 @@ function LegacyAuthPage({ mode, onClose, redirectPath }: AuthPageProps & { redir
         <p className="mt-6 text-center text-sm text-[var(--text-secondary)]">
           {isRegisterPage ? '已经有账户？ ' : null}
           <Link
+            state={state}
             to={isRegisterPage ? `/login?redirect=${encodeURIComponent(redirectPath)}` : `/register?redirect=${encodeURIComponent(redirectPath)}`}
             className="font-semibold text-[var(--color-brand)]"
           >

@@ -7,7 +7,10 @@ const mocks=vi.hoisted(()=>({admin:vi.fn(),select:vi.fn(),import:vi.fn(),preview
 vi.mock('../../api/lib/admin-auth.js',()=>({requireAdmin:mocks.admin,getRequestIp:()=>null}))
 vi.mock('../../api/lib/auth-session.js',()=>({getSessionUserId:()=>null,bridgeSessionCookies:mocks.session,clearSession:mocks.clearSession}))
 vi.mock('../../api/lib/app-releases.js',()=>({importAppRelease:mocks.import,previewAppRelease:mocks.preview,executeAppRelease:mocks.execute,reconcileAppRelease:mocks.reconcile,selectAppRelease:mocks.select,listAppReleases:vi.fn(),verifyEmailAuthPreviewLaunch:mocks.previewLaunch}))
-vi.mock('../../api/lib/app-release-artifacts.js',()=>({readInstalledAppRelease:mocks.installed,readAppReleaseFile:mocks.file}))
+vi.mock('../../api/lib/app-release-artifacts.js',async(importOriginal)=>({
+ ...await importOriginal<typeof import('../../api/lib/app-release-artifacts.js')>(),
+ readInstalledAppRelease:mocks.installed,readAppReleaseFile:mocks.file,
+}))
 const app=express();app.set('trust proxy',1);app.use(express.json());app.use('/public',publicAppReleaseRouter);app.use('/admin',router)
 beforeEach(()=>{vi.clearAllMocks();mocks.admin.mockResolvedValue({id:'admin',isSuperAdmin:true});mocks.select.mockResolvedValue({mode:'artifact',channel:'stable',release:{id:'stable-version',label:'Stable',notes:{features:['Feature'],fixes:[],changes:[]},capabilities:[],entryUrl:'/public/artifacts/stable-version/index.html'}});mocks.installed.mockResolvedValue({manifest:{}});mocks.file.mockResolvedValue(Buffer.from('synthetic-module'))})
 it('issues the browser preview only through the exact same-origin HTTPS cookie-session action',async()=>{
@@ -31,6 +34,20 @@ it('issues the browser preview only through the exact same-origin HTTPS cookie-s
 })
 it('serves only the server-assigned artifact with private no-store and no manifest exposure',async()=>{let response=await request(app).get('/public/artifacts/stable-version/assets/app.js');expect(response.status).toBe(200);expect(response.headers['cache-control']).toBe('private, no-store');expect(response.headers.vary).toBe('Cookie, Authorization');expect(mocks.file).toHaveBeenCalledWith(expect.anything(),'assets/app.js');response=await request(app).get('/public/artifacts/test-version/assets/app.js').set('x-release-channel','test');expect(response.status).toBe(403);expect(response.body.error.code).toBe('APP_RELEASE_NOT_ASSIGNED')})
 it('returns public selection without leaking exact SHA, CI, diagnostics or upstream configuration',async()=>{const response=await request(app).get('/public/bootstrap');expect(response.status).toBe(200);expect(response.body.data.release.label).toBe('Stable');expect(JSON.stringify(response.body)).not.toMatch(/sourceSha|ciRunId|artifactSha256|provider|baseUrl/)})
+it('attaches the foreground listener only to delivered old HTML, preserving its verified source',async()=>{
+ const source=Buffer.from('<html><head><script src="release-entry.js"></script></head><body></body></html>')
+ mocks.file.mockResolvedValue(source)
+ const old=await request(app).get('/public/artifacts/stable-version/index.html').expect(200)
+ expect(old.text).toContain('<head><script src="/api/app-releases/legacy-foreground.js"></script>')
+ expect(old.headers['cache-control']).toBe('private, no-store')
+ expect(source.toString()).not.toContain('legacy-foreground.js')
+ const modern=source.toString().replace('<html>','<html data-session-activity="native">')
+ mocks.file.mockResolvedValue(Buffer.from(modern))
+ expect((await request(app).get('/public/artifacts/stable-version/index.html').expect(200)).text).toBe(modern)
+ const listener=await request(app).get('/public/legacy-foreground.js').expect(200)
+ expect(listener.headers['content-type']).toContain('javascript')
+ expect(listener.text).toContain("document.addEventListener('visibilitychange'")
+})
 it('rejects client file paths and verification booleans as import evidence',async()=>{const response=await request(app).post('/admin/import').send({releaseId:'candidate',path:'/tmp/forged',verified:true,sourceSha:'a'.repeat(40)});expect(response.status).toBe(400);expect(mocks.import).not.toHaveBeenCalled()})
 it('passes only release ID to the protected manifest importer',async()=>{mocks.import.mockResolvedValue({id:'candidate'});const response=await request(app).post('/admin/import').send({releaseId:'candidate'});expect(response.status).toBe(201);expect(mocks.import).toHaveBeenCalledWith('admin','candidate',null)})
 it('preserves operation ID and expected revision when executing an explicitly previewed request',async()=>{mocks.execute.mockResolvedValue({status:'applied'});const body={action:'full_release',releaseId:'candidate',operationId:'00000000-0000-4000-8000-000000000001',previewHash:'b'.repeat(64),expectedRevision:3};const response=await request(app).post('/admin/execute').send(body);expect(response.status).toBe(200);expect(mocks.execute).toHaveBeenCalledWith('admin',body,null)})

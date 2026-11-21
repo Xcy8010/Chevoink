@@ -6,6 +6,7 @@ import { isWindowsDesktopApp } from '@/lib/desktop-app'
 import { registerDesktopSave } from '@/lib/desktop-lifecycle'
 
 import type { EditorSelectionState } from '../types'
+import { currentChapterCopy } from '../lib/chapter-recovery'
 
 type LocalFirstTextareaProps = {
   /** 外部权威值：Agent 写入、审查保留/撤销、服务端同步都会更新它 */
@@ -14,6 +15,8 @@ type LocalFirstTextareaProps = {
   onCommit: (value: string) => void
   /** 章节/文档标识：变化时强制用外部 value 重置本地（切章、切计划） */
   resetKey?: string
+  /** Present only for an authenticated author's chapter editor. */
+  recoveryKey?: string
   onSelectionChange?: (selection: EditorSelectionState) => void
   /** 影子层自增高布局（沉浸区正文），排版类名请放在 className 上 */
   autoGrow?: boolean
@@ -40,6 +43,7 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
     value,
     onCommit,
     resetKey,
+    recoveryKey,
     onSelectionChange,
     autoGrow = false,
     wrapperClassName,
@@ -52,6 +56,13 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
   },
   forwardedRef,
 ) {
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  const restoredPosition = useRef<string>()
+  const attachInput = useCallback((node: HTMLTextAreaElement | null) => {
+    inputRef.current = node
+    if (typeof forwardedRef === 'function') return forwardedRef(node)
+    if (forwardedRef) forwardedRef.current = node
+  }, [forwardedRef])
   const [local, setLocal] = useState(value)
   const localRef = useRef(value)
   const committedRef = useRef(value)
@@ -87,6 +98,34 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
       commit(localRef.current)
     }
   }, [clearCommitTimer])
+
+  useEffect(() => {
+    if (!recoveryKey) return
+    const capture = () => {
+      const input = inputRef.current
+      if (!input || readOnlyRef.current) return
+      flushPending()
+      const viewport = input.closest('[data-mobile-manuscript]') ?? input
+      try {
+        const position = JSON.stringify({
+          start: input.selectionStart, end: input.selectionEnd, top: viewport.scrollTop,
+          focused: document.activeElement === input,
+        })
+        const copy = currentChapterCopy(recoveryKey)
+        if (copy) localStorage.setItem(copy.slot + ':position', position)
+        localStorage.setItem(recoveryKey + ':position', position)
+      } catch { /* Optional editor position. */ }
+    }
+    window.addEventListener('chevoink:session-expired', capture)
+    window.addEventListener('pagehide', capture)
+    const background = () => { if (document.visibilityState === 'hidden') capture() }
+    document.addEventListener('visibilitychange', background)
+    return () => {
+      window.removeEventListener('chevoink:session-expired', capture)
+      window.removeEventListener('pagehide', capture)
+      document.removeEventListener('visibilitychange', background)
+    }
+  }, [recoveryKey, flushPending])
 
   const scheduleCommit = useCallback(
     (delay = commitDelay) => {
@@ -131,6 +170,27 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
     setLocal(value)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetKey])
+
+  useLayoutEffect(() => {
+    const input = inputRef.current
+    if (!recoveryKey || restoredPosition.current === recoveryKey || !input || readOnly || input.value !== value) return
+    restoredPosition.current = recoveryKey
+    try {
+      const copy = currentChapterCopy(recoveryKey)
+      const raw = (copy && localStorage.getItem(copy.slot + ':position')) ?? localStorage.getItem(recoveryKey + ':position')
+      if (!raw) return
+      const position = JSON.parse(raw)
+      if (Number.isInteger(position.start) && Number.isInteger(position.end)) {
+        if (position.focused === true) input.focus({ preventScroll: true })
+        input.setSelectionRange(position.start, position.end)
+        const viewport = input.closest('[data-mobile-manuscript]') ?? input
+        if (Number.isFinite(position.top)) {
+          viewport.scrollTop = position.top
+          if (viewport !== input) viewport.setAttribute('data-restored-position', '')
+        }
+      }
+    } catch { /* Invalid or unavailable storage does not prevent editing. */ }
+  }, [recoveryKey, readOnly, value, local])
 
   // 卸载时上报最后一批输入并清掉定时器，防止切视图丢字。
   useEffect(
@@ -213,7 +273,7 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
   const textarea = (
     <textarea
       {...textareaProps}
-      ref={forwardedRef}
+      ref={attachInput}
       value={displayValue}
       readOnly={readOnly}
       onChange={handleChange}

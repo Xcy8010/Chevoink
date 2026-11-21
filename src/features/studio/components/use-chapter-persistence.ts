@@ -6,9 +6,11 @@ import { formatDateTime } from '../lib/agent-session'
 import { replaceChapterItem, toChapterListItem } from '../lib/plan-review'
 import type { ChapterDraftState, ChapterPendingReview, SaveState } from '../types'
 import { registerDesktopSave } from '@/lib/desktop-lifecycle'
+import { chapterRecoveryKey, readChapterEdits, sameChapterEdits, storeChapterEdits } from '../lib/chapter-recovery'
 
 type ChapterPersistence = {
   activeNovelId: string
+  userId?: string
   scope?: string
   chapterDraft: ChapterDraftState | null
   chapterDirty: boolean
@@ -54,6 +56,7 @@ export function useChapterPersistence(options: ChapterPersistence) {
       const request = (async () => {
       const { activeNovelId, chapterDraftStateRef, chapterDirtyStateRef, pendingChapterReviewsRef, setPendingChapterReviews, syncSavedChapter, selectedChapterIdStateRef, promptConfirmPendingChapterReview, setChapterSaveState, setChapterSaveMessage, setChapters, setSelectedTreeItemId, setSelectedChapterId, setChapterDraft, setChapterDirty, setChapterLastSavedAt, setCurrentNovel, syncStudioPayload } = latest.current
       const owner = epoch.current
+      const userId = latest.current.userId
       // 编辑器输入经 LocalFirstTextarea 防抖上报，闭包里的 chapterDraft 可能落后；
       // 保存时一律以最新 ref 为准，blur/自动保存都能拿到当前输入。
       const draft = chapterDraftStateRef.current
@@ -116,15 +119,12 @@ export function useChapterPersistence(options: ChapterPersistence) {
           replaceChapterItem(current, localDraftId, toChapterListItem(savedChapter)),
         )
         const latestDraft = chapterDraftStateRef.current
-        const editsArrivedDuringSave = Boolean(
-          latestDraft && latestDraft.id === draft.id && (
-            latestDraft.title !== draft.title ||
-            latestDraft.summary !== draft.summary ||
-            latestDraft.content !== draft.content ||
-            latestDraft.status !== draft.status ||
-            latestDraft.visibility !== draft.visibility
-          ),
-        )
+        const editsArrivedDuringSave = Boolean(latestDraft && latestDraft.id === draft.id && !sameChapterEdits(latestDraft, draft))
+        const recoveryKey = chapterRecoveryKey(userId, activeNovelId, draft.id)
+        const pending = readChapterEdits(recoveryKey)
+        if (pending?.revision === draft.revision) {
+          storeChapterEdits(recoveryKey, sameChapterEdits(pending, draft) ? null : { ...pending, revision: savedChapter.revision })
+        }
         // 保存请求可能跨越切章动作才完成：只有章节仍处于打开状态才写回编辑器状态，
         // 绝不把旧章内容盖到已切换的新章草稿上。
         const chapterStillOpen = latestDraft?.id === draft.id
@@ -134,6 +134,7 @@ export function useChapterPersistence(options: ChapterPersistence) {
           // 网络请求期间用户仍可能继续输入。只接收服务端 revision/真实 id，绝不拿旧响应覆盖
           // 新输入；保留 dirty 让下一轮自动保存继续追上。
           const next = { ...latestDraft, id: savedChapter.id, revision: savedChapter.revision, localOnly: false }
+          storeChapterEdits(chapterRecoveryKey(userId, activeNovelId, next.id), next)
           chapterDraftStateRef.current = next
           if (chapterDirtyStateRef) chapterDirtyStateRef.current = true
           setChapterDraft(next)

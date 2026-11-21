@@ -8,6 +8,18 @@ function android(comment: string, hint?: string) {
 }
 
 describe('client-reported device model labels', () => {
+  it('recognizes the Windows client ahead of WebView2 and corrects known sessions on their next request', () => {
+    const req = { headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0) Chrome/140.0 Edg/140.0 ChevoinkDesktop/1.0.4' } } as Request
+    expect(deviceName(req)).toBe('Windows · Windows桌面端')
+    expect(enrichDeviceName(req, 'Windows · Edge')).toBe('Windows · Windows桌面端')
+    expect(enrichDeviceName(req, 'Windows · Surface Pro 9 · Edge')).toBe('Windows · Surface Pro 9 · Windows桌面端')
+    expect(enrichDeviceName(req, 'Windows · Windows桌面端')).toBeUndefined()
+    expect(enrichDeviceName(req, 'Windows · 启创墨域客户端')).toBe('Windows · Windows桌面端')
+    expect(enrichDeviceName(req, '旧版登录（合并显示）')).toBeUndefined()
+    req.headers['user-agent'] = 'Mozilla/5.0 (Windows NT 10.0) Chrome/140.0 Edg/140.0'
+    expect(deviceName(req)).toBe('Windows · Edge')
+    expect(enrichDeviceName(req, 'Windows · Edge')).toBeUndefined()
+  })
   it.each(['Pixel 8 Pro', 'Pixel Fold', 'Redmi Note 13 Pro', 'SM-S9210', '24031PN0DC', 'CPH2499', 'VOG-L29'])(
     'reads a quoted hint from a reduced UA (%s)', model => {
       expect(deviceName(android('K', '"' + model + '"'))).toBe('Android · ' + model + ' · Chrome')

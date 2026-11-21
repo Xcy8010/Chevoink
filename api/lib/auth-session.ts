@@ -3,14 +3,19 @@ import type { Request, Response } from 'express'
 import { Prisma } from '@prisma/client'
 import { isLegacyAccountMissingEmail } from '../../shared/account-contact.js'
 
-import { isRecognizedDevice, openDevice, registerRecognizedDevice, revokeDevice } from './device-session.js'
+import { enforcesForegroundIdle, isRecognizedDevice, openDevice, registerRecognizedDevice, revokeDevice, sessionIdleCutoff } from './device-session.js'
 import { resolveDeviceLocation } from './device-location.js'
+import { observePasswordLogin } from './account-security-observation.js'
 import { enrichDeviceName } from './device-name.js'
 import { env } from '../config/env.js'
 import { prisma, DataAccessError } from './prisma.js'
 
 const SESSION_COOKIE_NAME = 'chevoink_session'
 const REFRESH_COOKIE_NAME = 'chevoink_refresh'
+const deviceRefreshCookie = (deviceId: string) => 'chevoink_refresh_' + deviceId
+const activityRequest = (req: Request | undefined) => /^\/api\/auth\/session\/activity\/?(?:\?|$)/i.test(req?.originalUrl ?? '')
+const DEVICE_VERIFICATION_COOKIE = 'chevoink_device_verification'
+const DEVICE_VERIFICATION_SECONDS = 10 * 60
 
 /**
  * v1 存量令牌格式：`${userId}.${expiresAt}.${sig}`（30 天有效期，兼容双读直至自然过期）
@@ -108,6 +113,40 @@ function safeEqual(left: string, right: string): boolean {
 
 type SessionTokenKind = 'access' | 'refresh'
 
+type DeviceIdentity = { userId: string; deviceId: string; tokenVersion: number }
+
+function deviceVerificationSignature({ userId, deviceId, tokenVersion }: DeviceIdentity, expiresAt: number) {
+  return signPayload(JSON.stringify(['revoke-other-devices', userId, deviceId, tokenVersion, expiresAt]))
+}
+
+export function readDeviceVerification(req: Request, identity: DeviceIdentity): number | null {
+  const cookie = parseCookies(req.headers.cookie)[DEVICE_VERIFICATION_COOKIE]
+  const parts = cookie?.match(/^(\d+)\.([a-f0-9]{64})$/)
+  if (!parts) return null
+  const expiresAt = Number(parts[1])
+  return expiresAt > Date.now() && safeEqual(parts[2], deviceVerificationSignature(identity, expiresAt)) ? expiresAt : null
+}
+
+export function issueDeviceVerification(res: Response, identity: DeviceIdentity) {
+  const expiresAt = Date.now() + DEVICE_VERIFICATION_SECONDS * 1000
+  const value = expiresAt + '.' + deviceVerificationSignature(identity, expiresAt)
+  res.append('Set-Cookie', serializeCookie(DEVICE_VERIFICATION_COOKIE, value, DEVICE_VERIFICATION_SECONDS))
+  return expiresAt
+}
+
+function clearDeviceVerification(res: Response) {
+  if (parseCookies(res.req?.headers.cookie)[DEVICE_VERIFICATION_COOKIE]) {
+    res.append('Set-Cookie', serializeCookie(DEVICE_VERIFICATION_COOKIE, '', 0))
+  }
+}
+
+function clearPreviousDeviceRefresh(res: Response) {
+  const previous = res.req && deviceIdentity.get(res.req)
+  if (previous && parseCookies(res.req.headers.cookie)[deviceRefreshCookie(previous.deviceId)]) {
+    res.append('Set-Cookie', serializeCookie(deviceRefreshCookie(previous.deviceId), '', 0))
+  }
+}
+
 interface VerifiedToken {
   deviceId?: string
   userId: string
@@ -122,13 +161,17 @@ function buildToken(userId: string, expiresAt: number, tokenVersion: number, kin
 }
 
 export function buildSessionTokens(userId: string, tokenVersion: number, deviceId?: string) {
-  const now = Math.floor(Date.now() / 1000)
-  const accessToken = buildToken(userId, now + ACCESS_TTL_SECONDS, tokenVersion, 'access', deviceId)
-  const refreshToken = buildToken(userId, now + REFRESH_TTL_SECONDS, tokenVersion, 'refresh', deviceId)
+  const seconds = Date.now() / 1000
+  const accessToken = buildToken(userId, Math.floor(seconds) + ACCESS_TTL_SECONDS, tokenVersion, 'access', deviceId)
+  // The database enforces the exact millisecond deadline. A v3 refresh must still
+  // be usable in its last fractional second. Preserve the historical v2 pair offset.
+  const refreshStart = deviceId ? Math.ceil(seconds) : Math.floor(seconds)
+  const refreshToken = buildToken(userId, refreshStart + REFRESH_TTL_SECONDS, tokenVersion, 'refresh', deviceId)
 
   return {
     accessToken,
     refreshToken,
+    ...(deviceId ? { deviceSessionId: deviceId } : {}),
     expiresInSeconds: ACCESS_TTL_SECONDS,
   }
 }
@@ -140,19 +183,49 @@ function writeSessionCookies(userId: string, tokenVersion: number, res: Response
   return tokens
 }
 
+function isCoveredForegroundLogin(req: Request) {
+  const origin = env.authForegroundActivityOrigin
+  if (!origin || env.authCookieDomain || req.headers.origin !== origin || req.headers['x-chevoink-foreground-protocol'] !== '1') return false
+  try {
+    const dedicated = new URL(origin)
+    // Cookies span ports. The existing site's hostname can still contain
+    // older documents, even when a single active foreground tab is observable.
+    const host = dedicated.hostname.replace(/\.$/, '')
+    if (new URL(env.webUrl).hostname.replace(/\.$/, '') === host) return false
+    const local = host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(host)
+    return origin === dedicated.origin && req.headers.host === dedicated.host && req.protocol + ':' === dedicated.protocol &&
+      (dedicated.protocol === 'https:' || (local && dedicated.protocol === 'http:'))
+  } catch { return false }
+}
+
 /** 登录/重签会话：实时读库取最新 tokenVersion（不能走 60s 缓存，否则可能签出即刻失效的令牌） */
-export async function createSession(userId: string, res: Response, expectedTokenVersion?: number) {
+export async function createSession(userId: string, res: Response, expectedTokenVersion?: number, source?: 'password_login' | 'interactive') {
   const state = await getUserAuthState(userId, { fresh: true })
   if (!state) throw new DataAccessError(401, 'AUTH_REQUIRED', '账号已不存在，请重新登录。')
   if (state.banned) throw new DataAccessError(403, 'AUTH_ACCOUNT_BANNED', '当前账号已被封禁。')
   if (expectedTokenVersion !== undefined && state.tokenVersion !== expectedTokenVersion) {
     throw new DataAccessError(401, 'AUTH_SESSION_CHANGED', '账号状态已变化，请重新登录。')
   }
-  const device = await openDevice(userId, state.tokenVersion, res.req, refreshExpiry())
-  return writeSessionCookies(userId, state.tokenVersion, res, device.id)
+  const prior = res.req && deviceIdentity.get(res.req)
+  const foreground = source
+    ? Boolean(res.req && isCoveredForegroundLogin(res.req))
+    : prior?.userId === userId && enforcesForegroundIdle(prior.deviceId)
+  const device = await openDevice(userId, state.tokenVersion, res.req, REFRESH_TTL_SECONDS, foreground)
+  clearPreviousDeviceRefresh(res)
+  clearDeviceVerification(res)
+  const tokens = writeSessionCookies(userId, state.tokenVersion, res, device.id)
+  if (source === 'password_login') {
+    void observePasswordLogin(device, prior?.userId === userId && prior.tokenVersion === state.tokenVersion)
+      .catch(() => { /* Optional observation cannot block sign-in. */ })
+  }
+  return tokens
 }
 
 export function clearSession(res: Response) {
+  // An in-flight activity response must never delete a later login's cookies.
+  if (activityRequest(res.req)) return
+  clearPreviousDeviceRefresh(res)
+  clearDeviceVerification(res)
   res.append('Set-Cookie', serializeCookie(SESSION_COOKIE_NAME, '', 0))
   res.append('Set-Cookie', serializeCookie(REFRESH_COOKIE_NAME, '', 0))
 }
@@ -224,7 +297,7 @@ function readCredential(token: string | undefined | null, kind: SessionTokenKind
 }
 
 const refreshExpiry = () => new Date(Date.now() + REFRESH_TTL_SECONDS * 1000)
-const deviceIdentity = new WeakMap<Request, { userId: string; deviceId: string; tokenVersion: number; accessOnlyUntil?: number }>()
+const deviceIdentity = new WeakMap<Request, DeviceIdentity & { accessOnlyUntil?: number; legacyAccessLease?: Date; legacyRefreshUntil?: number }>()
 
 // Issuers before v3 signed the two expiry timestamps from the same second.
 // Keep their historical offset fixed across future changes to v3 token lifetimes.
@@ -308,6 +381,7 @@ const RESOLVED_USER_ID_KEY = Symbol('chevoinkResolvedUserId')
 const RESOLVED_TOKEN_VERSION_KEY = Symbol('chevoinkResolvedTokenVersion')
 const MISSING_LEGACY_EMAIL_KEY = Symbol('chevoinkMissingLegacyEmail')
 const SESSION_UNAVAILABLE_KEY = Symbol('chevoinkSessionUnavailable')
+const idleSessions = new WeakSet<Request>()
 
 export function evictUserBanCache(userId: string): void {
   userAuthStateCache.delete(userId)
@@ -445,9 +519,15 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
   const cookies = parseCookies(req.headers.cookie)
   const authHeader = req.headers.authorization
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length).trim() : null
+  const selected = req.headers['x-chevoink-device']
+  const selectedRefresh = () => {
+    if (typeof selected !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(selected)) return null
+    const token = readCredential(cookies[deviceRefreshCookie(selected)], 'refresh')
+    return token?.identity.deviceId === selected ? token : null
+  }
 
   const access = readCredential(cookies[SESSION_COOKIE_NAME], 'access') ?? readCredential(bearerToken, 'access')
-  const readRefresh = () => readCredential(cookies[REFRESH_COOKIE_NAME], 'refresh') ?? readCredential(bearerToken, 'refresh')
+  const readRefresh = () => readCredential(cookies[REFRESH_COOKIE_NAME], 'refresh') ?? selectedRefresh() ?? readCredential(bearerToken, 'refresh')
   const credential = access ?? readRefresh()
 
   if (!credential) {
@@ -491,6 +571,10 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
   const refreshing = credential.kind === 'refresh'
   const now = new Date()
   let hasGroup = false
+  let legacyAccessLease: Date | undefined
+  // v1 had a 30-day lifetime. v2 recorded expiry but had no device activity row.
+  const historicalTtl = candidate.tokenVersion === null ? 30 * 86400 : refreshing ? REFRESH_TTL_SECONDS : ACCESS_TTL_SECONDS
+  let firstActivity = new Date(Math.min(now.getTime(), (credential.expiresAt - historicalTtl) * 1000))
   try {
     if (historical) {
       const groupId = legacyGroupId(userId, state.tokenVersion)
@@ -501,6 +585,7 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
         return
       }
       hasGroup = Boolean(group)
+      if (group) firstActivity = group.lastActiveAt
       deviceId = await recognitionId(credential, groupId)
     }
     let mixedGroup: string | undefined
@@ -515,39 +600,49 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
       }
     }
     let device = historical ? await prisma.accountDeviceSession.findUnique({ where: { id: deviceId } }) : lookup.device
-    if ((historical && !device) || mixedGroup) device = await registerRecognizedDevice(userId, state.tokenVersion, req, recognizedExpiry, deviceId, mixedGroup, historical)
-    if (!device || device.userId !== userId || device.tokenVersion !== state.tokenVersion || device.revokedAt || (!historical && device.expiresAt <= now)) {
+    if ((historical && !device) || mixedGroup) device = await registerRecognizedDevice(userId, state.tokenVersion, req, recognizedExpiry, deviceId, mixedGroup, historical, firstActivity)
+    const cutoff = sessionIdleCutoff(deviceId, now)
+    const idle = cutoff && device && device.lastActiveAt <= cutoff
+    // A legacy row first seen with access alone recorded only the short access
+    // expiry. Its paired, still-valid refresh proves the original longer lease.
+    const proof = refreshing ? credential : sibling
+    const accessOnlyLease = historical && proof && device?.expiresAt.getTime() === (proof.expiresAt - legacyPairOffset) * 1000
+    if (accessOnlyLease && device) legacyAccessLease = device.expiresAt
+    if (!device || device.userId !== userId || device.tokenVersion !== state.tokenVersion || device.revokedAt ||
+        idle || (device.expiresAt <= now && !accessOnlyLease)) {
+      if (idle) idleSessions.add(req)
       clearSession(res)
       setResolvedUserId(req, null)
       return
     }
-    const stale = now.getTime() - device.lastActiveAt.getTime() >= activityWindowMs
     const improvedName = enrichDeviceName(req, device.deviceName)
     if (improvedName) {
       await prisma.accountDeviceSession.updateMany({ where: { id: deviceId, deviceName: device.deviceName, revokedAt: null }, data: { deviceName: improvedName } })
         .catch(() => { /* Optional display metadata can be enriched on a later request. */ })
     }
-    const extend = refreshing ? refreshExpiry() : historical && recognizedExpiry > device.expiresAt ? recognizedExpiry : null
-    if (stale || extend) {
-      const touched = await prisma.accountDeviceSession.updateMany({ where: { id: deviceId, revokedAt: null },
-        data: { ...(stale ? { lastActiveAt: now } : {}), ...(extend ? { expiresAt: extend } : {}) } })
+    const extend = activityRequest(req) ? null : refreshing ? refreshExpiry() : historical && recognizedExpiry > device.expiresAt ? recognizedExpiry : null
+    if (extend) {
+      const touched = await prisma.accountDeviceSession.updateMany({ where: { id: deviceId, revokedAt: null,
+        lastActiveAt: { gt: cutoff }, OR: [{ expiresAt: { gt: now } }, ...(accessOnlyLease ? [{ expiresAt: device.expiresAt }] : [])] },
+        data: { expiresAt: extend } })
       if (!touched.count) {
         clearSession(res)
         setResolvedUserId(req, null)
         return
       }
-      if (stale) refreshLocation(req, deviceId, now)
     }
   } catch {
     warnAuthDegrade('device-unavailable', { userId })
     return
   }
-  if (refreshing) writeSessionCookies(userId, state.tokenVersion, res, deviceId)
-  else if (historical && sibling) {
+  if (refreshing && !activityRequest(req)) {
+    writeSessionCookies(userId, state.tokenVersion, res, deviceId)
+  } else if (historical && sibling && !activityRequest(req)) {
     writeUpgradedCookie(res, candidate, deviceId, 'access', credential.expiresAt)
     writeUpgradedCookie(res, candidate, deviceId, 'refresh', sibling.expiresAt)
   }
   deviceIdentity.set(req, { userId, deviceId, tokenVersion: state.tokenVersion,
+    legacyAccessLease, legacyRefreshUntil: historical ? (refreshing ? credential : sibling)?.expiresAt : undefined,
     ...(isRecognizedDevice(deviceId) && !refreshing && !sibling ? { accessOnlyUntil: credential.expiresAt } : {}) })
 
   setResolvedUserId(req, candidate.userId)
@@ -598,6 +693,7 @@ export function requireSessionUserId(req: Request): string {
   const userId = getSessionUserId(req)
 
   if (!userId) {
+    if (idleSessions.has(req)) throw new DataAccessError(401, 'AUTH_SESSION_IDLE', '登录已过期，请重新登录。')
     throw new DataAccessError(401, 'AUTH_REQUIRED', '请先登录后再继续。')
   }
 
@@ -613,10 +709,53 @@ export function requireDeviceIdentity(req: Request) {
 
 export async function isDeviceSessionActive(identity: { userId: string; deviceId: string; tokenVersion: number }) {
   const { userId, deviceId: id, tokenVersion } = identity
+  const now = new Date()
   return Boolean(await prisma.accountDeviceSession.findFirst({ where: { id, userId, tokenVersion, revokedAt: null,
-    expiresAt: { gt: new Date() }, user: { bannedAt: null, tokenVersion,
+    expiresAt: { gt: now }, lastActiveAt: { gt: sessionIdleCutoff(id, now) }, user: { bannedAt: null, tokenVersion,
       ...(isRecognizedDevice(id) ? { deviceSessions: { none: { id: legacyGroupId(userId, tokenVersion), revokedAt: { not: null } } } } : {})
     } }, select: { id: true } }))
+}
+
+/** Only the foreground activity endpoint advances the rolling inactivity deadline. */
+export async function recordDeviceActivity(req: Request, res: Response, expected: { userId: string; deviceId: string; elapsedMs: number }) {
+  const identity = requireDeviceIdentity(req)
+  const { userId, deviceId, tokenVersion } = identity
+  const selected = req.headers['x-chevoink-device']
+  if (expected.userId !== userId || expected.deviceId !== deviceId || (selected && selected !== deviceId)) {
+    throw new DataAccessError(409, 'AUTH_ACTIVITY_SESSION_CHANGED', '当前浏览器的登录已切换。')
+  }
+  const now = new Date()
+  const observed = new Date(Math.max(0, now.getTime() - expected.elapsedMs))
+  const cookies = parseCookies(req.headers.cookie)
+  const bearer = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7).trim() : null
+  let proofExpiresAt = identity.legacyRefreshUntil ?? 0
+  for (const raw of [cookies[REFRESH_COOKIE_NAME], cookies[deviceRefreshCookie(deviceId)], bearer]) {
+    const token = readCredential(raw, 'refresh')
+    if (token?.kind === 'refresh' && token.identity.userId === userId && token.identity.tokenVersion === tokenVersion &&
+      (token.identity.deviceId === deviceId || recognizedDeviceId(token) === deviceId)) {
+      proofExpiresAt = Math.max(proofExpiresAt, token.expiresAt)
+    }
+  }
+  const deadline = observed.getTime() + REFRESH_TTL_SECONDS * 1000
+  const touched = await prisma.accountDeviceSession.updateMany({
+    where: { id: deviceId, userId, tokenVersion, revokedAt: null,
+      OR: [{ expiresAt: { gt: now } }, ...(identity.legacyAccessLease ? [{ expiresAt: identity.legacyAccessLease }] : [])],
+      lastActiveAt: { gt: sessionIdleCutoff(deviceId, now), lte: observed }, user: { tokenVersion, bannedAt: null } },
+    data: { lastActiveAt: observed, ...(proofExpiresAt ? { expiresAt: new Date(deadline) } : {}) },
+  })
+  if (!touched.count) {
+    if (await isDeviceSessionActive(identity)) return // A later concurrent interaction won.
+    clearSession(res)
+    throw new DataAccessError(401, 'AUTH_REQUIRED', '请重新登录。')
+  }
+  if (proofExpiresAt && proofExpiresAt * 1000 < deadline) {
+    // Keep one cookie per device. The 5-minute signing overlap coalesces reports;
+    // the exact credential lease and the inactivity cutoff remain database gates.
+    const expiresAt = Math.ceil((deadline + activityWindowMs) / 1000)
+    const token = buildToken(userId, expiresAt, tokenVersion, 'refresh', deviceId)
+    res.append('Set-Cookie', serializeCookie(deviceRefreshCookie(deviceId), token, expiresAt - Math.floor(now.getTime() / 1000)))
+  }
+  refreshLocation(req, deviceId, observed)
 }
 
 export async function revokeCurrentDevice(req: Request) {

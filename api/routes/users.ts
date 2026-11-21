@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 
 import { removeManagedAvatar, storeAvatarDataUrl } from '../lib/avatar-storage.js'
-import { createSession, getSessionUserId, requireSessionUserId } from '../lib/auth-session.js'
+import { createSession, getSessionUserId, requireDeviceIdentity, requireSessionUserId } from '../lib/auth-session.js'
 import { removeManagedProfileCover, storeProfileCoverDataUrl } from '../lib/profile-cover-storage.js'
 import {
   getInteractionBadgesData,
@@ -102,9 +102,9 @@ router.get('/me', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
 
   try {
-    const userId = requireSessionUserId(req)
+    const { userId, deviceId } = requireDeviceIdentity(req)
     const payload = await getMePayloadData(userId, { emailBindingRequired: res.locals.emailBindingRequired === true })
-    res.status(200).json(buildSuccess(requestId, payload))
+    res.status(200).json(buildSuccess(requestId, { ...payload, deviceSessionId: deviceId }))
   } catch (error) {
     sendRouteError(res, requestId, error)
   }

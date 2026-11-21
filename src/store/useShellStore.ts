@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-import { setSessionToken } from '@/lib/auth-token'
+import { selectDevice, selectedDevice, setSessionToken } from '@/lib/auth-token'
 import {
   DEFAULT_STUDIO_APPEARANCE,
   normalizeStudioAppearance,
@@ -21,6 +21,8 @@ type ShellState = {
   fullscreenPromptSeen: boolean
   quickCreateOpen: boolean
   authStatus: AuthStatus
+  lastVerifiedUserId: string | null
+  deviceSessionId: string | null
   sessionUser: User | null
   authTokens: AuthTokenPair | null
   unreadMessageCount: number
@@ -43,6 +45,7 @@ type ShellState = {
   }) => void
   syncSessionUser: (payload: {
     user: User
+    deviceSessionId?: string
     unreadMessageCount: number
     unreadNotificationCount: number
   }) => void
@@ -58,6 +61,8 @@ export const useShellStore = create<ShellState>()(
       fullscreenPromptSeen: false,
       quickCreateOpen: false,
       authStatus: 'checking',
+      lastVerifiedUserId: null,
+      deviceSessionId: null,
       sessionUser: null as User | null,
       authTokens: null as AuthTokenPair | null,
       unreadMessageCount: 0,
@@ -90,27 +95,41 @@ export const useShellStore = create<ShellState>()(
         // 登录令牌落盘：安卓壳 cookie 未及时刷盘时以 Authorization 头做备选通道，避免杀后台丢登录态；
         // 优先存长效 refresh 令牌（30 天），服务端闸口会静默重签 access，Bearer 备选通道寿命不缩短
         setSessionToken(tokens?.refreshToken ?? tokens?.accessToken ?? null)
+        const deviceSessionId = tokens?.deviceSessionId ?? null
+        selectDevice(deviceSessionId, user.id)
         set({
           authStatus: 'authenticated',
+          lastVerifiedUserId: user.id,
+          deviceSessionId,
           sessionUser: user,
           authTokens: tokens,
           unreadMessageCount: unreadMessageCount ?? user.unreadMessageCount ?? 0,
           unreadNotificationCount: unreadNotificationCount ?? user.unreadNotificationCount ?? 0,
         })
       },
-      syncSessionUser: ({ user, unreadMessageCount, unreadNotificationCount }) =>
+      syncSessionUser: ({ user, deviceSessionId, unreadMessageCount, unreadNotificationCount }) => {
+        if (deviceSessionId) selectDevice(deviceSessionId, user.id)
         set((state) => ({
           authStatus: 'authenticated',
+          lastVerifiedUserId: user.id,
+          deviceSessionId: deviceSessionId ?? state.deviceSessionId,
           sessionUser: user,
           authTokens: state.authTokens,
           unreadMessageCount: unreadMessageCount ?? user.unreadMessageCount ?? 0,
           unreadNotificationCount: unreadNotificationCount ?? user.unreadNotificationCount ?? 0,
-        })),
+        }))
+      },
       setGuest: () => {
         // 会话已确认无效或主动退出：同步清掉本地备选令牌
-        setSessionToken(null)
+        const device = get().deviceSessionId
+        if (!device || !selectedDevice() || device === selectedDevice()) {
+          selectDevice(null)
+          setSessionToken(null)
+        }
         set({
           authStatus: 'guest',
+          lastVerifiedUserId: null,
+          deviceSessionId: null,
           sessionUser: null,
           authTokens: null,
           unreadMessageCount: 0,
@@ -121,6 +140,7 @@ export const useShellStore = create<ShellState>()(
     {
       name: 'chevoink-shell',
       partialize: (state) => ({
+        lastVerifiedUserId: state.lastVerifiedUserId,
         theme: state.theme,
         studioAppearance: state.studioAppearance,
         fullscreenEnabled: state.fullscreenEnabled,
@@ -130,6 +150,7 @@ export const useShellStore = create<ShellState>()(
         const persisted = persistedState as Partial<ShellState> | undefined
         return {
           ...currentState,
+          lastVerifiedUserId: typeof persisted?.lastVerifiedUserId === 'string' ? persisted.lastVerifiedUserId : null,
           theme: persisted?.theme ?? currentState.theme,
           studioAppearance: normalizeStudioAppearance(persisted?.studioAppearance),
           fullscreenEnabled: persisted?.fullscreenEnabled ?? currentState.fullscreenEnabled,

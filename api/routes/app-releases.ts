@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { appReleaseExecuteSchema, appReleaseIdSchema, appReleasePreviewSchema } from '../../shared/contracts/app-release.js'
 import { canonicalAppRoute } from '../../shared/app-release-route.js'
@@ -8,12 +9,16 @@ import { bridgeSessionCookies, clearSession, getSessionUserId } from '../lib/aut
 import { executeAppRelease, importAppRelease, listAppReleases, previewAppRelease, reconcileAppRelease, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../lib/app-releases.js'
 import { writeAccountEmailAuthPreviewGrant } from '../lib/account-email-auth-scope.js'
 import { env } from '../config/env.js'
-import { readInstalledAppRelease, readAppReleaseFile } from '../lib/app-release-artifacts.js'
+import { readInstalledAppRelease, readAppReleaseFile, withLegacyForeground } from '../lib/app-release-artifacts.js'
 import { buildSuccess, createRequestId } from '../lib/http.js'
 import { parseBody } from '../lib/parse-body.js'
 import { sendRouteError } from '../lib/route-error.js'
 import { DataAccessError } from '../lib/prisma.js'
 export const publicAppReleaseRouter=Router()
+publicAppReleaseRouter.get('/legacy-foreground.js',(_req,res)=>{
+ res.setHeader('Cache-Control','no-cache')
+ res.type('js').sendFile(fileURLToPath(new URL('../../public/boot-theme.js',import.meta.url)))
+})
 publicAppReleaseRouter.get('/bootstrap',async(req,res)=>{
  const id=createRequestId()
  try{
@@ -44,7 +49,8 @@ publicAppReleaseRouter.get('/artifacts/:releaseId/*',async(req,res)=>{
   const installed=await readInstalledAppRelease(req.params.releaseId)
   const bytes=await readAppReleaseFile(installed,filename)
   res.setHeader('Cache-Control','private, no-store');res.setHeader('Vary','Cookie, Authorization');res.setHeader('X-Content-Type-Options','nosniff')
-  res.type(path.extname(filename));res.send(bytes)
+  res.type(path.extname(filename))
+  res.send(filename==='index.html'?withLegacyForeground(bytes):bytes)
  }catch(error){sendRouteError(res,id,error)}
 })
 const router=Router()

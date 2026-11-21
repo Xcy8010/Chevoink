@@ -1,7 +1,7 @@
-import { useQueryClient } from '@tanstack/react-query'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import { ApiClientError } from '@/app/api-client'
+import { requestSessionSignIn } from '@/app/session-activity'
 import AppState from '@/components/ui/AppState'
 import { useShellStore } from '@/store/useShellStore'
 
@@ -11,15 +11,13 @@ export default function StudioOpenError({ error, retry, title = '创作中心暂
   title?: string
   retryLabel?: string
 }) {
-  const { pathname, search } = useLocation()
+  const { pathname, search, hash } = useLocation()
   const navigate = useNavigate()
-  const queryClient = useQueryClient()
   const sessionExpired = error instanceof ApiClientError && error.status === 401
 
   function signInAgain() {
-    useShellStore.getState().setGuest()
-    queryClient.clear()
-    navigate('/login?' + new URLSearchParams({ redirect: pathname + search }).toString())
+    if (useShellStore.getState().authStatus !== 'guest') requestSessionSignIn()
+    else navigate('/login?' + new URLSearchParams({ redirect: pathname + search + hash }).toString())
   }
 
   return (

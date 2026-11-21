@@ -1,4 +1,5 @@
-import { Suspense, useLayoutEffect, useRef } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Route, Routes, useLocation, useNavigate, type Location } from 'react-router-dom'
 
 import { appRoutes } from '@/app/route-config'
@@ -8,6 +9,8 @@ import AppShell from '@/components/layout/AppShell'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import { requiresLegacyEmailBinding } from '@/features/account/account-access'
 import { useShellStore } from '@/store/useShellStore'
+import { listenForSessionActivity, REAUTHENTICATION_REQUIRED } from './session-activity'
+import { readDeviceSelection } from '@/lib/auth-token'
 
 /** 未指定专属骨架的懒加载路由通用占位 */
 const defaultRouteFallback = (
@@ -22,6 +25,34 @@ function AppRoutes() {
   const location = useLocation()
   const navigate = useNavigate()
   const previousPage = useRef<Location | null>(null)
+  const client = useQueryClient()
+  const viewer = useShellStore(state => state.authStatus === 'authenticated' ? state.sessionUser?.id : null)
+  const tokens = useShellStore(state => state.authTokens)
+  const deviceId = useShellStore(state => state.deviceSessionId)
+  useEffect(() => {
+    if (!viewer || !deviceId) return
+    return listenForSessionActivity(viewer, deviceId, () => {
+      const current = useShellStore.getState()
+      return current.sessionUser?.id === viewer && current.deviceSessionId === deviceId && current.authTokens === tokens
+    })
+  }, [viewer, deviceId, tokens])
+  useLayoutEffect(() => {
+    function onExpiry() {
+      const shell = useShellStore.getState()
+      if (shell.authStatus === 'guest') return
+      const owner = shell.sessionUser?.id ?? readDeviceSelection()?.userId ?? shell.lastVerifiedUserId
+      window.dispatchEvent(new Event('chevoink:session-expired'))
+      previousPage.current = null
+      shell.setGuest()
+      client.clear()
+      if (!/^\/(?:login|register)\/?$/i.test(location.pathname)) {
+        const redirect = location.pathname + location.search + location.hash
+        navigate('/login?' + new URLSearchParams({ redirect }), { replace: true, state: { resumeOwner: owner ?? '' } })
+      }
+    }
+    window.addEventListener(REAUTHENTICATION_REQUIRED, onExpiry)
+    return () => window.removeEventListener(REAUTHENTICATION_REQUIRED, onExpiry)
+  }, [client, location, navigate])
   const path = location.pathname.toLowerCase().replace(/\/+$/, '')
   const authMode = path === '/login' ? 'login' : path === '/register' ? 'register' : undefined
   const checkingSession = useShellStore(state => state.authStatus === 'checking')

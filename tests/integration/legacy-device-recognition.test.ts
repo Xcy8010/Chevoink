@@ -39,6 +39,38 @@ afterAll(async () => {
 })
 
 describe.skipIf(!dbAvailable)('upgrade signed sessions on first visit', () => {
+  it('preserves unmeasured legacy opens and keeps an expired recognized row closed to every credential form', async () => {
+    const id = await account()
+    const tokens = pair(id, Math.floor(Date.now() / 1000) - 5)
+    const first = await request(app).get(endpoint).set('Cookie', cookies(tokens))
+    const deviceId = current(first).id
+    const lastActiveAt = new Date(Date.now() - 31 * 86_400_000)
+    await prisma.accountDeviceSession.update({ where: { id: deviceId }, data: { lastActiveAt } })
+    for (const req of [byBearer(tokens.access), byBearer(tokens.refresh), request(app).get(endpoint).set('Cookie', responseCookies(first))]) {
+      expect(current(await req).id).toBe(deviceId)
+    }
+    expect((await prisma.accountDeviceSession.findUniqueOrThrow({ where: { id: deviceId } })).lastActiveAt).toEqual(lastActiveAt)
+    await prisma.accountDeviceSession.update({ where: { id: deviceId }, data: { expiresAt: new Date(0) } })
+    for (const req of [byBearer(tokens.access), byBearer(tokens.refresh), request(app).get(endpoint).set('Cookie', responseCookies(first)),
+      request(app).post('/api/auth/session/activity').set('Cookie', cookies(tokens)).send({ userId: id, deviceId }),
+    ]) expect((await req).status).toBe(401)
+  })
+
+  it('accepts the signed original refresh after first recognizing only its short-lived access sibling', async () => {
+    const id = await account()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const issued = Math.floor(Date.now() / 1000)
+      const tokens = pair(id, issued)
+      const deviceId = current(await byBearer(tokens.access)).id
+      vi.setSystemTime((issued + 901) * 1000)
+      const opened = await request(app).post('/api/auth/session/activity')
+        .set('Authorization', 'Bearer ' + tokens.refresh).send({ userId: id, deviceId })
+      expect(opened.status).toBe(200)
+      expect((await prisma.accountDeviceSession.findUniqueOrThrow({ where: { id: deviceId } })).expiresAt.getTime()).toBeGreaterThan(Date.now())
+    } finally { vi.useRealTimers() }
+  })
+
   it('checks ownership on password verification and keeps an independent device active after self-removal', async () => {
     const id = await account(), outsider = await account(), issued = Math.floor(Date.now() / 1000) - 3
     const first = pair(id, issued), other = pair(id, issued + 1), foreign = pair(outsider, issued)
@@ -121,6 +153,26 @@ describe.skipIf(!dbAvailable)('upgrade signed sessions on first visit', () => {
     const newDevice = randomUUID(), standalone = pair(id, issued, newDevice)
     await prisma.accountDeviceSession.create({ data: { id: newDevice, userId: id, tokenVersion: 0,
       expiresAt: new Date(Date.now() + 100000), deviceName: 'Desktop' } })
+    if (mode === 'grouped') {
+      const targets = [randomUUID(), randomUUID()]
+      await prisma.accountDeviceSession.createMany({ data: targets.map(target => ({ id: target, userId: id, tokenVersion: 0,
+        expiresAt: new Date(Date.now() + 100000), deviceName: 'Windows · Edge' })) })
+      const revoke = (target: string) => request(app).post(endpoint + '/' + target + '/revoke').set('Cookie', responseCookies(result))
+      const confirmed = await revoke(targets[0]).type('form').send({ password })
+      expect(confirmed.status).toBe(200)
+      const verifiedCookies = responseCookies(result) + '; ' + responseCookies(confirmed)
+      const wrongType = await revoke(targets[1]).set('Cookie', verifiedCookies).type('form').send({})
+      expect(wrongType.status).toBe(415)
+      expect(current(await byBearer(pair(id, issued, targets[1]).access)).id).toBe(targets[1])
+      const reuse = (target: string) => revoke(target).set('Cookie', verifiedCookies).send({})
+      const next = await reuse(targets[1])
+      expect(next.status).toBe(200)
+      expect(next.body.data.otherDeviceVerificationExpiresAt).toBe(confirmed.body.data.otherDeviceVerificationExpiresAt)
+      expect(next.headers['set-cookie']).toBeUndefined()
+      const selfThroughGroup = await reuse(group)
+      expect(selfThroughGroup.body.error.code).toBe('DEVICE_PASSWORD_REQUIRED')
+      expect((await byBearer(original.access)).status).toBe(200)
+    }
     const removal = await request(app).post(endpoint + '/' + current(result).id + '/revoke')
       .set('Authorization', 'Bearer ' + (mode === 'standalone' ? standalone.access : original.access)).send({ password })
     expect(removal.status).toBe(200)
@@ -128,7 +180,7 @@ describe.skipIf(!dbAvailable)('upgrade signed sessions on first visit', () => {
     if (mode === 'grouped') expect(removal.headers['set-cookie']).toEqual([
       expect.stringMatching(/^chevoink_session=;.*Max-Age=0/), expect.stringMatching(/^chevoink_refresh=;.*Max-Age=0/),
     ])
-    else expect(removal.headers['set-cookie']).toBeUndefined()
+    else expect(removal.headers['set-cookie']).toEqual([expect.stringMatching(/^chevoink_device_verification=/)])
     for (const token of [original.access, original.refresh, webview.access, webview.refresh]) expect((await byBearer(token)).status).toBe(401)
     expect((await request(app).get(endpoint).set('Cookie', responseCookies(result))).status).toBe(401)
     expect((await byBearer(standalone.access)).body.data.devices).toHaveLength(1)
@@ -188,8 +240,10 @@ describe.skipIf(!dbAvailable)('upgrade signed sessions on first visit', () => {
     const unrelated = await request(app).get(endpoint).set('Cookie', 'chevoink_session=' + tokens.access + '; chevoink_refresh=' + pair(id, issued - 1).refresh)
     expect(current(unrelated).id).toBe(row.id)
     expect(unrelated.headers['set-cookie']).toBeUndefined()
-    await prisma.accountDeviceSession.update({ where: { id: row.id }, data: { location: 'old value', lastActiveAt: new Date(0) } })
-    expect((await byBearer(tokens.access)).status).toBe(200)
+    await prisma.accountDeviceSession.update({ where: { id: row.id }, data: { location: 'old value', lastActiveAt: new Date(Date.now() - 600_000) } })
+    const touch = await request(app).post('/api/auth/session/activity').set('Authorization', 'Bearer ' + tokens.access).send({ userId: id, deviceId: row.id })
+    expect(touch.status).toBe(200)
+    expect(touch.headers['set-cookie']).toBeUndefined()
     await expect.poll(async () => (await prisma.accountDeviceSession.findUniqueOrThrow({ where: { id: row.id } })).location).toBe('本机')
     const payload = id + '.' + (issued + 500)
     const v1 = await byBearer(payload + '.' + sign(payload))

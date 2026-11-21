@@ -3,11 +3,12 @@ import { z } from 'zod'
 import { legalConsentSchema } from '../../shared/contracts/site-content.js'
 import { accountEmailAuthEnabled, assertPreviewEmailAllowed } from '../lib/account-email-auth-scope.js'
 import { verifyAuthCaptchaChallenge } from '../lib/auth-captcha.js'
-import { createSession, requireSessionUserId, requireVersionedSessionIdentity } from '../lib/auth-session.js'
+import { createSession, requireDeviceIdentity, requireSessionUserId, requireVersionedSessionIdentity } from '../lib/auth-session.js'
 import {
   accountIdentity, accountPasswordIdentity, advanceAccountSetupData, bindAccountEmailData, bindAccountPhoneData,
   canSendBindingEmail, canSendBindingPhone, canSendRegistrationEmail, findAccountByIdentity, goBackAccountSetupData,
   loginAccountEmailCodeData, registerEmailUserData, setInitialAccountPasswordData, updateAccountPasswordWithCode,
+  updateAccountPasswordWithOldPassword,
 } from '../lib/data-access.js'
 import { sendAccountEmailCode } from '../lib/email-verification.js'
 import { buildSuccess, createRequestId } from '../lib/http.js'
@@ -33,7 +34,7 @@ function checkCaptcha(body: { captchaId: string; captchaAnswer: string }) {
   verifyAuthCaptchaChallenge(body.captchaId, body.captchaAnswer)
 }
 
-export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean) {
+export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean, consumePasswordAttempt: (ip: string) => boolean) {
   const router = Router()
   router.get('/options', (_req, res) => {
     res.setHeader('Cache-Control', 'private, no-store')
@@ -87,13 +88,13 @@ export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean) {
   }), async (body, _req, res) => {
     assertPreviewEmailAllowed(body.email)
     const user = await registerEmailUserData(body)
-    return { user, tokens: await createSession(user.id, res) }
+    return { user, tokens: await createSession(user.id, res, undefined, 'interactive') }
   }, 201)
 
   post('/email/login', z.object({ email, code: emailCode }), async (body, _req, res) => {
     assertPreviewEmailAllowed(body.email)
     const { user, tokenVersion } = await loginAccountEmailCodeData(body.email, body.code)
-    return { user, tokens: await createSession(user.id, res, tokenVersion) }
+    return { user, tokens: await createSession(user.id, res, tokenVersion, 'interactive') }
   })
 
   post('/account/email', z.object({ email, code: emailCode }), async (body, req) => ({
@@ -134,10 +135,21 @@ export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean) {
     return sendSms(req, identity.phone, 'change_password', userId, true)
   })
 
-  post('/account/password', z.object({ channel, code, password }), async (body, req, res) => {
-    const userId = requireSessionUserId(req)
-    const identity = await accountPasswordIdentity(userId, body.channel)
-    const { user, tokenVersion } = await updateAccountPasswordWithCode(identity, 'change_password', body.code, body.password, userId)
+  post('/account/password', z.union([
+    z.object({ oldPassword: z.string().min(1).max(1024), password }).strict(),
+    z.object({ channel, code, password }),
+  ]), async (body, req, res) => {
+    let result
+    if ('oldPassword' in body) {
+      const session = requireDeviceIdentity(req)
+      if (!consumePasswordAttempt('change-password:' + session.userId)) throw new DataAccessError(429, 'RATE_LIMITED', '密码尝试过于频繁，请稍后再试。')
+      result = await updateAccountPasswordWithOldPassword(session.userId, session.tokenVersion, body.oldPassword, body.password)
+    } else {
+      const userId = requireSessionUserId(req)
+      const identity = await accountPasswordIdentity(userId, body.channel)
+      result = await updateAccountPasswordWithCode(identity, 'change_password', body.code, body.password, userId)
+    }
+    const { user, tokenVersion } = result
     return { user, tokens: await createSession(user.id, res, tokenVersion) }
   })
 

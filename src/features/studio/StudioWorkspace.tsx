@@ -4,6 +4,8 @@ import type { ComponentProps } from 'react'
 import { hasComposerDraft, promoteComposerDraft } from './agent/composer-drafts'
 import { workspaceBodyChanges } from './agent/workspace-body-changes'
 import { shouldRetainAgentTaskWindow } from './lib/agent-session'
+import { chapterRecoveryKey, storeChapterEdits } from './lib/chapter-recovery'
+import ChapterDraftChoice from './components/ChapterDraftChoice'
 import { useShellStore } from '@/store/useShellStore'
 import { BookOpen, BookOpenText, Brain, Bug, FileText, Flag, FolderDown, ImagePlus, Lightbulb, LogOut, MessageSquareText, Network, PanelRightOpen, PenLine, Settings2, SlidersHorizontal, Trash2, Upload, Wrench } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
@@ -295,6 +297,37 @@ export default function StudioWorkspace() {
     { rightOpen: workRightOpen, viewer: workViewer, inspectorTab: workInspectorTab, selectedTreeItemId, selectedChapterId },
     { setRightOpen: setWorkRightOpen, setViewer: setWorkViewer, setInspectorTab: setWorkInspectorTab, setSelectedTreeItemId, setSelectedChapterId })
   const workPanelReady = Boolean(taskUiScope && workPanelScope === taskUiScope && currentNovel?.id === activeNovelId)
+  const manuscriptKey = workPanelReady && chapterDraft
+    ? chapterRecoveryKey(taskUiUserId, activeNovelId, chapterDraft.id) : undefined
+  const currentMobileView = useRef(mobileView)
+  currentMobileView.current = mobileView
+  // Chapter and viewer selection already belong to the task's panel state.
+  // The mobile editor is a separate view and otherwise reopens on the assistant.
+  useEffect(() => {
+    if (desktopLayout || !taskUiUserId || !taskUiScope || !workPanelReady) return
+    const key = 'chevoink:resume-mobile-writing:' + taskUiScope
+    try {
+      if (localStorage.getItem(key)) {
+        localStorage.removeItem(key)
+        setMobileView('editor')
+      }
+    } catch { /* Optional view state. */ }
+    const capture = () => {
+      try {
+        if (currentMobileView.current === 'editor') localStorage.setItem(key, '1')
+        else localStorage.removeItem(key)
+      } catch { /* Optional view state. */ }
+    }
+    window.addEventListener('chevoink:session-expired', capture)
+    window.addEventListener('pagehide', capture)
+    const background = () => { if (document.visibilityState === 'hidden') capture() }
+    document.addEventListener('visibilitychange', background)
+    return () => {
+      window.removeEventListener('chevoink:session-expired', capture)
+      window.removeEventListener('pagehide', capture)
+      document.removeEventListener('visibilitychange', background)
+    }
+  }, [desktopLayout, taskUiUserId, taskUiScope, workPanelReady])
   const workViewerMode = workPanelReady ? resolveWorkViewer(workViewer, selectedTreeItemId, selectedChapterId) : null
   const viewerChapterId = selectedTreeItemId?.startsWith('chapter:') ? selectedTreeItemId.slice('chapter:'.length) : selectedChapterId
   const chapterStreamOwner = useMemo(() => ({ novelId: activeNovelId, scope: taskUiScope, sessionId: agentSessionId,
@@ -1036,7 +1069,7 @@ export default function StudioWorkspace() {
   chapterDraftStateRef.current = chapterDraft
   const chapterDirtyRef = useRef(chapterDirty)
   chapterDirtyRef.current = chapterDirty
-  useChapterSnapshot({ data: chapterQuery.data, selectedChapterId, novelId: activeNovelId, scope: taskUiScope,
+  const chapterDraftChoice = useChapterSnapshot({ data: chapterQuery.data, selectedChapterId, novelId: activeNovelId, userId: taskUiUserId, scope: taskUiScope,
     hydratedScope: workPanelScope, draftRef: chapterDraftStateRef, dirtyRef: chapterDirtyRef,
     setDraft: setChapterDraft, setDirty: setChapterDirty, setSaveState: setChapterSaveState,
     setLastSavedAt: setChapterLastSavedAt, setSaveMessage: setChapterSaveMessage })
@@ -2554,7 +2587,7 @@ export default function StudioWorkspace() {
   }
 
   const persistChapter = useChapterPersistence({
-    activeNovelId, scope: taskUiScope, chapterDraft, chapterDirty, chapterDraftStateRef, chapterDirtyStateRef: chapterDirtyRef,
+    activeNovelId, userId: taskUiUserId, scope: taskUiScope, chapterDraft, chapterDirty, chapterDraftStateRef, chapterDirtyStateRef: chapterDirtyRef,
     pendingChapterReviewsRef, setPendingChapterReviews,
     syncSavedChapter: chapter => queryClient.setQueryData(['studio-chapter', activeNovelId, chapter.id], chapter),
     selectedChapterIdStateRef, promptConfirmPendingChapterReview, setChapterSaveState, setChapterSaveMessage, setChapters, setSelectedTreeItemId, setSelectedChapterId, setChapterDraft, setChapterDirty, setChapterLastSavedAt, setCurrentNovel, syncStudioPayload,
@@ -2835,7 +2868,16 @@ export default function StudioWorkspace() {
     })
   }
 
+  const storageWarningKey = useRef<string>()
   function handleChapterDraftChange(next: ChapterDraftState) {
+    const key = workPanelReady ? chapterRecoveryKey(taskUiUserId, activeNovelId, next.id) : undefined
+    if (key) {
+      if (storeChapterEdits(key, next)) storageWarningKey.current = undefined
+      else if (storageWarningKey.current !== key) {
+        storageWarningKey.current = key
+        toast.error('本地存储不可用。请复制未同步正文，或保持页面打开，联网后保存。')
+      }
+    }
     chapterDraftStateRef.current = next
     chapterDirtyRef.current = true
     setChapterDraft(next)
@@ -4070,6 +4112,7 @@ export default function StudioWorkspace() {
     <EditorCanvas
       {...presentation}
       chapterDraft={chapterDraft}
+      chapterRecoveryKey={chapterDraftChoice ? undefined : manuscriptKey}
       workspaceDocument={activeWorkspaceDocument}
       chapterLoading={chapterQuery.isLoading}
       chapterErrorMessage={chapterQuery.isError ? chapterSaveMessage : null}
@@ -4150,6 +4193,12 @@ export default function StudioWorkspace() {
         data-visual-viewport={platformCapabilities.visualViewport ? 'supported' : 'fallback'}
       >
         {studioQuery.isRefetchError ? <AppStateRefreshNotice retry={studioQuery.refetch} busy={studioQuery.isFetching} /> : null}
+        {chapterDirty && chapterSaveState === 'error' && !activeWorkspaceDocument && (
+          <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-4 py-2 text-sm">
+            <span>章节尚未同步。{chapterSaveMessage}</span>
+            <button type="button" className="shrink-0 underline" onClick={handleRetrySave}>重试保存</button>
+          </div>
+        )}
         {!desktopLayout && <div className="flex min-h-0 flex-1 flex-col lg:hidden">
           <StudioMobileHeader
             view={mobileView}
@@ -4483,6 +4532,7 @@ export default function StudioWorkspace() {
                 />}
                 viewer={workViewerMode ? <StudioChapterViewer
                   positionScope={taskUiScope}
+                  chapterRecoveryKey={chapterDraftChoice ? undefined : manuscriptKey}
                   draft={workChapterDraft}
                   workspaceDocument={workViewerMode === 'document' ? activeWorkspaceDocument : null}
                   loading={workViewerMode === 'chapter' ? !workChapterDraft && !workChapterLoadError : plansLoadedNovelId !== activeNovelId || agentSessionsResolving}
@@ -4671,6 +4721,7 @@ export default function StudioWorkspace() {
           onClose={() => setEditorChapterSettingsOpen(false)}
         />
       ) : null}
+      {chapterDraftChoice && <ChapterDraftChoice {...chapterDraftChoice} />}
       {planCreateOwner === workspaceOwnerRef.current ? <CreatePlanDialog onClose={() => setPlanCreateOwner(current => current === planCreateOwner ? null : current)} onCreate={handleCreatePlanFile} /> : null}
       {planSettingsPlan ? (
         <PlanSettingsPanel

@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { assertPreviewAccountAllowed, assertPreviewEmailAllowed } from '../account-email-auth-scope.js'
+import { recordAccountPasswordFailure } from '../account-security-observation.js'
 import { evictUserBanCache } from '../auth-session.js'
 import { invalidAccountCode, lockAccountKey, prepareAccountEmailCode } from '../email-verification.js'
 import { hashPassword, hasConfiguredPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
@@ -69,7 +70,11 @@ export async function loginAccountUserData(identity: Identity, password: string)
   // Keep a password derivation on unknown, unset and historical hash paths.
   const configuredScrypt = hashed.startsWith('scrypt:')
   const matched = verifyPassword(loginPassword, configuredScrypt ? hashed : dummyPasswordHash)
-  if (!user || !(configuredScrypt ? matched : verifyPassword(loginPassword, hashed))) return null
+  if (!user) return null
+  if (!(configuredScrypt ? matched : verifyPassword(loginPassword, hashed))) {
+    recordAccountPasswordFailure('password_login', user.id)
+    return null
+  }
   assertPreviewAccountAllowed(user)
 
   if (isLegacyPasswordHash(hashed)) {
@@ -175,6 +180,27 @@ export async function setInitialAccountPasswordData(userId: string, tokenVersion
       data: { passwordHash, accountSetupStep: 3, tokenVersion: { increment: 1 } },
     })
     if (!user) throw unavailable()
+    await invalidatePasswordCodes(tx, userId)
+    return user
+  })
+  evictUserBanCache(userId)
+  return { user: toUser(updated), tokenVersion: updated.tokenVersion }
+}
+
+export async function updateAccountPasswordWithOldPassword(userId: string, tokenVersion: number, oldPassword: string, password: string) {
+  const owner = await ensureUserExists(userId)
+  assertPreviewAccountAllowed(owner)
+  if (!verifyPassword(owner.role === 'admin' ? oldPassword : oldPassword.trim(), owner.passwordHash)) {
+    throw new DataAccessError(403, 'AUTH_INVALID_CREDENTIALS', '当前密码不正确。')
+  }
+  const passwordHash = hashPassword(password)
+  const updated = await prisma.$transaction(async tx => {
+    await lockAccountKey(tx, `account-password:${userId}`)
+    const [user] = await tx.user.updateManyAndReturn({
+      where: { id: userId, tokenVersion, bannedAt: null, passwordHash: owner.passwordHash },
+      data: { passwordHash, tokenVersion: { increment: 1 } },
+    })
+    if (!user) throw new DataAccessError(409, 'AUTH_SESSION_CHANGED', '账号状态已更改，请重新登录。')
     await invalidatePasswordCodes(tx, userId)
     return user
   })

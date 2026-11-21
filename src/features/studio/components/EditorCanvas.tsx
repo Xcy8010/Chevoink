@@ -13,6 +13,7 @@ import { useStreamingAutoFollow } from './useStreamingAutoFollow'
 
 type EditorCanvasProps = {
   chapterDraft: ChapterDraftState | null
+  chapterRecoveryKey?: string
   workspaceDocument?: WorkspaceDocumentView | null
   chapterLoading: boolean
   chapterErrorMessage: string | null
@@ -71,6 +72,7 @@ const desktopToolbarClassName = 'flex min-h-12 shrink-0 flex-wrap items-center j
 
 export default function EditorCanvas({
   chapterDraft: sourceChapterDraft,
+  chapterRecoveryKey,
   workspaceDocument: sourceWorkspaceDocument = null,
   chapterLoading,
   chapterErrorMessage,
@@ -142,7 +144,8 @@ export default function EditorCanvas({
     if (!mobileChapterEditor || reviewingChapter) return
     const viewport = editorViewport.current
     const previous = mobileReviewScroll.current
-    if (viewport) viewport.scrollTop = previous?.scope === mobileChapterScope ? previous.top : 0
+    if (viewport?.hasAttribute('data-restored-position')) viewport.removeAttribute('data-restored-position')
+    else if (viewport) viewport.scrollTop = previous?.scope === mobileChapterScope ? previous.top : 0
     mobileReviewScroll.current = null
   }, [editorViewport, mobileChapterEditor, mobileChapterScope, reviewingChapter])
 
@@ -466,6 +469,7 @@ export default function EditorCanvas({
               data-kb-reveal="off"
               aria-label="章节正文"
               value={chapterDraft.content}
+              recoveryKey={chapterRecoveryKey}
               readOnly={writeLocked}
               resetKey={chapterDraft.id}
               onCommit={(content) => onChange({ ...chapterDraft, content })}
@@ -543,6 +547,8 @@ export default function EditorCanvas({
               data-kb-reveal="off"
               aria-label="章节正文"
               value={chapterDraft.content}
+              recoveryKey={chapterRecoveryKey}
+              readOnly={writeLocked}
               resetKey={chapterDraft.id}
               onCommit={(content) => onChange({ ...chapterDraft, content })}
               onSelectionChange={onSelectionChange}

@@ -71,6 +71,24 @@ it('uses one mobile manuscript scroll area with chapter and whole-review actions
   expect(props.onGoToNextReviewFile).toHaveBeenCalledOnce()
 })
 
+it('restores the chapter selection and outer mobile scroll after the author closes and reopens the page', () => {
+  const props = { ...mobileProps(), chapterRecoveryKey: 'writer:novel:chapter' }
+  const original = render(<EditorCanvas {...props} />)
+  const input = screen.getByRole<HTMLTextAreaElement>('textbox', { name: '章节正文' })
+  const viewport = original.container.querySelector<HTMLElement>('[data-mobile-manuscript]')!
+  input.focus()
+  input.setSelectionRange(1, 4)
+  viewport.scrollTop = 230
+  window.dispatchEvent(new Event('pagehide'))
+  original.unmount()
+  sessionStorage.clear()
+  const reopened = render(<EditorCanvas {...props} />)
+  const resumed = screen.getByRole<HTMLTextAreaElement>('textbox', { name: '章节正文' })
+  expect([resumed.selectionStart, resumed.selectionEnd]).toEqual([1, 4])
+  expect(reopened.container.querySelector<HTMLElement>('[data-mobile-manuscript]')!.scrollTop).toBe(230)
+  localStorage.removeItem(props.chapterRecoveryKey + ':position')
+})
+
 it('locates and processes the current visible mobile change, including after a manual scroll', () => {
   let viewportHeight = 200
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
