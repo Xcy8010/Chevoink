@@ -26,6 +26,7 @@ function fixture() {
 }
 
 it('reports a visible opening without input and does not treat a hidden load as use', () => {
+  vi.useFakeTimers()
   send.mockResolvedValue({})
   const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
   const first = listenForSessionActivity('reader', 'this-login', () => true)
