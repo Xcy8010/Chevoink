@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ComponentProps } from 'react'
 import { hasComposerDraft, promoteComposerDraft } from './agent/composer-drafts'
@@ -91,17 +91,18 @@ import { openWorkDocument } from './components/work-viewer-events'
 import { adoptChapterResult, canApplyChapterSnapshot, claimWorkspaceStreamEvent, isReviewStreamReplay, isStaleChapterReview, isWorkspaceStreamOwnerCurrent, type ReviewStreamCursor } from './components/chapter-stream-handoff'
 import { useChapterSnapshot } from './components/use-chapter-snapshot'
 
-const AgentMemoryCenter = lazy(() => import('./agent/components/AgentMemoryCenter'))
-const MemoryGraph = lazy(() => import('./components/MemoryGraph'))
-const SkillsPanel = lazy(() => import('./components/SkillsPanel'))
-const EditorCanvas = lazy(() => import('./components/EditorCanvas'))
-const ChapterSidebar = lazy(() => import('./components/ChapterSidebar'))
-const StudioWorkspaceSidebar = lazy(() => import('./components/StudioWorkspaceSidebar'))
-const WorkPerspective = lazy(() => import('./components/WorkPerspective'))
-const StudioChapterViewer = lazy(() => import('./components/StudioChapterViewer'))
-const ImportDialog = lazy(() => import('./components/ImportDialog'))
-const StudioSettingsDialog = lazy(() => import('./components/StudioSettingsDialog'))
-const dialogLoading = <LoadingMark className="fixed inset-0 z-[90] grid place-items-center bg-[var(--surface-default)]" />
+import WorkPerspective from './components/WorkPerspective'
+import StudioWorkspaceSidebar from './components/StudioWorkspaceSidebar'
+import { loadStudioSurface } from './components/load-studio-surface'
+
+const AgentMemoryCenter = loadStudioSurface(() => import('./agent/components/AgentMemoryCenter'), '记忆中心')
+const MemoryGraph = loadStudioSurface(() => import('./components/MemoryGraph'), '关系网')
+const SkillsPanel = loadStudioSurface(() => import('./components/SkillsPanel'), '技能')
+const EditorCanvas = loadStudioSurface(() => import('./components/EditorCanvas'), '编辑器')
+const ChapterSidebar = loadStudioSurface(() => import('./components/ChapterSidebar'), '作品目录')
+const StudioChapterViewer = loadStudioSurface(() => import('./components/StudioChapterViewer'), '章节查看器')
+const ImportDialog = loadStudioSurface(() => import('./components/ImportDialog'), '导入面板', props => props)
+const StudioSettingsDialog = loadStudioSurface(() => import('./components/StudioSettingsDialog'), '创作区设置', props => props)
 
 export default function StudioWorkspace() {
   const desktopLayout = useDesktopStudioLayout()
@@ -552,6 +553,8 @@ export default function StudioWorkspace() {
 
   /** 当前已应用（用户可见）的任务窗口 id：后台补载工件返回时据此判断用户是否已切走 */
   const appliedAgentTaskWindowIdRef = useRef<string | null>(null)
+  const taskSelectionRevision = useRef(0)
+  const historyRequestRevision = useRef(0)
 
   function applyAgentTaskWindowState(taskWindow: AgentTaskWindowState | null) {
     setSessionResolutionError(null)
@@ -627,10 +630,23 @@ export default function StudioWorkspace() {
       return
     }
 
-    const loadedTaskWindow = await hydrateAgentTaskWindow(targetTaskWindow)
+    const owner = workspaceOwnerRef.current
+    const revision = ++historyRequestRevision.current
+    let loadedTaskWindow: AgentTaskWindowState
+    try {
+      loadedTaskWindow = await hydrateAgentTaskWindow(targetTaskWindow)
+    } catch {
+      if (workspaceOwnerRef.current === owner && revision === historyRequestRevision.current && appliedAgentTaskWindowIdRef.current === targetTaskWindow.id) {
+        toast.error('任务历史暂时无法读取，请重新打开任务。')
+      }
+      return
+    }
+    if (workspaceOwnerRef.current !== owner || revision !== historyRequestRevision.current) return
 
     setAgentTaskWindows((current) =>
-      current.map((taskWindow) => (taskWindow.id === targetTaskWindow.id ? loadedTaskWindow : taskWindow)),
+      current.map(taskWindow => taskWindow.id === targetTaskWindow.id
+        ? { ...taskWindow, artifacts: loadedTaskWindow.artifacts, activeArtifactId: loadedTaskWindow.activeArtifactId, loaded: true }
+        : taskWindow),
     )
 
     // 补载期间用户可能已切到别的任务窗口，此时不得用旧窗口状态覆盖
@@ -638,7 +654,9 @@ export default function StudioWorkspace() {
       return
     }
 
-    applyAgentTaskWindowState(loadedTaskWindow)
+    // Only history was fetched; title, composer and run state may have changed while it was in flight.
+    setAgentArtifacts(loadedTaskWindow.artifacts)
+    setActiveAgentArtifactId(loadedTaskWindow.activeArtifactId)
   }
 
   function pruneTemporaryTaskWindows(nextActiveTaskId: string) {
@@ -664,7 +682,7 @@ export default function StudioWorkspace() {
         prompt: agentPrompt,
         artifacts: agentArtifacts,
         activeArtifactId: activeAgentArtifactId,
-        loaded: taskWindow.loaded || agentArtifacts.length > 0 || Boolean(agentSessionId),
+        loaded: taskWindow.loaded || agentArtifacts.length > 0,
         temporary: taskWindow.temporary && !agentSessionId,
         firstPromptSubmitted:
           taskWindow.firstPromptSubmitted || Boolean(agentArtifacts.some((artifact) => artifact.promptText?.trim())),
@@ -3628,6 +3646,9 @@ export default function StudioWorkspace() {
     }
 
     setSessionResolutionError(null)
+    const revision = ++taskSelectionRevision.current
+    const owner = workspaceOwnerRef.current
+    const selectionIsCurrent = () => revision === taskSelectionRevision.current && workspaceOwnerRef.current === owner
     // A newer explicit selection supersedes a still-resolving cross-novel deep link.
     if (searchParams.has('session')) {
       const nextParams = new URLSearchParams(searchParams)
@@ -3646,9 +3667,7 @@ export default function StudioWorkspace() {
       try {
         const sessions = await listWritingAgentSessions(activeNovelId)
         const session = sessions.find((item) => item.id === taskWindowId)
-        if (!session) {
-          return
-        }
+        if (!session || !selectionIsCurrent()) return
         const materializedTaskWindow = buildAgentTaskWindowFromSession(session)
         setAgentTaskWindows((current) => [
           materializedTaskWindow,
@@ -3656,7 +3675,7 @@ export default function StudioWorkspace() {
         ])
         await loadAgentTaskWindow(materializedTaskWindow.id, materializedTaskWindow)
       } catch {
-        setSessionResolutionError('任务读取失败，请重试。')
+        if (selectionIsCurrent()) toast.error('任务读取失败，请重新选择任务。')
       }
       return
     }
@@ -4184,6 +4203,8 @@ export default function StudioWorkspace() {
     setWorkspacePerspective('ide')
   }
 
+  const switchingWork = currentNovel.id !== activeNovelId || studioQuery.isPlaceholderData
+  const lockOutgoingContent = (element: HTMLDivElement | null) => { if (element) element.inert = switchingWork }
   const mobileConversationOwner = workspaceOwnerRef.current
   return (
     <>
@@ -4213,7 +4234,7 @@ export default function StudioWorkspace() {
               if (view === 'editor' || view === 'chapters') setWorkspacePerspective('ide')
             }}
           />
-          <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]">
+          <div ref={lockOutgoingContent} aria-busy={switchingWork} className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]">
             <Suspense fallback={<LoadingMark className="m-auto" label="正在打开创作面板" />}>
 
             {mobileView === 'editor' ? (
@@ -4400,7 +4421,7 @@ export default function StudioWorkspace() {
           </StudioMobileNavigation>
         </div>}
 
-        {desktopLayout && <Suspense fallback={<StudioSkeleton />}><div className="hidden min-h-0 flex-1 lg:flex">
+        {desktopLayout && <div className="hidden min-h-0 flex-1 lg:flex">
           {workspacePerspective === 'work' ? <StudioWorkspaceSidebar
             open={workspaceSidebarOpen}
             onOpenChange={setWorkspaceSidebarOpen}
@@ -4441,8 +4462,7 @@ export default function StudioWorkspace() {
             onAutoFollowChange={setAutoFollow}
             onOpenStudioSettings={(section = 'general') => { setStudioSettingsSection(section); setStudioSettingsOpen(true) }}
           /> : null}
-          <div className={cn('flex min-w-0 flex-1 flex-col transition-opacity', workspacePerspective === 'ide' && studioQuery.isPlaceholderData && 'pointer-events-none opacity-60')}>
-          {/* 半透明防误编辑仅限 IDE 表单视图；Work 对话区数据不依赖 studioQuery，透明只会造成无意义闪烁 */}
+          <div ref={lockOutgoingContent} aria-busy={switchingWork} className="flex min-w-0 flex-1 flex-col">
           <StudioCommandBar
             workspaceControls={workspacePerspective === 'ide'}
             workspaceSidebarOpen={workspacePerspective === 'ide' ? ideTreeOpen : workspaceSidebarOpen}
@@ -4679,9 +4699,8 @@ export default function StudioWorkspace() {
             </div>
           ) : null}
           </div>
-        </div></Suspense>}
+        </div>}
         {studioSettingsOpen !== null && (
-          <Suspense fallback={dialogLoading}>
             <StudioSettingsDialog
               open={studioSettingsOpen}
               section={studioSettingsSection}
@@ -4706,7 +4725,6 @@ export default function StudioWorkspace() {
               onTaskForked={handleAgentTaskForked}
               onTaskArchived={handleAgentTaskArchived}
             />
-          </Suspense>
         )}
         {activeToolPanel === 'cover' ? renderCoverToolPanel(true) : null}
       </div>
@@ -4806,7 +4824,6 @@ export default function StudioWorkspace() {
         if (picked && taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId, autoFile: picked })
       }} />
       {importRequest?.novelId === activeNovelId && importRequest.userId === taskUiUserId ? (
-        <Suspense fallback={dialogLoading}>
           <ImportDialog
             open
             novelId={activeNovelId}
@@ -4846,7 +4863,6 @@ export default function StudioWorkspace() {
             onRestored={() => refreshWorkspaceAfterAgentWrite()}
               onViewChapter={handleSelectWorkChapter}
           />
-        </Suspense>
       ) : null}
       {volumeSettings?.novelId === activeNovelId && volumeSettings.epoch === workspaceOwnerRef.current.epoch ? <VolumeSettingsDialog
         key={`${volumeSettings.novelId}:${volumeSettings.volumeId}:${volumeSettings.epoch}`}

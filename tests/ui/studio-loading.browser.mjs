@@ -1,0 +1,192 @@
+// Run after npm run build:client: node tests/ui/studio-loading.browser.mjs [dist-directory]
+// Requires playwright-core and its Chromium browser, or PLAYWRIGHT_CORE_PATH (module entry) / CHROME_BIN.
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { extname, resolve, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { sessions, studioApi } from '../fixtures/studio-loading-api.mjs'
+
+const dist = resolve(process.argv[2] ?? 'dist')
+const { chromium } = await import(process.env.PLAYWRIGHT_CORE_PATH ? pathToFileURL(resolve(process.env.PLAYWRIGHT_CORE_PATH)).href : 'playwright-core')
+const browser = await chromium.launch({ executablePath: process.env.CHROME_BIN || undefined })
+const page = await browser.newPage({ viewport: {width: 1600, height: 900}, serviceWorkers: 'block', reducedMotion: 'reduce' })
+await page.addInitScript(() => {
+  localStorage.setItem('chevoink-shell', JSON.stringify({state: {fullscreenPromptSeen: true}, version: 0}))
+  // B was last closed on its memory tab; its chunk has never been opened in this browser.
+  localStorage.setItem('chevoink:studio-work-panel-ui', JSON.stringify({
+    'fixture-author:novel-0:session-B': {rightOpen: true, viewer: null, inspectorTab: 'context'},
+  }))
+})
+page.setDefaultTimeout(8000)
+const origin = 'http://studio.test'
+const requests = []
+const errors = []
+page.on('pageerror', error => errors.push(error.message))
+const types = {html: 'text/html', js: 'text/javascript', css: 'text/css', svg: 'image/svg+xml', webp: 'image/webp', png: 'image/png', json: 'application/json'}
+let hold
+await page.route('**/*', async route => {
+  const req = route.request()
+  const url = new URL(req.url())
+  if (url.origin !== origin || req.method() !== 'GET') return route.abort()
+  requests.push({path: url.pathname, document: req.isNavigationRequest()})
+  if (hold?.matches(url.pathname)) {
+    hold.started()
+    await hold.resume
+  }
+  if (url.pathname.startsWith('/api/')) {
+    const data = studioApi(url)
+    return data === undefined ? route.fulfill({status: 404, json: {success: false, error: {code: 'NO_FIXTURE'}}})
+      : route.fulfill({json: {success: true, data}})
+  }
+  const file = resolve(dist, req.isNavigationRequest() ? 'index.html' : decodeURIComponent(url.pathname.slice(1)))
+  assert.ok(file.startsWith(dist + sep))
+  const body = await readFile(file).catch(() => null)
+  return route.fulfill(body ? {body, contentType: types[extname(file).slice(1)] ?? 'application/octet-stream'} : {status: 404})
+})
+
+const workspace = page.locator('.studio-workspace[data-visual-viewport]')
+const composer = page.locator('[data-agent-composer-editor]:visible')
+const scroll = page.locator('.agent-conversation-scroll:visible')
+const inspector = page.locator('[data-studio-panel="workInspector"]')
+const button = (name, root = page) => root.getByRole('button', {name, exact: true})
+const draft = '未发送的虚构草稿 A'
+const chunk = component => path => new RegExp('/' + component + '-[^/]+\\.js$').test(path)
+async function settled() {
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+}
+async function whilePending(matches, action, verify) {
+  const entered = Promise.withResolvers(), gate = Promise.withResolvers()
+  hold = {matches, started: entered.resolve, resume: gate.promise}
+  let timeout
+  try {
+    await action()
+    await Promise.race([entered.promise, new Promise((_, reject) => { timeout = setTimeout(() => reject(Error('Expected an uncached request')), 8000) })])
+    await verify()
+  } finally {
+    clearTimeout(timeout)
+    hold = undefined
+    gate.resolve()
+  }
+  await settled()
+}
+async function contentVisible(text) { await scroll.getByText(text, {exact: true}).filter({visible:true}).first().waitFor() }
+async function assertComposer(ref, position) {
+  assert.equal(await composer.evaluate((el, original) => el === original, ref), true, 'composer was remounted')
+  assert.equal(await composer.innerText(), draft)
+  assert.equal(await scroll.evaluate(el => el.scrollTop), position, 'conversation scroll jumped')
+}
+function selectTask(index) {
+  return page.getByRole('button', {name: new RegExp('^' + sessions[index].title + '(?:，|$)')}).first().click()
+}
+async function assertNoPageFallback() {
+  assert.equal(await page.evaluate(() => window.studioFallbackFrames), 0, 'whole-page fallback appeared after Studio became interactive')
+  assert.equal(requests.filter(r => r.document).length, 1, 'browser document navigated')
+}
+try {
+  await page.goto(origin + '/studio/novel/novel-0?session=session-A&from=regression')
+  await workspace.waitFor()
+  await contentVisible('试验任务A合成消息47')
+  await page.waitForURL(u => !u.searchParams.has('session') && u.searchParams.get('from') === 'regression')
+  await page.evaluate(() => {
+    window.studioFallbackFrames = 0
+    window.warmSkillsFallback = null
+    const observe = () => {
+      if ([...document.querySelectorAll('[aria-label="创作区加载中"], [role="status"].fixed.inset-0')].some(el => el.getClientRects().length)) window.studioFallbackFrames++
+      if (window.warmSkillsFallback !== null && document.querySelector('[aria-label="正在打开技能"]')?.checkVisibility()) window.warmSkillsFallback = true
+    }
+    new MutationObserver(observe).observe(document.body, {attributes: true, childList: true, subtree: true})
+    observe()
+  })
+  const editor = await composer.elementHandle()
+  await composer.fill(draft)
+  if (await button('展开检查区').isVisible()) await button('展开检查区').click()
+  const bottom = await scroll.evaluate(el => el.scrollTop)
+  assert.ok(bottom > 700, 'fixture history must scroll')
+  await scroll.hover()
+  await page.mouse.wheel(0, -640)
+  await page.waitForFunction(({node, bottom}) => node.scrollTop < bottom - 100, {node: await scroll.elementHandle(), bottom})
+  await settled()
+  const position = await scroll.evaluate(el => el.scrollTop)
+  assert.ok(position > 0 && position < bottom, 'reader must be in the middle of the conversation')
+  const initialStudioRequests = requests.filter(r => r.path.endsWith('/studio')).length
+
+  await whilePending(chunk('StudioChapterViewer'), () => inspector.getByText(/甲作品测试章节/).filter({visible:true}).first().click(), async () => {
+    await page.getByRole('status', {name: '正在打开章节查看器'}).waitFor()
+    await assertComposer(editor, position)
+    await assertNoPageFallback()
+  })
+  await page.waitForFunction(() => [...document.querySelectorAll('textarea')].some(el => el.value === '甲作品测试正文' && el.checkVisibility()))
+  await whilePending(chunk('SkillsPanel'), () => button('技能', inspector).click(), async () => {
+    await inspector.getByRole('status', {name: '正在打开技能'}).waitFor()
+    await assertComposer(editor, position)
+    await assertNoPageFallback()
+  })
+  await inspector.getByText('0/0 已启用').waitFor()
+  await button('作品', inspector).click()
+  await page.evaluate(() => {window.warmSkillsFallback = false})
+  await button('技能', inspector).click()
+  await inspector.getByText('0/0 已启用').waitFor()
+  await settled()
+  await assertComposer(editor, position)
+  assert.equal(await page.evaluate(() => window.warmSkillsFallback), false, 'warm skills showed its loading placeholder')
+  assert.equal(requests.filter(r => chunk('SkillsPanel')(r.path)).length, 1, 'warm skills triggered another download')
+
+  const settings = page.getByRole('region', {name: '创作区设置'})
+  const downloaded = page.waitForResponse(response => chunk('StudioSettingsDialog')(new URL(response.url()).pathname))
+  await whilePending(chunk('StudioSettingsDialog'), () => button('Agent 与定时').click(), async () => {
+    const dialog = page.getByRole('dialog')
+    await dialog.waitFor()
+    await dialog.getByRole('status', {name: '正在打开创作区设置'}).waitFor()
+    await assertComposer(editor, position)
+    await dialog.getByRole('button', {name: /关闭/}).click()
+    await dialog.waitFor({state: 'hidden'})
+    await assertNoPageFallback()
+  })
+  await (await downloaded).finished()
+  await settled()
+  assert.equal(await settings.isVisible(), false, 'late module completion reopened dismissed settings')
+  await button('Agent 与定时').click()
+  await settings.waitFor()
+  await page.keyboard.press('Escape')
+  await settings.waitFor({state: 'hidden'})
+  assert.equal(requests.filter(r => r.path.endsWith('/studio')).length, initialStudioRequests, 'panels reloaded workspace payload')
+
+  const shell = await page.locator('[data-app-shell]').elementHandle()
+  const work = await workspace.elementHandle()
+  await whilePending(chunk('AgentMemoryCenter'), () => selectTask(1), async () => {
+    await inspector.getByRole('status', {name: '正在打开记忆中心'}).waitFor()
+    assert.equal(await work.evaluate(el => el.isConnected && el.checkVisibility()), true, 'same-novel workspace disappeared')
+    await assertNoPageFallback()
+  })
+  await contentVisible('试验任务B合成消息47')
+  assert.equal(await composer.innerText(), '')
+  await composer.fill('未发送的虚构草稿 B')
+  await selectTask(0)
+  await contentVisible('试验任务A合成消息47')
+  assert.equal(await composer.innerText(), draft)
+
+  await whilePending(path => path === '/api/novels/novel-1/studio', () => selectTask(2), async () => {
+    await page.waitForURL(u => u.pathname === '/studio/novel/novel-1')
+    const outgoing = page.locator('[data-work-conversation]:visible')
+    await page.waitForFunction(el => el.closest('[inert][aria-busy="true"]') !== null, await outgoing.elementHandle())
+    assert.equal(await shell.evaluate(el => el.isConnected && el.checkVisibility()), true, 'shared application shell disappeared')
+    assert.equal(await work.evaluate(el => el.isConnected && el.checkVisibility()), true, 'workspace frame disappeared during cross-novel fetch')
+    await assertNoPageFallback()
+  })
+  await page.waitForURL(u => u.pathname === '/studio/novel/novel-1' && !u.searchParams.has('session'))
+  await contentVisible('试验任务C合成消息47')
+  assert.equal(await composer.innerText(), '')
+  assert.equal(await scroll.getByText(/试验任务[AB]合成消息/).count(), 0)
+  assert.equal(await composer.evaluate(el => el.closest('[inert]') === null), true, 'new workspace remained locked')
+  await selectTask(1)
+  await page.waitForURL(u => u.pathname === '/studio/novel/novel-0' && !u.searchParams.has('session'))
+  await contentVisible('试验任务B合成消息47')
+  assert.equal(await composer.innerText(), '未发送的虚构草稿 B')
+  await assertNoPageFallback()
+  assert.deepEqual(errors, [])
+  console.log(JSON.stringify({ coldSurfaces: ['章节查看器', '技能', '创作区设置', '任务 B 记忆中心'], warmSkillsFallback: false,
+    tasks: ['甲作品 A', '甲作品 B', '甲作品 A', '乙作品 C', '甲作品 B'], scrollTop: position,
+    fullPageFallbacks: await page.evaluate(() => window.studioFallbackFrames), documentRequests: requests.filter(r => r.document).length }))
+} finally {
+  await browser.close()
+}
