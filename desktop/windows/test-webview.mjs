@@ -94,6 +94,28 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100))
   }
   const caption = action => evaluate("window.__TAURI_INTERNALS__.invoke('desktop_caption', {action:" + JSON.stringify(action) + "})")
+  // Exercise the installed host and Windows shell with the same target and rel as Agent Markdown.
+  // Count successful browser handoffs without recording the URL or accessing browser profiles.
+  const handoffs = () => readFileSync(new URL('./test-results/startup-stderr.txt', import.meta.url), 'utf8')
+    .split('Desktop link handed to default browser').length - 1
+  for (const markup of [
+    '<a href="https://example.com/" target="_blank" rel="noopener noreferrer">参考来源</a>',
+    '<a href="/account/profile">账户中心</a>',
+    '<button onclick="window.open(\'/account/usage\', \'_blank\', \'noopener,noreferrer\')">用量明细</button>',
+  ]) {
+    const before = handoffs()
+    const { x, y } = await evaluate(`(() => {
+      document.body.innerHTML = ${JSON.stringify(markup)}
+      const r = document.body.firstElementChild.getBoundingClientRect()
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+    })()`)
+    for (const type of ['mousePressed', 'mouseReleased'])
+      await call('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 })
+    for (let attempt = 0; attempt < 50 && handoffs() === before; attempt++)
+      await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(handoffs(), before + 1, 'One user click must reach the Windows default browser')
+    assert.equal(await evaluate('location.href'), fixture, 'Desktop should keep the current document')
+  }
   assert.equal((await caption('state')).decorated, true, 'Old web page keeps system controls')
   const attached = await caption('attach')
   assert.equal(attached.decorated, false)

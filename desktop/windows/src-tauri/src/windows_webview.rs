@@ -1,4 +1,4 @@
-use crate::navigation::{is_app_url, is_download_url, is_external_url, safe_filename, APP_ORIGIN};
+use crate::navigation::{is_app_url, is_download_url, opens_in_browser, safe_filename, APP_ORIGIN};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -73,17 +73,25 @@ pub fn install(window: &WebviewWindow) -> tauri::Result<()> {
                 args.SetState(if allow_prompt { COREWEBVIEW2_PERMISSION_STATE_DEFAULT } else { COREWEBVIEW2_PERMISSION_STATE_DENY })?;
                 Ok(())
             })), &mut token)?;
-            let popup_window = owned.clone();
-            webview.add_NewWindowRequested(&NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
-                let Some(args) = args else { return Ok(()); };
+            let app = owned.app_handle().clone();
+            webview.add_NewWindowRequested(&NewWindowRequestedEventHandler::create(Box::new(move |sender, args| {
+                let (Some(sender), Some(args)) = (sender, args) else { return Ok(()); };
                 args.SetHandled(true)?;
                 let mut gesture = BOOL::default(); args.IsUserInitiated(&mut gesture)?;
+                if !gesture.as_bool() { return Ok(()); }
+                // Read the COM sender directly on its UI thread.
+                let mut source = PWSTR::null(); sender.Source(&mut source)?;
+                if !url::Url::parse(&take_pwstr(source)).is_ok_and(|url| is_app_url(&url)) { return Ok(()); }
                 let mut uri = PWSTR::null(); args.Uri(&mut uri)?;
                 let uri = take_pwstr(uri);
-                if gesture.as_bool() && popup_window.url().is_ok_and(|url| is_app_url(&url)) {
-                    if let Ok(url) = url::Url::parse(&uri) {
-                        if is_app_url(&url) { let _ = popup_window.navigate(url); }
-                        else if is_external_url(&url) { let _ = popup_window.app_handle().opener().open_url(uri, None::<&str>); }
+                if let Ok(url) = url::Url::parse(&uri) {
+                    if opens_in_browser(&url) {
+                        match app.opener().open_url(url.as_str(), None::<&str>) {
+                            Ok(()) => eprintln!("Desktop link handed to default browser"),
+                            Err(_) => crate::window::notice("未能打开链接", "请检查 Windows 默认浏览器设置后重试。"),
+                        }
+                    } else if is_app_url(&url) {
+                        sender.Navigate(&HSTRING::from(uri))?;
                     }
                 }
                 Ok(())

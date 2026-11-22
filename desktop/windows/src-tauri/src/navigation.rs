@@ -30,6 +30,11 @@ pub fn is_external_url(url: &Url) -> bool {
         && url.password().is_none()
 }
 
+pub fn opens_in_browser(url: &Url) -> bool {
+    is_external_url(url)
+        && (!is_app_url(url) || url.path() == "/account" || url.path().starts_with("/account/"))
+}
+
 pub fn is_download_url(url: &Url) -> bool {
     is_app_url(url)
         || (url.scheme() == "blob" && Url::parse(url.path()).is_ok_and(|inner| is_app_url(&inner)))
@@ -86,6 +91,25 @@ mod tests {
             "javascript:alert(1)",
         ] {
             assert!(!is_app_url(&Url::parse(value).unwrap()), "{value}");
+        }
+    }
+    #[test]
+    fn browser_links_include_account_pages_but_keep_other_app_routes_internal() {
+        let site = Url::parse(APP_ORIGIN).unwrap();
+        for path in ["/account", "/account/", "/account/docs?doc=faq#security"] {
+            assert!(opens_in_browser(&site.join(path).unwrap()));
+        }
+        for path in ["/accounting", "/studio", "/api/auth/account/profile"] {
+            assert!(!opens_in_browser(&site.join(path).unwrap()));
+        }
+        let book = Url::parse("https://example.org/book").unwrap();
+        assert!(opens_in_browser(&book));
+        for url in [
+            "javascript:void(0)",
+            "file:///C:/test",
+            "https://u:p@example.org",
+        ] {
+            assert!(!opens_in_browser(&Url::parse(url).unwrap()));
         }
     }
     #[test]

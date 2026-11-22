@@ -5,7 +5,7 @@ mod window;
 mod windows_webview;
 
 use navigation::{is_app_url, is_fallback_url, APP_ORIGIN};
-use tauri::{webview::NewWindowResponse, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
@@ -124,7 +124,13 @@ pub fn run() {
                 )
                 .build(),
         )
-        .plugin(tauri_plugin_opener::init())
+        // WebView2 routes user-initiated popups. The plugin's click interceptor
+        // would consume target=_blank and invoke an IPC unavailable to remote pages.
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(window::CloseState::default())
         .manage(update::UpdateState::default())
@@ -151,6 +157,7 @@ pub fn run() {
                     .min_inner_size(640.0, 480.0)
                     .data_directory(data)
                     .disable_drag_drop_handler()
+                    .initialization_script(include_str!("browser-links.js"))
                     // A reloaded/older website and the packaged failure page must always
                     // have working system controls until a compatible page takes over.
                     .on_page_load(|window, payload| {
@@ -161,7 +168,6 @@ pub fn run() {
                         }
                     })
                     .on_navigation(|url| is_app_url(url) || is_fallback_url(url))
-                    .on_new_window(|_, _| NewWindowResponse::Deny)
                     .build()?;
             window::install(&window)?;
             #[cfg(windows)]
