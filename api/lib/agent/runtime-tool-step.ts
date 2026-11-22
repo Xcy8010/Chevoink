@@ -1,4 +1,5 @@
 import { DataAccessError } from '../prisma.js'
+import { resolveDurableInputLimit } from './context-budget.js'
 import { findPlanByIdentity } from './novel-plan-contract.js'
 import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection,
   readAssistantModelSnapshot, readPreparedModelRequest } from './runtime-tool-view.js'
@@ -269,6 +270,8 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     if (frozenArgs && runtimeJson(args).hash !== runtimeJson(frozenArgs).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原冻结文学参数不能被新归一化改写。')
     const originalChapterId = originalScope.selection?.chapterId ?? (originalScope.chapterIds?.length === 1 ? originalScope.chapterIds[0] : null)
     const ctx: ToolContext = { userId: lease.userId, runId: lease.runId, novelId: root.novelId, sessionId: root.sessionId,
+      attachmentInputBudgetTokens: current.configuration.model.contextWindowTokens && current.configuration.model.maxOutputTokens
+        ? resolveDurableInputLimit(current.configuration.model.contextWindowTokens, current.configuration.model.maxOutputTokens) : undefined,
       chapterId: originalChapterId, callId: call.id, mode: current.configuration.mode, creativeFreedom: current.configuration.creativeFreedom,
       ...(!lease.parent && call.name === 'web_search' && originalSpec.networkAccess !== 'denied'
         ? { publicWebSearchQuestion: originalSpec.publicWebQuestion } : {}),

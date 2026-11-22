@@ -1,6 +1,7 @@
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { freezeWritingScope, readWritingScope } from './writing-scope.js'
 import { enableAgentWritingScope } from './agent-writing-scope.js'
+import { readLegacyAttachmentResumeNote } from './legacy-attachment-resume.js'
 import { isEmptyNovelMetadata } from './novel-initialization.js'
 import { isInternalAgentArtifact } from './artifact-visibility.js'
 import { syncBuiltinSkillCatalog } from './skills/service.js'
@@ -1307,6 +1308,7 @@ async function continueLoopRunLocked(
   } catch {
     throw new DataAccessError(503, 'RUN_EVENTS_PENDING', '任务记录尚未完成同步，请稍后继续；不会重复启动任务。')
   }
+  const attachmentResumeNote = await readLegacyAttachmentResumeNote(run.id, queuedInput?.attachments, run.errorMessage)
   // Reject a genuinely exhausted execution before admitting another run or
   // generating a paid summary. Paused gaps come from the flushed event journal.
   if (run.startedAt) {
@@ -1359,6 +1361,7 @@ async function continueLoopRunLocked(
     tokenBudget: queuedInput?.tokenBudget,
     resume: true,
     eventStartSeq,
+    ...(attachmentResumeNote ? { attachmentResumeNote } : {}),
     ...(continueFrom ? { authorContinue: { eventId: continueFrom.id, afterSeq: eventStartSeq,
       ...(continuationRetirements.length ? { legacyContinuationRetirements: continuationRetirements } : {}) } } : {}),
     modelTier: nextTier,

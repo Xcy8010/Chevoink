@@ -161,6 +161,23 @@ describe('one task research request budget', () => {
     }
     expect(await readResearchRequestBudget(resumed, 'search', f.tx)).toMatchObject({ used: 1, remaining: 4 })
   })
+  it('reuses a pre-lookup receipt only in its original task with the old request key or identical query and old settings', async () => {
+    const f = fixture(), query = 'site:book.example.com/book/it it novel', request = f.call('old-lookup')
+    const prior = { requestKey: digest(['old', query]), contextKey: digest(['old', 6, 'config', 'question']) }
+    expect(await reserveResearchRequest(request, 'search', prior.requestKey, undefined, f.tx, { query })).toBe(true)
+    await settleResearchRequest(request, 'consumed', f.tx)
+    await saveResearchSearchOutcome(request, { provider: 'bocha', results: [], contextKey: prior.contextKey }, query)
+    const read = (scope: typeof f.scope, value: string, preLookup: typeof prior) =>
+      findResearchSearchOutcome(scope, digest('with-target'), value, { key: digest('with-target-context'), preLookup })
+    const resumed = { ...f.scope, runId: 'resumed' }
+    const otherKey = { ...prior, requestKey: digest('changed-request') }
+    expect(await read(resumed, query, { ...prior, contextKey: digest('unavailable-context') })).toMatchObject({ query })
+    expect(await read(resumed, query, otherKey)).toMatchObject({ query })
+    expect(await read(resumed, 'site:book.example.com/book/it novel it', otherKey)).toBeNull()
+    expect(await read(resumed, query, { ...otherKey, contextKey: digest(['old', 5, 'config', 'question']) })).toBeNull()
+    f.run.taskRootId = 'different-root'
+    expect(await read(f.scope, query, prior)).toBeNull()
+  })
   it('accepts an ordered legacy key only with the exact same original query', async () => {
     const f = fixture(), original = '"two  spaces" after:2025'
     expect(await f.search(original, 'old-ordered')).toBe(true)

@@ -241,6 +241,16 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
     let textIndex = 0
     for (const part of parts) {
       if (part.type !== 'tool-call') {
+        if (part.type === 'context-compaction') {
+          if (current) current.closed = true
+          current = undefined
+          previousCall = undefined
+          proposedTitle = undefined
+          stageReports = []
+          publicTextSinceAction = false
+          hasPublicReport = false
+          hasActivityTitle = false
+        }
         if (part.type === 'activity-title') {
           proposedTitle = visibleAgentActivityTitle(part.title)
           if (proposedTitle) hasActivityTitle = true

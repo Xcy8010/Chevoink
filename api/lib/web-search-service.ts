@@ -4,7 +4,7 @@ import { parsePublicHttpUrl, readBoundedPublicBody } from './public-http.js'
 import { getToolModelRuntime, ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
 import { requestWebTool, webToolEndpoint, resolveWebToolProtocol } from './web-tool-provider.js'
 import { parseHTML } from 'linkedom'
-import { evaluateResearchSearchCandidates, evaluateResearchNavigationCandidates, rankResearchSearchResults, searchQueryHash, type ResearchSearchEvaluation, type ResearchSearchTarget } from './research-search-quality.js'
+import { evaluateResearchSearchCandidates, evaluateResearchNavigationCandidates, quotedBookLookupQuery, rankResearchSearchResults, searchQueryHash, type ResearchSearchEvaluation, type ResearchSearchTarget } from './research-search-quality.js'
 import { searchAuthoritySchema, searchPublicationDateSchema, searchRerankScoreSchema, WEB_SEARCH_SNIPPET_CHARS, WEB_SEARCH_SUMMARY_CHARS, type WebSearchResult } from './web-search-result.js'
 
 export { evaluateResearchSearchCandidates } from './research-search-quality.js'
@@ -21,7 +21,7 @@ export type { ResearchSearchEvaluation, ResearchSearchTarget } from './research-
 export type { WebSearchResult } from './web-search-result.js'
 
 export type WebSearchOutcome = {
-  provider: 'bocha' | 'deepseek' | 'sogou' | 'bing'
+  provider: 'bocha' | 'deepseek' | 'sogou' | 'bing' | 'qidian'
   results: WebSearchResult[]
   /** Dispatch-time scope for matching equivalent queries after recovery. */
   contextKey?: string
@@ -311,7 +311,44 @@ async function searchSogou(query: string, maxResults: number, signal: AbortSigna
   return results
 }
 
-/** 无 key 末位兜底：抓取 Bing 结果页，正则提取 b_algo 块（标题链接 + 摘要段落） */
+/** Bing may expose the publisher URL in the u=a1<base64url> field of a
+ * tracking link. Decode only this observed destination, without following redirects. */
+/** The publisher's public catalogue links each exact title to its reading entry. */
+async function searchQidian(title: string, signal: AbortSignal, metadata: AttemptResponse): Promise<WebSearchResult[]> {
+  const origin = 'https://m.qidian.com'
+  const response = await fetch(`${origin}/soushu/${encodeURIComponent(title)}.html`, { signal, redirect: 'error' })
+  captureSearchResponse(response, metadata)
+  if (!response.ok) return rejectSearchResponse(response, '起点书目 ')
+  const html = (await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8')
+  completeSearchResponses.add(metadata)
+  const { document } = parseHTML(html)
+  const results: WebSearchResult[] = []
+  for (const anchor of document.querySelectorAll('a[data-bid][href]')) {
+    const book = anchor.querySelector('h2')?.textContent?.trim()
+    const id = anchor.getAttribute('data-bid')
+    if (book !== title || !id || !/^\d+$/u.test(id)) continue
+    let url: URL
+    try { url = new URL(anchor.getAttribute('href')!, origin) } catch { continue }
+    if (url.origin !== origin || url.username || url.password || url.pathname !== `/chapter/${id}/0/`) continue
+    const author = anchor.querySelector('[class*="searchBookAuthor"]')?.textContent?.trim().slice(0, 80)
+    results.push({ title: `《${book}》在线阅读 - 起点中文网`, url: url.href, source: '起点中文网',
+      snippet: author ? `起点中文网书目，作者：${author}` : '起点中文网书目' })
+    if (results.length === 8) break
+  }
+  return results
+}
+
+function bingDestination(href: string) {
+  try {
+    const url = parsePublicHttpUrl(new URL(href, 'https://www.bing.com').href, true)
+    if (url.hostname !== 'bing.com' && !url.hostname.endsWith('.bing.com')) return url.href
+    const encoded = url.pathname === '/ck/a' ? url.searchParams.get('u') : null
+    if (!encoded || !/^a1[A-Za-z0-9_-]+={0,2}$/u.test(encoded)) return
+    const destination = parsePublicHttpUrl(Buffer.from(encoded.slice(2), 'base64url').toString('utf8'), true)
+    if (destination.hostname !== 'bing.com' && !destination.hostname.endsWith('.bing.com')) return destination.href
+  } catch { /* Malformed or non-public destinations never become sources. */ }
+}
+
 async function searchBing(query: string, maxResults: number, signal: AbortSignal, metadata: AttemptResponse): Promise<WebSearchResult[]> {
   const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=zh-CN`
   const response = await fetch(url, {
@@ -332,35 +369,21 @@ async function searchBing(query: string, maxResults: number, signal: AbortSignal
   const html = (await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8')
   completeSearchResponses.add(metadata)
   captureSearchHtml(html, metadata, query)
-  const blocks = [...html.matchAll(/<li class="b_algo"[\s\S]*?<\/li>/g)]
+  const { document } = parseHTML(html)
+  const blocks = [...document.querySelectorAll('li.b_algo')]
   const results: WebSearchResult[] = []
 
   for (const block of blocks) {
     if (results.length >= maxResults) {
       break
     }
-    // b_algo 块首个链接可能是面包屑站点链接（标题=域名），逐个候选取第一个像真实标题的
-    const anchors = [...block[0].matchAll(/<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
-    let picked: { href: string; title: string } | null = null
-    for (const anchor of anchors) {
-      const title = stripTags(anchor[2])
-      // 面包屑链接特征：文本内嵌 URL（含不带协议头的短域名）、带 › 分隔、或以域名开头
-      if (!title || /https?:\/\//.test(title) || title.includes(' › ') || /^([a-z0-9-]+\.)+[a-z]{2,}/i.test(title)) {
-        continue
-      }
-      picked = { href: anchor[1], title }
-      break
-    }
-    if (!picked) {
-      continue
-    }
-    const snippetMatch = block[0].match(/<p[^>]*>([\s\S]*?)<\/p>/)
-    results.push({
-      title: picked.title,
-      url: picked.href,
-      snippet: truncate(stripTags(snippetMatch?.[1] ?? ''), WEB_SEARCH_SNIPPET_CHARS),
-      source: hostOf(picked.href),
-    })
+    const anchor = block.querySelector('h2 a[href]')
+    const title = anchor?.textContent?.replace(/\s+/gu, ' ').trim()
+    const href = anchor?.getAttribute('href')
+    const destination = href && bingDestination(href)
+    if (!title || !destination) continue
+    const snippet = block.querySelector('p')?.textContent?.replace(/\s+/gu, ' ').trim() ?? ''
+    results.push({ title, url: destination, source: hostOf(destination), snippet: truncate(snippet, WEB_SEARCH_SNIPPET_CHARS) })
   }
 
   if (metadata.queryHash) metadata.parseCode = results.length ? 'BING_RESULTS_PARSED' : blocks.length ? 'BING_NO_USABLE_LINKS' : 'BING_NO_RESULT_BLOCKS'
@@ -402,22 +425,33 @@ export async function searchWeb(
       throw new WebSearchError('联网搜索已禁用（WEB_SEARCH_PROVIDER=disabled）')
     }
 
-    const providers: WebSearchOutcome['provider'][] = primary ? [primary, 'sogou', 'bing'] : ['sogou', 'bing']
+    // Spend the existing free fallback slot on the named publisher when the
+    // request is a book lookup. The paid route and total request cap stay intact.
+    const catalogue = expectedTarget?.purpose === 'lookup' && /起点|\bqidian\.com\b/iu.test(query)
+      && !expectedTarget.sourceSites?.length && !/(?:site:|(?:排除|不要|不含|除了)\s*起点)/iu.test(query)
+    const fallback = catalogue ? 'qidian' : 'sogou'
+    const providers: WebSearchOutcome['provider'][] = primary ? [primary, fallback, 'bing'] : [fallback, 'bing']
     const constrained = evaluateResearchSearchCandidates(query, [], expectedTarget).hasHardConstraints
     let constrainedResult: Pick<WebSearchOutcome, 'provider' | 'results' | 'quality'> | undefined
-    let emptyProvider: WebSearchOutcome['provider'] | undefined
+    let emptyResult: Pick<WebSearchOutcome, 'provider' | 'results' | 'quality'> | undefined
     let navigation: WebSearchOutcome['navigation']
     for (const provider of providers) {
       merged.throwIfAborted()
       const started = Date.now()
-      const metadata: AttemptResponse = constrained || durable ? { queryHash: searchQueryHash(query) } : {}
+      const freeProvider = provider === 'sogou' || provider === 'bing'
+      const providerQuery = provider === 'qidian' ? expectedTarget!.title : freeProvider ? quotedBookLookupQuery(query, expectedTarget) : query
+      const metadata: AttemptResponse = constrained || durable ? { queryHash: searchQueryHash(providerQuery) } : {}
+      // An HTML result list can contain useful candidates below the visible
+      // result count. Rank a bounded pool from the same already-fetched page.
+      const htmlCandidates = constrained ? Math.max(20, maxResults) : maxResults
       // A slow provider must leave time for fallback; all attempts still share the overall deadline.
       const local = withTimeout(merged, Math.max(1, Math.floor(env.webSearchTimeoutMs / 2)))
       try {
         const raw = provider === 'deepseek' ? await searchDeepSeek(query, maxResults, local.signal, configured!, metadata, originalQuestion)
           : provider === 'bocha' ? await searchBocha(query, maxResults, local.signal, configured, metadata)
-          : provider === 'sogou' ? await searchSogou(query, maxResults, local.signal, metadata)
-            : await searchBing(query, maxResults, local.signal, metadata)
+          : provider === 'qidian' ? await searchQidian(providerQuery, local.signal, metadata)
+          : provider === 'sogou' ? await searchSogou(providerQuery, htmlCandidates, local.signal, metadata)
+            : await searchBing(providerQuery, htmlCandidates, local.signal, metadata)
         local.signal.throwIfAborted()
         const results = rankResearchSearchResults(query, publicResults(raw, raw.length), expectedTarget).slice(0, maxResults)
         if (raw.length && !results.length) {
@@ -439,14 +473,14 @@ export async function searchWeb(
           constrainedResult ??= { provider, results, quality }
           continue
         }
-        emptyProvider = provider
+        emptyResult = { provider, results: [], ...(quality ? { quality } : {}) }
       } catch (error) {
         const unknown = durable && !completeSearchResponses.has(metadata) && !(metadata.httpStatus !== undefined && (metadata.httpStatus < 200 || metadata.httpStatus >= 300))
         attempts.push({ provider, outcome: unknown ? 'unknown' : merged.aborted ? 'aborted' : 'failed', durationMs: Date.now() - started, ...metadata })
         if (unknown) throw new WebSearchUnknownError(attempts)
         if (merged.aborted) {
           if (!signal?.aborted && constrainedResult) return { ...constrainedResult, attempts, ...(navigation ? { navigation } : {}) }
-          if (!signal?.aborted && emptyProvider) return { provider: emptyProvider, results: [], attempts }
+          if (!signal?.aborted && emptyResult) return { ...emptyResult, attempts }
           throw error
         }
       } finally {
@@ -454,7 +488,7 @@ export async function searchWeb(
       }
     }
     if (constrainedResult) return { ...constrainedResult, attempts, ...(navigation ? { navigation } : {}) }
-    if (emptyProvider) return { provider: emptyProvider, results: [], attempts }
+    if (emptyResult) return { ...emptyResult, attempts }
     throw new WebSearchError('所有搜索引擎均未返回有效响应', attempts)
   } catch (error) {
     if (error instanceof WebSearchUnknownError) throw error

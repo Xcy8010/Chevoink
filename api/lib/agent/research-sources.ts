@@ -7,12 +7,13 @@ import { parsePublicHttpUrl } from '../public-http.js'
 import { assessReaderText, type ReaderTarget } from '../web-reader-quality.js'
 import type { WebReadResult } from '../web-reader-service.js'
 import { countReportChineseCharacters } from '../../../shared/agent-output.js'
-import { researchChapterTitle, researchSourceHosts } from './research-navigation-policy.js'
+import { researchAuthor, researchChapterTitle, researchSourceHosts, researchSourceSites } from './research-navigation-policy.js'
 import { mergeResearchRanges } from './research-ranges.js'
-import { evaluateResearchNavigationCandidates, evaluateResearchSearchCandidates } from '../research-search-quality.js'
+import { bookLookupTarget, evaluateResearchNavigationCandidates, evaluateResearchSearchCandidates, type ResearchSearchTarget } from '../research-search-quality.js'
 import { webSearchResultSchema } from '../web-search-result.js'
 import { runtimeJson } from './runtime-common.js'
 import { durableTaskSpecIdentity } from './runtime-identity.js'
+import { readOriginalTaskRequest } from './original-request.js'
 import type { ToolContext } from './tools/types.js'
 
 type Scope = Pick<ToolContext, 'userId' | 'sessionId' | 'novelId' | 'runId' | 'transaction' | 'webAdmission'>
@@ -408,10 +409,10 @@ export async function recordResearchReadOutcome(scope: Scope & { callId: string 
 }
 
 const savedSearchResult = webSearchResultSchema.extend({ url: z.string().max(8192) })
-export const searchOutcomeSchema = z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']),
+export const searchOutcomeSchema = z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing', 'qidian']),
   query: z.string().max(120).optional(), contextKey: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   results: z.array(savedSearchResult).max(8),
-  navigation: z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']),
+  navigation: z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing', 'qidian']),
     results: z.array(savedSearchResult).max(2) }).optional() })
 
 const searchFailureSchema = z.object({ kind: z.literal('known_http_failure'), query: z.string().max(120),
@@ -460,7 +461,7 @@ export async function saveResearchSearchOutcome(scope: Scope & { callId: string 
 }
 
 export async function findResearchSearchOutcome(scope: Scope, requestKey: string, query?: string,
-  context?: { key: string; legacyRequestKey?: string }) {
+  context?: { key: string; legacyRequestKey?: string; preLookup?: { requestKey: string; contextKey: string; orderedV1Key?: string } }) {
   return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
@@ -480,11 +481,16 @@ export async function findResearchSearchOutcome(scope: Scope, requestKey: string
       if (parsed.success && parsed.data.query?.trim() === query.trim()) return parsed.data
     }
     const previous = await tx.agentResearchRequest.findMany({ where: { scopeKey, kind: 'search', status: 'consumed', savedOutcome: { not: Prisma.DbNull } },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { savedOutcome: true } })
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { savedOutcome: true, requestKey: true } })
     for (const entry of previous) {
       const parsed = searchOutcomeSchema.safeParse(entry.savedOutcome)
-      if (!parsed.success || !parsed.data.query || normalizeResearchSearchQuery(parsed.data.query) !== normalizeResearchSearchQuery(query)) continue
+      if (!parsed.success) continue
+      if (context.preLookup && entry.requestKey === context.preLookup.requestKey) return parsed.data
+      if (!parsed.data.query || normalizeResearchSearchQuery(parsed.data.query) !== normalizeResearchSearchQuery(query)) continue
       if (parsed.data.contextKey === context.key) return parsed.data
+      if (context.preLookup && parsed.data.query.trim() === query.trim()
+        && (parsed.data.contextKey === context.preLookup.contextKey
+          || (context.preLookup.orderedV1Key && entry.requestKey === context.preLookup.orderedV1Key))) return parsed.data
     }
     return null
   })
@@ -542,17 +548,28 @@ export async function resolveResearchSource(scope: Scope, sourceId: string) {
 }
 
 /** The model cannot replace the original task's named work or author. */
-export async function getResearchReadTarget(scope: Scope): Promise<(ReaderTarget & { textAnalysisRequired?: boolean }) | undefined> {
+export async function getResearchReadTarget(scope: Scope, lookupQuery?: string): Promise<(ReaderTarget & ResearchSearchTarget & { textAnalysisRequired?: boolean }) | undefined> {
   return researchTransaction(scope, async tx => {
     const { spec, taskKey } = await ownedTask(tx, scope)
     if (spec?.researchNavigation) {
       const sourceHosts = await originalResearchSourceHosts(tx, scope, spec)
-      const chapterTitle = researchChapterTitle(await originalResearchPrompt(tx, scope, spec) ?? '')
+      const prompt = await originalResearchPrompt(tx, scope, spec)
+      const chapterTitle = researchChapterTitle(prompt ?? '')
       const selected = await readResearchSelection(tx, scope, taskKey)
-      const target = selected?.target ?? spec.researchTarget ?? { title: '' }
+      const lookup = lookupQuery && prompt ? bookLookupTarget(lookupQuery, [prompt]) : undefined
+      const target = selected?.target ?? spec.researchTarget ?? (lookup ? { ...lookup, sourceSites: spec.researchNavigation.sourceSites } : { title: '' })
       return { ...target, sourceHosts, ...(chapterTitle ? { chapterTitle } : {}) }
     }
-    return spec?.researchTarget
+    if (spec?.researchTarget || !lookupQuery) return spec?.researchTarget
+    const requestHash = spec?.scope.capabilityCatalog?.requestHash ?? spec?.scope.authorEffects?.requestHash
+    const original = spec?.goals.find(goal => requestHash && hash(goal) === requestHash)
+      ?? (await readOriginalTaskRequest(tx, scope)).prompt
+    if (!original && bookLookupTarget(lookupQuery, spec?.goals)) throw new DataAccessError(409, 'RESEARCH_ORIGINAL_REQUEST_UNAVAILABLE', '无法核实原始找书请求的来源范围，本次未搜索。')
+    if (!original) return
+    const lookup = bookLookupTarget(lookupQuery, [original])
+    if (!lookup) return
+    const author = researchAuthor(original), sourceHosts = researchSourceHosts(original), sourceSites = researchSourceSites(original)
+    return { ...lookup, ...(author ? { author } : {}), ...(sourceHosts.length ? { sourceHosts } : {}), ...(sourceSites.length ? { sourceSites } : {}) }
   })
 }
 

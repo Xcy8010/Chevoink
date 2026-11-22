@@ -72,7 +72,8 @@ import { isCompletedWritingRepeatProposal } from './runtime-writing-todo.js'
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { preflightChapterReviewWrite } from './tools/chapter-tools.js'
 import { getTaskRunIds } from './task-lineage.js'
-import type { AgentTool, ToolContext } from './tools/types.js'
+import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
+import { AttachmentReadStage, attachmentStageFindings, requestsSequentialAttachment, requestsWholeAttachment, type AttachmentResume } from './legacy-attachment-resume.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
 import { toolActivityReport } from './activity-report.js'
@@ -157,6 +158,7 @@ export type ExecuteAgentRunParams = {
   qualityMode?: StoryCompilerMode
   /** 从 paused 恢复：历史含本 run 已持久化的消息，prompt 换成续跑指令 */
   resume?: boolean
+  attachmentResumeNote?: AttachmentResume
   /** Server-owned journal high water mark, never accepted from model/user input. */
   eventStartSeq?: number
   /** Verified HTTP continue admission; never supplied by a model or worker. */
@@ -297,6 +299,7 @@ type ToolCallOutcome = {
   requiredResult?: { targetId: string; contentHash: string }
   semanticTransition?: { targetId: string; beforeHash: string; afterHash: string }
   observedChapterRange?: import('./semantic-progress.js').ChapterReadEvidence
+  observedAttachment?: ToolResult['observedAttachment']
   part: Extract<AgentMessagePart, { type: 'tool-call' }>
   /** 附属分部：子 Agent 内嵌执行产生的内部工具调用卡片，随父消息一并落库与直播 */
   extraParts?: AgentMessagePart[]
@@ -655,6 +658,7 @@ export async function handleToolCall(
       requiredResult: result.requiredResult,
       semanticTransition: result.semanticTransition,
       observedChapterRange: result.observedChapterRange,
+      observedAttachment: call.name === 'read_file' && !ctx.inlineChild ? result.observedAttachment : undefined,
       terminalResponse: call.name === 'task_respond' && !ctx.inlineChild ? result.terminalResponse : undefined,
       questionTimedOut: call.name === 'ask_user' && !ctx.inlineChild ? result.questionTimedOut : undefined,
       questionCancelled: call.name === 'ask_user' && !ctx.inlineChild ? result.questionCancelled : undefined,
@@ -747,7 +751,7 @@ export async function handleToolCall(
   }
 }
 
-type LocalTerminalNoticeKind = 'question_timeout' | 'question_cancelled' | 'novel_setup'
+type LocalTerminalNoticeKind = 'question_timeout' | 'question_cancelled' | 'novel_setup' | 'attachment_stage'
 
 async function finalizeLegacyRun(
   runId: string,
@@ -1560,6 +1564,23 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
     }
     if (ordinaryResponseAvailable && taskSpec.responseDeliveryProtocol !== 1) messages.push({ role: 'user', content: '[系统] 根据本任务完整原始请求决定实际工作。可以按需使用读取工具核对已有信息，再正常输出完整答复；普通答复无需章节提交、终结工具或额外待办。推测的写作标签不构成创作义务；已经实际准备、修改或检查章节及未完成的真实工作仍须按原证据流程交付。' })
+    const attachmentStage = new AttachmentReadStage(params.attachments, params.resume ? params.attachmentResumeNote : undefined)
+    const needsWholeAttachment = requestsWholeAttachment(params.prompt)
+    const sequentialResume = params.resume && requestsSequentialAttachment(params.prompt)
+    if (params.resume && params.attachmentResumeNote) messages.push({ role: 'user', content: params.attachmentResumeNote.note })
+    const finishAttachmentStage = async (notice: string, messageId: string, findings = '') => {
+      const resultText = findings ? `本阶段根据已读片段整理：\n${findings}` : attachmentStage.excerpts()
+      const text = [resultText, notice].filter(Boolean).join('\n\n')
+      await finalizeRun(runId, bus, 'paused', usage, turn, notice.slice(0, 300), undefined, false, undefined, undefined, undefined, false,
+        undefined, 'needs_input', undefined, undefined, undefined, { kind: 'attachment_stage', text, messageId,
+          sessionId: params.sessionId, parts: [], signal: controller.signal })
+      liveTurn = null
+    }
+    const pauseAttachmentLocally = async (notice: string) => {
+      const messageId = randomUUID()
+      bus.emit({ type: 'message.start', messageId, role: 'assistant' })
+      await finishAttachmentStage(notice, messageId)
+    }
     if (params.goalSteering && ownedGoalExecution) {
       messages.push(await (await import('./goal-steering-message.js')).buildGoalSteeringMessage(params.goalSteering, params.userId, Boolean(modelRuntime.visionEnabled)))
     }
@@ -1705,22 +1726,28 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
      * OpenAI-compatible models. It counts tool schemas, tool arguments,
      * reasoning and multimodal placeholders instead of only visible text.
      */
-    const prepareContextForRequest = (beforeTokens: number, toolDefinitionTokens: number, personalization?: PersonalizationContext) => {
+    const prepareContextForRequest = async (beforeTokens: number, toolDefinitionTokens: number, personalization?: PersonalizationContext) => {
+      let compactionId: string | undefined
+      const announceCompaction = () => {
+        if (compactionId) return
+        compactionId = randomUUID()
+        bus.emit({ type: 'context.compaction', messageId: compactionId, state: 'running' })
+      }
       let afterTokens = beforeTokens
       let compactedToolArguments = 0
       let compactedToolOutputs = 0
       let collapsedToolRounds = 0
 
       if (beforeTokens >= contextBudget.compactAtTokens) {
-        releaseCompletedReasoning(messages)
-        const firstStage = compactEarlyToolPayloads(messages, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS)
+        releaseCompletedReasoning(messages, announceCompaction)
+        const firstStage = compactEarlyToolPayloads(messages, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS, announceCompaction)
         compactedToolArguments += firstStage.compactedToolArguments
         compactedToolOutputs += firstStage.compactedToolOutputs
         collapsedToolRounds += firstStage.collapsedToolRounds
         afterTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
       }
       if (afterTokens > contextBudget.hardRequestTokens) {
-        const secondStage = collapseEarlyToolRounds(messages, 1)
+        const secondStage = collapseEarlyToolRounds(messages, 1, announceCompaction)
         collapsedToolRounds += secondStage.collapsedToolRounds
         afterTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
       }
@@ -1737,6 +1764,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           compactedToolOutputs,
           collapsedToolRounds,
         }))
+      }
+      if (compactionId) {
+        await persistMessage(compactionId, runId, params.sessionId, 'assistant', [{ type: 'context-compaction', state: 'completed' }])
+        bus.emit({ type: 'context.compaction', messageId: compactionId, state: 'completed' })
       }
       return { beforeTokens, afterTokens, fits: afterTokens <= contextBudget.hardRequestTokens }
     }
@@ -1773,6 +1804,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
     const publicWebQuestion = params.publicWebQuestion === taskSpec.publicWebQuestion ? params.publicWebQuestion : undefined
     const toolContext: ToolContext = {
+      get attachmentInputBudgetTokens() { return contextBudget.hardRequestTokens },
       publicWebSearchQuestion: taskSpec.networkAccess !== 'denied' && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId
         ? publicWebQuestion : undefined,
       planContentHashes: new Map(),
@@ -1974,7 +2006,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const executionControl = untilCompletionControl(checkpointOrigin)
     while (executionControl.controlPolicy === 'until_completion') {
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
-      if (await finishPersistedWritingIfComplete()) return
+      const attachmentPause = attachmentStage.pauseNotice()
+      const localAttachmentPause = attachmentStage.tokenLimitNotice(params.tokenBudget, inheritedTokens + usage.totalTokens, 1)
+        ?? (attachmentStage.hasNewRange() ? undefined : attachmentPause)
+      if (localAttachmentPause) {
+        await pauseAttachmentLocally(localAttachmentPause)
+        return
+      }
+      if (!attachmentPause && await finishPersistedWritingIfComplete()) return
       const personalizationEnabled = !sessionPolicy?.spawnedFromSessionId
         && (env.appEnv !== 'production' || await (await import('../app-releases.js')).hasAgentPersonalizationCapability(params.userId))
       const rules = await readPersonalizationRules(params.userId)
@@ -2007,14 +2046,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
       }
       const textOnlyModel = isTextOnlyModel(modelRuntime)
-      const publicVerification = textOnlyModel && Boolean(publicWebQuestion) && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId
+      const publicVerification = !attachmentPause && textOnlyModel && Boolean(publicWebQuestion) && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId
       let publicWebStep: PublicWebStep | undefined
-      if (!textOnlyModel && !publicWebQuestion && taskSpec.researchNavigation?.version === 1 && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied') {
+      if (!attachmentPause && !textOnlyModel && !publicWebQuestion && taskSpec.researchNavigation?.version === 1 && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied') {
         const discovery = await (await import('./research-recovery.js')).takeResearchDiscoveryHandoff({ userId: params.userId,
           novelId: params.novelId, sessionId: params.sessionId, runId }, tools.map(tool => tool.name))
         if (discovery) bootstrapCall = { id: `research-discovery-${discovery.receiptId}`, name: discovery.name, arguments: JSON.stringify(discovery.args) }
       }
-      if (!textOnlyModel && !publicWebQuestion && !bootstrapCall && (!researchHandoffChecked || researchReadBootstrap) && taskSpec.researchDiscoveryProtocol === 1
+      if (!attachmentPause && !textOnlyModel && !publicWebQuestion && !bootstrapCall && (!researchHandoffChecked || researchReadBootstrap) && taskSpec.researchDiscoveryProtocol === 1
         && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied'
         && tools.some(tool => tool.name === 'web_read')) {
         researchHandoffChecked = true
@@ -2097,7 +2136,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         messages.push(preparationReminder)
       }
       const budgetStarted = performance.now()
-      const openAITools = textOnlyModel ? [] : (personalizationEnabled ? availableDefinitions : stableDefinitions).filter(definition => toolContext.toolAuthority?.has(definition.function.name))
+      if (attachmentPause) messages.push({ role: 'system', content: '本轮仅交付阶段性结果。请结合作者目标，简洁写出已返回附件片段里有文字依据的发现，逐项给出对应片段线索。不可推断未读部分、宣称全文已阅或已完成写入。没有依据的项明确列为待核。服务器会附上读取位置并暂停。' })
+      const openAITools = textOnlyModel || attachmentPause ? [] : (personalizationEnabled ? availableDefinitions : stableDefinitions).filter(definition => toolContext.toolAuthority?.has(definition.function.name))
       const toolDefinitionTokens = estimateToolDefinitionTokens(openAITools)
       const personalization = personalizationEnabled && !bootstrapCall ? await loadPersonalizationContext(params.userId, contextPrompt, runId) : undefined
       toolContext.personalizationMemoryEpoch = personalization?.memoryEpoch
@@ -2112,7 +2152,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         estimatedRequestTokens += estimateChatMessageTokens(contextReminder)
       }
       // 在发往供应商之前执行模型窗口感知的压缩；仍超限则安全收尾，不把必失败请求交给供应商。
-      let requestBudget = prepareContextForRequest(estimatedRequestTokens, toolDefinitionTokens, personalization)
+      let requestBudget = await prepareContextForRequest(estimatedRequestTokens, toolDefinitionTokens, personalization)
       if (!bootstrapCall && outputRecoveryFrom !== undefined) {
         const fittingOutput = emptyResponseRecoveryOutputTokens(outputRecoveryFrom, modelRuntime.maxOutputTokens, contextWindowTokens, requestBudget.afterTokens)
         if (fittingOutput === null) {
@@ -2129,6 +2169,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         maxOutputTokens: requestOutputTokens,
         budgetMs: performance.now() - budgetStarted,
       })
+      const budgetPause = !bootstrapCall && (attachmentStage.tokenLimitNotice(params.tokenBudget,
+        inheritedTokens + usage.totalTokens, requestBudget.afterTokens + requestOutputTokens) ?? (!requestBudget.fits ? attachmentStage.pauseNotice(true) : undefined))
+      if (budgetPause) {
+        await pauseAttachmentLocally(budgetPause)
+        return
+      }
       if (!bootstrapCall && !requestBudget.fits) {
         if (completedWritingWrapUp.value && await finishPersistedWritingIfComplete(async () => {})) return
         await wrapUpAndFinish('当前任务上下文已达到所选模型的安全窗口上限。')
@@ -2156,7 +2202,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && taskSpec.scope.agentWritingProtocol === 1 && !taskSpec.scope.agentWritingBinding
         && taskSpec.scope.authorEffects?.manuscript === true && ['write', 'revise'].includes(taskSpec.intent)
         && (writeProgressCount > 0 || params.resume === true) && usesBriefStandaloneWritingClosing(params.prompt)
-      let writingTextHeld = requiredWritingPresentation || savedUnboundWriting
+      const holdPartialAttachmentAnswer = Boolean(attachmentStage.pauseNotice(true))
+      let writingTextHeld = Boolean(attachmentPause) || holdPartialAttachmentAnswer || requiredWritingPresentation || savedUnboundWriting
       let writingTextBuffer = ''
       let visibleToolPreview = false
       let textBeforePreview: string | undefined
@@ -2168,7 +2215,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       const publishAuthorDelta = (delta: string) => {
         if (!delta) return
-        if (liveTurn?.messageId === messageId) liveTurn.streamedAuthorText += delta
+        if (liveTurn?.messageId === messageId && !holdPartialAttachmentAnswer) liveTurn.streamedAuthorText += delta
         if (visibleToolPreview) return
         const textIncrement = explanatoryResponse ? delta : visibleTextStreamer.push(delta)
         if (!textIncrement) return
@@ -2188,7 +2235,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         onUsage: observeTurnUsage,
         messages,
         personalization,
-        nextPromptMarker,
+        nextPromptMarker: attachmentPause ? undefined : nextPromptMarker,
         tools: openAITools,
         textOnlyModel,
         textOnlyWebQuestionRequired: textOnlyModel && !publicVerification && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId,
@@ -2218,7 +2265,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             // Preserve the provider channel, including whitespace between chunks.
             if (chunk.delta) bus.emit({ type: 'reasoning.delta', messageId, delta: chunk.delta, ...(chunk.delta.trim() ? { activity: true as const } : {}) })
           } else if (chunk.type === 'tool-call-start') {
-            releaseWritingToolText()
+            if (!holdPartialAttachmentAnswer || chunk.name !== 'task_respond') releaseWritingToolText()
             lastActivityAt = Date.now()
             if (chunk.id) {
               announcedToolNames.set(chunk.id, chunk.name)
@@ -2288,12 +2335,20 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // Journal this small tombstone so reconnect also clears previews seen earlier.
       if (announcedToolNames.size > 0) bus.emit({ type: 'tool.preparation.end', messageId, callIds: [...announcedToolNames.keys()] })
       if (!result) {
+        if (attachmentPause) { await finishAttachmentStage(attachmentPause, messageId); return }
         bus.emit({ type: 'text.final', messageId, text: '', asReasoning: false })
         liveTurn = null
         continue
       }
       if (!bootstrapCall) observeTurnUsage(result.usage)
       await persistCheckpoint()
+      if (attachmentPause) {
+        const findings = result.finishReason === 'stop' && !result.toolCalls.length && !containsAgentProtocolInvocation(modelText.text)
+          ? attachmentStageFindings(humanizeAgentVisibleText(stripAgentProtocolArtifacts(modelText.text))) : ''
+        bus.emit({ type: 'step.finish', turn, usage: result.usage })
+        await finishAttachmentStage(attachmentPause, messageId, findings)
+        return
+      }
 
       const recoveredToolCalls = !textOnlyModel && !explanatoryResponse && result.finishReason !== 'length' && result.toolCalls.length === 0
         ? recoverAgentProtocolToolCalls(result.content).map((call, index) => ({
@@ -2303,6 +2358,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }))
         : []
       const effectiveToolCalls = textOnlyModel && !bootstrapCall ? [] : result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
+      // An answer proposal cannot settle an explicit full-file request when
+      // the source receipts still contain gaps. Do not buy a regeneration.
+      const earlyAttachmentStop = holdPartialAttachmentAnswer && !pendingReviews.size && !forceWrapUpReason && result.finishReason !== 'length'
+        && (!effectiveToolCalls.length || effectiveToolCalls.length === 1 && effectiveToolCalls[0].name === 'task_respond')
+        ? attachmentStage.unfinishedAnswer(needsWholeAttachment, modelText.text + (effectiveToolCalls[0]?.arguments ?? '')) : undefined
+      if (earlyAttachmentStop) {
+        if (effectiveToolCalls.length) deferToolProposal(effectiveToolCalls[0], earlyAttachmentStop, messageId, bus)
+        bus.emit({ type: 'step.finish', turn, usage: result.usage })
+        await finishAttachmentStage(earlyAttachmentStop, messageId)
+        return
+      }
       const firstActivityCall = effectiveToolCalls.find(call => call.name !== 'task_respond')
       const responseCall = effectiveToolCalls.length === 1 && result.toolCalls[0]?.name === 'task_respond' ? result.toolCalls[0] : undefined
       const responseSuggestion = responseCall ? readTaskResponseNextPrompt(responseCall.arguments) : undefined
@@ -2666,7 +2732,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }, args) })
       const knownBatchReviewResults = new Map<string, string>()
       for (let callIndex = 0; callIndex < effectiveToolCalls.length; callIndex += 1) {
-        const call = effectiveToolCalls[callIndex]
+        let call = effectiveToolCalls[callIndex]
+        if (attachmentStage.pauseNotice()) {
+          const reason = '附件本段读取已结束，剩余提议未执行。'
+          deferToolProposal(call, reason, messageId, bus)
+          messages.push({ role: 'tool', toolCallId: call.id, content: reason })
+          continue
+        }
         if (chapterMemoryBatch && !CHAPTER_MEMORY_TOOLS.includes(call.name)) {
           const reason = '本章正文已保存；继续处理当前章节的记忆卡片。'
           deferToolProposal(call, reason, messageId, bus)
@@ -2690,7 +2762,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
         let coordinatedCommit: AgentTool | undefined
         const preflightTool = tools.find(tool => tool.name === call.name)
-        const preflightArgs = reviewPreflightArgs(call, preflightTool)
+        let preflightArgs = reviewPreflightArgs(call, preflightTool)
+        const resumeOffset = sequentialResume && preflightTool?.name === 'read_file' ? attachmentStage.resumeOffset(preflightArgs) : undefined
+        if (resumeOffset !== undefined && preflightArgs) {
+          preflightArgs = { ...preflightArgs, offset: resumeOffset }
+          // Keep the native model proposal in its original history. The tool
+          // event and authoritative returned range use the actual read cursor.
+          call = { ...call, arguments: JSON.stringify(preflightArgs) }
+        }
         if (pendingReviews.size) {
           // An unresolved provider call permits only ordinary local reads.
           // A read-only declaration alone does not make a billed call safe.
@@ -2782,6 +2861,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const admissionKey = admission.key(admissionSignature, Boolean(tool?.readOnly) || STATE_SENSITIVE_VALIDATORS.has(call.name))
         const previousObservation = REPEATABLE_TOOLS.has(call.name) ? undefined : admission.previous(admissionKey)
         if (previousObservation !== undefined) {
+          if (call.name === 'read_file') attachmentStage.reused(preflightArgs)
           blockedRepeat += 1
           const blockSummary = '相同状态下该工具与完整参数已成功执行，复用结果，未重复执行'
           // 产品口径：熔断拦截属服务端防空转保护，不是作者需要看到的「失败工具」——
@@ -2914,7 +2994,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const durableProgress = contentProgress || structureProgress
           const requiredProgress = Boolean(outcome.requiredResult && observeRequiredResult(progressSignatures,
             `chapter:${outcome.requiredResult.targetId}`, outcome.requiredResult.contentHash))
-          const readProgress = observeSemanticReadProgress(progressSignatures, call.name, outcome.observation, outcome.observedChapterRange)
+          const readProgress = outcome.observedAttachment ? attachmentStage.observe(outcome.observedAttachment,
+            outcome.part.display?.kind === 'markdown' ? outcome.part.display.markdown : undefined)
+            : observeSemanticReadProgress(progressSignatures, call.name, outcome.observation, outcome.observedChapterRange)
           const workflowProgress = observeWritingWorkflowMilestone(progressSignatures, call.name, outcome.workflowMilestone,
             { userId: params.userId, novelId: params.novelId, runId, taskSpec: outcome.workflowMilestone
               ? await prisma.$transaction(tx => effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) : taskSpec })

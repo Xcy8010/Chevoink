@@ -650,6 +650,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
   it('history is factual status data, not pseudo-call examples; failed calls and cover IDs survive', async () => {
     vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([{ id: 'tool-history', role: 'assistant', parts: [
       { type: 'tool-call', toolName: 'chapter_read', status: 'failed', summary: '章节不存在' },
+      { type: 'tool-call', toolName: 'read_file', status: 'success', args: { url: '/api/uploads/agent-attachments/book.txt' }, summary: '返回字符 [0,3000)，提取文字共 4000 字符；续读 offset=3000' },
       { type: 'tool-call', toolName: 'todo_write', status: 'success', summary: '1/2' },
       { type: 'tool-call', toolName: 'cover_generate', status: 'success', display: { kind: 'coverImages', images: [{ id: 'cover-old' }] } },
     ] }] as never)
@@ -661,6 +662,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(history).toContain('旧待办状态已过时')
     expect(history).not.toContain('1/2')
     expect(history).toContain('"coverAssetId":"cover-old"')
+    expect(history).toContain('续读 offset=3000","attachmentUrl":"/api/uploads/agent-attachments/book.txt"')
   })
 
   it('separates mixed assistant prose and receipts; removes legacy echoes only from assistant history', async () => {

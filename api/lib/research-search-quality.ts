@@ -3,7 +3,7 @@ import { parsePublicHttpUrl } from './public-http.js'
 import type { WebSearchResult } from './web-search-service.js'
 
 /** Supplied by the frozen server task, never by search-result text. */
-export type ResearchSearchTarget = { title: string; author?: string; sourceHosts?: readonly string[] }
+export type ResearchSearchTarget = { title: string; author?: string; sourceHosts?: readonly string[]; purpose?: 'lookup'; sourceSites?: readonly string[] }
 export type ResearchSearchCandidate = {
   index: number
   eligible: boolean
@@ -28,6 +28,40 @@ type SiteConstraint = { host: string; path: string; exclude: boolean }
 export const searchQueryHash = (query: string) => createHash('sha256').update(query).digest('hex')
 const normalized = (value: string) => value.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim()
 const hostMatches = (actual: string, expected: string) => actual === expected || actual.endsWith(`.${expected}`)
+
+/** A plain book lookup needs a complete name, even outside the chapter-
+ * research workflow. The goal supplies a local results filter, never query text. */
+export function bookLookupTarget(query: string, goals: readonly string[] = []): ResearchSearchTarget | undefined {
+  const named = (text: string) => [...text.matchAll(/《([^《》\r\n]{1,120})》/gu)].map(match => match[1].trim()).filter(Boolean)
+  const colloquial = (text: string) => [...text.matchAll(/(?:查找|寻找|检索|搜索|搜搜|找找|查查|搜|找|查)(?:一下|一找|一查|一搜|一部|一本)?\s*(?:名为|名叫|叫做|叫作)?\s*([^《》“”"'，,。！？!?；;\r\n]{1,80}?)\s*(?:这本(?:小说|书)|这部(?:小说|作品))/gu)].map(match => match[1].trim())
+  const names = (text: string) => [...named(text), ...colloquial(text)]
+  const authorTitles = [...new Set(goals.flatMap(names))]
+  const titles = new Set((authorTitles.length ? authorTitles : names(query)).filter(title => title && normalized(query).includes(normalized(title))))
+  const bookWords = /小说|这本书|书名|作者|书目|搜书|找书|图书|正版|出版社|阅读入口|作品页|中文网|书城|连载|\b(?:novel|book|publisher)\b/iu
+  if (!titles.size && authorTitles.length === 1 && (bookWords.test(query) || named(query).length)) titles.add(authorTitles[0])
+  if (titles.size !== 1) return
+  const title = [...titles][0]
+  if (!bookWords.test([query, ...goals].join('\n').split(title).join(''))) return
+  return { title, purpose: 'lookup' }
+}
+
+/** Strengthen one existing free fallback without adding a call or relaxing any operator. */
+export function quotedBookLookupQuery(query: string, target?: ResearchSearchTarget) {
+  const title = target?.title
+  if (target?.purpose !== 'lookup' || !title || /["\r\n]/u.test(title) || query.includes(`"${title}"`)) return query
+  const wrapped = `《${title}》`
+  // Never quote text inside an operator, URL, negative term or an existing phrase.
+  const protectedTerms = [...query.matchAll(/-?[\w-]+:\s*(?:"[^"]*"|'[^']*'|[^\s)]+)|-[^\s)]+|"[^"]*"|'[^']*'/gu)]
+  for (const name of [wrapped, title]) {
+    for (let at = query.indexOf(name); at >= 0; at = query.indexOf(name, at + name.length)) {
+      const end = at + name.length
+      if (protectedTerms.some(term => at < term.index + term[0].length && end > term.index)) continue
+      if (name === title && (/[\p{L}\p{N}_]$/u.test(query.slice(0, at)) || /^[\p{L}\p{N}_]/u.test(query.slice(end)))) continue
+      return query.slice(0, at) + '"' + title + '"' + query.slice(end)
+    }
+  }
+  return query
+}
 
 function publicationBounds(query: string) {
   let from = -Infinity, before = Infinity
@@ -90,10 +124,28 @@ function titleMatch(title: string, snippet: string, target: ResearchSearchTarget
   return text.includes(wanted) || normalized(snippet).includes(wanted) ? 'related' : 'absent'
 }
 
+function lookupNamesWork(title: string, description: string, target: string, pageType: ResearchSearchCandidate['pageType']) {
+  const wanted = normalized(target), label = normalized(title)
+  const otherEdition = /^\s*[-_:·]?\s*(?:同人|衍生|番外|续篇|续传|第[二三四五六七八九十\d]+部|[2-9]|ii\b|iii\b)/iu
+  const quoted = [...label.matchAll(/《([^》]+)》/gu)]
+  if (quoted.length) return quoted.some(book => book[1].trim() === wanted && !otherEdition.test(label.slice(book.index! + book[0].length)))
+  if (label.includes(wanted)) {
+    for (let at = label.indexOf(wanted); at >= 0; at = label.indexOf(wanted, at + wanted.length)) {
+      const suffix = label.slice(at + wanted.length)
+      if (/[\p{L}\p{N}]$/u.test(label.slice(0, at)) || otherEdition.test(suffix)) continue
+      if (!/^[\p{L}\p{N}]/u.test(suffix) || (at === 0 && titleMatch(title, '', { title: target }) === 'exact')) return true
+    }
+    return false
+  }
+  return pageType === 'book' && normalized(description).includes(`《${wanted}》`)
+}
+
 /** Eligibility means a bounded candidate to read next, never verified identity,
  * chapter completeness, semantic progress, or permission to write a report. */
 export function evaluateResearchSearchCandidates(query: string, results: readonly WebSearchResult[], target?: ResearchSearchTarget): ResearchSearchEvaluation {
-  const { sites, invalid } = siteConstraints(query)
+  const querySites = siteConstraints(query)
+  const siteScopes = target?.sourceSites?.length ? [querySites, siteConstraints(target.sourceSites.join(' '))] : [querySites]
+  const invalid = siteScopes.some(scope => scope.invalid)
   const publication = publicationBounds(query)
   const hosts: string[] = []
   let invalidHosts = false
@@ -104,7 +156,7 @@ export function evaluateResearchSearchCandidates(query: string, results: readonl
       hosts.push(url.hostname.toLowerCase())
     } catch { invalidHosts = true }
   }
-  const hasHardConstraints = Boolean(target?.title || sites.length || invalid || invalidHosts || target?.sourceHosts?.length || publication.constrained)
+  const hasHardConstraints = Boolean(target?.title || siteScopes.some(scope => scope.sites.length) || invalid || invalidHosts || target?.sourceHosts?.length || publication.constrained)
   const candidates = results.map((result, index): ResearchSearchCandidate => {
     let url: URL
     try { url = parsePublicHttpUrl(result.url, true) }
@@ -112,8 +164,10 @@ export function evaluateResearchSearchCandidates(query: string, results: readonl
     const hostMatch = !invalidHosts && (!hosts.length || hosts.some(host => hostMatches(url.hostname.toLowerCase(), host)))
     const matchesSite = (site: SiteConstraint) => hostMatches(url.hostname.toLowerCase(), site.host)
       && (site.path === '/' || url.pathname === site.path || url.pathname.startsWith(`${site.path}/`))
-    const positive = sites.filter(site => !site.exclude)
-    const siteMatch = !invalid && (!positive.length || positive.some(matchesSite)) && !sites.some(site => site.exclude && matchesSite(site))
+    const siteMatch = !invalid && siteScopes.every(({ sites }) => {
+      const positive = sites.filter(site => !site.exclude)
+      return (!positive.length || positive.some(matchesSite)) && !sites.some(site => site.exclude && matchesSite(site))
+    })
     const descriptions = `${result.snippet}\n${result.summary ?? ''}`
     const match = target?.title ? titleMatch(result.title, descriptions, target) : 'unconstrained'
     const authorText = normalized(`${result.title}\n${descriptions}`)
@@ -127,10 +181,12 @@ export function evaluateResearchSearchCandidates(query: string, results: readonl
     const reasons: string[] = []
     if (!hostMatch) reasons.push('FROZEN_SOURCE_HOST_MISMATCH')
     if (!siteMatch) reasons.push(invalid ? 'QUERY_SITE_CONSTRAINT_INVALID' : 'QUERY_SITE_CONSTRAINT_MISMATCH')
-    if (target?.title && match !== 'exact') reasons.push(match === 'related' ? 'TARGET_TITLE_RELATED_ONLY' : 'TARGET_TITLE_ABSENT')
+    const lookup = target?.purpose === 'lookup'
+    if (target?.title && (lookup ? !lookupNamesWork(result.title, descriptions, target.title, pageType) : match !== 'exact')) reasons.push(match === 'related' ? 'TARGET_TITLE_RELATED_ONLY' : 'TARGET_TITLE_ABSENT')
     if (authorMatch === 'conflicting') reasons.push('TARGET_AUTHOR_CONFLICT')
     if (publicationMatch === 'outside') reasons.push('PUBLICATION_DATE_OUTSIDE_QUERY')
-    if (target?.title && pageType !== 'book' && pageType !== 'chapter') reasons.push(pageType === 'secondary' ? 'SECONDARY_SOURCE_ONLY' : pageType === 'homepage' ? 'PLATFORM_HOME_ONLY' : 'BOOK_PAGE_TYPE_UNCONFIRMED')
+    const needsReadingEntry = lookup && /正版|阅读入口|官方|全文阅读|作品页|书籍详情/u.test(query) && !/访谈|公告|新闻|采访/u.test(query)
+    if (target?.title && pageType !== 'book' && pageType !== 'chapter' && (!lookup || needsReadingEntry || pageType === 'homepage')) reasons.push(pageType === 'secondary' ? 'SECONDARY_SOURCE_ONLY' : pageType === 'homepage' ? 'PLATFORM_HOME_ONLY' : 'BOOK_PAGE_TYPE_UNCONFIRMED')
     return { index, eligible: reasons.length === 0, hostMatch, siteMatch, titleMatch: match, authorMatch, pageType,
       ...(publicationMatch ? { publicationMatch } : {}), reasons }
   })
@@ -148,6 +204,7 @@ export function rankResearchSearchResults(query: string, results: readonly WebSe
     // Eligibility and known target identity outrank supplier quality. Use
     // supplier reranking and authority jointly within otherwise suitable hits.
     return [Number(candidate.eligible), Number(candidate.eligible && candidate.authorMatch === 'mentioned'),
+      Number(target?.purpose === 'lookup' && candidate.eligible && candidate.pageType === 'book'),
       Number(candidate.publicationMatch === 'within'), Number(rerankScore >= 1.5), Number(authority >= 3), rerankScore, authority]
   }
   return evaluated.candidates.map(candidate => ({ index: candidate.index, rank: rank(candidate) }))

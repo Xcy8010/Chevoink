@@ -14,7 +14,7 @@ import type {
 import { env } from '../../config/env.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { parseModelCapabilities } from '../credits.js'
-import { estimateTextTokens } from './context-budget.js'
+import { attachmentHistoryUrl, estimateTextTokens } from './context-budget.js'
 import { extractDirectiveCandidates } from './task-spec.js'
 
 const WARNING_THRESHOLD = 0.65
@@ -247,7 +247,7 @@ async function compactSessionContextInternal(userId: string, sessionId: string, 
   const receipts = source.flatMap((item) => {
     if (!Array.isArray(item.parts)) return []
     return (item.parts as unknown as AgentMessagePart[]).flatMap((part) => part.type === 'tool-call' && part.status === 'success'
-      ? [{ toolName: part.toolName, summary: part.summary ?? '执行成功', artifactId: null }]
+      ? [{ toolName: part.toolName, summary: part.summary ?? '执行成功', artifactId: part.toolName === 'read_file' ? attachmentHistoryUrl(part.args) ?? null : null }]
       : [])
   })
   const constraints = directives.filter((item) => item.kind === 'must' || item.kind === 'must_not').map((item) => item.text)

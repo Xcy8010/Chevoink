@@ -1817,7 +1817,7 @@ export function AgentPanel({
               const messageRunActive = active && (message.runTiming?.sourceRunId ?? message.runId) === runId
               const blockRunActive = active && runId !== null && Boolean(block?.runIds?.includes(runId))
               const messageActivities = activityGroups.byMessage.get(message.id)
-              const hasActivity = messageActivities && [...messageActivities.values()].some(group => group.messageId === message.id)
+              const hasActivity = message.parts.some(part => part.type === 'context-compaction') || messageActivities && [...messageActivities.values()].some(group => group.messageId === message.id)
               const hasProcess = Boolean(block?.ops)
               const reportVisibility = activityReportVisibility(activityGroups.reportsByMessage.get(message.id), messageRunActive, pendingApproval?.callId)
               const hasAuthorText = hasVisibleActivityText(message.parts, reportVisibility)

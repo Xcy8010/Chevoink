@@ -146,7 +146,7 @@ export async function dossierSynthesisInput(tx: RuntimeTx, parent: { id: string;
     const row = await tx.webToolCall.findUnique({ where: { id } })
     if (!row || row.runId !== parent.originRunId || row.kind !== 'search' || row.status !== 'completed' || !row.outcome
       || row.amountMilli !== 0 || row.multiplierBps !== 0 || row.requestHash !== hash(dossierQueryRequest(parent, work, ordinal))) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原研究查询尚无完整回执，未生成档案。')
-    const outcome = z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']), results: z.array(z.object({ title: z.string(), url: z.string(), snippet: z.string(), source: z.string() })) }).passthrough().parse(row.outcome)
+    const outcome = z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing', 'qidian']), results: z.array(z.object({ title: z.string(), url: z.string(), snippet: z.string(), source: z.string() })) }).passthrough().parse(row.outcome)
     outcomes.push(outcome as WebSearchOutcome); queryReceipts.push({ id, hash: runtimeJson(row.outcome).hash })
   }
   const sources = researchDossierSources(outcomes, work.admittedAt)

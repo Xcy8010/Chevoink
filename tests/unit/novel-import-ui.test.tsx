@@ -9,6 +9,7 @@ import { canSubmitImport, IMPORT_MERGE_DELIMITER, importChapterMergeIssue, impor
 import { ImportPreviewEditor } from '../../src/features/studio/components/import-preview-editor'
 import { clearImportHandoff, readImportHandoff, readImportJobId } from '../../src/features/studio/lib/import-handoff'
 import { ToastProvider } from '../../src/components/ui/Toast'
+import { flushDesktopSaves } from '../../src/lib/desktop-lifecycle'
 import { StrictMode } from 'react'
 
 // ImportDialog 使用 useToast（成功提示），测试统一包 ToastProvider；rerender 会沿用同一 wrapper。
@@ -433,16 +434,20 @@ describe('import confirmations and ownership', () => {
   })
 
   it('persists legacy preview edits with the current revision before one-click import', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('ChevoinkDesktop/1.0.5')
     const { props, client } = fixture()
     vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
     render(<ImportDialog {...props} />)
     await screen.findByLabelText('选择导入文件'); await uploadAndParse()
     fireEvent.change(screen.getByLabelText('章名'), { target: { value: '新章名' } })
+    expect(await flushDesktopSaves()).toBe(false)
+    expect(client.commit).not.toHaveBeenCalled()
     await armedClick('一键导入')
     await waitFor(() => expect(client.edit).toHaveBeenCalledWith('a', 'job-a', expect.objectContaining({ expectedManifestRevision: 1, metadataSelection: {}, volumes: [{ title: '正文卷', chapters: [{ ...preview.volumes[0].chapters[0], title: '新章名' }] }] })))
     await waitFor(() => expect(client.confirm).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
     expect(props.onImported).toHaveBeenCalledWith(receipt)
+    expect(await flushDesktopSaves()).toBe(true)
   })
 
   it('routes native hardware-back cancellation directly to close', async () => {

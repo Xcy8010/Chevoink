@@ -1,10 +1,6 @@
 :root { color-scheme: light dark; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
 body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #151515; color: #ededed; }
 main { max-width: 34rem; padding: 2rem; line-height: 1.8; text-align: center; }
-main img { display: block; margin: 0 auto 24px; object-fit: contain; }
-#progress { margin: 0 auto; }
+.boot-splash[hidden] { display: none; }
 h1 { font-size: 1.5rem; } a { color: LinkText; }
-#progress { display: block; width: 1.5rem; height: 1.5rem; border: 2px solid GrayText; border-right-color: transparent; border-radius: 50%; animation: loading 1s linear infinite; }
-#progress[hidden] { display: none; }
-@keyframes loading { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { #progress { animation: none; } }
+@media (prefers-color-scheme: light) { body { background: #f4f0e8; color: #23252a; } }

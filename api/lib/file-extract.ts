@@ -9,7 +9,7 @@ import { DataAccessError } from './prisma.js'
  * 借鉴 anthropics/skills 的 pdf/docx 思路与 offset 续读参数设计，Node 纯 JS 实现。
  */
 
-/** 单次提取返回的最大字符数（≈15k token，对齐 loop 上下文预算） */
+/** Absolute extraction bound; the chat tool additionally sizes pages for its model. */
 export const FILE_EXTRACT_MAX_CHARS = 20000
 
 export type FileExtractResult = {
@@ -57,6 +57,7 @@ export async function extractFileText(
   buffer: Buffer,
   filename: string,
   offset = 0,
+  maxChars = FILE_EXTRACT_MAX_CHARS,
 ): Promise<FileExtractResult> {
   const extension = (path.extname(filename).slice(1) || '').toLowerCase()
 
@@ -91,7 +92,18 @@ export async function extractFileText(
   const totalChars = normalized.length
 
   const start = Math.min(Math.max(offset, 0), totalChars)
-  const text = normalized.slice(start, start + FILE_EXTRACT_MAX_CHARS)
+  if (start > 0 && start < totalChars && /[\uDC00-\uDFFF]/.test(normalized[start]) && /[\uD800-\uDBFF]/.test(normalized[start - 1])) {
+    throw new DataAccessError(400, 'VALIDATION_ERROR', `字符偏移位于同一个字符中间，请从 offset=${start - 1} 读取。`)
+  }
+  const pageChars = Number.isFinite(maxChars)
+    ? Math.min(FILE_EXTRACT_MAX_CHARS, Math.max(2, Math.floor(maxChars)))
+    : FILE_EXTRACT_MAX_CHARS
+  let end = Math.min(totalChars, start + pageChars)
+  // Keep UTF-16 offsets compatible with old receipts while returning complete code points.
+  if (end < totalChars && /[\uD800-\uDBFF]/.test(normalized[end - 1]) && /[\uDC00-\uDFFF]/.test(normalized[end])) {
+    end--
+  }
+  const text = normalized.slice(start, end)
 
   return {
     text,

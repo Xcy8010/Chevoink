@@ -393,6 +393,7 @@ export type AgentStreamEventBody =
       reasoningEffort: import('./credits.js').ModelReasoningEffort; creativeFreedom: CreativeFreedom; modelSelectionExplicit: boolean }
   | { type: 'execution.progress'; revision: number; stage: 'model' | 'tool' | 'checkpoint' | 'finalizing' }
   | { type: 'activity.title'; messageId: string; title: string }
+  | { type: 'context.compaction'; messageId: string; state: 'running' | 'completed' }
   | { type: 'review.reconciled'; callId: string; chapterId: string; revision: number;
       compilationId: string | null; receipt: AgentReviewFailureReconciliation | AgentCancelledReviewRetirement | AgentAuthorReviewReplacement | AgentAuthorContinuedReview }
   | { type: 'text.delta'; messageId: string; delta: string }
@@ -523,6 +524,7 @@ export type AgentNextPrompt = { runId: EntityId; text: string }
 export type AgentMessagePart =
   | { type: 'text'; text: string; afterTools?: true }
   | { type: 'activity-title'; title: string }
+  | { type: 'context-compaction'; state: 'running' | 'completed' }
   | { type: 'reasoning'; text: string; durationMs?: number; activity?: true }
   | {
       type: 'tool-call'

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import MemoryCardEditor, { MemoryCardDeleteDialog } from '../../src/features/studio/agent/components/MemoryCardEditor'
 import { updateStoryMemory, deleteStoryMemory } from '../../src/features/studio/agent/agentApi'
 import type { StoryMemoryCard } from '../../shared/contracts'
+import { flushDesktopSaves } from '../../src/lib/desktop-lifecycle'
 
 vi.mock('../../src/features/studio/agent/agentApi', () => ({ updateStoryMemory: vi.fn(), deleteStoryMemory: vi.fn() }))
 vi.mock('../../src/store/useShellStore', () => ({ useShellStore: (select: (s: unknown) => unknown) => select({ sessionUser: { id: 'u' } }) }))
@@ -25,6 +26,16 @@ function setup(value = card, novelId = 'n') {
   const view = render(<MemoryCardEditor card={value} novelId={novelId} onClose={onClose} onSaved={onSaved} />)
   return { ...view, onClose, onSaved }
 }
+it('does not acknowledge a session-only memory edit as saved when the Windows app exits', async () => {
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('ChevoinkDesktop/1.0.5')
+  const view = setup()
+  expect(await flushDesktopSaves()).toBe(true)
+  fireEvent.change(screen.getByLabelText('内容'), { target: { value: '尚未保存到卡片' } })
+  expect(await flushDesktopSaves()).toBe(false)
+  expect(updateStoryMemory).not.toHaveBeenCalled()
+  view.unmount()
+  expect(await flushDesktopSaves()).toBe(true)
+})
 it('backdrop/scroll does not dismiss edits; Escape shows unsaved choice, keeps draft on reopen', () => {
   const view = setup()
   fireEvent.change(screen.getByLabelText('内容'), { target: { value: '未保存草稿' } })

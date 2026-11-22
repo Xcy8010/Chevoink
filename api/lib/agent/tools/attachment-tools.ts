@@ -203,11 +203,17 @@ export const viewImageTool = defineTool({
   },
 })
 
+/** Keep eight recent Chinese-text pages within half the available input budget. */
+export function readFilePageChars(inputBudgetTokens?: number): number {
+  if (inputBudgetTokens === undefined || !Number.isFinite(inputBudgetTokens)) return 3000
+  return Math.max(2, Math.min(6000, Math.floor(inputBudgetTokens / 16)))
+}
+
 export const readFileTool = defineTool({
   name: 'read_file',
   title: '读取文件',
   description:
-    '读取作者附件 PDF、Word、TXT、MD 的文字（每次最多 20000 字符，offset 续读）。识别扫描文字或图表时先读取文件，然后将返回的页码或内嵌图引用交给 view_image。旧版 DOC 需要隔离转换器。ZIP 或完整作品导入使用 novel_import prepare，经作者核对确认。禁止凭文件名猜测。',
+    '按当前模型窗口分页读取作者附件 PDF、Word、TXT、MD 的文字。长文按作者目标逐段整理已核实的结论，需要后文时用该附件回执的 offset 续读。识别扫描文字或图表时先读取文件，然后将返回的页码或内嵌图引用交给 view_image。旧版 DOC 需要隔离转换器。ZIP 或完整作品导入使用 novel_import prepare，经作者核对确认。禁止凭文件名猜测。',
   parameters: z.object({
     url: z.string().describe('文件地址（作者附件元数据中的 url）'),
     offset: z
@@ -240,7 +246,7 @@ export const readFileTool = defineTool({
     }
 
     try {
-      const result = await readChatAttachment(buffer, path.basename(diskPath), args.url, args.offset ?? 0, ctx.signal)
+      const result = await readChatAttachment(buffer, path.basename(diskPath), args.url, args.offset ?? 0, ctx.signal, readFilePageChars(ctx.attachmentInputBudgetTokens))
       ctx.signal.throwIfAborted()
 
       const notice = result.notice ? `\n${result.notice}` : ''
@@ -252,16 +258,18 @@ export const readFileTool = defineTool({
       }
 
       const offset = Math.min(args.offset ?? 0, result.totalChars)
-      const tailNote = result.truncated || offset > 0
-        ? `（本次返回第 ${offset}-${offset + result.text.length} 字符，已提取文字共 ${result.totalChars} 字符；${result.truncated ? `需要后续内容请再次调用 read_file 并传 offset=${offset + result.text.length}` : '已到提取文字末尾，本次仅返回该范围'}）`
-        : `（已返回全部提取文字，共 ${result.totalChars} 字符）`
+      const end = offset + result.text.length
+      const summary = `返回字符 [${offset},${end})，提取文字共 ${result.totalChars} 字符；${result.truncated ? `续读 offset=${end}` : '已到提取文字末尾'}`
+      const guidance = result.truncated
+        ? '\n请先归纳本段与作者任务有关的事实并保留出处，再按需续读。若作者要求全文，逐段整理至末尾；范围内材料已能回答的问题可直接作答。'
+        : ''
 
       return {
-        output: `文件内容提取结果${tailNote}${notice}\n"""\n${result.text}\n"""`,
-        summary: `读取文件 · ${result.text.length} 字`,
+        output: `文件内容提取结果（${summary}）${notice}${guidance}\n"""\n${result.text}\n"""`,
+        summary,
         display: { kind: 'markdown', markdown: clip(result.text, 2000) },
         observedAttachment: { url: args.url, contentHash: createHash('sha256').update(buffer).digest('hex'),
-          offset, end: offset + result.text.length, totalChars: result.totalChars },
+          offset, end, totalChars: result.totalChars },
       }
     } catch (error) {
       ctx.signal.throwIfAborted()

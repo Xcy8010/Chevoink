@@ -6,17 +6,15 @@ const reasons = {
   crash: '页面进程重复异常，已停止自动重载。可尝试重新连接或重新打开客户端。',
   engine: '无法初始化安全的浏览器环境，请更新 WebView2 后重新打开客户端。',
 }
-let timer
 function render() {
-  clearTimeout(timer)
   const code = window.location.hash.slice(1)
   const reason = Object.hasOwn(reasons, code) ? reasons[code] : undefined
-  document.getElementById('title').textContent = reason ? '暂时无法打开 Chevoink' : '正在连接 Chevoink'
-  document.getElementById('detail').textContent = reason || '正在安全地连接创作空间，请稍候。'
-  document.getElementById('progress').hidden = Boolean(reason)
-  if (!reason) timer = setTimeout(() => {
-    document.getElementById('detail').textContent = '连接时间较长，可检查网络后重试，或通过窗口菜单在浏览器打开官网。'
-  }, 15000)
+  document.documentElement.classList.toggle('dark', Boolean(window.matchMedia?.('(prefers-color-scheme: dark)').matches))
+  document.getElementById('app-loading').hidden = Boolean(reason)
+  document.getElementById('detail').textContent = reason || ''
+  document.querySelector('main').hidden = !reason
+  // An incomplete permission setup can only be retried by restarting the host.
+  document.querySelector('a').hidden = code === 'engine'
 }
 window.addEventListener('hashchange', render)
 render()

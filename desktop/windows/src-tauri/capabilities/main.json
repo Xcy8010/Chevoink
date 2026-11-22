@@ -1,9 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Version, nonce-scoped save acknowledgement and fixed update/official-site actions; no generic plugin commands",
+  "description": "Version, nonce-scoped save acknowledgement, fixed settings and main-window caption actions",
   "local": false,
   "windows": ["main"],
   "remote": { "urls": ["https://chevoink.chevolink.com"] },
-  "permissions": ["allow-desktop-get-info", "allow-desktop-report-state", "allow-desktop-settings-action"]
+  "permissions": ["allow-desktop-get-info", "allow-desktop-report-state", "allow-desktop-settings-action", "allow-desktop-caption"]
 }

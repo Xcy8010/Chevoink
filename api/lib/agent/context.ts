@@ -31,7 +31,7 @@ import { selectProfileExcerpt } from './story-profile.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { buildStoryCompilerDigest } from './story-compiler.js'
 import { getLearnedStyleDigest } from './style-learning.js'
-import { estimateTextTokens, estimateChatMessagesTokens } from './context-budget.js'
+import { attachmentHistoryUrl, estimateTextTokens, estimateChatMessagesTokens } from './context-budget.js'
 import { taskOperatingGuidance } from './task-guidance.js'
 import { readWritingLocalContext } from './writing-local-context.js'
 import { renderContextTime, withHistoryTimestamp } from './context-time.js'
@@ -324,7 +324,8 @@ function partsToPlainText(parts: AgentMessagePart[]): string {
         }
         const coverIds =
           part.display?.kind === 'coverImages' ? part.display.images.map((image) => image.id).join('、') : ''
-        return JSON.stringify({ tool: part.toolName, status: part.status, summary: part.summary, ...(coverIds ? { coverAssetId: coverIds } : {}) })
+        const attachmentUrl = part.toolName === 'read_file' && part.status === 'success' ? attachmentHistoryUrl(part.args) : undefined
+        return JSON.stringify({ tool: part.toolName, status: part.status, summary: part.summary, attachmentUrl, ...(coverIds ? { coverAssetId: coverIds } : {}) })
       }
       return ''
     })

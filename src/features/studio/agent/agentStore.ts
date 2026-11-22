@@ -1342,6 +1342,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         case 'execution.progress':
           return base
 
+        case 'context.compaction': {
+          if (event.runId !== state.runId) return {}
+          const owned = ensureAssistantMessage(state.messages, event, state.runGoalId)
+          if (!owned) return {}
+          return { ...base, messages: updateMessageParts(owned, event.messageId, parts => {
+            const previous = parts.find(part => part.type === 'context-compaction')
+            if (previous?.state === 'completed' || previous?.state === event.state) return parts
+            return [...parts.filter(part => part.type !== 'context-compaction'), { type: 'context-compaction', state: event.state }]
+          }) }
+        }
         case 'activity.title': {
           const owned = ensureAssistantMessage(state.messages, event, state.runGoalId)
           if (!owned) return {}

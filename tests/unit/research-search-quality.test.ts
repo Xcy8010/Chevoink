@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { evaluateResearchSearchCandidates, searchQueryHash, type ResearchSearchTarget } from '../../api/lib/research-search-quality.js'
+import { bookLookupTarget, evaluateResearchSearchCandidates, quotedBookLookupQuery, searchQueryHash, type ResearchSearchTarget } from '../../api/lib/research-search-quality.js'
 import { searchWeb, type WebSearchResult } from '../../api/lib/web-search-service.js'
 import { env } from '../../api/config/env.js'
 
@@ -12,6 +12,38 @@ const wrongBook = result('我不是戏神123456三九音域番茄小说', 'https
 const generic = [result('我（汉语汉字）_百科', 'https://baike.example.com/item/wo'), result('《我的世界》官网 Minecraft', 'https://minecraft.example.com/')]
 
 describe('bounded research search candidate facts', () => {
+  const bookGoal = '帮我联网找一下雾港长昼这本书'
+  it('quotes only a standalone free search term, including titles contained in operators and URLs', () => {
+    const target = { title: 'it', purpose: 'lookup' as const }
+    expect(quotedBookLookupQuery('site:book.example.com/book/it it novel', target)).toBe('site:book.example.com/book/it "it" novel')
+    expect(quotedBookLookupQuery('site:"book.example.com/book/it" -it edit novel', target)).toBe('site:"book.example.com/book/it" -it edit novel')
+  })
+  it('does not match a partial unquoted name inside a different book title', () => {
+    const query = '雾港长昼 小说', target = bookLookupTarget(query, [bookGoal])
+    const distinct = result('重生之雾港长昼传奇', 'https://publisher.example/book/other', '与《雾港长昼》有关')
+    const correct = result('雾港长昼 - 作者访谈', 'https://publisher.example/book/right')
+    expect(evaluateResearchSearchCandidates(query, [distinct, correct], target).eligibleResults).toEqual([correct])
+  })
+  it.each(['《雾港长昼》 青衣客 正版 小说 阅读 起点中文网', '青衣客 雾港长昼 起点中文网 作品 官方',
+    'site:qidian.com/book "雾港长昼" "青衣客"', '雾港长昼 小说 青衣客 正版阅读 起点 纵横', '青衣客作品 雾港长昼 小说 阅读 官方'])('retains an unquoted author lookup across query rewrites: %s', query => {
+    const target = bookLookupTarget(query, [bookGoal])
+    expect(target).toEqual({ title: '雾港长昼', purpose: 'lookup' })
+    expect(quotedBookLookupQuery(query, target)).toContain('"雾港长昼"')
+    expect(evaluateResearchSearchCandidates(query, generic, target)).toMatchObject({ hasHardConstraints: true, eligibleCount: 0 })
+  })
+  it('keeps private or ambiguous titles out of outgoing queries and distinguishes a sequel from the named book', () => {
+    expect(bookLookupTarget('公开资料 查找', [bookGoal])).toBeUndefined()
+    expect(bookLookupTarget('《甲书》 《乙书》 小说', [])).toBeUndefined()
+    expect(bookLookupTarget('帮我查一下水位这两天的变化', [])).toBeUndefined()
+    const query = '雾港长昼 正版入口'
+    const target = bookLookupTarget(query, [bookGoal])
+    const real = result('《雾港长昼》 - 官方阅读', 'https://publisher.example.com/book/15')
+    const sequel = result('《雾港长昼2》', 'https://publisher.example.com/book/17', '《雾港长昼》的续集')
+    const review = result('访谈：《雾港长昼》', 'https://paper.example.org/article/42')
+    expect(evaluateResearchSearchCandidates(query, [sequel, review, real], target).eligibleResults).toEqual([real])
+    expect(quotedBookLookupQuery('site:publisher.example.com/book -site:other.example.org 雾港长昼 官方', target))
+      .toBe('site:publisher.example.com/book -site:other.example.org "雾港长昼" 官方')
+  })
   it('separates generic hits, wrong books, related secondary evidence and exact official candidates', () => {
     const chapter = result('我不是戏神第1章 赤色流星', 'https://fanqienovel.com/reader/789', '三九音域')
     const assessment = evaluateResearchSearchCandidates('site:fanqienovel.com 我不是戏神 三九音域', [...generic, wrongBook, secondary, derivative, official, chapter], target)
@@ -71,6 +103,25 @@ beforeEach(() => { env.webSearchProvider = 'auto'; transport.mockReset(); vi.stu
 afterEach(() => { env.webSearchProvider = originalProvider; vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('constrained provider selection preserves billing and transport facts', () => {
+  it('finds the publisher below off-topic Bing hits through a checked tracking href without sending a second paid request', async () => {
+    const query = '雾港长昼 正版入口', target = bookLookupTarget(query, ['帮我联网找一下雾港长昼这本书'])
+    const officialUrl = 'https://publisher.example.com/book/108'
+    const href = (value: string) => '/ck/a?x=1&amp;u=a1' + Buffer.from(value).toString('base64url')
+    const block = (title: string, url: string) => `<li data-rank='2' class='result b_algo'><a href='https://ads.example.com/'>面包屑</a><h2><a href='${url}'>${title}</a></h2></li>`
+    const html = [block('《雾港长昼》', href('http://127.0.0.1/book/1')), block('《雾港长昼》', '/ck/a?u=bad'),
+      ...Array.from({ length: 7 }, (_, n) => block('雾（汉字释义）', 'https://dict.example.com/item/' + n)),
+      block('《<b>雾港长昼</b>》 官方阅读', href(officialUrl))].join('')
+    transport.mockResolvedValueOnce(Response.json({ results: [nativeItem(generic[0])] }))
+      .mockResolvedValueOnce(sogou(generic)).mockResolvedValueOnce(new Response(html))
+    const outcome = await searchWeb(query, 5, undefined, config, target)
+    expect(outcome.quality?.eligibleResults).toMatchObject([{ title: '《雾港长昼》 官方阅读', url: officialUrl, source: 'publisher.example.com' }])
+    expect(outcome.results[0].url).toBe(officialUrl)
+    expect(outcome.attempts?.map(attempt => [attempt.provider, attempt.eligibleCount])).toEqual([['deepseek', 0], ['sogou', 0], ['bing', 1]])
+    expect(transport).toHaveBeenCalledTimes(3)
+    expect(JSON.parse(transport.mock.calls[0][1].body).query).toBe(query)
+    expect(new URL(transport.mock.calls[2][0]).searchParams.get('q')).toBe('"雾港长昼" 正版入口')
+    expect(outcome.attempts?.[2].queryHash).toBe(searchQueryHash('"雾港长昼" 正版入口'))
+  })
   const query = 'site:fanqienovel.com/page 我不是戏神 三九音域'
   it('continues free fallback after valid paid secondary hits, then adopts an actual eligible result', async () => {
     transport.mockResolvedValueOnce(Response.json({ results: [nativeItem(secondary), nativeItem(wrongBook)] }))

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AGENT_FILE_ACCEPT, MAX_AGENT_FILE_BYTES_DOC } from '../../shared/contracts/agent-attachments.js'
 import { validateAgentFile } from '../../src/features/studio/agent/agent-attachments.js'
 import { resolveManagedAttachmentPath, storeAgentAttachment } from '../../api/lib/agent-attachment-storage.js'
-import { readFileTool } from '../../api/lib/agent/tools/attachment-tools.js'
+import { readFilePageChars, readFileTool } from '../../api/lib/agent/tools/attachment-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 const files: string[] = []
@@ -23,17 +23,34 @@ describe('chat import-only attachment channel', () => {
     ['utf8', 'txt', true],
   ] as const)('reads an uploaded %s file through the chat tool', async (encoding, extension, addBOM) => {
     const tail = encoding === 'gb18030' ? '生僻字𠀀' : '山河'
-    const body = '章'.repeat(19999) + '\r\n' + tail
+    const pageChars = readFilePageChars()
+    const body = '章'.repeat(pageChars - 1) + '\r\n' + tail
     const bytes = iconv.encode(body, encoding, { addBOM })
     const attachment = await storeAgentAttachment({ userId, kind: 'file', name: `稿.${extension}`,
       dataUrl: `data:application/octet-stream;base64,${bytes.toString('base64')}` })
     files.push(resolveManagedAttachmentPath(attachment.url)!)
     const first = await readFileTool.execute(context(), { url: attachment.url })
-    expect(first.output).toContain('offset=20000')
+    expect(first.output).toContain(`offset=${pageChars}`)
     expect(first.output.includes('按 GB18030')).toBe(encoding.startsWith('gb'))
-    const next = await readFileTool.execute(context(), { url: attachment.url, offset: 20000 })
+    const next = await readFileTool.execute(context(), { url: attachment.url, offset: pageChars })
     expect(next.output).toContain(`"""\n${tail}\n"""`)
-    expect(next.observedAttachment).toMatchObject({ offset: 20000, end: 20000 + tail.length })
+    expect(next.observedAttachment).toMatchObject({ offset: pageChars, end: pageChars + tail.length })
+  })
+
+  it('sizes each real read for the input allowance and resumes at an existing 20k cursor', async () => {
+    const bytes = Buffer.from('山'.repeat(19_999) + '河' + '路'.repeat(7000))
+    const { url } = await storeAgentAttachment({ userId, kind: 'file', name: '长稿.txt',
+      dataUrl: `data:application/octet-stream;base64,${bytes.toString('base64')}` })
+    files.push(resolveManagedAttachmentPath(url)!)
+    const small = await readFileTool.execute({ ...context(), attachmentInputBudgetTokens: 16_000 }, { url })
+    expect(small.summary).toContain('续读 offset=1000')
+    expect(small.observedAttachment).toMatchObject({ url, offset: 0, end: 1000, totalChars: 27000 })
+    const large = await readFileTool.execute({ ...context(), attachmentInputBudgetTokens: 128_000 }, { url, offset: 20_000 })
+    expect(large.observedAttachment).toMatchObject({ url, offset: 20_000, end: 26_000, totalChars: 27000 })
+    expect(large.output).toContain('"""\n' + '路'.repeat(6000) + '\n"""')
+    const tail = await readFileTool.execute(context(), { url, offset: large.observedAttachment!.end })
+    expect(tail.summary).toContain('[26000,27000)')
+    expect(tail.summary).not.toContain('续读 offset=')
   })
 
   it('reports undecodable bytes instead of returning a successful text observation', async () => {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { LoaderCircle, Upload } from 'lucide-react'
+import { registerDesktopSave } from '@/lib/desktop-lifecycle'
 import type { NovelImportCapabilities, NovelImportJobStatus, NovelImportModelSelection, NovelImportPreflight, NovelImportPreview, NovelImportReceipt } from '../../../../shared/contracts/novel-import.js'
 import { novelImportApi, type NovelImportClient } from '../import-api'
 import { canSubmitImport, importPreviewCounts } from '../lib/import-preview'
@@ -85,6 +86,8 @@ function ImportDialogSession(props: ImportDialogProps) {
   const [report, setReport] = useState<NovelImportReportDto | null>(null)
   const [selection, setSelection] = useState<ImportSelectionEdit | null>(null)
   const [dirty, setDirty] = useState(false)
+  // Selection and manifest edits are local until the author explicitly saves/applies them.
+  useEffect(() => registerDesktopSave(() => !dirty), [dirty])
   const [file, setFile] = useState<File | null>(null)
   const [manualEncoding, setManualEncoding] = useState(false)
   const [encoding, setEncoding] = useState('utf-8')

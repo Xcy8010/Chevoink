@@ -25,13 +25,15 @@ const reviewedChapterSchema = z.object({ chapterId: z.string().min(1), revision:
  * Caller holds the root lock and commits this with the source projection marker. */
 export async function persistProjectedMessages(tx: RuntimeTx, source: AgentExecutionOutbox, sessionId: string, bodies: AgentStreamEventBody[]) {
   for (const body of bodies) {
-    if (!['message.start', 'activity.title', 'reasoning.delta', 'text.final', 'tool.call', 'tool.result'].includes(body.type) || !('messageId' in body)) continue
+    if (!['message.start', 'activity.title', 'context.compaction', 'reasoning.delta', 'text.final', 'tool.call', 'tool.result'].includes(body.type) || !('messageId' in body)) continue
     const old = await tx.agentMessage.findUnique({ where: { id: body.messageId }, include: { run: { select: { taskRootId: true } } } })
     if (old && (old.sessionId !== sessionId || old.role !== 'assistant' || old.run.taskRootId !== source.taskRootId)) {
       return runtimeError('RUNTIME_SCOPE_MISMATCH', '历史消息不属于原持久任务，不能覆盖。')
     }
     let parts = (old?.parts ?? []) as unknown as AgentMessagePart[]
-    if (body.type === 'activity.title') {
+    if (body.type === 'context.compaction') {
+      parts = [{ type: 'context-compaction', state: body.state }]
+    } else if (body.type === 'activity.title') {
       parts = prependAgentActivityTitle(parts, body.title)
     } else if (body.type === 'reasoning.delta') {
       const existing = parts.find(part => part.type === 'reasoning')

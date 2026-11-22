@@ -12,7 +12,7 @@ use tauri_plugin_opener::OpenerExt;
 fn desktop_get_info(window: tauri::WebviewWindow) -> Result<serde_json::Value, String> {
     authorize(&window)?;
     Ok(
-        serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "saveHandshake": 1, "settingsActions": 1}),
+        serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "saveHandshake": 1, "settingsActions": 1, "windowCaption": 1}),
     )
 }
 
@@ -53,6 +53,51 @@ fn authorize(window: &tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum CaptionAction {
+    Attach,
+    System,
+    State,
+    Drag,
+    Minimize,
+    ToggleMaximize,
+    Close,
+}
+
+#[derive(serde::Serialize)]
+struct CaptionState {
+    decorated: bool,
+    maximized: bool,
+    fullscreen: bool,
+}
+
+#[tauri::command]
+fn desktop_caption(
+    window: tauri::WebviewWindow,
+    action: CaptionAction,
+) -> Result<CaptionState, String> {
+    authorize(&window)?;
+    let apply = || -> tauri::Result<CaptionState> {
+        match action {
+            CaptionAction::Attach => window.set_decorations(false)?,
+            CaptionAction::System => window.set_decorations(true)?,
+            CaptionAction::State => (),
+            CaptionAction::Drag => window.start_dragging()?,
+            CaptionAction::Minimize => window.minimize()?,
+            CaptionAction::ToggleMaximize if window.is_maximized()? => window.unmaximize()?,
+            CaptionAction::ToggleMaximize => window.maximize()?,
+            CaptionAction::Close => window::request_close(&window),
+        }
+        Ok(CaptionState {
+            decorated: window.is_decorated()?,
+            maximized: window.is_maximized()?,
+            fullscreen: window.is_fullscreen()?,
+        })
+    };
+    apply().map_err(|_| "Window control unavailable".into())
+}
+
 #[tauri::command]
 fn desktop_report_state(
     window: tauri::WebviewWindow,
@@ -71,7 +116,14 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        - tauri_plugin_window_state::StateFlags::DECORATIONS,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(window::CloseState::default())
@@ -79,7 +131,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             desktop_get_info,
             desktop_report_state,
-            desktop_settings_action
+            desktop_settings_action,
+            desktop_caption
         ])
         .setup(|app| {
             let data = app.path().app_local_data_dir()?.join("WebView2");
@@ -98,6 +151,15 @@ pub fn run() {
                     .min_inner_size(640.0, 480.0)
                     .data_directory(data)
                     .disable_drag_drop_handler()
+                    // A reloaded/older website and the packaged failure page must always
+                    // have working system controls until a compatible page takes over.
+                    .on_page_load(|window, payload| {
+                        if payload.event() == tauri::webview::PageLoadEvent::Started
+                            && matches!(window.is_decorated(), Ok(false))
+                        {
+                            let _ = window.set_decorations(true);
+                        }
+                    })
                     .on_navigation(|url| is_app_url(url) || is_fallback_url(url))
                     .on_new_window(|_, _| NewWindowResponse::Deny)
                     .build()?;

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { env } from '../../api/config/env.js'
 import { webSearchTool } from '../../api/lib/agent/tools/search-tools.js'
@@ -39,6 +39,62 @@ const context = (): ToolContext => ({ userId: 'fixture', novelId: 'fixture', cha
   runId: randomUUID(), callId: randomUUID(), mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: vi.fn() })
 
 describe('search URL handoff to the model', () => {
+  it('uses the owned original lookup request and applies its site limits after the model drops the site operator', async () => {
+    const { buildTaskSpec } = await import('../../api/lib/agent/task-spec.js')
+    const { getResearchReadTarget } = await vi.importActual<typeof import('../../api/lib/agent/research-sources.js')>('../../api/lib/agent/research-sources.js')
+    const { evaluateResearchSearchCandidates } = await import('../../api/lib/research-search-quality.js')
+    const goal = '帮我联网找一下雾港长昼这本书。' + '背景信息。'.repeat(210) + '仅在 site:publisher.example.com/book 检索，禁止 site:publisher.example.com/book/archive。'
+    const ctx = context(), query = '青衣客 雾港长昼 正版阅读'
+    const taskSpec = buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt: goal })
+    expect(taskSpec.goals.join('')).not.toContain('site:')
+    const owned = { id: ctx.runId, sessionId: ctx.sessionId, taskSpec, startRequest: { prompt: goal } }
+    const findFirst = vi.fn(async () => owned)
+    ctx.transaction = { agentRun: { findFirst, findFirstOrThrow: vi.fn(async () => owned) },
+      agentSession: { findFirst: vi.fn(async () => ({ spawnedFromRunId: null })) },
+      agentChildExecutionGrant: { findUnique: vi.fn(async () => null) } } as never
+    expect(await getResearchReadTarget(ctx)).toBeUndefined()
+    const target = await getResearchReadTarget(ctx, query)
+    expect(findFirst).toHaveBeenCalledWith({ where: { id: ctx.runId, userId: ctx.userId, sessionId: ctx.sessionId, novelId: ctx.novelId, novel: { authorId: ctx.userId } } })
+    expect(target).toMatchObject({ title: '雾港长昼', purpose: 'lookup', sourceHosts: ['publisher.example.com'] })
+    const hit = (url: string) => ({ title: '《雾港长昼》', snippet: '', source: '站点', url })
+    const candidates = [hit('https://publisher.example.com/book/18'), hit('https://publisher.example.com/book/archive/18'), hit('https://other.example.org/book/18')]
+    expect(evaluateResearchSearchCandidates(query, candidates, target).eligibleResults).toEqual([candidates[0]])
+  })
+  it('reprojects an exact pre-lookup same-task receipt under a new call ID and binds every original cache condition', async () => {
+    const { findResearchSearchOutcome, getResearchReadTarget } = await import('../../api/lib/agent/research-sources.js')
+    const digest = (parts: unknown) => createHash('sha256').update(JSON.stringify(parts)).digest('hex')
+    const ctx = { ...context(), publicWebSearchQuestion: '请搜索《雾港长昼》这本小说。' }, query = '雾港长昼 小说'
+    const originalQuestionHash = createHash('sha256').update(ctx.publicWebSearchQuestion).digest('hex')
+    const settings = { count: 5, provider: env.webSearchProvider, bochaConfigured: env.webSearchBochaApiKeyConfigured,
+      bochaKey: env.webSearchBochaApiKey, configured: null, originalQuestionHash }
+    const requestKey = digest({ version: 1, userId: ctx.userId, query, ...settings })
+    const raw = { provider: 'bing' as const, results: [{ title: '重生之雾港长昼传奇', snippet: '', source: '索引', url: 'https://example.org/book/1' }] }
+    vi.mocked(findResearchSearchOutcome).mockImplementationOnce(async (_ctx, _key, _query, options) =>
+      options?.preLookup?.requestKey === requestKey && options.preLookup.contextKey === digest(settings) ? raw : null)
+    vi.mocked(getResearchReadTarget).mockResolvedValueOnce({ title: '雾港长昼', purpose: 'lookup' })
+    const result = await webSearchTool.execute(ctx, { query, maxResults: 5 })
+    expect(result.display).toMatchObject({ kind: 'webSearch', results: [] })
+    expect(mocks.charge).not.toHaveBeenCalled()
+    expect(mocks.search).not.toHaveBeenCalled()
+  })
+  it('filters off-topic hits from an existing raw lookup receipt without redispatch, fee changes or registering dictionary links for the model', async () => {
+    const { findWebToolCallOutcome } = await import('../../api/lib/billing/web-tool-calls.js')
+    const { getResearchReadTarget, saveResearchSearchOutcome } = await import('../../api/lib/agent/research-sources.js')
+    const unrelated = { title: '雾字的释义', url: 'https://dictionary.example.com/item/wu', source: '字典', snippet: '字义' }
+    const raw = { provider: 'bing' as const, results: [unrelated] }
+    vi.mocked(findWebToolCallOutcome).mockResolvedValueOnce(raw)
+    vi.mocked(getResearchReadTarget).mockResolvedValueOnce({ title: '雾港长昼', purpose: 'lookup' })
+    const ctx = context(), query = '雾港长昼 青衣客 正版 小说'
+    const received = await webSearchTool.execute(ctx, { query, maxResults: 5 })
+    expect(getResearchReadTarget).toHaveBeenCalledWith(ctx, query)
+    expect(received.display).toMatchObject({ kind: 'webSearch', results: [] })
+    expect(received.summary).toContain('0 条相关来源')
+    expect(received.output).not.toContain(unrelated.url)
+    expect(saveResearchSearchOutcome).toHaveBeenCalledWith(ctx, raw, query)
+    expect(mocks.search).not.toHaveBeenCalled()
+    expect(mocks.charge).not.toHaveBeenCalled()
+    expect(mocks.refund).not.toHaveBeenCalled()
+  })
   it('repairs the research projection of this completed raw call even after configuration is disabled without reserving or charging again', async () => {
     const { findWebToolCallOutcome } = await import('../../api/lib/billing/web-tool-calls.js')
     const { reserveResearchRequest, saveResearchSearchOutcome } = await import('../../api/lib/agent/research-sources.js')
@@ -220,6 +276,18 @@ describe('search URL handoff to the model', () => {
 describe('provider response boundaries', () => {
   const actualSearch = async () => (await vi.importActual<typeof import('../../api/lib/web-search-service.js')>('../../api/lib/web-search-service.js')).searchWeb
   const entry = (url: string) => ({ name: '公开章节', url, summary: '公开摘要' })
+  it('finds a named publisher’s exact work in a single free catalogue response', async () => {
+    env.webSearchProvider = 'sogou'
+    const row = (id: number, book: string, href: string) => `<a data-bid="${id}" href="${href}"><h2>${book}</h2><p class="_searchBookAuthor_hash">作者甲</p></a>`
+    const html = row(41, '雾港来信', 'https://example.com/chapter/41/0/') +
+      row(42, '雾港来信', '//m.qidian.com/chapter/42/0/') + row(43, '雾港来信外传', '//m.qidian.com/chapter/43/0/')
+    const fetcher = vi.fn(async () => new Response(html))
+    vi.stubGlobal('fetch', fetcher)
+    const result = await (await actualSearch())('雾港来信 起点中文网 正版', 5, undefined, null, { purpose: 'lookup', title: '雾港来信' })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(result.provider).toBe('qidian')
+    expect(result.quality?.eligibleResults).toEqual([expect.objectContaining({ url: 'https://m.qidian.com/chapter/42/0/', snippet: expect.stringContaining('作者甲') })])
+  })
   it('cancels rejected response bodies before starting fallback requests', async () => {
     env.webSearchProvider = 'bocha'
     const cancelled: number[] = []

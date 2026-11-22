@@ -3,9 +3,9 @@ name: Windows Desktop
 on:
   push:
     branches: [chevoink-windows, main]
-    paths: ['desktop/windows/**', '.github/workflows/windows-desktop.yml']
+    paths: ['desktop/windows/**', 'index.html', 'public/agent-mark-144.webp', '.github/workflows/windows-desktop.yml']
   pull_request:
-    paths: ['desktop/windows/**', '.github/workflows/windows-desktop.yml']
+    paths: ['desktop/windows/**', 'index.html', 'public/agent-mark-144.webp', '.github/workflows/windows-desktop.yml']
   workflow_dispatch:
 
 permissions:

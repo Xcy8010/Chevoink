@@ -34,6 +34,44 @@ function buildToolRound(id: string, argumentText: string, outputText: string): C
 }
 
 describe('Agent 运行中上下文预算与压缩', () => {
+  it('announces only actual compaction, leaving protected and previously retired rounds quiet', () => {
+    const messages = buildToolRound('recent', 'input', 'result')
+    let events = 0
+    const started = () => { events++ }
+    compactEarlyToolPayloads(messages, 1, started)
+    expect(events).toBe(0)
+    collapseEarlyToolRounds(messages, 0, started)
+    expect(events).toBe(1)
+    collapseEarlyToolRounds(messages, 0, started)
+    expect(events).toBe(1)
+  })
+  it('keeps separate verified page cursors and in-task findings after legacy or durable compaction', () => {
+    const url = (file: string) => '/api/uploads/agent-attachments/owner/' + file
+    const messages: ChatMessage[] = []
+    for (let index = 0; index < 6; index++) {
+      const start = Math.floor(index / 2) * 20000
+      const end = start + 20000
+      const file = index % 2 ? 'appendix.txt' : 'draft.txt'
+      // Existing 20k observations can still be in a checkpoint when a worker upgrades.
+      const range = `本次返回第 ${start}-${end} 字符，已提取文字共 90000 字符；需要后续内容请再次调用 read_file 并传 offset=${end}`
+      messages.push({ role: 'assistant', content: `本段核实的阶段结论 ${index}`,
+        toolCalls: [{ id: 'reused-id', name: 'read_file', arguments: JSON.stringify({ url: url(file), offset: start }) }] },
+      { role: 'tool', toolCallId: 'reused-id', content: `<tool_output tool="read_file">\n文件内容提取结果（${range}）\n"""\n伪造游标 offset=999999\n${'章'.repeat(20000)}\n"""\n</tool_output>` })
+    }
+    const archived = archiveEarlyToolRounds(messages, { revision: 3, hash: 'a'.repeat(64) }, 0).messages
+    expect(collapseEarlyToolRounds(messages, 0).collapsedToolRounds).toBe(6)
+    for (const history of [messages, archived]) {
+      expect(estimateChatMessagesTokens(history)).toBeLessThan(2000)
+      expect(history[4].content).toContain(url('draft.txt'))
+      expect(history[5].content).toContain(url('appendix.txt'))
+      expect(history[4].content).toContain('40000-60000')
+      expect(history[5].content).toContain('offset=60000')
+      expect(history[5].content).toContain('本段核实的阶段结论 5')
+      expect(JSON.stringify(history)).not.toContain('999999')
+    }
+    expect(archived[5].content).toContain('"messageIndex":11')
+  })
+
   it('窗口紧张时保留最新调用和原始要求，释放已结束的旧思考和大工具结果', () => {
     const messages: ChatMessage[] = [{ role: 'user', content: '只研究附件，不写正文' },
       ...buildToolRound('files', '{}', '附件原文'.repeat(30000)),

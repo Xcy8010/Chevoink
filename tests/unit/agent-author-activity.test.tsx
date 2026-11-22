@@ -4,11 +4,22 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, expect, it, vi } from 'vitest'
 import type { AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
 import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/studio/agent/components/AuthorActivityParts'
+
 import { getMessageText } from '../../src/features/studio/agent/lib/panel-helpers'
 import { activityAnswerText, activityReportVisibility, projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
 import { isRunActive, restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 afterEach(() => { cleanup(); vi.useRealTimers() })
+it('updates the inline compression status in place without displaying a tool card', () => {
+  const row = (state: 'running' | 'completed') => <AuthorActivityParts parts={[{ type: 'context-compaction', state }]} messageId="compression" runActive />
+  const view = render(row('running'))
+  const status = screen.getByRole('status')
+  expect(status.textContent).toBe('正在自动压缩上下文')
+  view.rerender(row('completed'))
+  expect(screen.getByRole('status')).toBe(status)
+  expect(status.textContent).toBe('上下文已自动压缩')
+})
+
 const title = '风从窗台进来'
 const chapters = new Map([['internal-chapter-id', { title, orderIndex: 1 }]])
 const reasoning: AgentMessagePart = { type: 'reasoning', text: 'RAW_THOUGHT_ONLY。已全部修复。' }

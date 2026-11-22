@@ -31,6 +31,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     const sources = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: root.id,
       OR: [{ type: { in: ['child.admitted', 'approval.requested', 'approval.resolved', 'execution.state.saved', 'writing.delivery.projected', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered', 'configuration.changed'] } },
         { type: { in: ['execution.bootstrap.paused', 'execution.bootstrap.resumed'] }, runId },
+        { type: 'execution.context.archived', runId },
         { type: { in: ['question.parked', 'question.woken'] }, runId },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'completed' } },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'cancelled' } },
@@ -221,6 +222,10 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           if (frame.snapshotHash !== paused.data.sourceHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '暂停判定与原执行帧不一致。')
         }
         bodies = [{ type: 'run.paused', reason: paused.data.reason }]
+      } else if (source.type === 'execution.context.archived') {
+        // The archive and this outbox source commit atomically. Only the
+        // completed state is observable for this protocol.
+        bodies = [{ type: 'context.compaction', messageId: source.id, state: 'completed' }]
       } else if (source.type === 'execution.state.saved') {
         bodies = await projectExecutionFrame(tx, source)
         if (source.runId !== runId && bodies.some(body => body.type === 'text.final')) {

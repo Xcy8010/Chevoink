@@ -89,12 +89,19 @@ pub fn install(window: &WebviewWindow) -> tauri::Result<()> {
                 Ok(())
             })), &mut token)?;
             let loaded = Arc::new(AtomicBool::new(false));
+            let boot_started = AtomicBool::new(false);
             let load_window = owned.clone();
             webview.add_NavigationCompleted(&NavigationCompletedEventHandler::create(Box::new(move |sender, args| {
                 let (Some(sender), Some(args)) = (sender, args) else { return Ok(()); };
                 let mut uri = PWSTR::null(); sender.Source(&mut uri)?;
-                let remote = url::Url::parse(&take_pwstr(uri)).is_ok_and(|url| is_app_url(&url));
+                let location = url::Url::parse(&take_pwstr(uri)).ok();
+                let remote = location.as_ref().is_some_and(is_app_url);
                 let mut success = BOOL::default(); args.IsSuccess(&mut success)?;
+                if success.as_bool() && location.as_ref().is_some_and(|url| crate::navigation::is_fallback_url(url) && url.fragment().is_none())
+                    && !boot_started.swap(true, Ordering::SeqCst) {
+                    sender.Navigate(&HSTRING::from(APP_ORIGIN))?;
+                    return Ok(());
+                }
                 if remote && success.as_bool() { loaded.store(true, Ordering::SeqCst); }
                 else if remote && !success.as_bool() && !loaded.load(Ordering::SeqCst) {
                     let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
@@ -117,12 +124,9 @@ pub fn install(window: &WebviewWindow) -> tauri::Result<()> {
                 }
                 Ok(())
             })), &mut token)?;
-            // Let the packaged brand page paint before remote navigation replaces it.
-            let initial_window = owned.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                let _ = initial_window.navigate(APP_ORIGIN.parse().unwrap());
-            });
+            // Commit the packaged web boot DOM before its first remote navigation.
+            // This also covers an initial local navigation that finished before hooks installed.
+            webview.Navigate(&HSTRING::from("http://tauri.localhost/index.html"))?;
             Ok(())
         }};
         if install().is_err() {

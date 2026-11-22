@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useLayoutEffect, useRef } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Route, Routes, useLocation, useNavigate, type Location } from 'react-router-dom'
 
@@ -6,6 +6,9 @@ import { appRoutes } from '@/app/route-config'
 import AccountAccessGate from '@/app/routes/AccountAccessGate'
 import AuthPage from '@/app/routes/AuthPage'
 import AppShell from '@/components/layout/AppShell'
+import DesktopWindowFrame from '@/components/layout/DesktopWindowFrame'
+import { isWindowsDesktopApp } from '@/lib/desktop-app'
+import { DesktopStudioCommands } from '@/lib/desktop-caption'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import { requiresLegacyEmailBinding } from '@/features/account/account-access'
 import { useShellStore } from '@/store/useShellStore'
@@ -102,5 +105,9 @@ function AppRoutes() {
 }
 
 export default function AppRouter() {
-  return <BrowserRouter><AppRoutes /></BrowserRouter>
+  const [commands, setCommands] = useState<HTMLElement | null>(null)
+  return <BrowserRouter>
+    {isWindowsDesktopApp() && <DesktopWindowFrame onCommandsHost={setCommands} />}
+    <DesktopStudioCommands.Provider value={commands}><AppRoutes /></DesktopStudioCommands.Provider>
+  </BrowserRouter>
 }

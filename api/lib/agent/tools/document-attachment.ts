@@ -37,15 +37,15 @@ export async function prepareDocumentView(ctx: ToolContext, args: { url: string;
   }
 }
 
-export async function readChatAttachment(original: Buffer, filename: string, url: string, offset: number, signal: AbortSignal): Promise<FileExtractResult & { visualSummary?: string }> {
+export async function readChatAttachment(original: Buffer, filename: string, url: string, offset: number, signal: AbortSignal, maxChars?: number): Promise<FileExtractResult & { visualSummary?: string }> {
   const extension = path.extname(filename).toLowerCase()
-  if (!['.pdf', '.doc', '.docx'].includes(extension)) return extractFileText(original, filename, offset)
+  if (!['.pdf', '.doc', '.docx'].includes(extension)) return extractFileText(original, filename, offset, maxChars)
   const format = extension === '.pdf' ? 'pdf' : 'docx'
   const bytes = extension === '.doc' ? await convertChatDocToDocx(original, signal) : original
   let result: FileExtractResult
   let extractionError: unknown
   try {
-    result = await extractFileText(bytes, `attachment.${format}`, offset)
+    result = await extractFileText(bytes, `attachment.${format}`, offset, maxChars)
   } catch (error) {
     signal.throwIfAborted()
     extractionError = error

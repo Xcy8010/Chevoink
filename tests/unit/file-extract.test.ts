@@ -71,4 +71,16 @@ describe('real document extraction dependency compatibility', () => {
     expect(tail.text).toBe('章'.repeat(8))
     expect(tail.truncated).toBe(false)
   })
+
+  it('preserves supplementary Chinese characters across page boundaries and returns advancing UTF-16 offsets', async () => {
+    const text = '天地𠀀山河'
+    const first = await extractFileText(Buffer.from(text), 'draft.txt', 0, 3)
+    expect(first.text).toBe('天地')
+    const second = await extractFileText(Buffer.from(text), 'draft.txt', first.text.length, 3)
+    expect(second.text).toBe('𠀀山')
+    const last = await extractFileText(Buffer.from(text), 'draft.txt', first.text.length + second.text.length, 3)
+    expect(first.text + second.text + last.text).toBe(text)
+    expect(last.truncated).toBe(false)
+    await expect(extractFileText(Buffer.from(text), 'draft.txt', 3, 3)).rejects.toThrow('offset=2')
+  })
 })

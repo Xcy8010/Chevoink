@@ -4,6 +4,7 @@ import { X } from 'lucide-react'
 import type { StoryMemoryCard } from '../../../../../shared/contracts/index.js'
 import { deleteStoryMemory, updateStoryMemory } from '../agentApi'
 import { useShellStore } from '@/store/useShellStore'
+import { registerDesktopSave } from '@/lib/desktop-lifecycle'
 import { MemoryMarkdown } from './MemoryMarkdown'
 import './memory-catalog.css'
 
@@ -103,6 +104,8 @@ export default function MemoryCardEditor({ card, novelId, onClose, onSaved }: { 
   const [storageError, setStorageError] = useState(false)
   const dirty = draft.title !== card.title || draft.content !== card.content || draft.importance !== card.importance
   const stale = draft.expectedVersion !== card.version
+  // This is a sessionStorage draft. Closing the WebView can end its lifetime.
+  useEffect(() => registerDesktopSave(() => !dirty && !pending.current), [dirty])
   // Save on each edit, not on delayed unmount: switching works or refreshing cannot overwrite another card.
   const change = (next: Draft) => {
     setDraft(next)

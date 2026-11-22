@@ -1,5 +1,5 @@
 import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { BookOpenText, Bot, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, Search } from 'lucide-react'
+import { BookOpenText, Bot, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, ListCollapse, Search } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useStreamingTextState } from '../../components/use-streaming-text'
@@ -393,6 +393,10 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   const stepKey = `${messageId}:step`
   const liveGroupId = workingGroupId ?? (showRunIndicator ? [...(localGroups?.values() ?? [])].at(-1)?.id : undefined)
   const entries = authorParts.map<ReactNode>((part, index) => {
+      if (part.type === 'context-compaction') return <div key={`${messageId}:compaction`} role="status" className="flex items-center gap-2 text-sm font-normal text-muted-foreground">
+        <ListCollapse aria-hidden="true" className="size-4" />
+        {part.state === 'running' ? '正在自动压缩上下文' : '上下文已自动压缩'}
+      </div>
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
         if (!part.text) return null
