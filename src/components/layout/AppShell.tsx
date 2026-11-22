@@ -3,7 +3,9 @@ import { defaultSiteSettings, effectiveSiteSettings } from '@/features/site-cont
 import { usePublicSiteContent } from '@/features/site-content/public-api'
 import AnnouncementBell from '@/features/site-content/AnnouncementBell'
 import SiteSupportLink from '@/features/site-content/SiteSupportLink'
-import { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, UIEvent, useEffect, useRef, useState } from 'react'
+import { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, UIEvent, useContext, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { DesktopCaptionHost } from '@/lib/desktop-caption'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight, ChevronUp, Compass, FileText, Home, LoaderCircle, LogOut, MessageSquareMore, MoonStar, PenSquare, Settings, SunMedium, UserRound, Users, WifiOff } from 'lucide-react'
@@ -73,6 +75,8 @@ export default function AppShell({ title, description, children }: AppShellProps
   const isCommunityRoute = location.pathname === '/community'
   const isStudioRoute = location.pathname === '/studio' || location.pathname.startsWith('/studio/')
   const isReaderRoute = /^\/novel\/[^/]+\/read\/[^/]+$/.test(location.pathname)
+  const captionHost = useContext(DesktopCaptionHost)
+  const siteHost = !isStudioRoute && !isReaderRoute ? captionHost : null
   // 作品详情页自带书名主标题，壳层引导文案反而冗余，隐藏页头
   const isNovelDetailRoute = /^\/novel\/[^/]+$/.test(location.pathname)
   // 帖子详情页以正文为中心，壳层大标题会造成信息重复，同样隐藏
@@ -105,7 +109,7 @@ export default function AppShell({ title, description, children }: AppShellProps
   const [headerFocus, setHeaderFocus] = useState<'search' | 'controls' | null>(null)
   const mobileHeader = useDeviceType() === 'mobile'
   // 手机收起顶栏后仍可使用搜索，桌面顶栏则需要为搜索保持可见。
-  const keepHeaderVisible = headerFocus === 'controls' || (!mobileHeader && (isSettingsRoute || headerSearchOpen || headerFocus === 'search'))
+  const keepHeaderVisible = Boolean(siteHost) || headerFocus === 'controls' || (!mobileHeader && (isSettingsRoute || headerSearchOpen || headerFocus === 'search'))
   const { ref: headerRef, hidden: headerHidden } = useRevealHeader(keepHeaderVisible, mainScrollRef, location.pathname)
   const desktopAccountMenuRef = useRef<HTMLDivElement | null>(null)
   // 默认折叠，保证内容区最大宽度；展开状态仅影响桌面端(lg)，平板端常驻收起导航轨
@@ -177,7 +181,7 @@ export default function AppShell({ title, description, children }: AppShellProps
       observer.disconnect()
       window.removeEventListener('resize', updateHeaderHeight)
     }
-  }, [headerRef])
+  }, [headerRef, siteHost])
 
   useEffect(() => {
     const nextScrollRoot = mainScrollRef.current
@@ -485,6 +489,55 @@ export default function AppShell({ title, description, children }: AppShellProps
         : 'hover:bg-transparent',
     )
 
+  const siteHeader = (
+    <header
+      ref={headerRef}
+      data-site-header
+      className={cn(
+        'site-reveal-header fixed left-0 right-0 top-0 z-40 border-b border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 pt-[var(--safe-top)]',
+        isStudioRoute && 'hidden lg:hidden',
+        isReaderRoute && 'hidden md:hidden',
+        hideMobileHeader && !isStudioRoute && !isReaderRoute && 'hidden md:block',
+      )}
+      data-hidden={headerHidden}
+      onFocusCapture={event => {
+        if (!event.target.matches(':focus-visible')) {
+          setHeaderFocus(null)
+          return
+        }
+        setHeaderFocus(event.target.closest('.site-header-search') ? 'search' : 'controls')
+      }}
+      onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) setHeaderFocus(null) }}
+    >
+      <div className="site-header-row relative flex h-14 items-center gap-2 md:h-16">
+        <Link to="/" className="site-header-identity flex shrink-0 items-center gap-2" aria-label={effectiveSettings.name + '首页'}>
+          <AppImage src={!effectiveSettings.logoUrl || effectiveSettings.logoUrl === defaultSiteSettings.logoUrl ? agentMarkUrl : effectiveSettings.logoUrl} alt={effectiveSettings.name + ' Logo'} className="h-10 w-10 shrink-0 md:h-11 md:w-11" priority />
+          <span className="hidden text-base font-semibold md:block">{effectiveSettings.name}</span>
+        </Link>
+        <nav aria-label="站点导航" className="site-header-navigation hidden min-w-0 items-center overflow-x-auto md:flex">
+          {headerNavItems.map((item) => item.href.startsWith('/') ? (
+            <NavLink key={item.href} to={item.href}>{item.label}</NavLink>
+          ) : (
+            <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer">{item.label}</a>
+          ))}
+        </nav>
+        <GlobalSearchBox onOpenChange={setHeaderSearchOpen} className="site-header-search min-w-0 flex-1" />
+        <div className="site-header-actions flex shrink-0 items-center gap-0.5">
+          {!isStudioRoute && !isReaderRoute && <AnnouncementBell placement="site" />}
+          <Button onClick={toggleTheme} variant="ghost" className="hidden h-11 w-11 px-0 md:inline-flex" aria-label="切换主题">
+            {theme === 'light' ? <MoonStar className="h-5 w-5" /> : <SunMedium className="h-5 w-5" />}
+          </Button>
+          <NavLink to="/messages" aria-label="消息" className="hidden h-11 w-11 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] md:flex">
+            <span className="relative inline-flex">
+              <MessageSquareMore className="h-5 w-5" />
+              {totalUnread > 0 ? <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-rose-500" /> : null}
+            </span>
+          </NavLink>
+        </div>
+      </div>
+    </header>
+  )
+
   return (
     <div
       data-app-shell
@@ -649,52 +702,7 @@ export default function AppShell({ title, description, children }: AppShellProps
               isStudioRoute && 'max-w-none px-0 md:px-0 xl:px-0',
             )}
           >
-            <header
-              ref={headerRef}
-              data-site-header
-              className={cn(
-                'site-reveal-header fixed left-0 right-0 top-0 z-40 border-b border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 pt-[var(--safe-top)]',
-                isStudioRoute && 'hidden lg:hidden',
-                isReaderRoute && 'hidden md:hidden',
-                hideMobileHeader && !isStudioRoute && !isReaderRoute && 'hidden md:block',
-              )}
-              data-hidden={headerHidden}
-              onFocusCapture={event => {
-                if (!event.target.matches(':focus-visible')) {
-                  setHeaderFocus(null)
-                  return
-                }
-                setHeaderFocus(event.target.closest('.site-header-search') ? 'search' : 'controls')
-              }}
-              onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) setHeaderFocus(null) }}
-            >
-              <div className="site-header-row relative flex h-14 items-center gap-2 md:h-16">
-                <Link to="/" className="site-header-identity flex shrink-0 items-center gap-2" aria-label={effectiveSettings.name + '首页'}>
-                  <AppImage src={!effectiveSettings.logoUrl || effectiveSettings.logoUrl === defaultSiteSettings.logoUrl ? agentMarkUrl : effectiveSettings.logoUrl} alt={effectiveSettings.name + ' Logo'} className="h-10 w-10 shrink-0 md:h-11 md:w-11" priority />
-                  <span className="hidden text-base font-semibold md:block">{effectiveSettings.name}</span>
-                </Link>
-                <nav aria-label="站点导航" className="site-header-navigation hidden min-w-0 items-center overflow-x-auto md:flex">
-                  {headerNavItems.map((item) => item.href.startsWith('/') ? (
-                    <NavLink key={item.href} to={item.href}>{item.label}</NavLink>
-                  ) : (
-                    <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer">{item.label}</a>
-                  ))}
-                </nav>
-                <GlobalSearchBox onOpenChange={setHeaderSearchOpen} className="site-header-search min-w-0 flex-1" />
-                <div className="site-header-actions flex shrink-0 items-center gap-0.5">
-                  {!isStudioRoute && !isReaderRoute && <AnnouncementBell placement="site" />}
-                  <Button onClick={toggleTheme} variant="ghost" className="hidden h-11 w-11 px-0 md:inline-flex" aria-label="切换主题">
-                    {theme === 'light' ? <MoonStar className="h-5 w-5" /> : <SunMedium className="h-5 w-5" />}
-                  </Button>
-                  <NavLink to="/messages" aria-label="消息" className="hidden h-11 w-11 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] md:flex">
-                    <span className="relative inline-flex">
-                      <MessageSquareMore className="h-5 w-5" />
-                      {totalUnread > 0 ? <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-rose-500" /> : null}
-                    </span>
-                  </NavLink>
-                </div>
-              </div>
-            </header>
+            {siteHost ? createPortal(siteHeader, siteHost) : siteHeader}
 
         {/* Keep the system bar and the space below the settings navigation outside the scrollport. */}
         <div className={cn(

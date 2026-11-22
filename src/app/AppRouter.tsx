@@ -8,7 +8,7 @@ import AuthPage from '@/app/routes/AuthPage'
 import AppShell from '@/components/layout/AppShell'
 import DesktopWindowFrame from '@/components/layout/DesktopWindowFrame'
 import { isWindowsDesktopApp } from '@/lib/desktop-app'
-import { DesktopStudioCommands } from '@/lib/desktop-caption'
+import { DesktopCaptionHost } from '@/lib/desktop-caption'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import { requiresLegacyEmailBinding } from '@/features/account/account-access'
 import { useShellStore } from '@/store/useShellStore'
@@ -105,9 +105,9 @@ function AppRoutes() {
 }
 
 export default function AppRouter() {
-  const [commands, setCommands] = useState<HTMLElement | null>(null)
+  const [captionHost, setCaptionHost] = useState<HTMLElement | null>(null)
   return <BrowserRouter>
-    {isWindowsDesktopApp() && <DesktopWindowFrame onCommandsHost={setCommands} />}
-    <DesktopStudioCommands.Provider value={commands}><AppRoutes /></DesktopStudioCommands.Provider>
+    {isWindowsDesktopApp() && <DesktopWindowFrame onContentHost={setCaptionHost} />}
+    <DesktopCaptionHost.Provider value={captionHost}><AppRoutes /></DesktopCaptionHost.Provider>
   </BrowserRouter>
 }

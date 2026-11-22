@@ -48,6 +48,23 @@ it('returns window management to the OS while a dialog makes the web caption ine
   expect(await screen.findByRole('button', { name: '最小化窗口' })).toBeTruthy()
 })
 
+it('keeps the site toolbar and its open dialog mounted during system caption handover', async () => {
+  invoke.mockImplementation(async cmd => cmd === 'desktop_get_info' ? { windowCaption: 1 }
+    : { maximized: false, fullscreen: false })
+  const bind = vi.fn()
+  render(<MemoryRouter><DesktopWindowFrame onContentHost={bind} /></MemoryRouter>)
+  await screen.findByRole('button', { name: '最小化窗口' })
+  const host: HTMLElement = bind.mock.lastCall![0]
+  const dialog = document.createElement('dialog')
+  host.append(dialog)
+  dialog.open = true
+  await waitFor(() => expect(screen.queryByLabelText('桌面窗口')).toBeNull())
+  expect(dialog.isConnected && dialog.open).toBe(true)
+  dialog.remove()
+  await screen.findByRole('button', { name: '最小化窗口' })
+  expect(bind).toHaveBeenCalledTimes(1)
+})
+
 it('serializes caption changes when a modal opens during attach and closes during system handover', async () => {
   const native = { maximized: false, fullscreen: false }
   let finish!: () => void

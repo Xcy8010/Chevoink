@@ -22,13 +22,14 @@ const destinations = [
 ]
 const sections: Record<string, string> = { studio: '创作区', community: '社区', search: '搜索', me: '个人中心', messages: '消息', settings: '设置', novel: '作品', post: '帖子', login: '登录', register: '注册', create: '创作', discover: '发现', rankings: '榜单' }
 
-export default function DesktopWindowFrame({ onCommandsHost }: { onCommandsHost?: (host: HTMLDivElement | null) => void }) {
+export default function DesktopWindowFrame({ onContentHost }: { onContentHost?: (host: HTMLDivElement | null) => void }) {
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const [state, setState] = useState<CaptionState>()
   const [systemCaption, setSystemCaption] = useState(false)
   const [wide, setWide] = useState(() => window.innerWidth >= 1280)
   const frameActive = useRef(false)
+  const hasAttached = useRef(false)
   const menu = useRef<HTMLDetailsElement>(null)
   const route = pathname.split('/')[1]
   const studio = route === 'studio'
@@ -47,6 +48,7 @@ export default function DesktopWindowFrame({ onCommandsHost }: { onCommandsHost?
           const next = await control(wanted ? 'system' : 'attach')
           if (disposed) return
           applied = wanted
+          if (!wanted) hasAttached.current = true
           wanted = hasDialog()
           if (wanted === applied) { setSystemCaption(wanted); setState(next) }
         }
@@ -100,13 +102,16 @@ export default function DesktopWindowFrame({ onCommandsHost }: { onCommandsHost?
     document.addEventListener('pointerdown', outside)
     return () => document.removeEventListener('pointerdown', outside)
   }, [visible, pathname])
-  if (!visible) return null
+  // The announcement dialog belongs to the portaled header. Keep its host
+  // mounted while Windows temporarily supplies system controls for the modal.
+  const keepSiteHost = systemCaption && hasAttached.current && !studio && !state?.fullscreen
+  if (!visible && !keepSiteHost) return null
   const back = Number(window.history.state?.idx) > 0
   const forward = (window as Window & { navigation?: { canGoForward: boolean } }).navigation?.canGoForward === true
   const act = (action: WindowAction) => { void control(action).then(setState).catch(() => {}) }
   const maximizeLabel = state?.maximized ? '还原窗口' : '最大化窗口'
   return <>
-    <div className="desktop-caption" role="region" aria-label="桌面窗口">
+    <div className={keepSiteHost ? 'desktop-system-caption' : 'desktop-caption'} role={visible ? 'region' : undefined} aria-label={visible ? '桌面窗口' : undefined}>
       <Link to="/" className="desktop-product" title="启创墨域首页"><img src={agentMarkUrl} alt="" width="19" height="19" /><span>启创墨域</span></Link>
       <div className="desktop-history"><button type="button" disabled={!back} aria-label="后退" title="后退" onClick={() => navigate(-1)}><ArrowLeft /></button><button type="button" disabled={!forward} aria-label="前进" title="前进" onClick={() => navigate(1)}><ArrowRight /></button></div>
       <details className="desktop-go" ref={menu} onKeyDown={event => {
@@ -116,7 +121,7 @@ export default function DesktopWindowFrame({ onCommandsHost }: { onCommandsHost?
         <nav aria-label="前往页面">{destinations.map(({ to, icon: Icon, name }) =>
           <NavLink key={to} to={to} end={to === '/'} onClick={() => { if (menu.current) menu.current.open = false }}><Icon />{name}</NavLink>)}</nav>
       </details>
-      {studio && wide && <div ref={onCommandsHost} className="desktop-commands studio-workspace" />}
+      {(!studio || wide) && <div ref={onContentHost} className={studio ? 'desktop-commands studio-workspace' : keepSiteHost ? 'desktop-system-tools' : 'desktop-site-tools'} />}
       <div className="desktop-drag" onMouseDown={event => {
         if (event.button !== 0) return
         event.preventDefault()

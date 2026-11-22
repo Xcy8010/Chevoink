@@ -6,7 +6,7 @@ import { Link } from 'react-router-dom'
 import FeedbackDialog from '@/features/feedback/components/FeedbackDialog'
 import AnnouncementBell from '@/features/site-content/AnnouncementBell'
 import { cn } from '@/lib/utils'
-import { DesktopStudioCommands } from '@/lib/desktop-caption'
+import { DesktopCaptionHost } from '@/lib/desktop-caption'
 import type { FeedbackKind, Novel } from '../../../../shared/contracts/index.js'
 import StudioMoreMenu, { type StudioSettingsSection } from './StudioMoreMenu'
 import WorkspaceNovelSwitcher from './WorkspaceNovelSwitcher'
@@ -63,7 +63,7 @@ const STUDIO_MENUS: { key: StudioMenuKey; label: string }[] = [
 const dropdownClass = 'absolute left-0 top-[calc(100%+7px)] z-50 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)] motion-safe:origin-top-left motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]'
 
 export default function StudioCommandBar(props: Props) {
-  const captionHost = useContext(DesktopStudioCommands)
+  const captionHost = useContext(DesktopCaptionHost)
   const autoFollow = useAgentStore((state) => state.autoFollow)
   const setAutoFollow = useAgentStore((state) => state.setAutoFollow)
   const [openMenu, setOpenMenu] = useState<StudioMenuKey | null>(null)

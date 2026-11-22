@@ -228,7 +228,7 @@ export default function GlobalSearchBox({ className, compact = false, onOpenChan
       </label>
 
       {open || (compact && leaving) ? (
-        <div className={cn('absolute inset-x-0 top-[calc(100%+8px)] z-50 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[var(--shadow-elevated)]', compact && 'compact-search-results static min-h-0 flex-1 rounded-none border-0 bg-[var(--app-bg)] shadow-none')}>
+        <div data-global-search-results className={cn('absolute inset-x-0 top-[calc(100%+8px)] z-50 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[var(--shadow-elevated)]', compact && 'compact-search-results static min-h-0 flex-1 rounded-none border-0 bg-[var(--app-bg)] shadow-none')}>
           {showSuggest ? (
             <div className={cn('max-h-[420px] overflow-y-auto overflow-x-hidden scrollbar-none py-2', compact && 'h-full max-h-none')}>
               {suggestions.map((item, index) => (

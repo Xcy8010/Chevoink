@@ -1,4 +1,4 @@
 import { createContext } from 'react'
 
-/** A wide native window can host the real studio command bar alongside its caption controls. */
-export const DesktopStudioCommands = createContext<HTMLElement | null>(null)
+/** Native caption slot for the active route's toolbar. */
+export const DesktopCaptionHost = createContext<HTMLElement | null>(null)
