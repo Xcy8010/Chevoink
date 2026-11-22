@@ -24,6 +24,8 @@ it('uses the native controls and follows workspace navigation without reattachin
     : { maximized: args.action === 'toggleMaximize', fullscreen: false })
   mount()
   fireEvent.click(await screen.findByRole('button', { name: '最大化窗口' }))
+  expect(screen.getByTitle('启创墨域首页').querySelector('img')?.getAttribute('src'))
+    .toBe(`${import.meta.env.BASE_URL}agent-mark-144.webp`)
   expect(await screen.findByRole('button', { name: '还原窗口' })).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '关闭窗口' }))
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_caption', { action: 'close' }))

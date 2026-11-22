@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, BookOpen, ChevronDown, ChevronRight, Compass, Copy, Feather, House, MessageCircle, Minus, Settings, Square, X } from 'lucide-react'
 import { Link, NavLink, matchPath, useLocation, useNavigate } from 'react-router-dom'
 import { appRoutes } from '@/app/route-config'
+import { agentMarkUrl } from '@/lib/brand-assets'
 import './desktop-window.css'
 
 type CaptionState = { maximized: boolean; fullscreen: boolean }
@@ -106,7 +107,7 @@ export default function DesktopWindowFrame({ onCommandsHost }: { onCommandsHost?
   const maximizeLabel = state?.maximized ? '还原窗口' : '最大化窗口'
   return <>
     <div className="desktop-caption" role="region" aria-label="桌面窗口">
-      <Link to="/" className="desktop-product" title="启创墨域首页"><img src="/favicon-48.png" alt="" width="19" height="19" /><span>启创墨域</span></Link>
+      <Link to="/" className="desktop-product" title="启创墨域首页"><img src={agentMarkUrl} alt="" width="19" height="19" /><span>启创墨域</span></Link>
       <div className="desktop-history"><button type="button" disabled={!back} aria-label="后退" title="后退" onClick={() => navigate(-1)}><ArrowLeft /></button><button type="button" disabled={!forward} aria-label="前进" title="前进" onClick={() => navigate(1)}><ArrowRight /></button></div>
       <details className="desktop-go" ref={menu} onKeyDown={event => {
         if (event.key === 'Escape' && menu.current) { menu.current.open = false; menu.current.querySelector('summary')?.focus() }
