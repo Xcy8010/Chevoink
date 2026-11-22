@@ -18,7 +18,8 @@ tauri = { version = "=2.11.5", features = [] }
 tauri-plugin-single-instance = "=2.4.4"
 tauri-plugin-window-state = "=2.4.1"
 tauri-plugin-opener = "=2.5.5"
-tauri-plugin-updater = "=2.11.0"
+# The signed Windows channel accepts a direct NSIS .exe (update.rs).
+tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"

@@ -10,9 +10,11 @@ import * as credits from '../../api/lib/credits.js'
 import { getCreditWindow } from '../../api/lib/credits.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
+import { createDurableTestLifecycle } from '../support/durable-test-lifecycle.js'
 
 describe.runIf(available)('durable stagnation evidence', () => {
-  it.each(['repeat-read', 'changed-read', 'noop-write'] as const)('%s only resets on new evidence and continues to the report', async scenario => {
+  for (const scenario of ['repeat-read', 'changed-read', 'noop-write'] as const) it(`${scenario} only resets on new evidence and continues to the report`, async ({ signal }) => {
+    const lifecycle = createDurableTestLifecycle(signal, entry => console.info('[stagnation-scenario]', scenario, entry))
     await fixture(async f => {
       const lease = await claim(f)
       const tools = [chapterReadTool, chapterWriteTool]
@@ -29,6 +31,7 @@ describe.runIf(available)('durable stagnation evidence', () => {
       let calls = 0
       const finalCall = scenario === 'changed-read' ? 16 : 12
       vi.stubGlobal('fetch', vi.fn(async () => {
+        lifecycle.mockRequest()
         calls++
         if (calls > finalCall) throw new Error('The completed report must reach completion review without another model request')
         if (scenario === 'changed-read' && calls === 5) await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户提供的新证据', revision: { increment: 1 } } })
@@ -37,13 +40,13 @@ describe.runIf(available)('durable stagnation evidence', () => {
           : { content: calls === finalCall ? '已核对当前正文，检查结果已生成。' : '接下来读取正文。' }
         return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: calls % 2 ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       }))
-      expect(await runDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'completion_review' })
+      expect(await runDurableExecution(lease, lifecycle.signal)).toMatchObject({ kind: 'completion_review' })
       expect(calls).toBe(finalCall)
       const reminders = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: f.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
       expect(reminders.map(item => (item.payload as { reminderIndex: number }).reminderIndex)).toEqual(scenario === 'changed-read' ? [1, 2, 1, 2, 3, 4, 5] : [1, 2, 3, 4, 5])
       expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('active')
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'run.paused' } })).toBe(0)
-    })
+    }, undefined, undefined, { lifecycle })
   }, 30000)
 })
 
