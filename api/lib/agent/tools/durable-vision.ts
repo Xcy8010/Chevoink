@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto'
-import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import { env } from '../../../config/env.js'
@@ -14,7 +13,7 @@ import { prepareToolCursorOperation, readAdmittedToolOperation } from '../runtim
 import { assertCurrentToolPolicy, prepareOperationInTransaction, prepareProviderAttempt, markProviderDispatched,
   recordProviderResult, recordProviderUsage, lockOwnedAttempt, commitOperationEffect } from '../runtime-operations.js'
 import { reduceExecutionReceipt } from '../runtime-reducer.js'
-import { readViewImageInput, viewImageTool, type ViewImageInput } from './attachment-tools.js'
+import { readViewImageInput, viewImageTool, visionObservation, type ViewImageInput } from './attachment-tools.js'
 import { visionWorkSchema, visionResponseSchema, visionRawResponseSchema, visionProofSchema, visionRequest, inspectVisionResponse } from '../runtime-vision-contract.js'
 import { normalizeToolInput } from './input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
@@ -126,8 +125,7 @@ async function callVision(ctx: ToolContext, lease: RunLeaseToken, parentOperatio
     }
     // Also repair a crash between raw result, usage and exempt-policy receipt.
     await finalizeVisionObservation(lease, prepared.attempt.id, prepared.attempt.requestHash, observed, durationMs)
-    if (succeeded(observed)) return { output: `图片观察结果：${observed.description}`, summary: '查看 1 张图片',
-      display: { kind: 'viewedImage' as const, images: [{ id: path.basename(work.displayUrl), url: work.displayUrl }], description: observed.description! } }
+    if (succeeded(observed)) return visionObservation(work.displayUrl, observed.description!)
     if (retryable(observed) && index === 0 && completeUsage(observed)) { await delay(2000, undefined, { signal: ctx.signal }); continue }
     return { outcome: 'failed' as const, failureCode: 'VISION_ERROR', output: `view_image 未完成：视觉服务${observed.invalid ? '未返回完整描述' : `返回 ${observed.httpStatus}`}。原响应及实际用量已保留。`, summary: '图片查看未完成' }
   }

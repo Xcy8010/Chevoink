@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { WORKER_LIMITS } from '../../../workers/document-import/protocol.js'
 import { createNovelImportPipeline, parseNovelImportDocument, type NovelImportPipelineOptions } from './pipeline.js'
 import { createDocumentImportWorker, DocumentWorkerError, type DocumentWorkerHealth } from './worker-client.js'
 import { NovelImportParseError } from './parsers/types.js'
@@ -55,11 +57,30 @@ export async function parseConfiguredNovelImportDocument(buffer: Buffer, filenam
   if (/\.(?:txt|md)$/i.test(filename)) return parseNovelImportDocument(buffer, filename, options)
   const current = configuration()
   if (!current) return parseNovelImportDocument(buffer, filename, options)
+  return withReadyWorker(current, options.signal, () => current.parse(buffer, filename, options))
+}
+
+async function withReadyWorker<T>(current: Runtime, signal: AbortSignal | undefined, run: () => Promise<T>) {
   const readiness = await getDocumentImportReadiness()
-  if (options.signal?.aborted) throw new NovelImportParseError('IMPORT_CANCELLED', '文档解析已取消。')
+  if (signal?.aborted) throw new NovelImportParseError('IMPORT_CANCELLED', '文档解析已取消。')
   if (!readiness.ready) throw new NovelImportParseError(readiness.code ?? 'IMPORT_WORKER_UNAVAILABLE', '隔离文档工作器未就绪，请稍后重试。')
   if (current.busy) throw new NovelImportParseError('IMPORT_LIMIT_EXCEEDED', '文档工作器正在处理其他任务，请稍后重新解析；已上传原文件仍保留。')
   current.busy++
-  try { return await current.parse(buffer, filename, options) }
+  try { return await run() }
   finally { current.busy-- }
+}
+
+/** Read-only chat conversion uses the same pinned sandbox, concurrency slot and validated response as import. */
+export async function convertChatDocToDocx(buffer: Buffer, signal: AbortSignal): Promise<Buffer> {
+  signal.throwIfAborted()
+  const current = configuration()
+  if (!current) throw new NovelImportParseError('IMPORT_NATIVE_DISABLED', '当前未启用旧版 DOC 转换器，请另存为 DOCX 后上传。')
+  return withReadyWorker(current, signal, async () => {
+    const sourceHash = createHash('sha256').update(buffer).digest('hex')
+    const result = await current.worker.run({ sourceId: sourceHash, sourceHash, format: 'doc', bytes: buffer,
+      signal, timeoutMs: WORKER_LIMITS.nativeMs })
+    const converted = result.artifacts.find(artifact => artifact.id === result.convertedArtifactId)
+    if (result.outcome !== 'converted' || !converted) throw new NovelImportParseError('IMPORT_CONVERT_FAILED', '旧版 DOC 转换未完成，请检查原文件。')
+    return Buffer.from(converted.bytes)
+  })
 }

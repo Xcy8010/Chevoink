@@ -11,7 +11,7 @@ vi.mock('pdf-parse', () => ({
 }))
 beforeEach(() => {
   vi.resetAllMocks()
-  parser.getText.mockResolvedValue({ text: '已提取正文' })
+  parser.getText.mockResolvedValue({ text: '已提取正文', total: 1, pages: [{ num: 1, text: '已提取正文' }] })
   parser.destroy.mockResolvedValue(undefined)
 })
 describe('PDF resource lifecycle', () => {

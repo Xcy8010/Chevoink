@@ -1,10 +1,11 @@
 import path from 'node:path'
 
+import { decodeText } from './novel-import/parsers/text.js'
 import { DataAccessError } from './prisma.js'
 
 /**
  * 上传文件文本提取（read_file 工具基座）：
- * txt/md 直读；pdf → pdf-parse；docx → mammoth；均动态 import 懒加载（启动零开销）。
+ * txt/md 复用作品导入的文本解码；PDF 与 DOCX 按需加载文字提取器。
  * 借鉴 anthropics/skills 的 pdf/docx 思路与 offset 续读参数设计，Node 纯 JS 实现。
  */
 
@@ -15,16 +16,19 @@ export type FileExtractResult = {
   text: string
   totalChars: number
   truncated: boolean
+  notice?: string
+  pdfPages?: { total: number; withoutText: number[] }
 }
 
-async function extractPdf(buffer: Buffer): Promise<string> {
+async function extractPdf(buffer: Buffer) {
   try {
     const { PDFParse } = await import('pdf-parse')
     const parser = new PDFParse({ data: buffer, isEvalSupported: false })
     try {
       // v2 adds page labels by default; they are not part of the uploaded text.
       const parsed = await parser.getText({ pageJoiner: '' })
-      return parsed.text ?? ''
+      return { text: parsed.text ?? '', pages: { total: parsed.total,
+        withoutText: parsed.pages.filter(page => !page.text.trim()).map(page => page.num) } }
     } finally {
       // Release workers/document resources on successful and failed extraction.
       await parser.destroy()
@@ -57,11 +61,17 @@ export async function extractFileText(
   const extension = (path.extname(filename).slice(1) || '').toLowerCase()
 
   let full: string
+  let notice: string | undefined
+  let pdfPages: FileExtractResult['pdfPages']
 
   if (extension === 'txt' || extension === 'md') {
-    full = buffer.toString('utf8')
+    const decoded = decodeText(buffer, filename)
+    full = decoded.text
+    notice = decoded.warnings.map(warning => warning.message).join(' ') || undefined
   } else if (extension === 'pdf') {
-    full = await extractPdf(buffer)
+    const pdf = await extractPdf(buffer)
+    full = pdf.text
+    pdfPages = pdf.pages
   } else if (extension === 'docx') {
     full = await extractDocx(buffer)
   } else if (extension === 'doc') {
@@ -74,16 +84,11 @@ export async function extractFileText(
     throw new DataAccessError(400, 'VALIDATION_ERROR', `暂不支持解析 .${extension} 文件。`)
   }
 
+  if (extension === 'pdf' || extension === 'docx') {
+    if (full.includes('\uFFFD')) notice = '提取文字含替换字符（�），请核对原件或文字层后再引用。'
+  }
   const normalized = full.replace(/\r\n?/g, '\n').trim()
   const totalChars = normalized.length
-
-  if (totalChars === 0) {
-    return {
-      text: '',
-      totalChars: 0,
-      truncated: false,
-    }
-  }
 
   const start = Math.min(Math.max(offset, 0), totalChars)
   const text = normalized.slice(start, start + FILE_EXTRACT_MAX_CHARS)
@@ -92,5 +97,7 @@ export async function extractFileText(
     text,
     totalChars,
     truncated: start + text.length < totalChars,
+    ...(notice && { notice }),
+    ...(pdfPages && { pdfPages }),
   }
 }

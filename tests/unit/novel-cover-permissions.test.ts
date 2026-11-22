@@ -5,7 +5,8 @@ import { chmod, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from
 import path from 'node:path'
 import os from 'node:os'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { storeImportedNovelCoverDataUrl, storeNovelCoverDataUrl } from '../../api/lib/novel-cover-storage.js'
+import { storeImportedNovelCoverDataUrl, storeNovelCoverDataUrl, storeNovelCoverFromRemoteUrl } from '../../api/lib/novel-cover-storage.js'
+import { validateNovelCoverFile } from '../../src/features/studio/cover-image.js'
 
 const mocks = vi.hoisted(() => ({ transcode: vi.fn(), events: [] as Array<{ op: string; file: string; mode?: number | string }> }))
 vi.mock('../../api/lib/image-transcode.js', () => ({ transcodeCoverImage: mocks.transcode }))
@@ -41,6 +42,28 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true })
 })
 const fileFor = (url: string) => path.join(directory, '.local-storage', 'uploads', 'novel-covers', path.basename(url))
+it('accepts exactly 10 MiB for a manually selected cover and rejects one byte more on both sides', async () => {
+  const limit = 10 * 1024 * 1024
+  const bytes = Buffer.alloc(limit + 1)
+  png.copy(bytes)
+  const allowed = bytes.subarray(0, limit)
+  expect(() => validateNovelCoverFile(new File([allowed], 'cover.png', { type: 'image/png' }))).not.toThrow()
+  const saved = await storeNovelCoverDataUrl(dataUrl(allowed), 'manual')
+  expect(await readFile(fileFor(saved), 'utf8')).toBe('main-webp')
+  expect(() => validateNovelCoverFile(new File([bytes], 'cover.png', { type: 'image/png' }))).toThrow('10 MiB')
+  await expect(storeNovelCoverDataUrl(dataUrl(bytes), 'manual')).rejects.toThrow('10 MiB')
+  expect(mocks.transcode).toHaveBeenCalledTimes(1)
+})
+it('keeps generated, remote and imported covers capped at 3 MiB', async () => {
+  const bytes = Buffer.alloc(3 * 1024 * 1024 + 1)
+  png.copy(bytes)
+  await expect(storeNovelCoverDataUrl(dataUrl(bytes))).rejects.toThrow('3 MiB')
+  await expect(storeImportedNovelCoverDataUrl(dataUrl(bytes))).rejects.toThrow('3 MiB')
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(bytes))
+  await expect(storeNovelCoverFromRemoteUrl('https://example.invalid/image.png')).rejects.toThrow('3MB')
+  expect(mocks.transcode).not.toHaveBeenCalled()
+})
+
 it('explicitly publishes main and thumbnail read permissions and only changes the public leaf directory', async () => {
   const url = await storeNovelCoverDataUrl(dataUrl(png)), main = fileFor(url), thumb = main.replace(/\.webp$/, '.thumb.webp')
   expect(await readFile(main, 'utf8')).toBe('main-webp')

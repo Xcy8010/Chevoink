@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { link, mkdir, open, readFile, realpath, unlink } from 'node:fs/promises'
 import path from 'node:path'
 
+import { MAX_MANUAL_NOVEL_COVER_BYTES } from '../../shared/contracts/models.js'
 import { env } from '../config/env.js'
 import { transcodeCoverImage } from './image-transcode.js'
 import { DataAccessError } from './prisma.js'
@@ -32,7 +33,7 @@ function getNovelCoverDirectory() {
   return path.join(getUploadsRoot(), 'novel-covers')
 }
 
-function parseNovelCoverDataUrl(dataUrl: string): {
+function parseNovelCoverDataUrl(dataUrl: string, maxBytes = MAX_NOVEL_COVER_BYTES): {
   mimeType: SupportedNovelCoverMimeType
   buffer: Buffer
 } {
@@ -50,15 +51,16 @@ function parseNovelCoverDataUrl(dataUrl: string): {
     throw new DataAccessError(400, 'VALIDATION_ERROR', '作品封面图片不能为空。')
   }
 
-  if (buffer.byteLength > MAX_NOVEL_COVER_BYTES) {
-    throw new DataAccessError(400, 'VALIDATION_ERROR', '作品封面图片不能超过 3MB。')
+  if (buffer.byteLength > maxBytes) {
+    throw new DataAccessError(400, 'VALIDATION_ERROR', `作品封面图片不能超过 ${maxBytes / (1024 * 1024)} MiB。`)
   }
 
   return { mimeType, buffer }
 }
 
-export async function storeNovelCoverDataUrl(dataUrl: string): Promise<string> {
-  const { mimeType, buffer } = parseNovelCoverDataUrl(dataUrl)
+export async function storeNovelCoverDataUrl(dataUrl: string, source: 'generated' | 'manual' = 'generated'): Promise<string> {
+  const limit = source === 'manual' ? MAX_MANUAL_NOVEL_COVER_BYTES : MAX_NOVEL_COVER_BYTES
+  const { mimeType, buffer } = parseNovelCoverDataUrl(dataUrl, limit)
   return writeCoverBuffer(mimeType, buffer)
 }
 

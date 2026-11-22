@@ -10,7 +10,7 @@ import {
   readAuthorizedAgentAttachment,
   resolveManagedAttachmentPath,
 } from '../../agent-attachment-storage.js'
-import { extractFileText } from '../../file-extract.js'
+import { documentViewLabel, prepareDocumentView, readChatAttachment } from './document-attachment.js'
 import { getPublicHttpBytes } from '../../public-http.js'
 import { prisma } from '../../prisma.js'
 import { describeImageWithVision } from '../../vision-service.js'
@@ -96,6 +96,7 @@ export type ViewImageInput = { image: { buffer: Buffer; mime: string }; displayU
 /** Read pixels through the same URL/attachment boundaries before any model call. */
 export async function readViewImageInput(ctx: ToolContext, args: { url: string; focus?: string }): Promise<ViewImageInput | ToolResult> {
   ctx.signal.throwIfAborted()
+  if (args.url.startsWith(MANAGED_AGENT_ATTACHMENT_PREFIX) && args.url.includes('#')) return prepareDocumentView(ctx, args)
   let buffer: Buffer | null = null
   let mime: string | undefined
   // display 用真实图片地址：入参可能是 coverAssetId（UUID），直接展示会 404 破图
@@ -156,15 +157,21 @@ export async function readViewImageInput(ctx: ToolContext, args: { url: string; 
   return { image: { buffer, mime }, displayUrl, question: args.focus?.trim() || '请详细描述这张图片的内容：主体、场景、文字（如有，逐字列出）、构图与风格，供网文写作与封面校验参考。' }
 }
 
+export function visionObservation(displayUrl: string, description: string): ToolResult {
+  const label = documentViewLabel(displayUrl)
+  if (label) return { output: `${label}识别结果：\n${description}`, summary: `查看${label}`,
+    display: { kind: 'markdown', markdown: `**${label}**\n\n${description}` } }
+  return { output: `图片观察结果：${description}`, summary: '查看 1 张图片',
+    display: { kind: 'viewedImage', images: [{ id: path.basename(displayUrl), url: displayUrl }], description } }
+}
+
 export const viewImageTool = defineTool({
   name: 'view_image',
   title: '查看图片',
   description:
     '查看并理解一张图片（纯文本主模型收到的作者参考图、cover_generate 返回的封面候选图、novel_get_context 返回的正式封面地址，含历史外网封面链接）。本工具通过安全视觉旁路返回文字描述；若系统已说明本轮附件像素直接可见，不要为同一附件重复调用。cover_generate 后仍须查看候选以校验画面，作者询问当前封面效果时用正式封面地址查看。url 接受本站附件/封面地址、封面候选 coverAssetId 或 https 公网地址。',
   parameters: z.object({
-    url: z
-      .string()
-      .describe('图片地址（作者附件 url、cover_generate 候选图 url 或 coverAssetId、正式封面 url 或 https 外网图片 url）'),
+    url: z.string().describe('图片地址，或 read_file 返回的文档页/图引用（#page=N、#image=N）；支持作者附件、封面候选图 url 或 coverAssetId、正式封面和 https 外网图片'),
     focus: z
       .string()
       .max(500)
@@ -184,18 +191,12 @@ export const viewImageTool = defineTool({
         { userId: ctx.userId, runId: ctx.runId, signal: ctx.signal, novelId: ctx.novelId, modelAssignments: ctx.modelAssignments },
       )
 
-      return {
-        output: `图片观察结果：${description}`,
-        summary: '查看 1 张图片',
-        display: {
-          kind: 'viewedImage',
-          images: [{ id: path.basename(displayUrl), url: displayUrl }],
-          description,
-        },
-      }
+      return visionObservation(displayUrl, description)
     } catch (error) {
+      ctx.signal.throwIfAborted()
       const message = error instanceof Error ? error.message : String(error)
       return {
+        outcome: 'failed',
         output: `view_image 失败：${message}。可基于文字信息继续任务，并向作者如实说明本次未能查看图片。`,
       }
     }
@@ -206,7 +207,7 @@ export const readFileTool = defineTool({
   name: 'read_file',
   title: '读取文件',
   description:
-    '读取作者随消息上传的文件内容（pdf/docx/txt/md）。禁止凭文件名猜测。ZIP/DOC 及完整作品导入请使用 novel_import prepare，经用户核对与确认，不通过本工具解压或转换。返回提取的纯文本（单次最多 20000 字符，超出时用 offset 参数续读）。',
+    '读取作者附件 PDF、Word、TXT、MD 的文字（每次最多 20000 字符，offset 续读）。识别扫描文字或图表时先读取文件，然后将返回的页码或内嵌图引用交给 view_image。旧版 DOC 需要隔离转换器。ZIP 或完整作品导入使用 novel_import prepare，经作者核对确认。禁止凭文件名猜测。',
   parameters: z.object({
     url: z.string().describe('文件地址（作者附件元数据中的 url）'),
     offset: z
@@ -232,29 +233,31 @@ export const readFileTool = defineTool({
     const buffer = await readAuthorizedAgentAttachment(args.url, ctx.userId)
     ctx.signal.throwIfAborted()
 
-    if (['.zip', '.doc'].includes(path.extname(diskPath).toLowerCase())) {
-      return { outcome: 'failed', summary: '需使用作品导入', output: 'ZIP/DOC 仅作为导入原件保存，请使用 novel_import prepare，或打开作品导入面板核验。此工具未解压、未转换、未导入；DOC 转换器未开放时请另存为 DOCX。' }
+    const ext = path.extname(diskPath).toLowerCase()
+    if (ext === '.zip' || (ext === '.doc' && process.env.NOVEL_IMPORT_NATIVE_ENABLED !== 'true')) {
+      const reason = ext === '.doc' ? '旧版 DOC 转换器未启用，另存为 DOCX 后可直接读取。' : 'ZIP 作为导入原件保存。'
+      return { outcome: 'failed', summary: '需使用作品导入', output: `${reason}若需导入作品，请使用 novel_import prepare，或打开作品导入面板核验。此工具未解压、未转换、未导入。` }
     }
 
     try {
-      const result = await extractFileText(buffer, path.basename(diskPath), args.offset ?? 0)
+      const result = await readChatAttachment(buffer, path.basename(diskPath), args.url, args.offset ?? 0, ctx.signal)
       ctx.signal.throwIfAborted()
 
+      const notice = result.notice ? `\n${result.notice}` : ''
       if (result.totalChars === 0) {
         return {
-          output:
-            'read_file：未提取到任何文本。若为扫描版 PDF（图片扫描件），没有文字层，可如实告知作者。',
-          summary: '读取文件（无文本）',
+          output: `read_file：未提取到可读文字。${notice}`,
+          summary: result.visualSummary ? `读取文档 · ${result.visualSummary}` : '读取文件（无文本）',
         }
       }
 
       const offset = Math.min(args.offset ?? 0, result.totalChars)
       const tailNote = result.truncated || offset > 0
-        ? `（本次返回第 ${offset}-${offset + result.text.length} 字符，全文共 ${result.totalChars} 字符；${result.truncated ? `需要后续内容请再次调用 read_file 并传 offset=${offset + result.text.length}` : '已到文件末尾，本次仅返回该范围'}）`
-        : `（全文共 ${result.totalChars} 字符，已完整返回）`
+        ? `（本次返回第 ${offset}-${offset + result.text.length} 字符，已提取文字共 ${result.totalChars} 字符；${result.truncated ? `需要后续内容请再次调用 read_file 并传 offset=${offset + result.text.length}` : '已到提取文字末尾，本次仅返回该范围'}）`
+        : `（已返回全部提取文字，共 ${result.totalChars} 字符）`
 
       return {
-        output: `文件内容提取结果${tailNote}：\n"""\n${result.text}\n"""`,
+        output: `文件内容提取结果${tailNote}${notice}\n"""\n${result.text}\n"""`,
         summary: `读取文件 · ${result.text.length} 字`,
         display: { kind: 'markdown', markdown: clip(result.text, 2000) },
         observedAttachment: { url: args.url, contentHash: createHash('sha256').update(buffer).digest('hex'),

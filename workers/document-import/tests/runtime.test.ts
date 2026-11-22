@@ -20,6 +20,18 @@ afterEach(() => vi.unstubAllEnvs())
 const options = { sourceId: 'source', deadlineAt: Date.now() + 1_800_000 }
 
 describe('operator native composition (no Docker or DB)', () => {
+  it('reads only the converted DOCX from an available sandbox for chat', async () => {
+    const runtime = await import('../../../api/lib/novel-import/runtime.js')
+    const bytes = Buffer.from('converted package')
+    mocks.run.mockResolvedValue({ outcome: 'converted', convertedArtifactId: 'docx', artifacts: [{ id: 'docx', bytes }] })
+    const signal = new AbortController().signal
+    expect(await runtime.convertChatDocToDocx(Buffer.from('doc'), signal)).toEqual(bytes)
+    expect(mocks.health).toHaveBeenCalledOnce()
+    expect(mocks.run).toHaveBeenCalledWith(expect.objectContaining({ format: 'doc', signal }))
+    expect(mocks.parse).not.toHaveBeenCalled()
+    mocks.run.mockResolvedValue({ outcome: 'failed', artifacts: [] })
+    await expect(runtime.convertChatDocToDocx(Buffer.from('doc'), signal)).rejects.toMatchObject({ code: 'IMPORT_CONVERT_FAILED' })
+  })
   it('default-off keeps deterministic parsing and never probes native', async () => {
     vi.stubEnv('NOVEL_IMPORT_NATIVE_ENABLED', '')
     const runtime = await import('../../../api/lib/novel-import/runtime.js')

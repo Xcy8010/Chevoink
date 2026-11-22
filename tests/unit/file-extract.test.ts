@@ -7,8 +7,7 @@ const mammothRequire = createRequire(require.resolve('mammoth'))
 const JSZip = mammothRequire('jszip') as typeof import('jszip')
 
 /** Self-authored one-page PDF with correct offsets; no network or external fixture. */
-function samplePdf() {
-  const text = 'BT /F1 12 Tf 50 100 Td (Chevoink runtime extraction) Tj ET'
+function samplePdf(text = 'BT /F1 12 Tf 50 100 Td (Chevoink runtime extraction) Tj ET') {
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
@@ -35,13 +34,28 @@ describe('real document extraction dependency compatibility', () => {
     expect(result.truncated).toBe(false)
   }, 15_000) // Cold-loads PDF.js and its native support; keep the suite default unchanged.
 
+  it('distinguishes image-only PDF pages from extracted text', async () => {
+    const image = 'q 80 0 0 80 10 10 cm BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID 00> EI Q'
+    const result = await extractFileText(samplePdf(image), 'scan.pdf')
+    expect(result.text).toBe('')
+    expect(result.pdfPages).toEqual({ total: 1, withoutText: [1] })
+    const mixed = await extractFileText(samplePdf(image + '\nBT /F1 12 Tf 40 100 Td (Caption) Tj ET'), 'mixed.pdf')
+    expect(mixed.text).toBe('Caption')
+    expect(mixed.pdfPages).toEqual({ total: 1, withoutText: [] })
+  })
+
   it('extracts Chinese DOCX text and escaped characters through mammoth', async () => {
     const zip = new JSZip()
     zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
     zip.file('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
-    zip.file('word/document.xml', '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>布衣山河 &amp; 安全提取</w:t></w:r></w:p></w:body></w:document>')
+    const document = '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>布衣山河 &amp; 安全提取</w:t></w:r></w:p></w:body></w:document>'
+    zip.file('word/document.xml', document)
     const result = await extractFileText(await zip.generateAsync({ type: 'nodebuffer' }), 'sample.docx')
     expect(result.text).toBe('布衣山河 & 安全提取')
+    zip.file('word/document.xml', document.replace('布衣山河', '布衣�河'))
+    const damaged = await extractFileText(await zip.generateAsync({ type: 'nodebuffer' }), 'damaged.docx')
+    expect(damaged.text).toBe('布衣�河 & 安全提取')
+    expect(damaged.notice).toContain('替换字符')
   }, 15_000) // Includes isolated-worker startup and cold-loading mammoth, like the PDF case above.
 
   it.each(['pdf', 'docx'])('returns a safe error for corrupt %s', async (extension) => {

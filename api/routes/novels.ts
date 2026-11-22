@@ -193,7 +193,7 @@ router.patch('/:novelId/cover', async (req: Request, res: Response): Promise<voi
     const userId = requireSessionUserId(req)
     const body = parseBody(uploadNovelCoverSchema, req.body, '请提供作品封面图片。')
 
-    const imageUrl = await storeNovelCoverDataUrl(body.coverDataUrl.trim())
+    const imageUrl = await storeNovelCoverDataUrl(body.coverDataUrl.trim(), 'manual')
     const asset = await createUploadedCoverAssetData({
       userId,
       novelId: req.params.novelId,

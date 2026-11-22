@@ -9,6 +9,7 @@ export type AiImageSize =
 export const FIXED_NOVEL_COVER_SIZE: AiImageSize = '768x1024'
 export const FIXED_NOVEL_COVER_WIDTH = 768
 export const FIXED_NOVEL_COVER_HEIGHT = 1024
+export const MAX_MANUAL_NOVEL_COVER_BYTES = 10 * 1024 * 1024
 
 export type AiProviderMode = 'mock' | 'provider' | 'fallback' | 'hybrid' | string
 export type AiProviderType = 'text' | 'image'

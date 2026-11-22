@@ -1,10 +1,10 @@
 import {
   FIXED_NOVEL_COVER_HEIGHT,
   FIXED_NOVEL_COVER_WIDTH,
+  MAX_MANUAL_NOVEL_COVER_BYTES,
 } from '../../../shared/contracts/index.js'
 
 const SUPPORTED_COVER_TYPES = ['image/png', 'image/jpeg', 'image/webp']
-const MAX_COVER_FILE_BYTES = 3 * 1024 * 1024
 export const COVER_PREVIEW_WIDTH = 240
 export const COVER_PREVIEW_HEIGHT = 320
 
@@ -19,8 +19,8 @@ export function validateNovelCoverFile(file: File) {
     throw new Error('作品封面仅支持 PNG、JPG 或 WebP 图片。')
   }
 
-  if (file.size > MAX_COVER_FILE_BYTES) {
-    throw new Error('作品封面图片不能超过 3MB。')
+  if (file.size > MAX_MANUAL_NOVEL_COVER_BYTES) {
+    throw new Error(`作品封面图片不能超过 ${MAX_MANUAL_NOVEL_COVER_BYTES / (1024 * 1024)} MiB。`)
   }
 }
 
