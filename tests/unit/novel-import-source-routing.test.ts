@@ -50,7 +50,7 @@ function reviewablePreview(): NovelImportEvidencePreview {
 describe('source routing pipeline evidence', () => {
   it('本站导出ZIP保留规划和明确正文，封面只安全转码而不产生正文OCR阻断', async () => {
     const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=', 'base64')
-    const converter = vi.spyOn(converters, 'runConverter').mockResolvedValue({ base64: png.toString('base64'), width: 1, height: 1 })
+    const converter = vi.spyOn(converters, 'runConverter').mockResolvedValue({ base64: png.toString('base64'), width: 1, height: 1, format: 'png' })
     const nativeParser = vi.fn().mockRejectedValue(new Error('cover must not invoke OCR'))
     vi.mocked(createIsolatedNovelImportParser).mockReturnValue((bytes, filename, options) => parseNovelImportFile(bytes, filename, { ...options, resources: true, nativeParser }))
     const result = await createNovelImportPipeline()(zipFiles({
