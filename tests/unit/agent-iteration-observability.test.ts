@@ -51,7 +51,8 @@ describe('Agent 创作可观测与容错', () => {
     expect(loop).toContain('extractStreamingToolDraft(toolName, rawArgs)')
     expect(workspace).toContain('liveToolDrafts')
     expect(viewer).toContain('Agent 写入中 · 暂停编辑')
-    expect(viewer).toContain('readOnly={writeLocked}')
+    expect(viewer).toContain('const readOnly = retained || writeLocked')
+    expect(viewer).toContain('readOnly={readOnly}')
   })
 
   it('Work 追踪会自动打开作品树及章节查看器', () => {
