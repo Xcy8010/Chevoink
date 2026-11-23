@@ -6,6 +6,22 @@ import { loadStudioSurface } from '../../src/features/studio/components/load-stu
 
 afterEach(cleanup)
 
+it('shares a prepared pane and lets the first open recover from a missed preload', async () => {
+  const chunk = { default: ({ title }: { title: string }) => <div>{title}</div> }
+  const load = vi.fn<() => Promise<typeof chunk>>().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(chunk)
+  const Pane = loadStudioSurface(load, '章节')
+  await act(async () => { Pane.preload(); Pane.preload() })
+  expect(load).toHaveBeenCalledTimes(1)
+  const view = render(<Pane title="章节正文" />)
+  await screen.findByText('章节正文')
+  expect(screen.queryByRole('alert')).toBeNull()
+  view.unmount()
+  Pane.preload()
+  render(<Pane title="下一章" />)
+  expect(screen.getByText('下一章')).toBeTruthy()
+  expect(load).toHaveBeenCalledTimes(2)
+})
+
 it('keeps a shared cold import, its failure, and a retry inside the panel', async () => {
   const loaded = { default: ({ title }: { title: string }) => <div>{title}</div> }
   const load = vi.fn<() => Promise<typeof loaded>>().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(loaded)

@@ -7,6 +7,7 @@ import type { StudioPayload } from '../../../../shared/contracts/index.js'
 import type { WorkspacePlanFile } from '../types'
 import { COMPOSER_REFERENCE_MIME, serializeComposerReferenceTransfer } from '../agent/composer-content'
 import TreeContextMenu, { TreeMenuButton, type TreeMenuAnchor, type TreeMenuItem } from './TreeContextMenu'
+import './chapter-tree.css'
 
 function formatChapterTreeLabel(chapter: StudioPayload['chapters'][number]) {
   const normalizedTitle = plainChapterTitle(chapter.title) || chapter.title.trim()
@@ -33,7 +34,7 @@ type TreeContextMenuTarget = { title: string } & (
 type TreeRenameTarget = { label: string; save: (title: string) => void; trigger: HTMLElement }
 
 const planKindLabels = { outline: '大纲', detail: '细纲', legacy: '历史未分类' }
-const rowActionsClass = 'flex shrink-0 items-center opacity-100 [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100'
+const rowActionsClass = 'studio-tree-row-action flex shrink-0 items-center'
 
 function TreeHeaderButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
   return (
@@ -338,7 +339,7 @@ export default function ChapterSidebar({
   return (
     <div
       className={cn(
-        'group/tree flex h-full min-h-0 flex-col overflow-hidden bg-[var(--surface-default)]',
+        'flex h-full min-h-0 flex-col overflow-hidden bg-[var(--surface-default)]',
         embedded
           ? 'px-2 py-3'
           : 'rounded-[var(--radius-lg)] border border-[var(--border-subtle)] p-2 pb-4 shadow-[var(--shadow-soft)]',
@@ -347,7 +348,7 @@ export default function ChapterSidebar({
       {/* 参考 IDE 资源管理器的顶栏结构：标题区移除，新建按钮浮在根节点行右侧；树整体贴近左侧边框 */}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pt-1 pb-2">
         <div className="space-y-0.5">
-          <div onContextMenu={(event) => openTreeContextMenu(event, novelTarget)} className="group/novel-row flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 transition hover:bg-[var(--surface-muted)]">
+          <div onContextMenu={(event) => openTreeContextMenu(event, novelTarget)} className="studio-tree-row flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 transition hover:bg-[var(--surface-muted)]">
             <button
               type="button"
               onClick={() => setNovelExpanded((current) => !current)}
@@ -362,8 +363,7 @@ export default function ChapterSidebar({
               <FolderTree className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
               <span className="truncate">{novelTitle}</span>
             </button>
-            {/* 参考 IDE 资源管理器：悬停树区域时浮出图标按钮组，悬停按钮有提示字；手机端无 hover 常驻 */}
-            <div className={cn('flex shrink-0 items-center gap-0.5 opacity-100 md:opacity-0 md:transition-opacity md:group-hover/tree:opacity-100', showExtendedMenus && 'md:group-focus-within/tree:opacity-100')}>
+            <div className="studio-tree-row-action flex shrink-0 items-center gap-0.5">
               {onCreateVolume ? <TreeHeaderButton label="新建卷" onClick={onCreateVolume}><FolderPlus className="h-3.5 w-3.5" /></TreeHeaderButton> : null}
               <TreeHeaderButton label="新建章节" onClick={onCreateChapter}><FilePlus2 className="h-3.5 w-3.5" /></TreeHeaderButton>
               <TreeHeaderButton label="新建计划" onClick={onCreatePlan}><NotebookPen className="h-3.5 w-3.5" /></TreeHeaderButton>
@@ -372,7 +372,7 @@ export default function ChapterSidebar({
           </div>
 
           {novelExpanded ? (
-            <div className="ml-3.5 border-l border-[var(--border-subtle)] pl-1.5 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
+            <div className="ml-3.5 border-l border-[var(--border-subtle)] pl-1.5">
               <button
                 type="button"
                 onClick={onSelectCatalog}
@@ -387,7 +387,7 @@ export default function ChapterSidebar({
                 <span className="truncate">目录</span>
               </button>
 
-              <div onContextMenu={(event) => openTreeContextMenu(event, planFolderTarget)} className="group/row flex items-center rounded-[10px] transition hover:bg-[var(--surface-muted)]">
+              <div onContextMenu={(event) => openTreeContextMenu(event, planFolderTarget)} className="studio-tree-row flex items-center rounded-[10px] transition hover:bg-[var(--surface-muted)]">
                 <button
                   type="button"
                   onClick={() => setPlanFolderExpanded((current) => !current)}
@@ -407,13 +407,13 @@ export default function ChapterSidebar({
               </div>
 
               {planFolderExpanded ? (
-                <div className="ml-3 border-l border-[var(--border-subtle)] pl-1.5 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
+                <div className="ml-3 border-l border-[var(--border-subtle)] pl-1.5">
                   {(['outline', 'detail', 'legacy'] as const).map(kind => {
                     const plans = savedPlans.filter(plan => (plan.planKind ?? 'legacy') === kind)
                     if (kind === 'legacy' && plans.length === 0) return null
                     const kindTarget = kind === 'legacy' ? null : { kind: 'plan-kind' as const, id: kind, title: planKindLabels[kind] }
                     return <div key={kind}>
-                      <div onContextMenu={kindTarget ? (event) => openTreeContextMenu(event, kindTarget) : undefined} className="group/row flex items-center rounded-[10px] hover:bg-[var(--surface-muted)]">
+                      <div onContextMenu={kindTarget ? (event) => openTreeContextMenu(event, kindTarget) : undefined} className="studio-tree-row flex items-center rounded-[10px] hover:bg-[var(--surface-muted)]">
                         <button type="button" aria-expanded={expandedPlanKinds[kind]} onClick={() => setExpandedPlanKinds(current => ({ ...current, [kind]: !current[kind] }))} className="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-secondary)]">
                           {expandedPlanKinds[kind] ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
                           <span className="truncate">{planKindLabels[kind]}</span><span className="ml-auto shrink-0 text-[10px]">共{plans.length}个</span>
@@ -456,12 +456,12 @@ export default function ChapterSidebar({
                         }}
                         onContextMenu={(event) => openTreeContextMenu(event, planTarget)}
                         className={cn(
-                          'group group/row flex items-center gap-1 rounded-[10px] border-t border-transparent transition',
+                          'studio-tree-row group/row flex items-center gap-1 rounded-[10px] border-t border-transparent transition',
                           selectedTreeItemId === `plan:${plan.id}` ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]',
                           dropTarget === `plan:${plan.id}` && 'border-t-[var(--text-primary)]',
                         )}
                       >
-                        <GripVertical className="ml-1 h-3.5 w-3.5 shrink-0 cursor-grab text-[var(--text-tertiary)] opacity-0 transition-opacity group-hover:opacity-100" />
+                        <GripVertical className="ml-1 h-3.5 w-3.5 shrink-0 cursor-grab text-[var(--text-tertiary)] opacity-0 group-hover/row:opacity-100" />
                         <button
                           type="button"
                           onClick={() => onSelectPlan(plan.id)}
@@ -482,11 +482,11 @@ export default function ChapterSidebar({
                           type="button"
                           onClick={() => onOpenPlanSettings(plan.id)}
                           className={cn(
-                            'mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--text-tertiary)] transition hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)]',
+                            'mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)]',
                             // 手机端无 hover，小屏常驻显示；桌面端仅选中或悬停时显示
                             selectedTreeItemId === `plan:${plan.id}`
                               ? 'opacity-100'
-                              : 'opacity-100 md:opacity-0 md:group-hover:opacity-100',
+                              : 'studio-tree-row-action',
                           )}
                           aria-label="计划设置"
                           title="计划设置"
@@ -501,7 +501,7 @@ export default function ChapterSidebar({
                 </div>
               ) : null}
 
-              <div onContextMenu={(event) => openTreeContextMenu(event, chapterFolderTarget)} className="group/row flex items-center rounded-[10px] transition hover:bg-[var(--surface-muted)]">
+              <div onContextMenu={(event) => openTreeContextMenu(event, chapterFolderTarget)} className="studio-tree-row flex items-center rounded-[10px] transition hover:bg-[var(--surface-muted)]">
                 <button
                   type="button"
                   onClick={() => setChapterFolderExpanded((current) => !current)}
@@ -520,7 +520,7 @@ export default function ChapterSidebar({
               </div>
 
               {chapterFolderExpanded ? (
-                <div className="ml-3.5 border-l border-[var(--border-subtle)] pl-1.5 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
+                <div className="ml-3.5 border-l border-[var(--border-subtle)] pl-1.5">
                   {volumeGroups.map(({ volume, chapters: volumeChapters }) => {
                     const volumeTarget = { kind: 'volume', id: volume.id, title: volume.title } as const
                     return (
@@ -541,7 +541,7 @@ export default function ChapterSidebar({
                           setDropTarget(null)
                         }}
                         className={cn(
-                          'group/volume group/row flex items-center gap-1.5 rounded-md border border-transparent px-2 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors',
+                          'studio-tree-row flex items-center gap-1.5 rounded-md border border-transparent px-2 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors',
                           dropTarget === `volume:${volume.id}` && 'border-[var(--border-strong)] bg-[var(--surface-muted)]',
                         )}
                       >
@@ -557,14 +557,14 @@ export default function ChapterSidebar({
                               event.stopPropagation()
                               onOpenVolumeSettings(volume.id)
                             }}
-                            className="ml-auto inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-full px-1.5 text-[10px] text-[var(--text-tertiary)] transition hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:h-7 [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:min-w-7"
+                            className="ml-auto inline-grid h-11 min-w-11 shrink-0 place-items-center rounded-full px-1.5 text-[10px] text-[var(--text-tertiary)] transition hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:h-7 [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:min-w-7"
                             aria-label={`卷设置：${volume.title}`}
                             title="卷设置"
                           >
-                            <span aria-hidden="true" className="hidden [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:inline md:group-hover/volume:hidden md:group-focus-within/volume:hidden">
+                            <span aria-hidden="true" className="studio-tree-volume-count [grid-area:1/1]">
                               共{volumeChapters.length}章
                             </span>
-                            <span aria-hidden="true" className="inline-flex items-center gap-1 [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:hidden md:group-hover/volume:inline-flex md:group-focus-within/volume:inline-flex">
+                            <span aria-hidden="true" className="studio-tree-volume-action inline-flex items-center gap-1 [grid-area:1/1]">
                               <Settings2 data-volume-settings-icon className="h-3.5 w-3.5" />
                               <span className="hidden [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:inline">设置</span>
                             </span>
@@ -574,7 +574,7 @@ export default function ChapterSidebar({
                         )}
                         {showExtendedMenus && <div className={rowActionsClass}>{treeMenuButton(volumeTarget)}</div>}
                       </div>
-                      {!collapsedVolumes.has(volume.id) ? <div className="ml-2.5 border-l border-[var(--border-subtle)] pl-1 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
+                      {!collapsedVolumes.has(volume.id) ? <div className="ml-2.5 border-l border-[var(--border-subtle)] pl-1">
                   {volumeChapters.map((chapter) => {
                     const chapterTarget = { kind: 'chapter', id: chapter.id, title: chapter.title.trim() || `第 ${chapter.orderInVolume} 章` } as const
                     const chapterActive =
@@ -617,12 +617,12 @@ export default function ChapterSidebar({
                         }}
                         onContextMenu={(event) => openTreeContextMenu(event, chapterTarget)}
                         className={cn(
-                          'group group/row flex items-center gap-1 rounded-[10px] border-t border-transparent transition',
+                          'studio-tree-row group/row flex items-center gap-1 rounded-[10px] border-t border-transparent transition',
                           chapterActive ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]',
                           dropTarget === `chapter:${chapter.id}` && 'border-t-[var(--text-primary)]',
                         )}
                       >
-                        <GripVertical className="ml-1 h-3.5 w-3.5 shrink-0 cursor-grab text-[var(--text-tertiary)] opacity-0 transition-opacity group-hover:opacity-100" />
+                        <GripVertical className="ml-1 h-3.5 w-3.5 shrink-0 cursor-grab text-[var(--text-tertiary)] opacity-0 group-hover/row:opacity-100" />
                         <button
                           type="button"
                           onClick={() => onSelectChapter(chapter.id)}
@@ -650,10 +650,10 @@ export default function ChapterSidebar({
                           type="button"
                           onClick={() => onOpenChapterSettings(chapter.id)}
                           className={cn(
-                            'mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--text-tertiary)] transition hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)]',
+                            'mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)]',
                             chapterActive
                               ? 'opacity-100'
-                              : 'opacity-100 md:opacity-0 md:group-hover:opacity-100',
+                              : 'studio-tree-row-action',
                           )}
                           aria-label="章节设置"
                           title="章节设置"

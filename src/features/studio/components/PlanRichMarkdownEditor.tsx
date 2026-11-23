@@ -4,10 +4,6 @@ import { placeholder } from '@milkdown/crepe/feature/placeholder'
 import { editorViewCtx, parserCtx, serializerCtx } from '@milkdown/kit/core'
 import type { Node as ProseNode } from '@milkdown/kit/prose/model'
 
-import '@milkdown/crepe/theme/common/prosemirror.css'
-import '@milkdown/crepe/theme/common/reset.css'
-import '@milkdown/crepe/theme/common/placeholder.css'
-
 import type { EditorSelectionState } from '../types'
 import { useStreamingAutoFollow } from './useStreamingAutoFollow'
 import { readPlanPosition, savePlanPosition } from './plan-view-position'

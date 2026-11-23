@@ -103,6 +103,12 @@ const SkillsPanel = loadStudioSurface(() => import('./components/SkillsPanel'), 
 const EditorCanvas = loadStudioSurface(() => import('./components/EditorCanvas'), '编辑器', 'document')
 const ChapterSidebar = loadStudioSurface(() => import('./components/ChapterSidebar'), '作品目录')
 const StudioChapterViewer = loadStudioSurface(() => import('./components/StudioChapterViewer'), '章节查看器', 'document')
+
+function canWarmChapter() {
+  const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection
+  return document.visibilityState === 'visible' && !connection?.saveData
+    && !['slow-2g', '2g', '3g'].includes(connection?.effectiveType ?? '')
+}
 const ImportDialog = loadStudioSurface(() => import('./components/ImportDialog'), '导入面板', props => props)
 const StudioSettingsDialog = loadStudioSurface(() => import('./components/StudioSettingsDialog'), '创作区设置', props => props)
 
@@ -1076,7 +1082,7 @@ export default function StudioWorkspace() {
   })
 
   const prepareChapter = useCallback((chapterId: string) => {
-    if (!workPanelReady || chapterId === selectedChapterId || chapterId.startsWith('local-')) return
+    if (!workPanelReady || !canWarmChapter() || chapterId === selectedChapterId || chapterId.startsWith('local-')) return
     void queryClient.prefetchQuery({
       queryKey: ['studio-chapter', activeNovelId, chapterId],
       queryFn: () => getChapterContent(activeNovelId, chapterId),
@@ -1084,12 +1090,32 @@ export default function StudioWorkspace() {
     })
   }, [activeNovelId, queryClient, selectedChapterId, workPanelReady])
 
+  const workDesktop = desktopLayout && workspacePerspective === 'work'
+  const browsingChapters = desktopLayout
+    ? (workDesktop ? workRightOpen && workInspectorTab === 'work' : ideTreeOpen && ideSidebarTab === 'work')
+    : mobileView === 'chapters'
+  const readingChapter = desktopLayout
+    ? (workDesktop ? workViewerMode === 'chapter' : selectedTreeItemId?.startsWith('chapter:'))
+    : mobileView === 'editor' && selectedTreeItemId !== 'catalog' && !selectedTreeItemId?.startsWith('plan:')
   useEffect(() => {
-    if (workViewerMode !== 'chapter' || chapterQuery.data?.novelId !== activeNovelId
-      || chapterQuery.data.id !== viewerChapterId) return
-    const index = chapters.findIndex(chapter => chapter.id === viewerChapterId)
-    if (index >= 0 && chapters[index + 1]) prepareChapter(chapters[index + 1].id)
-  }, [activeNovelId, chapterQuery.data, chapters, prepareChapter, viewerChapterId, workViewerMode])
+    if (!workPanelReady || (!browsingChapters && !readingChapter) || !canWarmChapter()) return
+    const warm = () => {
+      if (!canWarmChapter()) return
+      if (workDesktop && browsingChapters) StudioChapterViewer.preload()
+      if (chapterQuery.isFetching || chapterQuery.isError || queryClient.isFetching({ queryKey: ['studio-chapter', activeNovelId] })) return
+      const currentId = selectedChapterId ?? studioQuery.data?.draftChapter?.id
+      const index = chapters.findIndex(chapter => chapter.id === currentId)
+      const next = chapters[index + 1]
+      if (next) prepareChapter(next.id)
+    }
+    if (window.requestIdleCallback) {
+      const idle = window.requestIdleCallback(warm)
+      return () => window.cancelIdleCallback(idle)
+    }
+    const timer = window.setTimeout(warm, 80)
+    return () => window.clearTimeout(timer)
+  }, [activeNovelId, browsingChapters, chapterQuery.isError, chapterQuery.isFetching, chapters, prepareChapter, queryClient, readingChapter,
+    selectedChapterId, studioQuery.data?.draftChapter?.id, workDesktop, workPanelReady])
 
   useEffect(() => {
     if (!chapterQuery.isError) {

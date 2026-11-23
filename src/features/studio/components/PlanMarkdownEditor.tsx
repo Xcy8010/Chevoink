@@ -1,6 +1,11 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import type { Element, ElementContent, Root } from 'hast'
+
+import '@milkdown/crepe/theme/common/prosemirror.css'
+import '@milkdown/crepe/theme/common/reset.css'
+import '@milkdown/crepe/theme/common/placeholder.css'
 
 import type { EditorSelectionState } from '../types'
 import { markdownResources, safeMarkdownUrl } from '../agent/components/markdown-resources'
@@ -10,8 +15,46 @@ import { readPlanPosition, savePlanPosition } from './plan-view-position'
 
 const PlanRichMarkdownEditor = lazy(() => import('./PlanRichMarkdownEditor'))
 
+// ProseMirror preserves whitespace. Markdown's HTML formatting newlines between
+// blocks would paint as extra lines until the editable document replaces them.
+function alignReadingBlocks() {
+  const blockTags = new Set(['p', 'ul', 'ol', 'blockquote', 'pre', 'table', 'hr', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+  const isBlock = (child: ElementContent | undefined) => child?.type === 'element' && blockTags.has(child.tagName)
+  const emptyParagraph = (): Element => ({ type: 'element', tagName: 'p', properties: {}, children: [{ type: 'element', tagName: 'br', properties: {}, children: [] }] })
+  function visit(node: Root | Element) {
+    for (const child of node.children) if (child.type === 'element') visit(child)
+    if (node.type === 'root' || ['ul', 'ol', 'blockquote'].includes(node.tagName)) {
+      node.children = node.children.filter(child => child.type !== 'text' || child.value !== '\n')
+    } else if (['li', 'th', 'td'].includes(node.tagName)) {
+      // Milkdown places tight list items and table cell text inside paragraphs.
+      const blocks: ElementContent[] = []
+      let paragraph: Element | undefined
+      for (const [index, child] of node.children.entries()) {
+        if (child.type === 'text' && child.value === '\n' && (!paragraph || isBlock(node.children[index + 1]) || index === node.children.length - 1)) continue
+        if (isBlock(child)) {
+          paragraph = undefined
+          blocks.push(child)
+        } else {
+          if (!paragraph) {
+            paragraph = { type: 'element', tagName: 'p', properties: {}, children: [] }
+            blocks.push(paragraph)
+          }
+          paragraph.children.push(child)
+        }
+      }
+      node.children = blocks.length ? blocks : [emptyParagraph()]
+    }
+  }
+  return (tree: Root) => {
+    visit(tree)
+    // Milkdown reserves a final editable line after a list, table or other block.
+    const last = tree.children.at(-1)
+    if (last?.type === 'element' && blockTags.has(last.tagName) && !/^(p|h[1-6])$/.test(last.tagName)) tree.children.push(emptyParagraph())
+  }
+}
+
 const ReadingMarkdown = memo(function ReadingMarkdown({ markdown }: { markdown: string }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={markdownResources} urlTransform={safeMarkdownUrl}>{markdown}</ReactMarkdown>
+  return <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[alignReadingBlocks]} skipHtml components={markdownResources} urlTransform={safeMarkdownUrl}>{markdown}</ReactMarkdown>
 })
 
 export type PlanEditorMode = 'preview' | 'markdown'

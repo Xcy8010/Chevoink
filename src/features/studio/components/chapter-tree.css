@@ -1,0 +1,19 @@
+.studio-tree-volume-count {
+  display: none;
+}
+
+@media (min-width: 768px) and (hover: hover) and (pointer: fine) {
+  .studio-tree-row:not(:hover):not(:focus-within) .studio-tree-row-action {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .studio-tree-volume-count {
+    display: inline;
+  }
+
+  .studio-tree-row:not(:hover):not(:focus-within) .studio-tree-volume-action,
+  .studio-tree-row:is(:hover, :focus-within) .studio-tree-volume-count {
+    visibility: hidden;
+  }
+}

@@ -20,20 +20,21 @@ export function loadStudioSurface<P extends object>(
     listeners.forEach(listener => listener())
   }
   const snapshot = () => state
-  function start() {
+  function start(speculative = false) {
     if (state !== 'idle' && state !== 'failed') return
     publish('loading')
-    void load().then(module => publish(module.default), () => publish('failed'))
+    void load().then(module => publish(module.default), () => publish(speculative ? 'idle' : 'failed'))
   }
-  return function StudioSurface(props: P) {
+  function StudioSurface(props: P) {
     const current = useSyncExternalStore(subscribe, snapshot, snapshot)
     const modal = typeof presentation === 'function' ? presentation(props) : undefined
     const visible = modal?.open ?? true
     useEffect(() => { if (visible && current === 'idle') start() }, [current, visible])
     const pending = visible ? <StudioSurfaceStatus label={label} close={modal?.onClose} shape={typeof presentation === 'string' ? presentation : 'dialog'}
-      retry={current === 'failed' ? start : undefined} /> : null
+      retry={current === 'failed' ? () => start() : undefined} /> : null
     if (typeof current === 'string') return pending
     const Loaded = current
     return <Suspense fallback={pending}><Loaded {...props} /></Suspense>
   }
+  return Object.assign(StudioSurface, { preload: () => { if (state === 'idle') start(true) } })
 }
