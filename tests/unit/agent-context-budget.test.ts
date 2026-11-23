@@ -6,15 +6,27 @@ import {
   collapseEarlyToolRounds,
   archiveEarlyToolRounds,
   compactEarlyToolPayloads,
+  planInRunCompaction,
+  hasProactiveCompactionGain,
   estimateChatMessagesTokens,
   estimateTextTokens,
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
   resolveDurableInputLimit,
+  resolveSessionContextWindow,
   releaseCompletedReasoning,
 } from '../../api/lib/agent/context-budget.js'
 
 describe('durable input admission', () => {
+  it('uses the shared session window on model changes and respects a smaller model and its output reservation', () => {
+    const windows = [undefined, null, 128000, 256000, 32000].map(modelWindow => resolveSessionContextWindow(128000, modelWindow))
+    expect(windows).toEqual([128000, 128000, 128000, 128000, 32000])
+    expect(windows.slice(0, 4).map(window => resolveAgentContextBudget(window, 8192).compactAtTokens)).toEqual(Array(4).fill(99840))
+    const small = resolveAgentContextBudget(windows[4], 14000)
+    expect(small.compactAtTokens).toBe(small.hardRequestTokens)
+    expect(small.hardRequestTokens).toBe(15952)
+  })
+
   it('reserves the actual output when larger than a quarter of the window', () => {
     expect(resolveDurableInputLimit(16000, 8192)).toBe(5760)
     expect(resolveDurableInputLimit(16000, 16000)).toBe(0)
@@ -254,7 +266,7 @@ describe('Agent 运行中上下文预算与压缩', () => {
   it('为模型输出和误差预留安全空间', () => {
     const budget = resolveAgentContextBudget(128_000, 8_192)
     expect(budget.warningTokens).toBe(83_200)
-    expect(budget.compactAtTokens).toBe(92_160)
+    expect(budget.compactAtTokens).toBe(99_840)
     expect(budget.hardRequestTokens).toBeLessThan(128_000)
     expect(budget.hardRequestTokens).toBeGreaterThan(budget.compactAtTokens)
   })
@@ -307,4 +319,33 @@ describe('Agent 运行中上下文预算与压缩', () => {
     compact(messages, 0)
     expect(messages).toEqual(before)
   })
+})
+
+it('leaves below-threshold requests and small reductions that do not clear the threshold alone', () => {
+  const messages = buildToolRound('old', '旧参数'.repeat(200), '旧结果'.repeat(800))
+  const budget = { compactAtTokens: 99840, hardRequestTokens: 105216 }
+  expect(planInRunCompaction(messages, 94135, budget, 0, () => 79226)).toBeNull()
+  expect(planInRunCompaction(messages, 101637, budget, 0, () => 101240)).toBeNull()
+  expect(planInRunCompaction(messages, 99841, budget, 0, () => 99839)).toBeNull()
+  expect(hasProactiveCompactionGain(100000, 98004, 99840)).toBe(false)
+  expect(hasProactiveCompactionGain(100000, 98003, 99840)).toBe(true)
+  expect(hasProactiveCompactionGain(500000, 497952, 500000)).toBe(true)
+  const planned = planInRunCompaction(messages, 102691, budget, 0, () => 96997)
+  expect(planned).toMatchObject({ afterTokens: 96997, collapsedToolRounds: 1 })
+  expect(messages[0].role).toBe('assistant')
+  expect(planInRunCompaction(messages, 115208, budget, 0, () => 102000)).toMatchObject({ afterTokens: 102000 })
+})
+
+it('reuses the reduced context across turns while preserving the author request and latest tool exchange', () => {
+  const current = buildToolRound('recent', '当前修订', '当前回执')
+  const messages: ChatMessage[] = [{ role: 'system', content: '约束' }, { role: 'user', content: '只修订第九章' },
+    ...buildToolRound('old', '甲'.repeat(52000), '乙'.repeat(52000)), ...current]
+  const budget = resolveAgentContextBudget(128000, 8192)
+  const estimate = (value: ChatMessage[]) => estimateChatMessagesTokens(value) + 340
+  const planned = planInRunCompaction(messages, estimate(messages), budget, 1, estimate)!
+  expect(planned.afterTokens).toBeLessThan(budget.compactAtTokens)
+  expect(planned.messages.slice(0, 2)).toEqual(messages.slice(0, 2))
+  expect(planned.messages.slice(-2)).toEqual(current)
+  expect(estimate(planned.messages)).toBe(planned.afterTokens)
+  expect(planInRunCompaction(planned.messages, planned.afterTokens, budget, 1, estimate)).toBeNull()
 })

@@ -1,3 +1,4 @@
+import type { AgentToolDraft } from '../../../../shared/contracts/agent-events'
 import { useEffect, useRef, useState } from 'react'
 
 /** The viewer keeps its immediate completion flush; live chat may drain received text independently. */
@@ -61,4 +62,12 @@ export function useStreamingTextState(text: string, streaming: boolean, identity
 
 export function useStreamingText(text: string, streaming: boolean, identity: string) {
   return useStreamingTextState(text, streaming, identity).text
+}
+
+/** Resolve complete provisional text. A range delta is only a replacement fragment. */
+export function resolveStreamingChapterText(chapter: { id: string; content: string }, draft: AgentToolDraft | null): string | undefined {
+  if (draft?.kind !== 'chapter' || draft.targetId !== chapter.id || !draft.content) return undefined
+  if (draft.toolName === 'chapter_edit_range' || (draft.toolName === 'chapter_write' && chapter.content.trim())) return undefined
+  if (draft.toolName === 'chapter_append' && chapter.content.trim()) return chapter.content.trimEnd() + '\n\n' + draft.content
+  return draft.content
 }

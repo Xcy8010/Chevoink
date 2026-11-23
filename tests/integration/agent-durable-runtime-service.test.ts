@@ -10,6 +10,7 @@ import * as contextAssembler from '../../api/lib/agent/context.js'
 import { executePersistedLoopRun,initializePersistedLoopRun,readSessionPendingQuestion,recoverDurableLoopRuns,stopLoopRun } from '../../api/lib/agent/run-service.js'
 import { readTaskBudget } from '../../api/lib/agent/runtime-budget.js'
 import { advanceDurableContext } from '../../api/lib/agent/runtime-checkpoint-step.js'
+import { estimateChatMessagesTokens } from '../../api/lib/agent/context-budget.js'
 import { AGENT_TOOL_EXECUTION_POLICY } from '../../api/lib/agent/tool-execution-guidance.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
@@ -177,6 +178,23 @@ describe.runIf(available)('durable personalization', () => {
         phase: 'idle', pendingOperationId: null, nextOperationSequence: 1, messages,
       })
       expect(await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).toMatchObject({ status: 'cancelled', dispatchedAt: null })
+    })
+  })
+
+  it('publishes a main request measurement once across repeated admission and replay', async () => {
+    await fixture(async f => {
+      const lease = await claim(f)
+      const messages = [{ role: 'user', content: '讨论提纲' }]
+      const { frame } = await initializeExecutionState(lease, { configuration, snapshot: { ...initial, messages } })
+      const contextUsage = { estimatedTokens: 2900, contextWindowTokens: 128000, compactAtTokens: 99840 }
+      const cursor = { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, contextUsage }
+      const input = { key: 'exec:0', action: 'workspaceAgent', request: { messages },
+        price: { version: 'credits-v1-exact' as const, modelTier: 'speed' as const, multiplierBps: 0 } }
+      await prepareModelCursorOperation(lease, cursor, input)
+      await prepareModelCursorOperation(lease, cursor, input)
+      const events = await publishDurableEvents(f.userId, f.runId)
+      expect(events.filter(event => event.type === 'context.usage')).toEqual([expect.objectContaining(contextUsage)])
+      expect(await publishDurableEvents(f.userId, f.runId)).toEqual([])
     })
   })
 })
@@ -494,6 +512,10 @@ describe.runIf(available)('durable context archive', () => {
       expect(guided.frame.state.messages).toContainEqual({ role: 'user', content })
       expect(guided.frame.revision).toBe(state.frame.revision + 1)
       await expect(executeDurableStep(lease, new AbortController().signal)).rejects.toMatchObject({ code: 'RUNTIME_CONTEXT_LIMIT' })
+      const visible = await publishDurableEvents(f.userId, f.runId)
+      const sample = visible.find(event => event.type === 'context.usage')
+      expect(sample?.contextWindowTokens).toBe(16000)
+      expect(sample!.estimatedTokens).toBeGreaterThan(sample!.compactAtTokens)
       expect(fetchMock).not.toHaveBeenCalled()
       expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(0)
       expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(guided.frame.snapshotHash)
@@ -537,12 +559,12 @@ describe.runIf(available)('durable context archive', () => {
       else expect(await baseline()).toBeNull()
     })
   })
-  it.each(['read', 'wrong-hash', 'future', 'no-reader', 'stopped', 'model-window'] as const)('%s preserves source frames and task budget', async scenario => {
+  it.each(['read', 'wrong-hash', 'future', 'no-reader', 'stopped', 'model-window', 'soft-window'] as const)('%s preserves source frames and task budget', async scenario => {
     await fixture(async f => {
       const lease = await claim(f), tool = executionContextReadTool
       const messages = [{ role: 'system', content: AGENT_TOOL_EXECUTION_POLICY }, { role: 'user', content: '只写第19章，不能继续旧任务。' }, ...Array.from({ length: 12 }, (_, index) => [
         { role: 'assistant', content: `第${index}次说明必须保留`, toolCalls: [{ id: `archive-${index}`, name: 'chapter_read', arguments: '{}' }] },
-        { role: 'tool', toolCallId: `archive-${index}`, content: '历史原文，必须可以完整回读。'.repeat(scenario === 'model-window' ? 100 : 1600) },
+        { role: 'tool', toolCallId: `archive-${index}`, content: '历史原文，必须可以完整回读。'.repeat(scenario.endsWith('window') ? 100 : 1600) },
       ]).flat()]
       const initial = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
@@ -552,17 +574,44 @@ describe.runIf(available)('durable context archive', () => {
       const budget = await readTaskBudget(lease)
       if (scenario === 'stopped') await pauseDurableTask(f.userId, f.runId)
       if (scenario === 'stopped' || scenario === 'no-reader') {
+        if (scenario === 'no-reader') {
+          // A legacy task can exceed the byte-based storage watermark without nearing its token limit.
+          const limit = 1_000_000
+          expect(await advanceDurableContext(lease, { contextWindowTokens: limit, compactAtTokens: limit * 0.78, hardLimit: limit,
+            estimate: estimateChatMessagesTokens, canReadArchive: false })).toBeNull()
+        }
         await expect(advanceDurableContext(lease)).rejects.toThrow()
         expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(initial.frame.snapshotHash)
         return
       }
       if (scenario === 'model-window') expect(await advanceDurableContext(lease)).toBeNull()
+      if (scenario === 'soft-window') {
+        const before = estimateChatMessagesTokens(initial.frame.state.messages)
+        const budget = { contextWindowTokens: before + 6000, hardLimit: before + 5000, compactAtTokens: before,
+          canReadArchive: true, estimate: estimateChatMessagesTokens }
+        // No phantom successful compaction when the projected messages still span the threshold.
+        expect(await advanceDurableContext(lease, { ...budget, estimate: () => before })).toBeNull()
+        expect(await advanceDurableContext(lease, { ...budget, estimate: messages => messages.length === initial.frame.state.messages.length ? before : before - 1 })).toBeNull()
+        expect(await advanceDurableContext(lease, { ...budget, canReadArchive: false })).toBeNull()
+        expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(initial.frame.snapshotHash)
+        const next = await advanceDurableContext(lease, budget)
+        expect(estimateChatMessagesTokens(next!.state.messages)).toBeLessThan(before)
+        expect(await advanceDurableContext(lease, budget)).toBeNull()
+        const visible = await publishDurableEvents(f.userId, f.runId)
+        expect(visible.filter(e => e.type === 'context.compaction')).toHaveLength(1)
+        expect(visible.flatMap(e => e.type === 'context.usage' ? [e.estimatedTokens] : [])).toEqual([before, estimateChatMessagesTokens(next!.state.messages)])
+        return
+      }
       const archived = await advanceDurableContext(lease, scenario === 'model-window' ? 8000 : undefined)
       expect(archived?.state.messages[0]).toEqual(messages[0])
       expect(archived?.state.messages.length).toBeLessThan(messages.length)
       expect(await readTaskBudget(lease)).toEqual(budget)
       expect(await advanceDurableContext(lease)).toBeNull()
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.context.archived' } })).toBe(1)
+      if (scenario === 'read') {
+        const visible = await publishDurableEvents(f.userId, f.runId)
+        expect(visible.filter(e => e.type === 'context.compaction')).toHaveLength(0)
+      }
       const source = await prisma.agentExecutionFrame.findUniqueOrThrow({ where: { taskRootId_revision: { taskRootId: f.rootId, revision: 0 } } })
       expect(source.snapshot).toEqual(initial.frame.snapshot)
       if (scenario === 'model-window') {

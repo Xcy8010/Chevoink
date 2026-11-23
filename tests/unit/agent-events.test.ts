@@ -2,8 +2,22 @@ import { describe, expect, it } from 'vitest'
 
 import { RunEventBus, createRunEventBus, disposeRunEventBus, getRunEventBus } from '../../api/lib/agent/events.js'
 import type { AgentStreamEvent } from '../../shared/contracts/index.js'
+import { observeConversation, wakeConversation } from '../../api/lib/agent/conversation-wakeup.js'
 
 describe('Agent run event bus', () => {
+  it('wakes only current observers of the admitted account and conversation', () => {
+    const seen: string[] = []
+    const desktop = observeConversation('owner', 'chat', () => seen.push('desktop'))
+    const phone = observeConversation('owner', 'chat', () => seen.push('phone'))
+    const other = observeConversation('other', 'chat', () => seen.push('other'))
+    wakeConversation('owner', 'chat')
+    phone()
+    wakeConversation('owner', 'different')
+    wakeConversation('owner', 'chat')
+    expect(seen).toEqual(['desktop', 'phone', 'desktop'])
+    desktop()
+    other()
+  })
   it('publishes an already committed start once without another persistence write or sequence', async () => {
     const bus = new RunEventBus('atomic-start', 4)
     const event: Extract<AgentStreamEvent, { type: 'run.started' }> = { seq: 5, runId: 'atomic-start', ts: new Date(0).toISOString(),

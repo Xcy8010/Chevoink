@@ -17,8 +17,8 @@ const PAGE_SIZE = 20
 
 const VIEW_TABS: Array<{ key: DetailView; label: string; icon: typeof FileClock }> = [
   { key: 'records', label: '上下文记录', icon: FileClock },
-  { key: 'checkpoints', label: '压缩记录', icon: ArchiveRestore },
-  { key: 'final', label: '最终上下文', icon: Layers },
+  { key: 'checkpoints', label: '历史检查点', icon: ArchiveRestore },
+  { key: 'final', label: '保留的历史', icon: Layers },
 ]
 
 const ROLE_META: Record<string, { label: string; className: string }> = {
@@ -178,18 +178,18 @@ export default function ContextDetailDialog({ sessionId, onClose }: Props) {
           {view === 'final' && finalState ? (
             <div className="border-b border-[var(--border-subtle)] px-5 py-4">
               <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1">
-                <p className="text-[11px] text-[var(--text-secondary)]">装配总量 <span className="text-base font-semibold tabular-nums text-[var(--text-primary)]">{formatContextTokenCount(finalState.estimatedTokens)}</span> tok</p>
+                <p className="text-[11px] text-[var(--text-secondary)]">会话历史估算 <span className="text-base font-semibold tabular-nums text-[var(--text-primary)]">{formatContextTokenCount(finalState.estimatedTokens)}</span> tok</p>
                 <p className="text-[10px] tabular-nums text-[var(--text-tertiary)]">其中检查点摘要 {formatContextTokenCount(finalState.checkpointTokens)} tok · 窗口消息 {formatContextTokenCount(finalState.estimatedTokens - finalState.checkpointTokens)} tok</p>
               </div>
               {finalState.checkpointDigest ? (
                 <details className="group mt-3">
-                  <summary className="cursor-pointer list-none text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:text-[var(--text-secondary)]">检查点摘要注入（发送给模型的原文）<span className="ml-1 text-[9px] text-[var(--text-tertiary)] group-open:hidden">点击展开</span></summary>
+                  <summary className="cursor-pointer list-none text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:text-[var(--text-secondary)]">已保存的检查点摘要<span className="ml-1 text-[9px] text-[var(--text-tertiary)] group-open:hidden">点击展开</span></summary>
                   <pre className="mt-2 max-h-44 overflow-y-auto whitespace-pre-wrap rounded-[10px] bg-[var(--surface-muted)] px-3 py-2.5 text-[10px] leading-5 text-[var(--text-secondary)]">{finalState.checkpointDigest}</pre>
                 </details>
               ) : null}
               {finalState.directiveDigest ? (
                 <details className="group mt-2">
-                  <summary className="cursor-pointer list-none text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:text-[var(--text-secondary)]">作者指令账本注入（发送给模型的原文）<span className="ml-1 text-[9px] text-[var(--text-tertiary)] group-open:hidden">点击展开</span></summary>
+                  <summary className="cursor-pointer list-none text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:text-[var(--text-secondary)]">作者指令记录<span className="ml-1 text-[9px] text-[var(--text-tertiary)] group-open:hidden">点击展开</span></summary>
                   <pre className="mt-2 max-h-44 overflow-y-auto whitespace-pre-wrap rounded-[10px] bg-[var(--surface-muted)] px-3 py-2.5 text-[10px] leading-5 text-[var(--text-secondary)]">{finalState.directiveDigest}</pre>
                 </details>
               ) : null}

@@ -1,0 +1,118 @@
+.studio-mobile-motion {
+  --studio-mobile-drawer-width: min(360px, 82%);
+  --studio-mobile-duration: 275ms;
+  --studio-mobile-ease: cubic-bezier(.22, .76, .21, 1);
+  --studio-mobile-drawer-progress: 0;
+  --studio-mobile-tabs-progress: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.studio-mobile-motion[data-drawer-open='true'] { --studio-mobile-drawer-progress: 1; }
+.studio-mobile-motion[data-primary-view='editor'] { --studio-mobile-tabs-progress: 1; }
+
+.studio-mobile-motion[data-primary-view],
+.studio-mobile-motion[data-primary-view] :where(.overflow-y-auto, [data-studio-mobile-navigation-scroll]) {
+  touch-action: pan-y pinch-zoom;
+}
+
+.studio-mobile-motion > .studio-mobile-motion-main,
+.studio-mobile-push-navigation > .studio-mobile-drawer,
+.studio-mobile-tab-page,
+.studio-mobile-motion .studio-mobile-tabs::after {
+  transition: transform var(--studio-mobile-duration) var(--studio-mobile-ease);
+}
+
+.studio-mobile-motion > .studio-mobile-motion-main {
+  position: relative;
+  background: var(--app-bg);
+  transform: translate3d(calc(var(--studio-mobile-drawer-width) * var(--studio-mobile-drawer-progress)), calc(-10px * var(--studio-mobile-drawer-progress)), 0);
+}
+
+.studio-mobile-motion:not([data-swipe-dragging='drawer']):not([data-drawer-open='true']) > .studio-mobile-motion-main {
+  transform: none;
+}
+
+.studio-mobile-push-navigation {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 30;
+}
+
+.studio-mobile-push-navigation > .studio-mobile-drawer {
+  width: var(--studio-mobile-drawer-width);
+  box-shadow: none;
+  transform: translate3d(calc((var(--studio-mobile-drawer-progress) - 1) * 100%), 0, 0);
+}
+
+.studio-mobile-push-navigation[data-state='open'] > :is(.studio-mobile-backdrop, .studio-mobile-drawer) {
+  pointer-events: auto;
+}
+
+.studio-mobile-push-navigation > .studio-mobile-backdrop {
+  left: var(--studio-mobile-drawer-width);
+  width: auto;
+  background: transparent;
+}
+
+.studio-mobile-tab-pages {
+  position: relative;
+  overflow: clip;
+}
+
+.studio-mobile-tab-page {
+  position: absolute;
+  inset: 0;
+}
+
+.studio-mobile-tab-page[data-page='assistant'] {
+  transform: translate3d(calc(-100% * var(--studio-mobile-tabs-progress)), 0, 0);
+}
+
+.studio-mobile-tab-page[data-page='editor'] {
+  transform: translate3d(calc((1 - var(--studio-mobile-tabs-progress)) * 100%), 0, 0);
+}
+
+.studio-mobile-motion .studio-mobile-tabs {
+  position: relative;
+  width: max-content;
+  margin-inline: auto;
+}
+
+.studio-mobile-motion .studio-mobile-tabs .studio-mobile-view-tab {
+  width: 64px;
+  font-weight: 600;
+}
+
+.studio-mobile-motion .studio-mobile-tabs .studio-mobile-view-tab::after { display: none; }
+
+.studio-mobile-motion .studio-mobile-tabs::after {
+  content: '';
+  position: absolute;
+  inset: auto auto 0 21px;
+  width: 22px;
+  height: 2px;
+  pointer-events: none;
+  border-radius: 2px;
+  background: var(--studio-mobile-accent);
+  transform: translate3d(calc(84px * var(--studio-mobile-tabs-progress)), 0, 0);
+}
+
+.studio-mobile-motion[data-swipe-dragging='drawer'] :is(.studio-mobile-motion-main, .studio-mobile-push-navigation > .studio-mobile-drawer),
+.studio-mobile-motion[data-swipe-dragging='tabs'] .studio-mobile-tab-page,
+.studio-mobile-motion[data-swipe-dragging='tabs'] .studio-mobile-tabs::after {
+  transition: none;
+}
+
+@starting-style {
+  .studio-mobile-motion:not([data-swipe-dragging='drawer']) .studio-mobile-push-navigation[data-state='open'] > .studio-mobile-drawer { transform: translate3d(-100%, 0, 0); }
+  .studio-mobile-motion[data-primary-view='editor']:not([data-swipe-dragging='tabs']) .studio-mobile-tab-page[data-page='editor'] { transform: translate3d(100%, 0, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studio-mobile-motion { --studio-mobile-duration: 0ms; }
+  .studio-mobile-motion > .studio-mobile-motion-main {
+    transform: translateX(calc(var(--studio-mobile-drawer-width) * var(--studio-mobile-drawer-progress)));
+  }
+}

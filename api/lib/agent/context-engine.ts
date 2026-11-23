@@ -12,13 +12,14 @@ import type {
   UserDirective,
 } from '../../../shared/contracts/index.js'
 import { env } from '../../config/env.js'
+import { contextUsageSchema } from '../../../shared/contracts/context-compaction-contracts.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { parseModelCapabilities } from '../credits.js'
-import { attachmentHistoryUrl, estimateTextTokens } from './context-budget.js'
+import { attachmentHistoryUrl, CONTEXT_COMPACTION_THRESHOLD, estimateTextTokens, resolveSessionContextWindow } from './context-budget.js'
 import { extractDirectiveCandidates } from './task-spec.js'
+import { MAIN_RUN_FILTER } from './runtime-child.js'
 
 const WARNING_THRESHOLD = 0.65
-const COMPACTION_THRESHOLD = 0.78
 const RECENT_TAIL_MESSAGES = 24
 const compactionJobs = new Map<string, { force: boolean; promise: Promise<ContextCheckpoint | null> }>()
 
@@ -43,7 +44,7 @@ function checkpointBoundary(record: { sourceEndedAt: Date; sourceMessageIds: unk
 
 async function resolveSessionContextWindowTokens(userId: string, sessionId: string): Promise<number> {
   const latestRun = await prisma.agentRun.findFirst({
-    where: { sessionId, userId },
+    where: { sessionId, userId, ...MAIN_RUN_FILTER },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     select: { modelTier: true, customModelId: true },
   })
@@ -54,7 +55,7 @@ async function resolveSessionContextWindowTokens(userId: string, sessionId: stri
       : { ownerUserId: null, tier: latestRun.modelTier },
     select: { metadata: true, provider: true },
   })
-  return parseModelCapabilities(model?.metadata, model?.provider).contextWindowTokens ?? env.agentContextWindowTokens
+  return resolveSessionContextWindow(env.agentContextWindowTokens, parseModelCapabilities(model?.metadata, model?.provider).contextWindowTokens)
 }
 
 function jsonText(value: unknown): string {
@@ -179,6 +180,13 @@ export function renderDirectiveDigest(directives: UserDirective[]): string | nul
   return `[系统] 作者长期有效指令账本（优先级高于旧对话；仅 active 生效）：\n${directives.map((item) => `- [${item.kind}/${item.scope}] ${item.text} (directiveId=${item.id})`).join('\n')}`
 }
 
+// Session summaries may carry book rules, but never another session's task directives.
+async function sessionDirectives(userId: string, novelId: string, sessionId: string) {
+  const rows = await prisma.userDirective.findMany({ where: { userId, novelId, status: 'active',
+    OR: [{ scope: { not: 'task' } }, { sessionId, scope: 'task' }] }, orderBy: [{ scope: 'asc' }, { createdAt: 'asc' }] })
+  return rows.map(directiveRecord)
+}
+
 function messageText(parts: unknown): string {
   if (!Array.isArray(parts)) return ''
   return (parts as AgentMessagePart[]).map((part) => {
@@ -222,22 +230,20 @@ export function renderCheckpointDigest(checkpoint: ContextCheckpoint, current?: 
 async function compactSessionContextInternal(userId: string, sessionId: string, force: boolean): Promise<ContextCheckpoint | null> {
   const session = await prisma.agentSession.findFirst({ where: { id: sessionId, userId }, select: { id: true, novelId: true } })
   if (!session) throw new DataAccessError(404, 'AGENT_SESSION_NOT_FOUND', 'Agent 会话不存在。')
-  const [previous, directives, records, contextWindowTokens] = await Promise.all([
-    prisma.contextCheckpoint.findFirst({ where: { sessionId }, orderBy: [{ version: 'desc' }, { createdAt: 'desc' }] }),
-    listActiveDirectives(userId, session.novelId),
+  const previous = await prisma.contextCheckpoint.findFirst({ where: { sessionId }, orderBy: [{ version: 'desc' }, { createdAt: 'desc' }] })
+  const [directives, afterPrevious, contextWindowTokens] = await Promise.all([
+    sessionDirectives(userId, session.novelId, sessionId),
     prisma.agentMessage.findMany({
-      where: { sessionId, run: { status: { in: ['completed', 'failed', 'cancelled'] } } },
+      where: { ...windowMessagesWhere(sessionId, checkpointBoundary(previous)), run: { ...MAIN_RUN_FILTER, status: { in: ['completed', 'failed', 'cancelled'] } } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      include: { run: { select: { inputSummary: true, outputSummary: true, status: true } } },
+      select: { id: true, runId: true, role: true, parts: true, createdAt: true, run: { select: { outputSummary: true } } },
     }),
     resolveSessionContextWindowTokens(userId, sessionId),
   ])
-  const boundary = checkpointBoundary(previous)
-  const afterPrevious = records.filter((item) => isAfterCheckpointBoundary(item, boundary))
   const source = afterPrevious.slice(0, Math.max(0, afterPrevious.length - RECENT_TAIL_MESSAGES))
   const activeText = afterPrevious.map((item) => messageText(item.parts)).join('\n')
-  const usageRatio = (estimateTextTokens(activeText) + (previous?.summaryTokens ?? 0)) / contextWindowTokens
-  if (!force && usageRatio < COMPACTION_THRESHOLD) return null
+  const beforeTokens = estimateTextTokens(activeText) + (previous?.summaryTokens ?? 0)
+  if (!force && beforeTokens < Math.floor(contextWindowTokens * CONTEXT_COMPACTION_THRESHOLD)) return null
   // 强制压缩也必须有新的可压缩消息；返回旧检查点会让前端误报“生成了新版本”。
   if (source.length === 0) return null
 
@@ -262,6 +268,9 @@ async function compactSessionContextInternal(userId: string, sessionId: string, 
     toolReceipts: [...(priorSummary?.toolReceipts ?? []), ...receipts].slice(-60),
     directiveIds: directives.map((item) => item.id),
   }
+  const summaryTokens = estimateTextTokens(jsonText(summary))
+  const retainedTokens = estimateTextTokens(afterPrevious.slice(source.length).map(item => messageText(item.parts)).join('\n'))
+  if (summaryTokens + retainedTokens >= beforeTokens) return null
   const hardIds = directives.filter((item) => item.kind === 'must' || item.kind === 'must_not').map((item) => item.id)
   const missingDirectiveIds = hardIds.filter((id) => !summary.directiveIds.includes(id))
   const validation = {
@@ -280,7 +289,7 @@ async function compactSessionContextInternal(userId: string, sessionId: string, 
         sessionId, runId: source.at(-1)?.runId ?? null, sourceMessageCount: source.length,
         sourceMessageIds: source.map((item) => item.id), sourceStartedAt: source[0].createdAt,
         sourceEndedAt: source.at(-1)!.createdAt, sourceTokens: estimateTextTokens(sourceText),
-        summaryTokens: estimateTextTokens(jsonText(summary)), model: 'deterministic-v2', version: (previous?.version ?? 0) + 1,
+        summaryTokens, model: 'deterministic-v2', version: (previous?.version ?? 0) + 1,
         sourceHash,
         summary: summary as unknown as object, validation,
       },
@@ -310,22 +319,40 @@ export async function compactSessionContext(userId: string, sessionId: string, f
   return job
 }
 
-export async function getContextState(userId: string, sessionId: string): Promise<ContextState> {
+export async function getContextState(userId: string, sessionId: string, preferRequest = false): Promise<ContextState> {
   const session = await prisma.agentSession.findFirst({ where: { id: sessionId, userId }, select: { novelId: true } })
   if (!session) throw new DataAccessError(404, 'AGENT_SESSION_NOT_FOUND', 'Agent 会话不存在。')
-  const [checkpoint, directives, records, contextWindowTokens] = await Promise.all([
+  const [checkpoint, directives, latest] = await Promise.all([
     prisma.contextCheckpoint.findFirst({ where: { sessionId }, orderBy: [{ version: 'desc' }, { createdAt: 'desc' }] }),
-    listActiveDirectives(userId, session.novelId),
-    prisma.agentMessage.findMany({ where: { sessionId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, parts: true, createdAt: true } }),
+    sessionDirectives(userId, session.novelId, sessionId),
+    preferRequest ? prisma.agentRun.findFirst({
+      where: { userId, sessionId, ...MAIN_RUN_FILTER, events: { some: { type: 'context.usage' } } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { id: true, status: true, events: { where: { type: 'context.usage' }, orderBy: { seq: 'desc' }, take: 1,
+        select: { seq: true, createdAt: true, payload: true } } },
+    }) : null,
+  ])
+  const base = { warningThreshold: WARNING_THRESHOLD, activeDirectiveCount: directives.length,
+    checkpoint: checkpoint ? checkpointRecord(checkpoint) : null }
+  const event = latest?.events[0]
+  if (latest && event && (!checkpoint || event.createdAt > checkpoint.createdAt || ['running', 'queued', 'awaiting_approval'].includes(latest.status))) {
+    const sample = contextUsageSchema.safeParse(event.payload)
+    if (sample.success) {
+      const { estimatedTokens, contextWindowTokens, compactAtTokens } = sample.data
+      return { ...base, requestSample: { runId: latest.id, seq: event.seq }, estimatedTokens, contextWindowTokens,
+        usageRatio: estimatedTokens / contextWindowTokens, compactionThreshold: compactAtTokens / contextWindowTokens }
+    }
+  }
+  // Historical clients and sessions without a measured request use saved history.
+  const [recent, contextWindowTokens] = await Promise.all([
+    prisma.agentMessage.findMany({ where: windowMessagesWhere(sessionId, checkpointBoundary(checkpoint)),
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true } }),
     resolveSessionContextWindowTokens(userId, sessionId),
   ])
-  const recent = records.filter((item) => isAfterCheckpointBoundary(item, checkpointBoundary(checkpoint)))
   const estimatedTokens = estimateTextTokens(recent.map((item) => messageText(item.parts)).join('\n')) + (checkpoint?.summaryTokens ?? 0)
   return {
-    estimatedTokens, contextWindowTokens,
-    usageRatio: estimatedTokens / contextWindowTokens, warningThreshold: WARNING_THRESHOLD,
-    compactionThreshold: COMPACTION_THRESHOLD, activeDirectiveCount: directives.length,
-    checkpoint: checkpoint ? checkpointRecord(checkpoint) : null,
+    ...base, estimatedTokens, contextWindowTokens,
+    usageRatio: estimatedTokens / contextWindowTokens, compactionThreshold: CONTEXT_COMPACTION_THRESHOLD,
   }
 }
 
@@ -350,7 +377,15 @@ function detailRecord(record: { id: string; role: string; parts: unknown; create
   }
 }
 
-/** 上下文详情弹窗数据源：records/checkpoints 走 DB 倒序分页；final 视图与占用卡同口径，窗口消息内存正序切片分页 */
+function windowMessagesWhere(sessionId: string, boundary: ContextCheckpointBoundary | null): Prisma.AgentMessageWhereInput {
+  if (!boundary) return { sessionId }
+  return { sessionId, OR: [
+    { createdAt: { gt: boundary.createdAt } },
+    ...(boundary.messageId ? [{ createdAt: boundary.createdAt, id: { gt: boundary.messageId } }] : []),
+  ] }
+}
+
+/** The detail view describes retained conversation history, independently of the current model request. */
 export async function getContextDetail(
   userId: string,
   sessionId: string,
@@ -388,14 +423,9 @@ export async function getContextDetail(
   }
 
   const [directives, windowRows] = await Promise.all([
-    listActiveDirectives(userId, session.novelId),
+    sessionDirectives(userId, session.novelId, sessionId),
     prisma.agentMessage.findMany({
-      where: boundary
-        ? { sessionId, OR: [
-            { createdAt: { gt: boundary.createdAt } },
-            ...(boundary.messageId ? [{ createdAt: boundary.createdAt, id: { gt: boundary.messageId } }] : []),
-          ] }
-        : { sessionId },
+      where: windowMessagesWhere(sessionId, boundary),
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       select: { id: true, role: true, parts: true, createdAt: true },
     }),

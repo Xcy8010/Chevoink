@@ -17,6 +17,7 @@ import { readParentContentionScope } from './runtime-parent-contention.js'
 import { savedChapterPresentationSchema } from './writing-scope.js'
 import { limitedWritingDeliverySchema, limitedWritingOutcomeSchema } from './writing-delivery-limitations.js'
 import { NEXT_PROMPT_MAX_LENGTH } from './next-prompt.js'
+import { contextUsageSchema } from '../../../shared/contracts/context-compaction-contracts.js'
 
 /** Only this DB-locked allocator writes UI events for the durable protocol.
  * New source families retain their outbox rows until their projector is added;
@@ -31,7 +32,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     const sources = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: root.id,
       OR: [{ type: { in: ['child.admitted', 'approval.requested', 'approval.resolved', 'execution.state.saved', 'writing.delivery.projected', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered', 'configuration.changed'] } },
         { type: { in: ['execution.bootstrap.paused', 'execution.bootstrap.resumed'] }, runId },
-        { type: 'execution.context.archived', runId },
+        { type: { in: ['execution.context.archived', 'execution.context.measured'] }, runId },
         { type: { in: ['question.parked', 'question.woken'] }, runId },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'completed' } },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'cancelled' } },
@@ -222,10 +223,27 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           if (frame.snapshotHash !== paused.data.sourceHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '暂停判定与原执行帧不一致。')
         }
         bodies = [{ type: 'run.paused', reason: paused.data.reason }]
+      } else if (source.type === 'execution.context.measured') {
+        const usage = contextUsageSchema.parse(source.payload)
+        const key = source.operationId ? `context-usage:${source.operationId}`
+          : `context-limit:${runtimeJson({ runId, ...z.object({ revision: z.number().int().nonnegative() }).parse(source.payload), ...usage }).hash}`
+        if (source.eventKey !== key) return runtimeError('RUNTIME_RECEIPT_INVALID', '模型上下文用量记录无效。')
+        bodies = [{ type: 'context.usage', ...usage }]
       } else if (source.type === 'execution.context.archived') {
         // The archive and this outbox source commit atomically. Only the
         // completed state is observable for this protocol.
-        bodies = [{ type: 'context.compaction', messageId: source.id, state: 'completed' }]
+        const storage = z.object({ reason: z.literal('storage'), revision: z.number().int().nonnegative() }).safeParse(source.payload)
+        bodies = storage.success
+          ? [{ type: 'execution.progress', stage: 'checkpoint', revision: storage.data.revision }]
+          : [{ type: 'context.compaction', messageId: source.id, state: 'completed' }]
+        const measured = contextUsageSchema.omit({ estimatedTokens: true }).extend({
+          beforeTokens: z.number().int().nonnegative(), afterTokens: z.number().int().nonnegative(),
+        }).safeParse(source.payload)
+        if (measured.success) {
+          const { beforeTokens, afterTokens, ...limits } = measured.data
+          bodies.unshift({ type: 'context.usage', ...limits, estimatedTokens: beforeTokens })
+          bodies.push({ type: 'context.usage', ...limits, estimatedTokens: afterTokens })
+        }
       } else if (source.type === 'execution.state.saved') {
         bodies = await projectExecutionFrame(tx, source)
         if (source.runId !== runId && bodies.some(body => body.type === 'text.final')) {

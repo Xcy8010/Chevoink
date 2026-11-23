@@ -46,7 +46,16 @@ export const contextCheckpointSchema = z.object({
   createdAt: z.string().datetime(),
 })
 
+/** Measured on the assembled input, before dispatch. Independent of billing totals. */
+export const contextUsageSchema = z.object({
+  estimatedTokens: z.number().int().nonnegative(),
+  contextWindowTokens: z.number().int().positive(),
+  compactAtTokens: z.number().int().nonnegative(),
+})
+export type ContextUsage = z.infer<typeof contextUsageSchema>
+
 export const contextStateSchema = z.object({
+  requestSample: z.object({ runId: z.string(), seq: z.number().int().positive() }).optional(),
   estimatedTokens: z.number().int().nonnegative(),
   contextWindowTokens: z.number().int().positive(),
   usageRatio: z.number().min(0),

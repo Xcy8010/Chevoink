@@ -244,6 +244,7 @@ type AgentStoreState = {
   /** 各会话未读状态信号（绿/黄/红点）；激活该会话时由宿主 dismiss 清除 */
   sessionSignals: Record<string, SessionSignal>
   usage: AgentTokenUsage
+  requestContext: Extract<AgentStreamEvent, { type: 'context.usage' }> | null
   currentTurn: number
   lastSeq: number
   lastVisibleOutput: { runId: string; at: number } | null
@@ -664,6 +665,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   runningSessionIds: new Set<string>(),
   sessionSignals: {},
   usage: emptyUsage,
+  requestContext: null,
   currentTurn: 0,
   lastSeq: 0,
   lastVisibleOutput: null,
@@ -1024,6 +1026,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         const remoteAuthorEnded = (entry as AgentSessionRunStatus & { authorEnded?: AgentAuthorEnded }).authorEnded
         const isActiveSession = sessionId === state.activeSessionId
         if (isActiveSession && isRunActive(state.phase) && state.runId && state.runId !== entry.runId) continue
+        // A slow poll can return the previous pause after another device has
+        // resumed this same run. Compare server timestamps, never handset time.
+        const stoppedAt = timestamp(entry.finishedAt)
+        if (stoppedAt !== null && isActiveSession && state.runId === entry.runId && isRunActive(state.phase)
+          && ['paused', 'completed', 'failed', 'cancelled'].includes(entry.status)
+          && state.messages.some(message => (message.runTiming?.sourceRunId ?? message.runId) === entry.runId
+            && (timestamp(message.runTiming?.activeSince) ?? -Infinity) > stoppedAt)) continue
         if (isActiveSession && state.runId === entry.runId && runGoalId !== (entry.runGoalId ?? null)) {
           runGoalId = entry.runGoalId ?? null
           changed = true
@@ -1341,6 +1350,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
         case 'execution.progress':
           return base
+        case 'context.usage':
+          if (event.runId !== state.runId) return {}
+          return { ...base, requestContext: event }
 
         case 'context.compaction': {
           if (event.runId !== state.runId) return {}

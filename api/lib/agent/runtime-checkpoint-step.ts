@@ -2,18 +2,29 @@ import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
 import { readTaskBudgetInTransaction } from './runtime-budget.js'
 import { readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
-import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinitionTokens, releaseCompletedReasoning } from './context-budget.js'
+import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinitionTokens, hasProactiveCompactionGain, releaseCompletedReasoning } from './context-budget.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { randomUUID } from 'node:crypto'
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE } from './tool-execution-guidance.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { COLLABORATION_MARKER, readWritingCollaborationDigest } from './writing-collaboration.js'
+import type { ChatMessage } from '../ai-service.js'
+
+type RequestContextBudget = {
+  contextWindowTokens: number
+  hardLimit: number
+  compactAtTokens: number
+  estimate: (messages: ChatMessage[]) => number
+  canReadArchive: boolean
+}
 
 /** Storage-pressure compaction is NOT a budget checkpoint and grants no tokens.
  * Each replacement points to the still-persisted, hash-verified original frame.
  * Model-window admission and very large single results remain separate concerns. */
-export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: number) {
+export async function advanceDurableContext(token: RunLeaseToken, budget?: number | RequestContextBudget | 'guidance') {
+  const admission = typeof budget === 'object' ? budget : null
+  const inputLimit = typeof budget === 'number' ? budget : admission?.hardLimit
   if (inputLimit !== undefined && (!Number.isSafeInteger(inputLimit) || inputLimit < 1)) return runtimeError('RUNTIME_INPUT_INVALID', '上下文输入预算无效。')
   const lease = { ...token }
   return withRunLease(lease, async tx => {
@@ -21,7 +32,7 @@ export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: n
     if (frame.state.phase !== 'idle') return null
     // Only a new model boundary can receive current guidance. Never alter a
     // paid assistant call awaiting execution, or an already prepared request.
-    if (frame.state.messages.at(-1)?.role !== 'assistant') {
+    if (!admission && frame.state.messages.at(-1)?.role !== 'assistant') {
       const policies = [AGENT_TOOL_EXECUTION_POLICY]
       if (!lease.parent && configuration.mode === 'build' && configuration.agentType === 'orchestrator'
         && configuration.toolAuthority.some(grant => grant.name === 'memory_save' && grant.permission !== 'deny')
@@ -46,25 +57,41 @@ export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: n
       if (runtimeJson(messages).hash !== runtimeJson(frame.state.messages).hash) return saveExecutionStateInTransaction(tx, lease,
         { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, snapshot: { ...frame.state, messages } })
     }
+    if (budget === 'guidance') return null
     const beforeBytes = Buffer.byteLength(JSON.stringify(frame.state.messages), 'utf8')
-    const modelPressure = inputLimit !== undefined && estimateChatMessagesTokens(frame.state.messages) + estimateToolDefinitionTokens(configuration.tools) > inputLimit
+    const estimate = admission?.estimate ?? ((messages: ChatMessage[]) => estimateChatMessagesTokens(messages) + estimateToolDefinitionTokens(configuration.tools))
+    const beforeTokens = inputLimit === undefined ? 0 : estimate(frame.state.messages)
+    const modelPressure = admission ? beforeTokens >= admission.compactAtTokens : inputLimit !== undefined && beforeTokens > inputLimit
     if (!modelPressure && (beforeBytes < 256 * 1024 || frame.state.messages.at(-1)?.role !== 'tool')) return null
+    if (admission && !admission.canReadArchive) return null
     // Keep the latest complete tool round: replacing it with an assistant
     // archive note would be mistaken for a final answer by the executor.
     const archived = archiveEarlyToolRounds(frame.state.messages, { revision: frame.revision, hash: frame.snapshotHash }, modelPressure ? 1 : 8)
     const releasedReasoningTokens = modelPressure ? releaseCompletedReasoning(archived.messages) : 0
     const afterBytes = Buffer.byteLength(JSON.stringify(archived.messages), 'utf8')
     if ((!archived.archivedRounds && !releasedReasoningTokens) || afterBytes >= beforeBytes) return null
+    const afterTokens = admission && modelPressure ? estimate(archived.messages) : null
+    if (admission && afterTokens !== null) {
+      if (afterTokens >= beforeTokens || beforeTokens <= admission.hardLimit && !hasProactiveCompactionGain(beforeTokens, afterTokens, admission.compactAtTokens)) return null
+    }
     const tool = configuration.tools.find(item => item.function.name === executionContextReadTool.name)
     const grant = configuration.toolAuthority.find(item => item.name === executionContextReadTool.name)
     if (!tool || !grant || grant.permission !== 'allow' || grant.alwaysConfirm
-      || runtimeJson(tool.function.parameters).hash !== runtimeJson(toOpenAIParameters(executionContextReadTool.parameters)).hash) return runtimeError('RUNTIME_CONTEXT_READER_REQUIRED', '压缩前必须提供本任务原文回读能力，不能留下无法读取的摘要。')
+      || runtimeJson(tool.function.parameters).hash !== runtimeJson(toOpenAIParameters(executionContextReadTool.parameters)).hash) {
+      if (admission) return null
+      return runtimeError('RUNTIME_CONTEXT_READER_REQUIRED', '压缩前必须提供本任务原文回读能力，不能留下无法读取的摘要。')
+    }
     const next = await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
       snapshot: { ...frame.state, messages: archived.messages } })
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: lease.taskRootId, runId: lease.runId,
       eventKey: `context:${lease.taskRootId}:${frame.revision}`, type: 'execution.context.archived',
       payload: { version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash, revision: next.revision,
         snapshotHash: next.snapshotHash, archivedRounds: archived.archivedRounds, releasedReasoningTokens, beforeBytes, afterBytes,
+        reason: modelPressure ? 'window' : 'storage',
+        ...(admission && afterTokens !== null && !lease.parent ? {
+          contextWindowTokens: admission.contextWindowTokens, compactAtTokens: admission.compactAtTokens,
+          beforeTokens, afterTokens,
+        } : {}),
         ...(inputLimit !== undefined ? { inputLimit, modelPressure } : {}) } } })
     return next
   })

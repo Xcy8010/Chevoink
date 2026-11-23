@@ -49,6 +49,9 @@ import StudioCommandBar from './components/StudioCommandBar'
 import StudioMobileAccountCard from './components/StudioMobileAccountCard'
 import StudioMobileHeader from './components/StudioMobileHeader'
 import StudioMobileNavigation from './components/StudioMobileNavigation'
+import { useStudioMobileSwipe } from './components/use-studio-mobile-swipe'
+import './components/studio-mobile-motion.css'
+import { resolveStreamingChapterText } from './components/use-streaming-text'
 import StudioMobileMenu from './components/StudioMobileMenu'
 import CreateNovelDialog from './components/CreateNovelDialog'
 import { AgentConversationRail } from './components/AgentTaskSidebar'
@@ -267,6 +270,13 @@ export default function StudioWorkspace() {
   useAutoHideScrollbars()
   const [activeToolPanel, setActiveToolPanel] = useState<ToolPanel | null>(null)
   const platformCapabilities = useMemo(() => getPlatformCapabilities(), [])
+  const mobileMotion = platformCapabilities.native && /Android/i.test(navigator.userAgent)
+  const mobilePrimary = mobileView === 'assistant' || mobileView === 'editor'
+  function selectMobileView(view: 'assistant' | 'editor' | 'chapters') {
+    setMobileView(view)
+    setWorkspacePerspective(view === 'assistant' ? 'work' : 'ide')
+  }
+  const mobileSwipe = useStudioMobileSwipe(mobileMotion, mobileView, mobileMoreOpen, setMobileMoreOpen, selectMobileView)
   const [agentPrompt, setAgentPrompt] = useState('')
   // 惰性初始化：从快照同步恢复当前会话 id，避免跨路由返回时 AgentPanel 先以 null 挂载冲掉进行中的任务直播
   // The same snapshot contains every task's artifacts. Parse it once for the
@@ -1872,13 +1882,12 @@ export default function StudioWorkspace() {
   ], [catalogDocument?.content, catalogDocument?.title, catalogPreview.content, catalogPreview.title, chapters, savedPlanFiles])
 
   const activeLiveToolDraft = useMemo(() => Object.values(liveToolDrafts).at(-1) ?? null, [liveToolDrafts])
-  const liveChapterTargetId = activeLiveToolDraft?.kind === 'chapter'
-    ? activeLiveToolDraft.targetId ?? (activeLiveToolDraft.toolName === 'chapter_create' ? null : selectedChapterId)
-    : null
   const livePlanTarget = activeLiveToolDraft?.kind === 'plan'
     ? savedPlanFiles.find((plan) => plan.id === activeLiveToolDraft.targetId || plan.backendArtifactId === activeLiveToolDraft.targetId) ?? null
     : null
-  const chapterStreamingPreview = liveChapterTargetId && liveChapterTargetId === selectedChapterId ? activeLiveToolDraft?.content : undefined
+  const chapterStreamingPreview = chapterDraft && chapterDraft.id === selectedChapterId
+    ? resolveStreamingChapterText(chapterDraft, activeLiveToolDraft)
+    : undefined
   const documentStreamingPreview = livePlanTarget && activeWorkspaceDocument?.kind === 'plan' && livePlanTarget.id === activeWorkspaceDocument.id
     ? activeLiveToolDraft?.content
     : undefined
@@ -4311,7 +4320,17 @@ export default function StudioWorkspace() {
             <button type="button" className="shrink-0 underline" onClick={handleRetrySave}>重试保存</button>
           </div>
         )}
-        {!desktopLayout && <div className="flex min-h-0 flex-1 flex-col lg:hidden">
+        {!desktopLayout && <div
+          ref={mobileSwipe.root}
+          className={cn('flex min-h-0 flex-1 flex-col lg:hidden', mobileMotion && 'studio-mobile-motion')}
+          data-primary-view={mobileMotion && mobilePrimary ? mobileView : undefined}
+          data-drawer-open={mobileMotion ? mobileMoreOpen : undefined}
+          {...mobileSwipe.handlers}
+        >
+          <div
+            ref={node => { node?.toggleAttribute('inert', mobileMotion && mobileMoreOpen) }}
+            className="studio-mobile-motion-main flex min-h-0 flex-1 flex-col"
+          >
           <StudioMobileHeader
             view={mobileView}
             navigationOpen={mobileMoreOpen}
@@ -4319,17 +4338,17 @@ export default function StudioWorkspace() {
             onBack={() => setMobileView(mobileBackView)}
             backLabel={mobileBackView === 'editor' ? '返回写作' : '返回工作台'}
             onExit={() => navigate('/')}
-            onSelectView={(view) => {
-              setMobileView(view)
-              if (view === 'assistant') setWorkspacePerspective('work')
-              if (view === 'editor' || view === 'chapters') setWorkspacePerspective('ide')
-            }}
+            onSelectView={selectMobileView}
           />
-          <div ref={lockOutgoingContent} aria-busy={switchingWork} className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]">
+          <div ref={lockOutgoingContent} aria-busy={switchingWork} className={cn('mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]', mobileMotion && mobilePrimary && 'studio-mobile-tab-pages')}>
             <Suspense fallback={<StudioPaneSkeleton label="正在打开创作面板" />}>
 
-            {mobileView === 'editor' ? (
-              <div className="flex min-h-0 flex-1 flex-col">
+            {mobileView === 'editor' || (mobileMotion && mobilePrimary && mobileSwipe.showEditor) ? (
+              <div
+                ref={node => { node?.toggleAttribute('inert', mobileMotion && mobileView !== 'editor') }}
+                data-page="editor"
+                className={cn('flex min-h-0 flex-1 flex-col', mobileMotion && 'studio-mobile-tab-page')}
+              >
                 {!chapterDraft || activeWorkspaceDocument ? (
                   <div data-studio-region="mobile-writing-navigation" className="flex min-h-11 shrink-0 items-center border-b border-[var(--border-subtle)] px-3">
                     <button type="button" onClick={openMobileChapters} className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-md px-1 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none">
@@ -4381,7 +4400,11 @@ export default function StudioWorkspace() {
             ) : null}
 
             {/* Keep the one mobile conversation connected while the author edits. */}
-            <div className={cn('relative z-20 min-h-0 flex-1 flex-col overflow-visible', mobileView === 'assistant' ? 'flex' : 'hidden')}>
+            <div
+              ref={node => { node?.toggleAttribute('inert', mobileMotion && mobileView !== 'assistant') }}
+              data-page="assistant"
+              className={cn('z-20 min-h-0 flex-1 flex-col overflow-visible', mobileMotion && mobilePrimary ? 'studio-mobile-tab-page flex' : cn('relative', mobileView === 'assistant' ? 'flex' : 'hidden'))}
+            >
               {renderWritingAgent(undefined, false, 'inline', true, true)}
             </div>
 
@@ -4431,7 +4454,10 @@ export default function StudioWorkspace() {
             </Suspense>
           </div>
 
+          </div>
           <StudioMobileNavigation
+            push={mobileMotion}
+            dragging={mobileSwipe.dragging === 'drawer'}
             open={mobileMoreOpen}
             onClose={() => setMobileMoreOpen(false)}
             onCreateNovel={handleCreateWorkspaceNovel}

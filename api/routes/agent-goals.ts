@@ -7,6 +7,7 @@ import { createRequestId, buildSuccess } from '../lib/http.js'
 import { parseBody } from '../lib/parse-body.js'
 import { sendRouteError } from '../lib/route-error.js'
 import { prisma } from '../lib/prisma.js'
+import { observeConversation } from '../lib/agent/conversation-wakeup.js'
 import { actOnAgentGoal, createAgentGoal, readAgentGoal, readAgentGoalDetail, updateAgentGoal } from '../lib/agent/goal-service.js'
 
 const router = Router()
@@ -74,10 +75,13 @@ router.get('/sessions/:sessionId/goal-events', async (req, res) => {
     res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`)
     let conversationRevision: string | undefined
     let sequence = cursor, closed = false, reading = false, ticks = 0
-    const close = () => { closed = true; clearInterval(timer); if (!res.writableEnded) res.end() }
+    let pendingWake = false
+    const close = () => { closed = true; unsubscribe(); clearInterval(timer); if (!res.writableEnded) res.end() }
     const poll = async () => {
       if (closed || reading) return
       reading = true
+      const admissionChanged = pendingWake
+      pendingWake = false
       try {
         // One indexed read replaces the ownership probe. No prompt, manuscript or tool output travels in this signal.
         const [revision] = await prisma.$queryRaw<Array<{ run: string | null; queue: string | null; edited: Date }>>`
@@ -92,7 +96,7 @@ router.get('/sessions/:sessionId/goal-events', async (req, res) => {
         `
         if (!revision || closed) { close(); return }
         const key = JSON.stringify([revision.edited, revision.run, revision.queue])
-        if (conversationRevision !== key) {
+        if (conversationRevision !== key || admissionChanged) {
           conversationRevision = key
           res.write('event: conversation\ndata: changed\n\n')
         }
@@ -108,8 +112,17 @@ router.get('/sessions/:sessionId/goal-events', async (req, res) => {
         }
         if (++ticks % 15 === 0 && !closed) res.write(': heartbeat\n\n')
       } catch { close() }
-      finally { reading = false }
+      finally {
+        reading = false
+        if (pendingWake && !closed) void poll()
+      }
     }
+    // Same-process admissions wake both devices immediately. The existing poll
+    // also observes workers on other processes and older clients.
+    const unsubscribe = observeConversation(userId, sessionId, () => {
+      pendingWake = true
+      if (!reading) void poll()
+    })
     const timer = setInterval(() => { void poll() }, 1000)
     timer.unref()
     res.on('close', close)

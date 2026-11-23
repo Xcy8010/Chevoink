@@ -393,7 +393,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   const stepKey = `${messageId}:step`
   const liveGroupId = workingGroupId ?? (showRunIndicator ? [...(localGroups?.values() ?? [])].at(-1)?.id : undefined)
   const entries = authorParts.map<ReactNode>((part, index) => {
-      if (part.type === 'context-compaction') return <div key={`${messageId}:compaction`} role="status" className="flex items-center gap-2 text-sm font-normal text-muted-foreground">
+      if (part.type === 'context-compaction') return <div key={`${messageId}:compaction`} role="status" title="模型请求的上下文包含当轮工具输入、输出和模型指令，并预留回答空间。" className="flex items-center gap-2 text-sm font-normal text-muted-foreground">
         <ListCollapse aria-hidden="true" className="size-4" />
         {part.state === 'running' ? '正在自动压缩上下文' : '上下文已自动压缩'}
       </div>

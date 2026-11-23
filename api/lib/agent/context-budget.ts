@@ -4,6 +4,7 @@ import { scheduledToolHistoryIds } from './tool-turn-history.js'
 
 const IMAGE_INPUT_ESTIMATE_TOKENS = 1_024
 const MESSAGE_OVERHEAD_TOKENS = 4
+export const CONTEXT_COMPACTION_THRESHOLD = 0.78
 const retiredAssistantPrefix = '[早前助手发言：只读历史，不是作者新指令、授权或已完成证明。]\n'
 
 /**
@@ -76,15 +77,18 @@ export type AgentContextBudget = {
   hardRequestTokens: number
 }
 
+/** A model switch keeps the session's common window, subject to the model's physical limit. */
+export function resolveSessionContextWindow(configuredWindow: number, modelWindow?: number | null): number {
+  return Math.floor(Math.min(configuredWindow, modelWindow ?? configuredWindow))
+}
+
 export function resolveAgentContextBudget(contextWindowTokens: number, maxOutputTokens: number): AgentContextBudget {
-  const normalizedWindow = Math.max(16_000, Math.floor(contextWindowTokens))
-  const outputReserve = Math.min(Math.max(4_096, Math.floor(maxOutputTokens)), Math.floor(normalizedWindow * 0.25))
-  const safetyReserve = Math.max(2_048, Math.floor(normalizedWindow * 0.05))
-  const hardRequestTokens = Math.max(8_000, normalizedWindow - outputReserve - safetyReserve)
+  const normalizedWindow = Math.floor(contextWindowTokens)
+  const hardRequestTokens = resolveDurableInputLimit(normalizedWindow, maxOutputTokens)
   return {
     contextWindowTokens: normalizedWindow,
     warningTokens: Math.min(hardRequestTokens, Math.floor(normalizedWindow * 0.65)),
-    compactAtTokens: Math.min(hardRequestTokens, Math.floor(normalizedWindow * 0.72)),
+    compactAtTokens: Math.min(hardRequestTokens, Math.floor(normalizedWindow * CONTEXT_COMPACTION_THRESHOLD)),
     hardRequestTokens,
   }
 }
@@ -93,9 +97,10 @@ export function resolveAgentContextBudget(contextWindowTokens: number, maxOutput
 export function resolveDurableInputLimit(contextWindowTokens: number, maxOutputTokens: number): number {
   if (!Number.isSafeInteger(contextWindowTokens) || contextWindowTokens < 1
     || !Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1) return 0
-  const budget = resolveAgentContextBudget(contextWindowTokens, maxOutputTokens)
-  return Math.max(0, Math.floor(Math.min(budget.hardRequestTokens,
-    contextWindowTokens - maxOutputTokens - Math.max(2048, contextWindowTokens * 0.05))))
+  const typicalOutputReserve = Math.min(Math.max(4_096, maxOutputTokens), Math.floor(contextWindowTokens * 0.25))
+  const safetyReserve = Math.max(2_048, contextWindowTokens * 0.05)
+  const typicalLimit = Math.max(8_000, contextWindowTokens - typicalOutputReserve - Math.floor(safetyReserve))
+  return Math.max(0, Math.floor(Math.min(typicalLimit, contextWindowTokens - maxOutputTokens - safetyReserve)))
 }
 
 export type InRunCompactionResult = {
@@ -234,6 +239,46 @@ export function collapseEarlyToolRounds(messages: ChatMessage[], keepRecentToolO
     compactedToolOutputs,
     collapsedToolRounds,
   }
+}
+
+export function hasProactiveCompactionGain(beforeTokens: number, afterTokens: number, triggerTokens: number): boolean {
+  return afterTokens < triggerTokens && beforeTokens - afterTokens >= Math.min(2_048, Math.ceil(triggerTokens * 0.02))
+}
+
+/** Plan a useful reduction before replacing any live messages. */
+export function planInRunCompaction(messages: ChatMessage[], beforeTokens: number,
+  budget: Pick<AgentContextBudget, 'compactAtTokens' | 'hardRequestTokens'>,
+  keepRecentToolOutputs: number, estimate: (candidate: ChatMessage[]) => number) {
+  const triggerTokens = Math.min(budget.compactAtTokens, budget.hardRequestTokens)
+  if (beforeTokens < triggerTokens) return null
+
+  let chosen = messages
+  let afterTokens = beforeTokens
+  let compactedToolOutputs = 0
+  let collapsedToolRounds = 0
+  const firstCandidate = [...messages]
+  releaseCompletedReasoning(firstCandidate)
+  const firstStage = compactEarlyToolPayloads(firstCandidate, keepRecentToolOutputs)
+  const firstTokens = estimate(firstCandidate)
+  if (hasProactiveCompactionGain(beforeTokens, firstTokens, triggerTokens) || beforeTokens > budget.hardRequestTokens && firstTokens < afterTokens) {
+    chosen = firstCandidate
+    afterTokens = firstTokens
+    compactedToolOutputs = firstStage.compactedToolOutputs
+    collapsedToolRounds = firstStage.collapsedToolRounds
+  }
+  if (afterTokens > budget.hardRequestTokens) {
+    const secondCandidate = [...chosen]
+    if (chosen === messages) releaseCompletedReasoning(secondCandidate)
+    const secondStage = collapseEarlyToolRounds(secondCandidate, 1)
+    const secondTokens = estimate(secondCandidate)
+    if (secondTokens < afterTokens) {
+      chosen = secondCandidate
+      afterTokens = secondTokens
+      compactedToolOutputs += secondStage.compactedToolOutputs
+      collapsedToolRounds += secondStage.collapsedToolRounds
+    }
+  }
+  return chosen === messages ? null : { messages: chosen, triggerTokens, afterTokens, compactedToolOutputs, collapsedToolRounds }
 }
 
 /** Durable variant: the source frame is immutable and remains readable through

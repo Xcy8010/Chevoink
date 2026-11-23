@@ -151,6 +151,8 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, governedPolicyKey } = await import('./agents.js')
   const { resolveAgent2FeatureFlags } = await import('../agent2-feature-flags.js')
   const { assembleContext, insertSubagentCatalog } = await import('./context.js')
+  const { estimateToolDefinitionTokens } = await import('./context-budget.js')
+  const { isTextOnlyModel } = await import('./public-web-verification.js')
   const { snapshotToolAuthority, intersectToolAuthority, restrictToolsToTask } = await import('./tool-authority.js')
   const { toOpenAITools } = await import('./tools/registry.js')
   const { executionContextReadTool } = await import('./tools/task-context-tools.js')
@@ -222,9 +224,12 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const currentTools = applyPersonalizationToolRules(sessionTools, input.mode, await readPersonalizationRules(userId),
     tool => hasPersonalizationSessionOverride(session.toolPolicy, governedPolicyKey(tool)))
   const tools = activationCeiling ? intersectToolAuthority(currentTools, input.mode, new Map(activationCeiling)) : currentTools
+  const toolDefinitions = toOpenAITools(tools, spec.scope)
+  const maxOutputTokens = Math.min(env.aiTextMaxOutputTokens, runtime.maxOutputTokens ?? env.aiTextMaxOutputTokens)
   const assembled = await assembleContext({ agent, mode: input.mode, userId, sessionId: run.sessionId, runId, novelId: run.novelId, chapterId: run.chapterId,
     prompt: input.prompt, selection: input.selection, attachments: input.attachments, visionEnabled: runtime.visionEnabled, taskSpec: spec,
-    modelTier: runtime.tier, modelName: runtime.modelName, contextWindowTokens: runtime.contextWindowTokens, pinnedSkillIds: input.pinnedSkillIds })
+    modelTier: runtime.tier, modelName: runtime.modelName, contextWindowTokens: runtime.contextWindowTokens,
+    maxOutputTokens, toolDefinitionTokens: estimateToolDefinitionTokens(isTextOnlyModel(runtime) ? [] : toolDefinitions), pinnedSkillIds: input.pinnedSkillIds })
   console.info('[agent-context-timing]', { runId, ...assembled.timings })
   if (agent.type === 'orchestrator') {
     const catalog = await (await import('./productivity.js')).renderSubagentCatalog(userId, run.novelId, input.pinnedSubagentId)
@@ -247,12 +252,12 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
         ...(run.modelPriceSnapshot ? { tokenPrice: tokenPriceSchema.parse(run.modelPriceSnapshot) } : {}), ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
         customModelId: runtime.tier === 'custom' ? run.customModelId : null,
         ...(runtime.toolCallingProtocol ? { toolCallingProtocol: runtime.toolCallingProtocol } : {}),
-        maxOutputTokens: env.aiTextMaxOutputTokens, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
+        maxOutputTokens, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
         reasoningEffort: runtime.reasoningEffort, routeRevision: modelRouteRevision({ provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel,
           endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort,
           ...(runtime.toolCallingProtocol ? { toolCallingProtocol: runtime.toolCallingProtocol } : {}),
           ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}) }) },
-      tools: toOpenAITools(tools, spec.scope), toolAuthority: [...snapshotToolAuthority(tools, input.mode)].map(([name, grant]) => ({ name, ...grant })),
+      tools: toolDefinitions, toolAuthority: [...snapshotToolAuthority(tools, input.mode)].map(([name, grant]) => ({ name, ...grant })),
       protectedChapterIds: spec.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED') ? spec.scope.chapterIds ?? [] : [],
       skillRouterVersion: assembled.skillRoute?.routerVersion ?? (await import('./skills/index.js')).SKILL_ROUTER_VERSION,
       pinnedSkillVersions: assembled.availableSkillVersions, skillInventoryVersion: 1 },

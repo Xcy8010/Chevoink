@@ -90,6 +90,49 @@ it('shares a single clock among current summaries and gives historical messages 
   expect(vi.getTimerCount()).toBe(0)
 })
 
+it('ticks each summary on its own elapsed-second boundary with one shared timer', () => {
+  render(<><ProcessDuration timing={timing} /><ProcessDuration timing={{ ...timing, elapsedMs: 2630 }} /></>)
+  expect(screen.getAllByLabelText('5 秒')).toHaveLength(2)
+  act(() => vi.advanceTimersByTime(369))
+  expect(screen.getAllByLabelText('5 秒')).toHaveLength(2)
+  act(() => vi.advanceTimersByTime(1))
+  expect(screen.getByLabelText('6 秒')).toBeTruthy()
+  expect(screen.getByLabelText('5 秒')).toBeTruthy()
+  act(() => vi.advanceTimersByTime(630))
+  expect(screen.getAllByLabelText('6 秒')).toHaveLength(2)
+  expect(vi.getTimerCount()).toBe(1)
+})
+
+it('sleeps while the phone is hidden and synchronizes on the first visible frame', () => {
+  const visibility = vi.spyOn(document, 'visibilityState', 'get')
+  try {
+    render(<ProcessDuration timing={timing} />)
+    visibility.mockReturnValue('hidden')
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
+    expect(vi.getTimerCount()).toBe(0)
+    act(() => vi.advanceTimersByTime(15_000))
+    visibility.mockReturnValue('visible')
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
+    expect(screen.getByLabelText('20 秒')).toBeTruthy()
+    expect(vi.getTimerCount()).toBe(1)
+  } finally { visibility.mockRestore() }
+})
+
+it('keeps a visible clock running across a recovery start without inventing a historical duration', () => {
+  const identity = { sourceRunId: 'run', scopeId: 'run' }
+  const { rerender, unmount } = render(<ProcessDuration timing={{ ...timing, ...identity }} active />)
+  act(() => vi.advanceTimersByTime(1000))
+  const resumed: AgentRunTiming = { ...identity, elapsedMs: null, activeSince: new Date().toISOString(), status: 'running', lastSeq: 20 }
+  rerender(<ProcessDuration timing={resumed} active />)
+  expect(screen.getByLabelText('6 秒')).toBeTruthy()
+  act(() => vi.advanceTimersByTime(1000))
+  expect(screen.getByLabelText('7 秒')).toBeTruthy()
+  unmount()
+  render(<ProcessDuration timing={resumed} active />)
+  expect(document.querySelector('[data-process-duration]')?.textContent).toContain('本段已处理')
+  expect(screen.getByLabelText('1 秒')).toBeTruthy()
+})
+
 it('restores the same elapsed time after leaving and reentering a session', () => {
   const first = render(<ProcessDuration timing={timing} />)
   first.unmount()

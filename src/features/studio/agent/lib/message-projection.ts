@@ -8,7 +8,15 @@ export type MessageBlock = { firstId: string; lastId: string; ops: number; goalI
 
 export function projectBlockTimings(messages: readonly AgentUIMessage[], blocks: Map<string, MessageBlock>, activeRunId: string | null) {
   const byRun = new Map<string, AgentRunTiming>()
-  for (const message of messages) if (message.runTiming) byRun.set(message.runId, message.runTiming)
+  for (const message of messages) {
+    const timing = message.runTiming
+    if (!timing) continue
+    const previous = byRun.get(message.runId)
+    if (previous && (previous.sourceRunId ?? message.runId) === (timing.sourceRunId ?? message.runId)
+      && (previous.lastSeq > timing.lastSeq || previous.elapsedMs !== null && timing.elapsedMs === null
+        && (timing.status === 'unknown' || timing.status === 'running'))) continue
+    byRun.set(message.runId, timing)
+  }
   const result = new Map<string, AgentRunTiming>()
   for (const block of new Set(blocks.values())) {
     const scopes = new Map<string, AgentRunTiming>()

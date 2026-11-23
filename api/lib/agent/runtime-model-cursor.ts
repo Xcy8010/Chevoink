@@ -5,8 +5,20 @@ import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { preparePricedProviderOperationInTransaction } from './runtime-settlement.js'
 import { readEffectiveNativeTooling } from './native-tool-policy.js'
+import type { ContextUsage } from '../../../shared/contracts/context-compaction-contracts.js'
+import { randomUUID } from 'node:crypto'
+import type { RuntimeTx } from './runtime-common.js'
 
-export type ModelExecutionCursor = { expectedRevision: number; expectedHash: string }
+export type ModelExecutionCursor = { expectedRevision: number; expectedHash: string; contextUsage?: ContextUsage }
+
+export async function recordRequestContext(tx: RuntimeTx, token: RunLeaseToken, usage: ContextUsage, source: { operationId: string } | { revision: number }) {
+  const operationId = 'operationId' in source ? source.operationId : null
+  const eventKey = operationId ? `context-usage:${operationId}` : `context-limit:${runtimeJson({ runId: token.runId, ...source, ...usage }).hash}`
+  await tx.agentExecutionOutbox.upsert({ where: { eventKey }, update: {}, create: {
+    id: randomUUID(), eventKey, taskRootId: token.taskRootId, runId: token.runId, operationId,
+    type: 'execution.context.measured', payload: { ...usage, ...source },
+  } })
+}
 export type FrozenModelRoute = { weightedRoute?: import('../../../shared/contracts/model-weighted-routes.js').WeightedRouteSelection;
   provider: string; model: string; endpoint: string; reasoningEffort: string;
   toolCallingProtocol?: import('../../../shared/contracts/index.js').ToolCallingProtocol }
@@ -87,6 +99,7 @@ export async function prepareModelCursorOperation(token: RunLeaseToken, cursor: 
     const operation = await preparePricedProviderOperationInTransaction(tx, token, input)
     const pending = await saveExecutionStateInTransaction(tx, token, { ...cursor, snapshot: { ...frame.state, phase: 'awaiting_operation', pendingOperationId: operation.id,
       turn: frame.state.turn + 1, nextOperationSequence: frame.state.nextOperationSequence + 1 } })
+    if (cursor.contextUsage && !token.parent) await recordRequestContext(tx, token, cursor.contextUsage, { operationId: operation.id })
     return { operation, pending }
   })
 }

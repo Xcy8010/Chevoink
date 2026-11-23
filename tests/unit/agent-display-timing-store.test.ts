@@ -28,6 +28,8 @@ it('pauses, resumes in the same run, and preserves time through cache and histor
   expect(runElapsedMs(current(), Date.parse(ts(99)))).toBe(10000)
   state.resumeRun('r', 's')
   state.applyEvent(start(3, 100))
+  state.syncRemoteRunStatuses({ s: { runId: 'r', status: 'paused', finishedAt: ts(10) } })
+  expect(useAgentStore.getState().phase).toBe('running')
   expect(runElapsedMs(current(), Date.parse(ts(105)))).toBe(15000)
   state.resetRun()
   const cached = readSessionMessagesCache('s')!

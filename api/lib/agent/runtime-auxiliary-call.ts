@@ -13,7 +13,7 @@ import { beginDurableChat } from './runtime-provider.js'
 import type { AuxiliaryModelStep } from './runtime-auxiliary-model.js'
 import type { DurableTokenPrice } from './runtime-settlement.js'
 import type { ToolContext } from './tools/types.js'
-import { estimateChatMessagesTokens, resolveDurableInputLimit } from './context-budget.js'
+import { estimateChatMessagesTokens, resolveDurableInputLimit, resolveSessionContextWindow } from './context-budget.js'
 
 const auxiliaryTierSchema = creditModelTierSchema
 const reasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
@@ -134,7 +134,9 @@ export async function callDurableAuxiliary(input: {
     || input.price.modelTier !== routeTier
     || runtime.provider !== input.route.provider || (runtime.modelName ?? env.aiTextModel) !== input.route.model
     || (runtime.baseUrl ?? env.aiTextBaseUrl) !== input.route.baseUrl) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原独立复核路由已变化，不能发送给另一模型。')
-  const inputLimit = resolveDurableInputLimit(runtime.contextWindowTokens ?? env.agentContextWindowTokens, input.route.maxOutputTokens)
+  const window = preparedRequest ? runtime.contextWindowTokens ?? env.agentContextWindowTokens
+    : resolveSessionContextWindow(env.agentContextWindowTokens, runtime.contextWindowTokens)
+  const inputLimit = resolveDurableInputLimit(window, input.route.maxOutputTokens)
   if (!inputLimit || estimateChatMessagesTokens([{ role: 'system', content: system }, { role: 'user', content }]) > inputLimit) {
     return runtimeError('RUNTIME_CONTEXT_LIMIT', '独立复核输入超过模型窗口，未派发请求；不能截掉正文后声称完成全文检查。')
   }

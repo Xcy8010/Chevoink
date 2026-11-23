@@ -82,7 +82,7 @@ export function combineRunTimings(timings: AgentRunTiming[]): AgentRunTiming {
   const active = timings.filter(timing => timing.status === 'running' && timing.activeSince)
   const known = timings.length > 0 && active.length <= 1 && timings.every(timing => timing.elapsedMs !== null && Number.isFinite(timing.elapsedMs) && timing.elapsedMs >= 0)
   return { ...latest, elapsedMs: known ? timings.reduce((sum, timing) => sum + timing.elapsedMs!, 0) : null,
-    activeSince: known ? active[0]?.activeSince ?? null : null,
+    activeSince: active.length === 1 ? active[0].activeSince : null,
     status: active.length ? 'running' : latest.status }
 }
 

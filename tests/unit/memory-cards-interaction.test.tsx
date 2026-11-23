@@ -7,9 +7,16 @@ import AgentMemoryCards from '../../src/features/studio/agent/components/AgentMe
 import AgentMemoryCenter from '../../src/features/studio/agent/components/AgentMemoryCenter'
 import { AgentApiError, compactAgentContext, fetchAgentContextState, fetchStoryMemories, fetchStoryMemorySets, updateStoryMemory } from '../../src/features/studio/agent/agentApi'
 import type { StoryMemoryCard } from '../../shared/contracts'
+import type { AgentStreamEvent } from '../../shared/contracts/agent-events'
 
-const store = vi.hoisted(() => ({ addComposerReference: vi.fn(), requestToolNavigation: vi.fn(), composerDraft: '', memorySpotlight: null as null | { nonce: number; memoryType: string; title: string; memoryId?: string } }))
-vi.mock('../../src/features/studio/agent/agentStore', () => ({ useAgentStore: (select: (s: unknown) => unknown) => select(store) }))
+const store = vi.hoisted(() => ({ addComposerReference: vi.fn(), requestToolNavigation: vi.fn(), composerDraft: '',
+  activeSessionId: null as string | null, runId: null as string | null, phase: 'idle',
+  requestContext: null as Extract<AgentStreamEvent, { type: 'context.usage' }> | null,
+  memorySpotlight: null as null | { nonce: number; memoryType: string; title: string; memoryId?: string } }))
+vi.mock('../../src/features/studio/agent/agentStore', async importOriginal => ({
+  ...await importOriginal<typeof import('../../src/features/studio/agent/agentStore')>(),
+  useAgentStore: (select: (s: unknown) => unknown) => select(store),
+}))
 const viewer = vi.hoisted(() => ({ id: 'u' as string | undefined }))
 vi.mock('../../src/store/useShellStore', () => ({ useShellStore: (select: (s: unknown) => unknown) => select({ sessionUser: viewer }) }))
 vi.mock('../../src/features/studio/agent/agentApi', async importOriginal => ({
@@ -250,6 +257,33 @@ it('opens the saved card by ID even when the current name has changed', async ()
 
 const contextA = { usageRatio: 0.42, estimatedTokens: 4200, contextWindowTokens: 10_000,
   compactionThreshold: 0.85, warningThreshold: 0.75, activeDirectiveCount: 3, checkpoint: null }
+
+it('displays a newer live model estimate only for the owning task and rejects an older replay', async () => {
+  const sample = { ...contextA, requestSample: { runId: 'r', seq: 7 } }
+  vi.mocked(fetchAgentContextState).mockResolvedValue(sample)
+  store.activeSessionId = 'a'
+  store.runId = 'r'
+  store.phase = 'running'
+  store.requestContext = { type: 'context.usage', estimatedTokens: 99840, compactAtTokens: 99840, contextWindowTokens: 128000,
+    runId: 'r', seq: 8, ts: new Date().toISOString() }
+  try {
+    const panel = render(<AgentMemoryCenter sessionId="a" novelId="n" />)
+    await screen.findByText('最近一次模型输入估算')
+    expect(screen.getAllByText('78%')).toHaveLength(2)
+    store.requestContext = { ...store.requestContext, seq: 6 }
+    panel.rerender(<AgentMemoryCenter sessionId="a" novelId="n" />)
+    expect(screen.getByText('42%')).toBeTruthy()
+    store.requestContext = { ...store.requestContext, seq: 9 }
+    panel.rerender(<AgentMemoryCenter sessionId="b" novelId="n" />)
+    await screen.findByText('42%')
+    expect(screen.queryByText('78%')).toBeNull()
+  } finally {
+    store.requestContext = null
+    store.activeSessionId = null
+    store.runId = null
+    store.phase = 'idle'
+  }
+})
 
 function deferred<T>() {
   let resolve!: (value: T) => void

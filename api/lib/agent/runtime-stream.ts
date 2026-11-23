@@ -4,10 +4,20 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { Response } from 'express'
 import { publishDurableEvents, loadDurableEvents, isDurablePauseResumed } from './runtime-event-projection.js'
 
+const publishing = new Map<string, ReturnType<typeof publishDurableEvents>>()
+function publishForReaders(userId: string, runId: string) {
+  const key = JSON.stringify([userId, runId])
+  const pending = publishing.get(key)
+  if (pending) return pending
+  const work = publishDurableEvents(userId, runId).finally(() => publishing.delete(key))
+  publishing.set(key, work)
+  return work
+}
+
 /** DB-backed live/replay; no process-local bus or synthetic failure fallback. */
 export async function streamDurableRun(userId: string, runId: string, sinceSeq: number, res: Response): Promise<void> {
   // Validate ownership/protocol/cursor before sending response headers.
-  await publishDurableEvents(userId, runId)
+  await publishForReaders(userId, runId)
   let page = await loadDurableEvents(userId, runId, sinceSeq)
   const controller = new AbortController()
   const closed = () => controller.abort()
@@ -47,7 +57,7 @@ export async function streamDurableRun(userId: string, runId: string, sinceSeq: 
       if (Date.now() - lastPing >= 20000) { if (!await write(': ping\n\n')) return; lastPing = Date.now() }
       if (page.length < 200) await delay(1000, undefined, { signal: controller.signal })
       if (controller.signal.aborted) return
-      await publishDurableEvents(userId, runId)
+      await publishForReaders(userId, runId)
       page = await loadDurableEvents(userId, runId, cursor)
     }
   } catch (error) {

@@ -17,12 +17,11 @@ import type { ToolContext } from './tools/types.js'
 import { intersectToolAuthority, snapshotToolAuthority } from './tool-authority.js'
 import { toolTurnHistory } from './tool-turn-history.js'
 import {
-  collapseEarlyToolRounds,
-  compactEarlyToolPayloads,
+  planInRunCompaction,
   estimateChatMessagesTokens,
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
-  releaseCompletedReasoning,
+  resolveSessionContextWindow,
 } from './context-budget.js'
 
 /**
@@ -140,21 +139,8 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
   let modelRuntime = params.modelRuntime
   const messages = buildSubagentMessages(params)
   messages.splice(1, 0, ...await (await import('./goal-runtime.js')).buildGoalContextMessages(params.userId, params.parentRunId))
-  const contextBudget = resolveAgentContextBudget(modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens, env.aiTextMaxOutputTokens)
-  const prepareContextForRequest = (requestTools = openAITools): boolean => {
-    const toolTokens = estimateToolDefinitionTokens(requestTools)
-    let requestTokens = estimateChatMessagesTokens(messages) + toolTokens
-    if (requestTokens >= contextBudget.compactAtTokens) {
-      releaseCompletedReasoning(messages)
-      compactEarlyToolPayloads(messages)
-      requestTokens = estimateChatMessagesTokens(messages) + toolTokens
-    }
-    if (requestTokens > contextBudget.hardRequestTokens) {
-      collapseEarlyToolRounds(messages, 1)
-      requestTokens = estimateChatMessagesTokens(messages) + toolTokens
-    }
-    return requestTokens <= contextBudget.hardRequestTokens
-  }
+  const toolTokens = estimateToolDefinitionTokens(openAITools)
+  const estimate = (candidate: ChatMessage[]) => estimateChatMessagesTokens(candidate) + toolTokens
   const usage: AgentTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
   const extraParts: AgentMessagePart[] = []
   const executionControl = untilCompletionControl()
@@ -189,7 +175,12 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
       }
       turns += 1
       emitProgress(turns, `「${params.name}」第 ${turns} 轮：分析任务并选择工具`)
-      if (!prepareContextForRequest()) {
+      const maxOutputTokens = Math.min(env.aiTextMaxOutputTokens, modelRuntime.maxOutputTokens ?? env.aiTextMaxOutputTokens)
+      const budget = resolveAgentContextBudget(resolveSessionContextWindow(env.agentContextWindowTokens, modelRuntime.contextWindowTokens), maxOutputTokens)
+      const inputTokens = estimate(messages)
+      const compacted = planInRunCompaction(messages, inputTokens, budget, 8, estimate)
+      if (compacted) messages.splice(0, messages.length, ...compacted.messages)
+      if ((compacted?.afterTokens ?? inputTokens) > budget.hardRequestTokens) {
         report = '子 Agent 上下文已达到当前模型的安全窗口上限。已完成的工具结果均已保存，主 Agent 可重新读取工作区状态后继续。'
         break
       }
@@ -207,6 +198,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         toolCallingProtocol: modelRuntime.toolCallingProtocol,
         thinkingEnabled: modelRuntime.thinkingEnabled,
         outputTokenParameter: modelRuntime.outputTokenParameter,
+        maxOutputTokens,
         temperature: 0.6,
         signal: params.toolContextBase.signal,
         usageLog: {
@@ -252,7 +244,8 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         const outcome = await handleToolCall(
           call,
           tools,
-          { ...params.toolContextBase, modelRuntime, planContentHashes, planSemanticHashes, mode: params.mode, toolAuthority, callId: call.id },
+          { ...params.toolContextBase, modelRuntime, attachmentInputBudgetTokens: budget.hardRequestTokens,
+            planContentHashes, planSemanticHashes, mode: params.mode, toolAuthority, callId: call.id },
           params.bus,
           params.messageId,
           params.parentRunId,

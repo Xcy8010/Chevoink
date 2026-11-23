@@ -27,9 +27,9 @@ import { collectDurableCompletionEvidence } from './runtime-completion-evidence.
 import { advanceDurableWritingDelivery } from './runtime-writing-delivery.js'
 import { CHAPTER_MEMORY_MARKER, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { advanceDurableMemory } from './runtime-memory.js'
-import { estimateChatMessageTokens, estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurableInputLimit } from './context-budget.js'
+import { CONTEXT_COMPACTION_THRESHOLD, estimateChatMessageTokens, estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurableInputLimit, resolveSessionContextWindow } from './context-budget.js'
 import { readDurableImportBoundary, waitForDurableImport } from './runtime-import.js'
-import { modelRouteRevision } from './runtime-model-cursor.js'
+import { modelRouteRevision, recordRequestContext } from './runtime-model-cursor.js'
 import { consumeDurableGoalConsent } from './goal-consent.js'
 import { consumeDurableConfigurationConsent } from './configuration-journal.js'
 import { awaitDurableChildren, wakeDurableChildren } from './runtime-child-tools.js'
@@ -39,7 +39,7 @@ import { NOVEL_SETUP_BLOCKED_NOTICE } from './novel-initialization.js'
 import { loadPersonalizationContext, projectPersonalizedMessages } from './personalization-context.js'
 import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
 import { executeDurablePublicWeb, isDurablePublicWebOperation, prepareDurablePublicWeb } from './runtime-public-web.js'
-import { isTextOnlyModel } from './public-web-verification.js'
+import { isTextOnlyModel, textOnlyWebQuestionGuidance } from './public-web-verification.js'
 
 const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const durableModelTier = creditModelTierSchema
@@ -231,7 +231,8 @@ async function refreshDurableGoalModel(token: RunLeaseToken) {
       tokenPrice: _oldPrice, toolCallingProtocol: _oldProtocol, ...previousModel } = state.configuration.model
     const nextConfiguration = { ...state.configuration, model: { ...previousModel, ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}), ...(runtime.tokenPrice ? { tokenPrice: runtime.tokenPrice } : {}), ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}),
       tier: runtime.tier, provider: runtime.provider, modelName, customModelId: runtime.tier === 'custom' ? run.customModelId : null,
-      maxOutputTokens: env.aiTextMaxOutputTokens, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
+      maxOutputTokens: Math.min(env.aiTextMaxOutputTokens, runtime.maxOutputTokens ?? env.aiTextMaxOutputTokens),
+      contextWindowTokens: resolveSessionContextWindow(env.agentContextWindowTokens, runtime.contextWindowTokens),
       reasoningEffort: runtime.reasoningEffort, routeRevision, ...protocol } }
     const configuration = runtimeJson(nextConfiguration)
     const configurationHash = runtimeJson({ configuration: configuration.value, inputHash: root.inputHash }).hash
@@ -316,7 +317,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     const tool = await executeDurableToolStep(lease, signal)
     if (tool.kind !== 'idle') return tool
     await advanceDurableToolStagnation(lease)
-    const context = await advanceDurableContext(lease)
+    const context = await advanceDurableContext(lease, 'guidance')
     if (context) return { kind: 'context' as const, frame: context }
     const checkpoint = await advanceDurableCheckpoint(lease)
     if (checkpoint) return { kind: 'checkpoint' as const, frame: checkpoint }
@@ -345,34 +346,47 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     { userId: lease.userId, runId: lease.runId, modelConfigId: configuration.model.modelConfigId, modelConfigRevision: configuration.model.modelConfigRevision, provider: configuration.model.provider, modelName: configuration.model.modelName }), configuration.model.weightedRoute)
   if (runtime.tier !== tier.data) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原模型档位不可用，不能静默回退。')
   const currentWindow = runtime.contextWindowTokens ?? env.agentContextWindowTokens
-  const window = Math.min(configuration.model.contextWindowTokens ?? currentWindow, currentWindow)
-  const maxOutputTokens = configuration.model.maxOutputTokens ?? env.aiTextMaxOutputTokens
+  const routeWindow = Math.min(configuration.model.contextWindowTokens ?? currentWindow, currentWindow)
+  const window = prepared ? routeWindow : resolveSessionContextWindow(env.agentContextWindowTokens, routeWindow)
+  const configuredOutput = configuration.model.maxOutputTokens ?? env.aiTextMaxOutputTokens
+  const maxOutputTokens = prepared ? configuredOutput : Math.min(configuredOutput, runtime.maxOutputTokens ?? configuredOutput)
   // Reserve the actual requested output, even when it exceeds the legacy
   // estimator's quarter-window allowance. Never shorten the requested answer.
   const inputLimit = resolveDurableInputLimit(window, maxOutputTokens)
-  if (inputLimit < 1) return runtimeError('RUNTIME_CONTEXT_LIMIT', '模型上下文窗口不足以预留配置的输出空间，请调整模型配置；原任务保留。')
   const originalSpec = taskSpecSchema.parse(current.state.originalSpec)
   const textOnlyModel = isTextOnlyModel(runtime)
-  if (!prepared && !lease.parent && textOnlyModel && originalSpec.publicWebQuestion) {
+  if (inputLimit > 0 && !prepared && !lease.parent && textOnlyModel && originalSpec.publicWebQuestion) {
     const operation = await prepareDurablePublicWeb(lease, frame)
     if (operation) return executeDurablePublicWeb(lease, operation, signal)
   }
   const effectiveTools = prepared ? null : await withRunLease(lease, tx => readEffectiveNativeTooling(tx, lease, configuration, originalSpec))
   const personalization = !lease.parent && effectiveTools?.personalizationEnabled ? await loadPersonalizationContext(lease.userId, originalSpec.goals.join('\n'), lease.runId) : undefined
-  if (!prepared) {
-    const overhead = personalization ? projectPersonalizedMessages([], personalization)
-      .reduce((sum, message) => sum + estimateChatMessageTokens(message), 0) : 0
-    const compacted = await advanceDurableContext(lease, Math.max(1, inputLimit - overhead))
-    if (compacted) return { kind: 'context' as const, frame: compacted }
-  }
   const memoryCheck = [...frame.state.messages].reverse().find(message => message.role === 'user'
     || message.role === 'system' && message.content.startsWith(CHAPTER_MEMORY_MARKER))
   const finishingMemory = memoryCheck?.role === 'system'
   const tools = prepared?.preparedTools ?? (textOnlyModel ? [] : (await currentNativeToolViews(effectiveTools!.tools, originalSpec.scope))
     .filter(({ function: { name } }) => !finishingMemory || CHAPTER_MEMORY_TOOLS.includes(name) || name === 'chapter_read' || name === 'execution_context_read'))
-  const requestMessages = prepared ? frame.state.messages : projectPersonalizedMessages(frame.state.messages, personalization)
-  if (estimateChatMessagesTokens(requestMessages) + estimateToolDefinitionTokens(tools) > inputLimit) {
-    return runtimeError('RUNTIME_CONTEXT_LIMIT', '原请求、工具定义或不可再归档内容超过模型输入预算；已保留完整原文，不截掉要求或盲目重试模型。')
+  const textOnlyWebQuestionRequired = !prepared && textOnlyModel && !originalSpec.publicWebQuestion && !lease.parent
+  const requestOverhead = estimateToolDefinitionTokens(tools) + (textOnlyWebQuestionRequired
+    ? estimateChatMessageTokens({ role: 'system', content: textOnlyWebQuestionGuidance }) : 0)
+  const estimate = (messages: ChatMessage[]) => requestOverhead + estimateChatMessagesTokens(prepared ? messages : projectPersonalizedMessages(messages, personalization))
+  const compactAtTokens = Math.min(Math.floor(window * CONTEXT_COMPACTION_THRESHOLD), inputLimit)
+  if (!prepared && inputLimit > 0) {
+    const compacted = await advanceDurableContext(lease, { contextWindowTokens: window, hardLimit: inputLimit, compactAtTokens, estimate,
+      canReadArchive: tools.some(tool => tool.function.name === 'execution_context_read') })
+    if (compacted) return { kind: 'context' as const, frame: compacted }
+  }
+  const estimatedTokens = estimate(frame.state.messages)
+  const contextUsage = { estimatedTokens, contextWindowTokens: window, compactAtTokens }
+  if (inputLimit < 1 || estimatedTokens > inputLimit) {
+    if (!lease.parent && !prepared) await withRunLease(lease, async tx => {
+      const { frame: latest } = await readExecutionStateInTransaction(tx, lease.taskRootId)
+      if (latest.snapshotHash === frame.snapshotHash && latest.revision === frame.revision) {
+        await recordRequestContext(tx, lease, contextUsage, { revision: frame.revision })
+      }
+    })
+    return runtimeError('RUNTIME_CONTEXT_LIMIT', inputLimit < 1 ? '模型上下文窗口不足以预留配置的输出空间，请调整模型配置；原任务保留。'
+      : '原请求、工具定义或不可再归档内容超过模型输入预算；已保留完整原文，不截掉要求或盲目重试模型。')
   }
   const operationKey = `exec:${frame.state.nextOperationSequence}`
   const child = await withRunLease(lease, tx => tx.agentChildExecutionGrant.findUnique({ where: { childRunId: lease.runId } }))
@@ -381,7 +395,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   signal.throwIfAborted()
   const result = await chatWithTools({ messages: frame.state.messages, tools,
     textOnlyModel: !prepared && textOnlyModel,
-    textOnlyWebQuestionRequired: !prepared && textOnlyModel && !originalSpec.publicWebQuestion && !lease.parent,
+    textOnlyWebQuestionRequired,
     preparedMainRequest: prepared?.request,
     personalization,
     nextPromptMarker: configuration.nextPromptMarker,
@@ -391,7 +405,8 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     ...(resolveResponsesEndpoint({ model: runtime.modelName ?? env.aiTextModel, baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl,
       reasoningEffort: effort.data, reasoningParameterMode: runtime.reasoningParameterMode, toolCallingProtocol: configuration.model.toolCallingProtocol })
       && runtime.reasoningParameterMode === 'omit' ? { reasoningParameterMode: runtime.reasoningParameterMode } : {}),
-    durableExecution: { lease, operationKey, attemptKey: '1', price, cursor: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash } },
+    durableExecution: { lease, operationKey, attemptKey: '1', price, cursor: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+      ...(!lease.parent && !prepared ? { contextUsage } : {}) } },
     usageLog: { userId: lease.userId, agentRunId: lease.runId, action: 'workspaceAgent', modelTier: tier.data, multiplierBps: price.multiplierBps, turn: frame.state.turn + 1 },
   }).then(result => ({ kind: 'model' as const, result }), async error => {
     if (!(error instanceof DataAccessError) || error.code !== STALE_PERSONALIZATION_REQUEST) throw error

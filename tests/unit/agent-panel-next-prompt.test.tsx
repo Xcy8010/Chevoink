@@ -71,12 +71,13 @@ it('observes another device starting the open conversation once and preserves an
   let revision = '0'
   const prompt = { id: 'remote-message', runId, role: 'user', createdAt: new Date().toISOString(), parts: [{ type: 'text', text: '手机上发来的需求' }] }
   let subsequentHistory: unknown
+  let observerRead: Promise<Response> | null = null
   let releaseHistory!: (response: Response) => void
   const pending = new Promise<Response>(resolve => { releaseHistory = resolve })
   const fetch = vi.fn<typeof globalThis.fetch>(async resource => {
     const url = String(resource)
     if (url.endsWith('/queue')) return response({ latestRunId: latest, latestRunStatus: latest ? status : null, historyRevision: revision, items: [] })
-    if (url.includes('/messages?runLimit=10')) return subsequentHistory ? response(subsequentHistory) : pending
+    if (url.includes('/messages?runLimit=10')) return observerRead ?? (subsequentHistory ? response(subsequentHistory) : pending)
     return response(null)
   })
   vi.stubGlobal('fetch', fetch)
@@ -101,6 +102,27 @@ it('observes another device starting the open conversation once and preserves an
   expect(await screen.findByText('手机上发来的需求', {}, { timeout: 3000 })).toBeTruthy()
   const emit = (stream: EventTarget, type: string, data: Record<string, unknown>) =>
     stream.dispatchEvent(new MessageEvent(type, { data: JSON.stringify({ runId, type, ts: new Date().toISOString(), ...data }) }))
+  const start = { agent: { title: '本轮', type: 'orchestrator', model: 'speed' }, mode: 'build' }
+  act(() => emit(streams[0], 'run.started', { ...start, seq: 1 }))
+  status = 'paused'
+  revision = 'stale-pause'
+  let settleObserver!: (response: Response) => void
+  observerRead = new Promise(resolve => { settleObserver = resolve })
+  act(() => remote.changed?.(sessionId))
+  await waitFor(() => expect(historyReads()).toBe(2))
+  // Same run ID and live phase, but a new, accepted SSE start happened after
+  // this request was sent. The delayed pause belongs to the previous attempt.
+  act(() => emit(streams[0], 'run.started', { ...start, seq: 2 }))
+  await act(async () => settleObserver(response({ historyHead: { latestRunId: runId, latestRunStatus: status, historyRevision: revision },
+    activeRunId: null, resumeRunId: runId, messages: [prompt] })))
+  expect(useAgentStore.getState()).toMatchObject({ runId, phase: 'running', resumeableRunId: null })
+  observerRead = null
+  revision = 'stale-mismatched-head'
+  subsequentHistory = { historyHead: { latestRunId: 'old', latestRunStatus: 'paused', historyRevision: revision },
+    activeRunId: null, messages: [{ ...prompt, runId: 'old' }] }
+  await act(async () => remote.changed?.(sessionId))
+  await waitFor(() => expect(historyReads()).toBe(3))
+  expect(useAgentStore.getState()).toMatchObject({ runId, phase: 'running', resumeableRunId: null })
   status = 'paused'
   revision = '1'
   subsequentHistory = { activeRunId: null, resumeRunId: runId, messages: [prompt] }
@@ -131,6 +153,45 @@ it('observes another device starting the open conversation once and preserves an
   await waitFor(() => expect(useAgentStore.getState().messages).toEqual([]))
   expect(editor.textContent).toBe('本机未发送的草稿')
   expect(fetch.mock.calls.every(([, options]) => options?.method !== 'POST')).toBe(true)
+})
+
+it('keeps previously opened pages at completion and reconciles a confirmed deletion inside the loaded range', async () => {
+  const sessionId = 'older-remote-settlement'
+  const rows = Array.from({ length: 14 }, (_, i) => ({ id: 'msg-' + i, runId: 'run-' + i, role: 'user',
+    createdAt: new Date(Date.UTC(2025, 0, i + 1)).toISOString(), parts: [{ type: 'text', text: '合成记录 ' + i }] }))
+  let visible = rows
+  let head = { latestRunId: 'run-13', latestRunStatus: 'running', historyRevision: 'active' }
+  const limits: number[] = []
+  const response = (data: unknown) => new Response(JSON.stringify({ success: true, data }))
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  vi.stubGlobal('EventSource', class extends EventTarget { close() {} })
+  vi.stubGlobal('fetch', vi.fn(async (resource: RequestInfo | URL) => {
+    const url = new URL(String(resource), 'http://localhost')
+    if (url.pathname.endsWith('/queue')) return response({ ...head, items: [] })
+    if (!url.pathname.endsWith('/messages')) return response(null)
+    const limit = Number(url.searchParams.get('runLimit'))
+    const earlier = url.searchParams.get('before')
+    const candidates = earlier ? visible.filter(row => row.createdAt < earlier) : visible
+    const messages = candidates.slice(-limit)
+    if (!earlier && limit !== 1) limits.push(limit)
+    return response({ historyHead: earlier ? undefined : head, messages, activeRunId: head.latestRunStatus === 'running' ? head.latestRunId : null,
+      pagination: { hasMore: candidates.length > limit, earliestRunStartedAt: messages[0]?.createdAt } })
+  }))
+  const client = new QueryClient({ defaultOptions: { queries: { enabled: false, retry: false } } })
+  render(<QueryClientProvider client={client}><ToastProvider>
+    <AgentPanel novelId="older-book" novelName="Test" sessionId={sessionId} ensureSession={async () => sessionId} />
+  </ToastProvider></QueryClientProvider>)
+  fireEvent.click(await screen.findByRole('button', { name: '加载更早对话' }))
+  await screen.findByText('合成记录 0')
+  head = { ...head, latestRunStatus: 'completed', historyRevision: 'completed' }
+  act(() => remote.changed?.(sessionId))
+  await waitFor(() => expect(useAgentStore.getState().runId).toBeNull())
+  expect(limits.at(-1)).toBe(14)
+  expect(useAgentStore.getState().messages.map(row => row.id)).toEqual(rows.map(row => row.id))
+  visible = rows.filter(row => row.id !== 'msg-2')
+  head = { ...head, historyRevision: 'delete-old-message' }
+  act(() => remote.changed?.(sessionId))
+  await waitFor(() => expect(useAgentStore.getState().messages.map(row => row.id)).toEqual(visible.map(row => row.id)))
 })
 
 it.each([false, true])('retries the same message history in place after a failed read (cached=%s)', async cached => {

@@ -392,6 +392,7 @@ export type AgentStreamEventBody =
   | { type: 'run.configuration'; modelTier: import('./credits.js').CreditModelTier; customModelId: string | null;
       reasoningEffort: import('./credits.js').ModelReasoningEffort; creativeFreedom: CreativeFreedom; modelSelectionExplicit: boolean }
   | { type: 'execution.progress'; revision: number; stage: 'model' | 'tool' | 'checkpoint' | 'finalizing' }
+  | ({ type: 'context.usage' } & import('./context-compaction-contracts.js').ContextUsage)
   | { type: 'activity.title'; messageId: string; title: string }
   | { type: 'context.compaction'; messageId: string; state: 'running' | 'completed' }
   | { type: 'review.reconciled'; callId: string; chapterId: string; revision: number;

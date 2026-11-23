@@ -577,7 +577,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
       ] },
       { id: 'question', role: 'user', createdAt: new Date('2026-11-01T02:00:00Z'), parts: [{ type: 'text', text: question }] },
     ] as never)
-    const result = await assembleContext({ ...buildInput(), contextWindowTokens: 8192 })
+    const result = await assembleContext({ ...buildInput(), contextWindowTokens: 32000, toolDefinitionTokens: 6000 })
     const history = result.messages.slice(1, result.messages.findIndex(message => String(message.content).startsWith('[当前作品上下文快照]')))
     expect(history.some(message => message.role === 'user' && String(message.content).endsWith(question))).toBe(true)
     expect(history.some(message => message.role === 'assistant' && String(message.content).endsWith(answer))).toBe(true)
@@ -586,6 +586,53 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(JSON.stringify(history)).toContain('共 1 组消息或回执')
     expect(JSON.stringify(history)).toContain('session_message_read')
     expect(result.inputEstimates!.history.tokens).toBeLessThan(2000)
+  })
+
+  it('keeps more than 20k of shared history when it fits, then skips an oversized recent reply without losing author text', async () => {
+    const input = { ...buildInput(), contextWindowTokens: 128000, maxOutputTokens: 8192, toolDefinitionTokens: 3200 }
+    const originalRequest = '第一章保留原名。'
+    const previousAnswer = '这段背景'.repeat(6500)
+    const recentRequest = '第二章沿用同一视角。'
+    const records = [
+      { id: 'long', role: 'assistant', parts: [{ type: 'text', text: '巨'.repeat(150000) }] },
+      { id: 'recent', role: 'user', parts: [{ type: 'text', text: recentRequest }] },
+      { id: 'answer', role: 'assistant', parts: [{ type: 'text', text: previousAnswer }] },
+      { id: 'original', role: 'user', parts: [{ type: 'text', text: originalRequest }] },
+    ]
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(records as never)
+    const result = await assembleContext(input)
+    expect(result.messages.map(message => message.content)).toEqual(expect.arrayContaining([originalRequest, previousAnswer, recentRequest]))
+    expect(result.inputEstimates!.history.tokens).toBeGreaterThan(20000)
+    expect(estimateChatMessagesTokens(result.messages) + input.toolDefinitionTokens).toBeLessThanOrEqual(99840)
+    expect(JSON.stringify(result.messages)).not.toContain('巨巨')
+    expect(JSON.stringify(result.messages)).toContain('共 1 组消息或回执')
+    const tight = await assembleContext({ ...input, toolDefinitionTokens: 65000 })
+    expect(tight.messages.map(message => message.content)).toEqual(expect.arrayContaining([originalRequest, recentRequest]))
+    expect(tight.messages.map(message => message.content)).not.toContain(previousAnswer)
+  })
+
+  it('leaves room for a fresh parallel chapter-read round even with a full session history', async () => {
+    const input = { ...buildInput(), contextWindowTokens: 128000, maxOutputTokens: 8192, toolDefinitionTokens: 5000 }
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(Array.from({ length: 110 }, (_, index) => ({
+      id: String(index), role: 'user', parts: [{ type: 'text', text: `历史${index}：${'章'.repeat(1000)}` }],
+    })) as never)
+    const result = await assembleContext(input)
+    const nextRound = [
+      { role: 'assistant' as const, content: null, toolCalls: ['first', 'second'].map(id => ({
+        id, name: 'chapter_read', arguments: JSON.stringify({ chapterId: id, limit: 12000 }) })) },
+      ...['first', 'second'].map(id => ({ role: 'tool' as const, toolCallId: id, content: '章'.repeat(12000) })),
+    ]
+    expect(result.inputEstimates!.history.tokens).toBeGreaterThan(20000)
+    expect(estimateChatMessagesTokens([...result.messages, ...nextRound]) + input.toolDefinitionTokens).toBeLessThanOrEqual(113408)
+  })
+
+  it('indicates earlier history is available when the database read limit is reached even if all 500 returned messages fit', async () => {
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(Array.from({ length: 501 }, (_, index) =>
+      ({ id: String(index), role: 'user', parts: [{ type: 'text', text: `用户发言 ${index}` }] })) as never)
+    const { messages } = await assembleContext(buildInput())
+    expect(messages.map(message => message.content)).toContain('用户发言 499')
+    expect(messages.map(message => message.content)).not.toContain('用户发言 500')
+    expect(messages.some(message => String(message.content).includes('另有更早的记录'))).toBe(true)
   })
 
   it('separates an old chapter repair and false saved claims from the frozen next-chapter task on resume', async () => {

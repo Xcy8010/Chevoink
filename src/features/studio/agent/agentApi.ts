@@ -203,7 +203,7 @@ export function fetchSessionsRunStatus(sessionIds: string[]): Promise<AgentSessi
 }
 
 export function fetchAgentContextState(sessionId: string, signal?: AbortSignal): Promise<ContextState> {
-  return requestData<ContextState>(`/api/agent/sessions/${sessionId}/context-state`, { signal })
+  return requestData<ContextState>(`/api/agent/sessions/${sessionId}/context-state?view=request`, { signal })
 }
 
 export function compactAgentContext(sessionId: string): Promise<{ checkpoint: ContextState['checkpoint']; state: ContextState }> {

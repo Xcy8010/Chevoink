@@ -3,7 +3,7 @@ import type { Response } from 'express'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../../api/lib/agent/runtime-event-projection.js', () => ({ publishDurableEvents: vi.fn(async () => []), loadDurableEvents: vi.fn(), isDurablePauseResumed: vi.fn() }))
 import { streamDurableRun } from '../../api/lib/agent/runtime-stream.js'
-import { loadDurableEvents, isDurablePauseResumed } from '../../api/lib/agent/runtime-event-projection.js'
+import { loadDurableEvents, isDurablePauseResumed, publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import type { AgentStreamEvent } from '../../shared/contracts/index.js'
 
 class StreamResponse extends EventEmitter {
@@ -21,6 +21,14 @@ const resumed: AgentStreamEvent = { type: 'run.started', agent: { type: 'orchest
 afterEach(() => vi.clearAllMocks())
 
 describe('same-run bootstrap stream resume', () => {
+  it('shares concurrent projection work across devices while each reads its own cursor', async () => {
+    vi.mocked(isDurablePauseResumed).mockResolvedValue(false)
+    vi.mocked(loadDurableEvents).mockResolvedValue([paused])
+    await Promise.all([0, 1].map(since => streamDurableRun('owner', 'run', since, new StreamResponse() as unknown as Response)))
+    expect(publishDurableEvents).toHaveBeenCalledTimes(1)
+    expect(loadDurableEvents).toHaveBeenCalledWith('owner', 'run', 0)
+    expect(loadDurableEvents).toHaveBeenCalledWith('owner', 'run', 1)
+  })
   it.each([0, 1])('preserves returned reasoning through durable live/replay SSE from cursor %i', async cursor => {
     const reasoning: AgentStreamEvent = { type: 'reasoning.delta', runId: 'run', seq: 2, ts: paused.ts, messageId: 'model-message', delta: '先比较人物动机。\\n再核对 chapter_read 和 chapterId=target。' }
     const end = { ...paused, seq: 3 }

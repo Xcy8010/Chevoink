@@ -32,7 +32,7 @@ export default function StudioMobileHeader({ view, navigationOpen, onOpenNavigat
           <button type="button" data-studio-mobile-primary-control aria-label={backLabel} onClick={onBack} className={buttonClass}><ChevronLeft className="h-5 w-5" /></button>
         )}
         {primary ? (
-          <nav aria-label="创作视图" className="flex h-full min-w-0 items-center justify-center gap-5">
+          <nav aria-label="创作视图" className="studio-mobile-tabs flex h-full min-w-0 items-center justify-center gap-5">
             {([{ key: 'assistant', label: '工作台' }, { key: 'editor', label: '写作' }] as const).map(({ key, label }) => (
               <button key={key} type="button" aria-pressed={view === key} onClick={() => onSelectView(key)} className={cn('studio-mobile-view-tab relative h-full min-w-0 px-1 text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none', view === key ? 'font-semibold text-[var(--text-primary)]' : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]')}>{label}</button>
             ))}

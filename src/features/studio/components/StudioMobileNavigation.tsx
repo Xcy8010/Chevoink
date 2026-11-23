@@ -5,6 +5,8 @@ import AnnouncementBell from '@/features/site-content/AnnouncementBell'
 
 type Props = {
   open: boolean
+  push?: boolean
+  dragging?: boolean
   onClose: () => void
   onCreateNovel: () => void
   creatingNovel?: boolean
@@ -25,7 +27,7 @@ function availableControl(control: HTMLElement) {
 }
 
 /** Controlled mobile navigation; it never owns workspace, task or editor state. */
-export default function StudioMobileNavigation({ open, onClose, onCreateNovel, creatingNovel, onOpenSettings, accountCard, novelSwitcher, children }: Props) {
+export default function StudioMobileNavigation({ open, push = false, dragging = false, onClose, onCreateNovel, creatingNovel, onOpenSettings, accountCard, novelSwitcher, children }: Props) {
   const [present, setPresent] = useState(open)
   const [search, setSearch] = useState('')
   const [composing, setComposing] = useState(false)
@@ -39,16 +41,16 @@ export default function StudioMobileNavigation({ open, onClose, onCreateNovel, c
   const closeRef = useRef(onClose)
   closeRef.current = onClose
   useEffect(() => {
-    if (open) { setPresent(true); return }
+    if (open || dragging) { setPresent(true); return }
     if (!present) return
     const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
     const timeout = window.setTimeout(() => {
       setPresent(false)
       setSearch('')
       setComposing(false)
-    }, reduced ? 0 : 210)
+    }, reduced ? 0 : push ? 290 : 210)
     return () => window.clearTimeout(timeout)
-  }, [open, present])
+  }, [dragging, open, present, push])
   useEffect(() => {
     if (!open) return
     const panel = panelRef.current!
@@ -102,9 +104,10 @@ export default function StudioMobileNavigation({ open, onClose, onCreateNovel, c
     }
   }, [open])
 
-  if (!open && !present) return null
-  return createPortal(
-    <div ref={navigationRef} data-state={open ? 'open' : 'closed'} aria-hidden={!open || undefined} className={`studio-workspace studio-mobile-navigation fixed inset-0 z-[100] lg:hidden ${!open ? 'pointer-events-none' : ''}`}>
+  if (!open && !present && !dragging) return null
+  const wrapper = push ? 'studio-mobile-push-navigation' : 'studio-mobile-navigation fixed inset-0 z-[100] lg:hidden'
+  const navigation = (
+    <div ref={navigationRef} data-state={open ? 'open' : 'closed'} aria-hidden={!open || undefined} className={`studio-workspace ${wrapper} ${!open ? 'pointer-events-none' : ''}`}>
       <button type="button" tabIndex={-1} aria-label="关闭导航遮罩" onClick={onClose} className="studio-mobile-backdrop absolute inset-0 h-full w-full bg-black/55" />
       <div ref={panelRef} id="studio-mobile-navigation" role="dialog" aria-modal="true" aria-label="创作区导航" tabIndex={-1} className="studio-mobile-drawer absolute inset-y-0 left-0 flex w-[min(360px,82%)] max-w-full flex-col overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--app-bg)] pl-[var(--safe-left,0px)] pt-[var(--safe-top,0px)] text-[var(--text-primary)] shadow-xl outline-none">
         <header className="flex shrink-0 items-center gap-2 px-3 pb-3 pt-2">
@@ -148,6 +151,7 @@ export default function StudioMobileNavigation({ open, onClose, onCreateNovel, c
           </div>
         </footer>
       </div>
-    </div>, document.body,
+    </div>
   )
+  return push ? navigation : createPortal(navigation, document.body)
 }

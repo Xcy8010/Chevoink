@@ -1,0 +1,50 @@
+import { beforeEach, expect, it, vi } from 'vitest'
+import type { ChatMessage } from '../../api/lib/ai-service.js'
+import { estimateChatMessagesTokens } from '../../api/lib/agent/context-budget.js'
+import { advanceDurableContext } from '../../api/lib/agent/runtime-checkpoint-step.js'
+import type { RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
+import { executionContextReadTool } from '../../api/lib/agent/tools/task-context-tools.js'
+import { toOpenAIParameters } from '../../api/lib/agent/tool-schema.js'
+
+const db = vi.hoisted(() => ({ read: vi.fn(), save: vi.fn(), archive: vi.fn() }))
+vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionStateInTransaction: db.read, saveExecutionStateInTransaction: db.save }))
+vi.mock('../../api/lib/agent/runtime-lease.js', () => ({
+  withRunLease: (_lease: unknown, work: (tx: unknown) => unknown) => work({ agentExecutionOutbox: { create: db.archive } }),
+}))
+const token = { runId: 'run', taskRootId: 'root' } as RunLeaseToken
+const messages: ChatMessage[] = [{ role: 'user', content: '保留作者要求' }]
+for (let i = 0; i < 3; i++) {
+  messages.push({ role: 'assistant', content: '', toolCalls: [{ id: String(i), name: 'chapter_read', arguments: '{}' }] },
+    { role: 'tool', toolCallId: String(i), content: '章'.repeat(9000) })
+}
+const tokens = estimateChatMessagesTokens(messages)
+const budget = { contextWindowTokens: 32000, hardLimit: 30000, compactAtTokens: 24960, estimate: estimateChatMessagesTokens, canReadArchive: true }
+beforeEach(() => {
+  vi.clearAllMocks()
+  const name = executionContextReadTool.name
+  db.read.mockResolvedValue({ frame: { revision: 2, snapshotHash: 'f'.repeat(64), state: { phase: 'idle', messages } },
+    configuration: { tools: [{ function: { name, parameters: toOpenAIParameters(executionContextReadTool.parameters) } }],
+      toolAuthority: [{ name, permission: 'allow', alwaysConfirm: false }] } })
+  db.save.mockImplementation((_tx, _lease, input) => ({ revision: 3, snapshotHash: 'e'.repeat(64), state: input.snapshot }))
+})
+
+it('compacts the projected request once and retains the author and latest tool result', async () => {
+  const next = await advanceDurableContext(token, budget)
+  expect(next?.state.messages[0]).toEqual(messages[0])
+  expect(next?.state.messages.at(-1)).toEqual(messages.at(-1))
+  expect(estimateChatMessagesTokens(next!.state.messages)).toBeLessThan(budget.compactAtTokens)
+  expect(db.archive).toHaveBeenCalledWith({ data: expect.objectContaining({ payload: expect.objectContaining({
+    beforeTokens: tokens, afterTokens: estimateChatMessagesTokens(next!.state.messages), reason: 'window',
+    compactAtTokens: budget.compactAtTokens, contextWindowTokens: budget.contextWindowTokens,
+  }) }) })
+  expect(messages).toHaveLength(7)
+})
+
+it('keeps an intact frame below the trigger, without a reader, or for a negligible projected saving', async () => {
+  expect(await advanceDurableContext(token, { ...budget, compactAtTokens: tokens + 1 })).toBeNull()
+  expect(await advanceDurableContext(token, { ...budget, canReadArchive: false })).toBeNull()
+  const estimate = (candidate: ChatMessage[]) => candidate.length === messages.length ? tokens : tokens - 1
+  expect(await advanceDurableContext(token, { ...budget, compactAtTokens: tokens, estimate })).toBeNull()
+  expect(db.save).not.toHaveBeenCalled()
+  expect(db.archive).not.toHaveBeenCalled()
+})

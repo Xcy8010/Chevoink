@@ -34,7 +34,7 @@ import type {
 } from '../../../shared/contracts/index.js'
 import { env } from '../../config/env.js'
 import { chatWithTools, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from '../ai-service.js'
-import { loadPersonalizationContext, projectPersonalizedMessages, type PersonalizationContext } from './personalization-context.js'
+import { loadPersonalizationContext, projectPersonalizedMessages } from './personalization-context.js'
 import { PERSONALIZATION_TOOL_NAMES, PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
 import { readPersonalizationRules } from './personalization.js'
 import { applyPersonalizationToolRules, hasPersonalizationSessionOverride } from './personalization-tool-policy.js'
@@ -81,7 +81,7 @@ import { SAVED_PLAN_CLOSING_GUIDANCE } from './task-guidance.js'
 import { createExecutionTextDetector, normalizeExecutionText } from './execution-text-detector.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { toolTurnHistory } from './tool-turn-history.js'
-import { isTextOnlyModel, mayAutoVerifyWeb, publicWebAnswerGuidance, publicWebAuthorityMessage, publicWebCallId, publicWebObservation, publicWebPendingNotice, publicWebReadSteps, recordedPublicWebStep, type PublicWebStep } from './public-web-verification.js'
+import { isTextOnlyModel, mayAutoVerifyWeb, publicWebAnswerGuidance, publicWebAuthorityMessage, publicWebCallId, publicWebObservation, publicWebPendingNotice, publicWebReadSteps, recordedPublicWebStep, textOnlyWebQuestionGuidance, type PublicWebStep } from './public-web-verification.js'
 import { readPublicWebStepDisposition } from './tools/search-tools.js'
 import { emptyResponseRecoveryOutputTokens, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { chapterAnchorFailureSummary, toolFailureRecovery } from './tool-failure-recovery.js'
@@ -112,14 +112,12 @@ import { nextSkillPhase, phaseIntent, phaseSignals } from './skills/lifecycle.js
 import { recordSkillLoads } from './skills/receipts.js'
 import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/index.js'
 import {
-  collapseEarlyToolRounds,
-  compactEarlyToolPayloads,
+  planInRunCompaction,
   estimateChatMessagesTokens,
   estimateChatMessageTokens,
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
-  resolveDurableInputLimit,
-  releaseCompletedReasoning,
+  resolveSessionContextWindow,
 } from './context-budget.js'
 
 /**
@@ -1524,6 +1522,32 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       && directImageInputs.length === imageAttachments.length
       && directImageInputs.every((item) => Boolean(item.dataUrl))
 
+    const featureFlags = resolveAgent2FeatureFlags(params.userId)
+    const sessionPolicy = await prisma.agentSession.findUnique({ where: { id: params.sessionId }, select: { toolPolicy: true, sandboxMode: true, spawnedFromSessionId: true } })
+    const scopedTools = restrictToolsToTask(getToolsForAgent(agent, params.mode, featureFlags, { goalOwned: Boolean(ownedGoalExecution), taskResponse: taskSpec.responseDeliveryProtocol === 1 }), taskSpec, params.mode)
+    // 派生窗口禁用跨任务编排：否则 b 再派生 e、e 再派生 f 会指数级打爆并发与额度，
+    // 而且互相等待还会直接死锁；派生窗口的职责就是干完自己那一份并交回摘要
+    const orchestrationScopedTools = sessionPolicy?.spawnedFromSessionId
+      ? scopedTools.filter((tool) => !ORCHESTRATION_TOOL_NAMES.has(tool.name) && !PERSONALIZATION_WRITE_ACTIONS.includes(tool.name))
+      : ownedGoalExecution ? scopedTools.filter(tool => !PERSONALIZATION_WRITE_ACTIONS.includes(tool.name)) : scopedTools
+    const currentTools = applySessionToolPolicy(
+      orchestrationScopedTools,
+      params.mode,
+      sessionPolicy?.toolPolicy,
+      sessionPolicy?.sandboxMode === 'read_only' || sessionPolicy?.sandboxMode === 'full_access' ? sessionPolicy.sandboxMode : 'workspace',
+    )
+    const activationCeiling = ownedGoalExecution ? await prisma.$transaction(async tx => {
+      const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: ownedGoalExecution.goalId } })
+      return (await import('./goal-activation.js')).readGoalActivationToolCeiling(tx, goal)
+    }) : null
+    const ceiling = params.toolAuthorityCeiling ?? (activationCeiling ? new Map(activationCeiling) : null)
+    const availableTools = ceiling ? intersectToolAuthority(currentTools, params.mode, ceiling) : currentTools
+    const stableTools = availableTools.filter(tool => !PERSONALIZATION_TOOL_NAMES.has(tool.name))
+    const availableDefinitions = toOpenAITools(availableTools, taskSpec.scope)
+    const stableDefinitions = availableDefinitions.filter(tool => !PERSONALIZATION_TOOL_NAMES.has(tool.function.name))
+    const configuredOutputTokens = () => Math.min(env.aiTextMaxOutputTokens, modelRuntime.maxOutputTokens ?? env.aiTextMaxOutputTokens)
+    let requestOutputTokens = configuredOutputTokens()
+    let contextWindowTokens = resolveSessionContextWindow(env.agentContextWindowTokens, modelRuntime.contextWindowTokens)
     const assembledContext = await assembleContext({
       agent,
       mode: params.mode,
@@ -1540,7 +1564,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       taskSpec,
       modelTier: modelRuntime.tier,
       modelName: modelRuntime.modelName,
-      contextWindowTokens: modelRuntime.contextWindowTokens,
+      contextWindowTokens,
+      maxOutputTokens: requestOutputTokens,
+      toolDefinitionTokens: estimateToolDefinitionTokens(isTextOnlyModel(modelRuntime) ? [] : availableDefinitions),
       pinnedSkillIds: params.pinnedSkillIds ?? [],
     })
     console.info('[agent-context-timing]', { runId, ...assembledContext.timings })
@@ -1689,86 +1715,39 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         confidence: decision.confidence, estimatedTokens: decision.estimatedTokens })
     }
 
-    const featureFlags = resolveAgent2FeatureFlags(params.userId)
-    const sessionPolicy = await prisma.agentSession.findUnique({ where: { id: params.sessionId }, select: { toolPolicy: true, sandboxMode: true, spawnedFromSessionId: true } })
-    const scopedTools = restrictToolsToTask(getToolsForAgent(agent, params.mode, featureFlags, { goalOwned: Boolean(ownedGoalExecution), taskResponse: taskSpec.responseDeliveryProtocol === 1 }), taskSpec, params.mode)
-    // 派生窗口禁用跨任务编排：否则 b 再派生 e、e 再派生 f 会指数级打爆并发与额度，
-    // 而且互相等待还会直接死锁；派生窗口的职责就是干完自己那一份并交回摘要
-    const orchestrationScopedTools = sessionPolicy?.spawnedFromSessionId
-      ? scopedTools.filter((tool) => !ORCHESTRATION_TOOL_NAMES.has(tool.name) && !PERSONALIZATION_WRITE_ACTIONS.includes(tool.name))
-      : ownedGoalExecution ? scopedTools.filter(tool => !PERSONALIZATION_WRITE_ACTIONS.includes(tool.name)) : scopedTools
-    const currentTools = applySessionToolPolicy(
-      orchestrationScopedTools,
-      params.mode,
-      sessionPolicy?.toolPolicy,
-      sessionPolicy?.sandboxMode === 'read_only' || sessionPolicy?.sandboxMode === 'full_access' ? sessionPolicy.sandboxMode : 'workspace',
-    )
-    const activationCeiling = ownedGoalExecution ? await prisma.$transaction(async tx => {
-      const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: ownedGoalExecution.goalId } })
-      return (await import('./goal-activation.js')).readGoalActivationToolCeiling(tx, goal)
-    }) : null
-    const ceiling = params.toolAuthorityCeiling ?? (activationCeiling ? new Map(activationCeiling) : null)
-    const availableTools = ceiling ? intersectToolAuthority(currentTools, params.mode, ceiling) : currentTools
-    const stableTools = availableTools.filter(tool => !PERSONALIZATION_TOOL_NAMES.has(tool.name))
-    const availableDefinitions = toOpenAITools(availableTools, taskSpec.scope)
-    const stableDefinitions = availableDefinitions.filter(tool => !PERSONALIZATION_TOOL_NAMES.has(tool.function.name))
-    const contextWindowTokens = modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens
-    let requestOutputTokens = Math.min(env.aiTextMaxOutputTokens, modelRuntime.maxOutputTokens ?? env.aiTextMaxOutputTokens)
     let outputRecoveryFrom: number | undefined
-    const resolveRequestContextBudget = () => {
-      const budget = resolveAgentContextBudget(contextWindowTokens, requestOutputTokens)
-      return { ...budget, hardRequestTokens: Math.min(budget.hardRequestTokens, resolveDurableInputLimit(contextWindowTokens, requestOutputTokens)) }
-    }
+    const resolveRequestContextBudget = () => resolveAgentContextBudget(contextWindowTokens, requestOutputTokens)
     let contextBudget = resolveRequestContextBudget()
+    const publishContextUsage = (estimatedTokens: number) => bus.emit({ type: 'context.usage',
+      estimatedTokens, contextWindowTokens: contextBudget.contextWindowTokens, compactAtTokens: contextBudget.compactAtTokens })
 
     /**
      * Provider-independent in-run compaction for DeepSeek, GLM and custom
      * OpenAI-compatible models. It counts tool schemas, tool arguments,
      * reasoning and multimodal placeholders instead of only visible text.
      */
-    const prepareContextForRequest = async (beforeTokens: number, toolDefinitionTokens: number, personalization?: PersonalizationContext) => {
-      let compactionId: string | undefined
-      const announceCompaction = () => {
-        if (compactionId) return
-        compactionId = randomUUID()
-        bus.emit({ type: 'context.compaction', messageId: compactionId, state: 'running' })
-      }
-      let afterTokens = beforeTokens
-      let compactedToolArguments = 0
-      let compactedToolOutputs = 0
-      let collapsedToolRounds = 0
-
-      if (beforeTokens >= contextBudget.compactAtTokens) {
-        releaseCompletedReasoning(messages, announceCompaction)
-        const firstStage = compactEarlyToolPayloads(messages, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS, announceCompaction)
-        compactedToolArguments += firstStage.compactedToolArguments
-        compactedToolOutputs += firstStage.compactedToolOutputs
-        collapsedToolRounds += firstStage.collapsedToolRounds
-        afterTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
-      }
-      if (afterTokens > contextBudget.hardRequestTokens) {
-        const secondStage = collapseEarlyToolRounds(messages, 1, announceCompaction)
-        collapsedToolRounds += secondStage.collapsedToolRounds
-        afterTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
-      }
-      if (compactedToolArguments > 0 || compactedToolOutputs > 0 || collapsedToolRounds > 0) {
-        console.info('[agent-loop] 运行中上下文压缩', JSON.stringify({
-          runId,
-          turn,
-          reason: 'turn',
-          modelTier: modelRuntime.tier,
-          contextWindowTokens: contextBudget.contextWindowTokens,
-          beforeTokens,
-          afterTokens,
-          compactedToolArguments,
-          compactedToolOutputs,
-          collapsedToolRounds,
-        }))
-      }
-      if (compactionId) {
-        await persistMessage(compactionId, runId, params.sessionId, 'assistant', [{ type: 'context-compaction', state: 'completed' }])
-        bus.emit({ type: 'context.compaction', messageId: compactionId, state: 'completed' })
-      }
+    const prepareContextForRequest = async (beforeTokens: number, estimate: (candidate: ChatMessage[]) => number) => {
+      const result = planInRunCompaction(messages, beforeTokens, contextBudget, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS, estimate)
+      if (!result) return { beforeTokens, afterTokens: beforeTokens, fits: beforeTokens <= contextBudget.hardRequestTokens }
+      const { triggerTokens, afterTokens, compactedToolOutputs, collapsedToolRounds } = result
+      const compactionId = randomUUID()
+      publishContextUsage(beforeTokens)
+      bus.emit({ type: 'context.compaction', messageId: compactionId, state: 'running' })
+      messages.splice(0, messages.length, ...result.messages)
+      console.info('[agent-loop] 运行中上下文压缩', JSON.stringify({
+        runId,
+        turn,
+        reason: 'turn',
+        modelTier: modelRuntime.tier,
+        contextWindowTokens: contextBudget.contextWindowTokens,
+        triggerTokens,
+        beforeTokens,
+        afterTokens,
+        compactedToolOutputs,
+        collapsedToolRounds,
+      }))
+      await persistMessage(compactionId, runId, params.sessionId, 'assistant', [{ type: 'context-compaction', state: 'completed' }])
+      bus.emit({ type: 'context.compaction', messageId: compactionId, state: 'completed' })
       return { beforeTokens, afterTokens, fits: afterTokens <= contextBudget.hardRequestTokens }
     }
     // plan/18：轮次片/预算片可被检查点续跑刷新，改 let；预算从「只能下调」改为 clamp 到硬顶（默认 500 万）
@@ -2033,6 +2012,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           params.customModelId = current.customModelId
           runtimeModelName = modelRuntime.modelName ?? agent.model
           toolContext.modelRuntime = modelRuntime
+          contextWindowTokens = resolveSessionContextWindow(env.agentContextWindowTokens, modelRuntime.contextWindowTokens)
+          requestOutputTokens = configuredOutputTokens()
+          outputRecoveryFrom = undefined
+          contextBudget = resolveRequestContextBudget()
         }
         const saved = configurationChanges.map(change => change.response as { creativeFreedom?: CreativeFreedom; appliesToRun?: boolean;
           modelAssignments?: import('../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments; configuration?: { creativeFreedom?: CreativeFreedom } })
@@ -2139,9 +2122,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (attachmentPause) messages.push({ role: 'system', content: '本轮仅交付阶段性结果。请结合作者目标，简洁写出已返回附件片段里有文字依据的发现，逐项给出对应片段线索。不可推断未读部分、宣称全文已阅或已完成写入。没有依据的项明确列为待核。服务器会附上读取位置并暂停。' })
       const openAITools = textOnlyModel || attachmentPause ? [] : (personalizationEnabled ? availableDefinitions : stableDefinitions).filter(definition => toolContext.toolAuthority?.has(definition.function.name))
       const toolDefinitionTokens = estimateToolDefinitionTokens(openAITools)
+      const textOnlyWebQuestionRequired = textOnlyModel && !publicVerification && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId
+      const requestOverheadTokens = toolDefinitionTokens + (textOnlyWebQuestionRequired
+        ? estimateChatMessageTokens({ role: 'system', content: textOnlyWebQuestionGuidance }) : 0)
       const personalization = personalizationEnabled && !bootstrapCall ? await loadPersonalizationContext(params.userId, contextPrompt, runId) : undefined
       toolContext.personalizationMemoryEpoch = personalization?.memoryEpoch
-      let estimatedRequestTokens = estimateChatMessagesTokens(projectPersonalizedMessages(messages, personalization)) + toolDefinitionTokens
+      const estimateRequest = (candidate: ChatMessage[]) =>
+        estimateChatMessagesTokens(projectPersonalizedMessages(candidate, personalization)) + requestOverheadTokens
+      let estimatedRequestTokens = estimateRequest(messages)
       const needsContextReminder = completedWritingWrapUp.value || estimatedRequestTokens > contextBudget.warningTokens
       if (savedPlanTitles.size > 0) {
         const planReminder = `[当前计划交付] ${SAVED_PLAN_CLOSING_GUIDANCE}`
@@ -2152,10 +2140,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         estimatedRequestTokens += estimateChatMessageTokens(contextReminder)
       }
       // 在发往供应商之前执行模型窗口感知的压缩；仍超限则安全收尾，不把必失败请求交给供应商。
-      let requestBudget = await prepareContextForRequest(estimatedRequestTokens, toolDefinitionTokens, personalization)
+      let requestBudget = bootstrapCall
+        ? { beforeTokens: estimatedRequestTokens, afterTokens: estimatedRequestTokens, fits: true }
+        : await prepareContextForRequest(estimatedRequestTokens, estimateRequest)
       if (!bootstrapCall && outputRecoveryFrom !== undefined) {
         const fittingOutput = emptyResponseRecoveryOutputTokens(outputRecoveryFrom, modelRuntime.maxOutputTokens, contextWindowTokens, requestBudget.afterTokens)
         if (fittingOutput === null) {
+          publishContextUsage(requestBudget.afterTokens)
           await finalizeFailedWithNotice('当前上下文空间不足，生成未完成，进度已保留。')
           return
         }
@@ -2163,6 +2154,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         contextBudget = resolveRequestContextBudget()
         requestBudget = { ...requestBudget, fits: requestBudget.afterTokens <= contextBudget.hardRequestTokens }
       }
+      if (!bootstrapCall) publishContextUsage(requestBudget.afterTokens)
       console.info('[agent-request-context]', {
         turn, messages: messages.length, tools: openAITools.length, toolTokens: toolDefinitionTokens,
         beforeTokens: requestBudget.beforeTokens, afterTokens: requestBudget.afterTokens,
@@ -2238,7 +2230,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         nextPromptMarker: attachmentPause ? undefined : nextPromptMarker,
         tools: openAITools,
         textOnlyModel,
-        textOnlyWebQuestionRequired: textOnlyModel && !publicVerification && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId,
+        textOnlyWebQuestionRequired,
         ...(requireNativeToolCall && openAITools.length > 0 ? { toolChoice: 'required' as const } : {}),
         model: runtimeModelName,
         providerBaseUrl: modelRuntime.baseUrl,

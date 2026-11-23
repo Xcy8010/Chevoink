@@ -143,16 +143,21 @@ export class RunEventBus {
 
   /** 订阅事件：先补发 sinceSeq 之后的内存历史，再接 live 流 */
   subscribe(listener: EventListener, sinceSeq = 0): () => void {
-    const replay = [...this.history, ...this.previews.values()].sort((a, b) => a.seq - b.seq)
-    for (const event of replay) {
-      if (event.seq > sinceSeq) {
-        try {
-          listener(event)
-        } catch {
-          // 历史补发与 live 通知保持同一隔离语义：单个断开的 SSE
-          // 响应不能阻止其他订阅者，也不能打断 Agent 运行。
-        }
-      }
+    // Seek in the ordered journal before merging its suffix with the bounded previews.
+    const previews = [...this.previews.values()].filter(event => event.seq > sinceSeq).sort((a, b) => a.seq - b.seq)
+    const end = this.history.length
+    let index = 0
+    let high = end
+    while (index < high) {
+      const mid = Math.floor((index + high) / 2)
+      if (this.history[mid].seq <= sinceSeq) index = mid + 1
+      else high = mid
+    }
+    let preview = 0
+    while (index < end || preview < previews.length) {
+      const next = previews[preview]
+      const event = next && (index === end || next.seq < this.history[index].seq) ? previews[preview++] : this.history[index++]
+      try { listener(event) } catch { /* A failed reader cannot interrupt another device. */ }
     }
 
     if (!this.closed) this.listeners.add(listener)

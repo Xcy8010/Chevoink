@@ -2,6 +2,7 @@ import { planKindSchema, planMetadataPatchSchema, planTargetSchema } from '../..
 import { Router, type Request, type Response } from 'express'
 import styleLearningRouter from './style-learning.js'
 import agentGoalsRouter from './agent-goals.js'
+import { wakeConversation } from '../lib/agent/conversation-wakeup.js'
 import agentPersonalizationRouter from './agent-personalization.js'
 import { z } from 'zod'
 import { patchModelAssignmentsSchema } from '../../shared/contracts/agent-model-assignments.js'
@@ -388,7 +389,7 @@ router.get('/sessions/:sessionId/context-state', async (req: Request, res: Respo
   const requestId = createRequestId()
   try {
     const userId = requireSessionUserId(req)
-    const payload = await getContextState(userId, req.params.sessionId)
+    const payload = await getContextState(userId, req.params.sessionId, req.query.view === 'request')
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)
@@ -947,6 +948,7 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
       pinnedSkillIds: body.pinnedSkillIds,
       pinnedSubagentId: body.pinnedSubagentId,
     }, { humanOrigin: 'http' })
+    wakeConversation(userId, payload.sessionId)
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)
@@ -1051,6 +1053,7 @@ router.post('/runs/:runId/continue', async (req: Request, res: Response): Promis
     const userId = requireSessionUserId(req)
     const model = parseBody(continueAgentLoopRunSchema, req.body, '续跑参数无效。')
     const payload = await continueLoopRun(userId, req.params.runId, model)
+    wakeConversation(userId, payload.sessionId)
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import LocalFirstTextarea from '../../src/features/studio/components/LocalFirstTextarea'
 import { useStreamingAutoFollow } from '../../src/features/studio/components/useStreamingAutoFollow'
 import StudioChapterViewer from '../../src/features/studio/components/StudioChapterViewer'
+import { resolveStreamingChapterText } from '../../src/features/studio/components/use-streaming-text'
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -210,4 +211,14 @@ it('commits the author candidate if IME ends under the lock and fences callbacks
   expect(author).toHaveBeenCalledTimes(1)
   expect(other).not.toHaveBeenCalled()
   expect(node.value).toBe('新任务预览')
+})
+
+it('keeps the whole chapter for range edits and previews append against only the targeted chapter', () => {
+  const chapter = { id: 'chapter', content: '开头\n\n原文\n\n结尾' }
+  const delta = { kind: 'chapter' as const, targetId: chapter.id, content: '修改片段' }
+  expect(resolveStreamingChapterText(chapter, { ...delta, toolName: 'chapter_edit_range' })).toBeUndefined()
+  expect(resolveStreamingChapterText(chapter, { ...delta, toolName: 'chapter_write' })).toBeUndefined()
+  expect(resolveStreamingChapterText({ ...chapter, content: '' }, { ...delta, toolName: 'chapter_write' })).toBe(delta.content)
+  expect(resolveStreamingChapterText(chapter, { ...delta, targetId: 'other', toolName: 'chapter_append' })).toBeUndefined()
+  expect(resolveStreamingChapterText(chapter, { ...delta, toolName: 'chapter_append' })).toBe(chapter.content + '\n\n修改片段')
 })

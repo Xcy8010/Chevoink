@@ -362,15 +362,7 @@ export function AgentPanel({
   const configurationHandler = useRef<(event: Extract<AgentStreamEvent, { type: 'run.configuration' }>) => void>(() => {})
   const preferenceRefresh = useRef<() => void>(() => {})
   const lastTerminal = useRef<{ runId: string; seq: number; observedAt: number } | null>(null)
-  const handleStreamEvent = useCallback((event: AgentStreamEvent) => {
-    if (event.type === 'run.paused' || event.type === 'run.finished' || (event.type === 'error' && !event.recoverable)) {
-      lastTerminal.current = { runId: event.runId, seq: event.seq, observedAt: Date.now() }
-    }
-    if (event.type === 'run.configuration') configurationHandler.current(event)
-    if (event.type === 'tool.result' && (event.toolName === 'agent_configure' || event.toolName === 'model_assign')) preferenceRefresh.current()
-    onStreamEvent?.(event)
-  }, [onStreamEvent])
-  const { connect, disconnect } = useAgentStream(handleStreamEvent, reconcileActiveStreamError)
+  const streamGeneration = useRef(0)
   const streamedLongQuestionId = streamedQuestion?.longWait ? streamedQuestion.requestId : undefined
   // These transitions include persisted terminal status discovered after a
   // dropped final SSE frame and a replayed long-wait request after reconnect.
@@ -382,13 +374,41 @@ export function AgentPanel({
   const goalSnapshotHandler = useCallback((streamSessionId: string, snapshot: AgentGoalSnapshot | null, sequence: number) => {
     if (viewSession.current === streamSessionId) setGoalSnapshot(snapshot, streamSessionId, sequence)
   }, [setGoalSnapshot])
+  const pendingConversation = useRef<{ sessionId: string; again: boolean } | null>(null)
   const refreshConversation = useCallback((changedSessionId: string) => {
     if (viewSession.current !== changedSessionId || document.visibilityState === 'hidden') return
+    if (pendingConversation.current?.sessionId === changedSessionId) {
+      pendingConversation.current.again = true
+      return
+    }
     const filter = { queryKey: ['agent-queue', changedSessionId], exact: true }
-    void queryClient.cancelQueries(filter).then(() => {
-      if (viewSession.current === changedSessionId) return queryClient.invalidateQueries(filter)
-    })
+    const reading = { sessionId: changedSessionId, again: queryClient.isFetching(filter) > 0 }
+    pendingConversation.current = reading
+    void (async () => {
+      try {
+        await queryClient.invalidateQueries(filter, { cancelRefetch: false })
+        while (reading.again && pendingConversation.current === reading && viewSession.current === changedSessionId && document.visibilityState !== 'hidden') {
+          reading.again = false
+          await queryClient.invalidateQueries(filter, { cancelRefetch: false })
+        }
+      } finally {
+        if (pendingConversation.current === reading) pendingConversation.current = null
+      }
+    })()
   }, [queryClient])
+  const handleStreamEvent = useCallback((event: AgentStreamEvent) => {
+    if (event.type === 'run.started') streamGeneration.current++
+    if (event.type === 'run.paused' || event.type === 'run.finished' || (event.type === 'error' && !event.recoverable)) {
+      streamGeneration.current++
+      lastTerminal.current = { runId: event.runId, seq: event.seq, observedAt: Date.now() }
+      // A resume hint on another device can arrive before this connection delivers the pause.
+      if (event.type === 'run.paused' && sessionId) refreshConversation(sessionId)
+    }
+    if (event.type === 'run.configuration') configurationHandler.current(event)
+    if (event.type === 'tool.result' && (event.toolName === 'agent_configure' || event.toolName === 'model_assign')) preferenceRefresh.current()
+    onStreamEvent?.(event)
+  }, [onStreamEvent, refreshConversation, sessionId])
+  const { connect, disconnect } = useAgentStream(handleStreamEvent, reconcileActiveStreamError)
   const { connect: connectGoal, disconnect: disconnectGoal } = useAgentGoalStream(goalSnapshotHandler, refreshConversation)
   const goalCapabilitiesQuery = useQuery({
     queryKey: ['agent-goal-capabilities'],
@@ -452,25 +472,36 @@ export function AgentPanel({
     // A slow history read survives repeated wakeups. The scoped key prevents old sessions sharing results.
     void queryClient.fetchQuery({
       queryKey: ['agent', 'observed-run-history', sessionId, revision],
-      queryFn: () => fetchAgentSessionMessages(sessionId, { runLimit: INITIAL_HISTORY_RUN_LIMIT }),
+      queryFn: async () => {
+        const generation = streamGeneration.current
+        const loadedRuns = new Set(live.messages.map(message => message.runId))
+        if (latestId) loadedRuns.add(latestId)
+        const runLimit = Math.min(200, Math.max(INITIAL_HISTORY_RUN_LIMIT, loadedRuns.size))
+        return { generation, payload: await fetchAgentSessionMessages(sessionId, { runLimit }) }
+      },
       staleTime: 0,
       gcTime: 0,
-    }).then(payload => {
-      if (cancelled || viewSession.current !== sessionId) return
+    }).then(({ generation, payload }) => {
+      if (cancelled || viewSession.current !== sessionId || generation !== streamGeneration.current) return
+      if (payload.historyHead && (payload.historyHead.latestRunId !== latestId
+        || head.historyRevision && historyRevisionKey(sessionId, payload.historyHead) !== revision)) return
+      if (payload.activeRunId && payload.activeRunId !== latestId) return
       const now = useAgentStore.getState()
       if (now.loadedSessionId !== sessionId || (now.runId !== live.runId && isRunActive(now.phase))) return
       if (payload.activeRunId && now.runId === payload.activeRunId && isRunActive(now.phase)) return
       if (shouldKeepLiveSessionMessages(now.runId, now.phase, now.activeSessionId, sessionId)) {
         // Another device can begin a new turn while we were offline for the old turn's final frame.
         const last = payload.messages.at(-1)
-        const newerRunConfirmed = now.runId === live.runId
-          && (payload.activeRunId ?? last?.runTiming?.sourceRunId ?? last?.runId) === latestId
-        if (!newerRunConfirmed && !(sameActive && !remoteActive && head.latestRunStatus)) return
+        const observedRun = payload.historyHead?.latestRunId ?? payload.activeRunId ?? payload.resumeRunId ?? last?.runTiming?.sourceRunId ?? last?.runId
+        if (!latestId || observedRun !== latestId || (remoteActive && !payload.activeRunId)) return
       }
       // Keep pages the reader explicitly loaded before this recent-history window.
       const overlap = payload.messages[0] ? now.messages.findIndex(message => message.id === payload.messages[0].id) : -1
-      const keepOlderPages = overlap > 0 && (!head.historyRevision || (latestId && !now.messages.some(message => message.runId === latestId)))
-      const history = keepOlderPages ? [...now.messages.slice(0, overlap), ...payload.messages] : payload.messages
+      const coveredRuns = new Set(payload.messages.map(message => message.runId))
+      const older = overlap > 0 && payload.pagination?.hasMore
+        ? now.messages.slice(0, overlap).filter(message => !coveredRuns.has(message.runId)) : []
+      const keepOlderPages = older.length > 0
+      const history = keepOlderPages ? [...older, ...payload.messages] : payload.messages
       if (!keepOlderPages && payload.pagination) setOlderPagination({ hasMore: payload.pagination.hasMore, before: payload.pagination.earliestRunStartedAt })
       appliedHistory.current = revision
       if (payload.activeRunId) {
@@ -1804,7 +1835,10 @@ export function AgentPanel({
                 const preparing = !block && message.id === lastUserRequest?.id && message.delivery?.status !== 'failed'
                   && (message.delivery?.status === 'sending' || message.requestTiming?.status === 'running' || working && message.runId === runId)
                 const headerActive = preparing || Boolean(active && runId && block?.runIds?.includes(runId))
-                const timing = (block ? blockTimings.get(block.firstId) : undefined) ?? message.requestTiming
+                const blockTiming = block ? blockTimings.get(block.firstId) : undefined
+                const pendingBlockTiming = blockTiming?.elapsedMs === null && (blockTiming.status === 'unknown' || blockTiming.status === 'running')
+                const timing = pendingBlockTiming && headerActive && message.requestTiming?.status === 'running'
+                  && message.requestTiming.elapsedMs !== null ? message.requestTiming : blockTiming ?? message.requestTiming
                 const showSummary = headerActive || Boolean(block && (block.ops || timing?.elapsedMs != null))
                 const settling = block ? settlingBlocks.has(block.firstId) : false
                 const summaryOpen = headerActive || settling || isBlockExpanded(block, message.runId)
