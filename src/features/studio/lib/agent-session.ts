@@ -135,7 +135,8 @@ export function buildAgentTaskWindowFromSession(session: AgentSession): AgentTas
     sessionId: session.id,
     title: session.title,
     temporary: false,
-    loaded: false,
+    // The server's run count is authoritative; older rows may have a missing lastRunAt.
+    loaded: session.hasAgentHistory === false,
     customNamed: session.title.trim() !== DEFAULT_AGENT_TASK_TITLE && !session.title.includes('写作会话'),
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,

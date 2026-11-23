@@ -34,6 +34,7 @@ import {
   deleteAgentSessionData,
   forkAgentSessionData,
   listAgentSessionHistoryData,
+  listAgentSessionWorkspaceHistoryData,
   listAgentSessionsData,
   searchAgentSessionsData,
   listSessionRunStatuses,
@@ -365,6 +366,18 @@ router.get('/sessions/:sessionId/history', async (req: Request, res: Response): 
   try {
     const userId = requireSessionUserId(req)
     const payload = await listAgentSessionHistoryData(userId, req.params.sessionId)
+    res.status(200).json(buildSuccess(requestId, payload))
+  } catch (error) {
+    sendRouteError(res, requestId, error)
+  }
+})
+
+router.get('/sessions/:sessionId/history/workspace', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+
+  try {
+    const userId = requireSessionUserId(req)
+    const payload = await listAgentSessionWorkspaceHistoryData(userId, req.params.sessionId)
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

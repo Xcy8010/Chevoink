@@ -38,6 +38,9 @@ try {
     Write-Output 'Packaged desktop stayed alive for 30 seconds and created a native window.'
     & node (Join-Path $PSScriptRoot 'test-webview.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Real WebView2 regression failed.' }
+    # A second unattended installation must leave the active writer in control.
+    $retry = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installDir") -WindowStyle Hidden -PassThru -Wait
+    if ($retry.ExitCode -eq 0 -or $child.HasExited) { throw 'Setup did not protect the running desktop session.' }
     if (!$child.CloseMainWindow()) { throw 'Unable to request native close.' }
     if (!$child.WaitForExit(15000)) { throw 'Packaged fallback did not close normally.' }
     Write-Output 'Packaged fallback closed normally without a discard/download prompt.'

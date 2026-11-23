@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
 import type { Chapter } from '../../../../shared/contracts/index.js'
 import { buildChapterDraft } from '../lib/form-state'
 import { formatDateTime } from '../lib/agent-session'
@@ -18,7 +18,7 @@ export function useChapterSnapshot({ data, selectedChapterId, novelId, userId, s
   const key = selectedChapterId ? chapterRecoveryKey(userId, novelId, selectedChapterId) : undefined
   const checkedKey = useRef<string>()
   const [choices, setChoices] = useState<{ key: string; copies: ChapterCopy[] } | null>(null)
-  useEffect(() => {
+  useLayoutEffect(() => {
     checkedKey.current = undefined
     setChoices(null)
   }, [key])
@@ -33,7 +33,8 @@ export function useChapterSnapshot({ data, selectedChapterId, novelId, userId, s
     setSaveState('pending')
     setSaveMessage('已恢复未同步的章节修改。')
   }, [draftRef, dirtyRef, setDraft, setDirty, setSaveState, setSaveMessage])
-  useEffect(() => {
+  // A cached or just-resolved chapter (including its recovery copy) belongs in the next paint.
+  useLayoutEffect(() => {
     if (!data || data.id !== selectedChapterId || !scope || scope !== hydratedScope || data.novelId !== novelId) return
     const incoming = buildChapterDraft(data)
     if (!canApplyChapterSnapshot(draftRef.current, incoming, dirtyRef.current)) return

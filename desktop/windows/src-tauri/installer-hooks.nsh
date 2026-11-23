@@ -1,6 +1,7 @@
 ; A packaged launcher can redirect LOCALAPPDATA into its own package cache.
 ; Preserve normal/custom installation paths; relocate only this known bad default.
 !define CHEVOINK_ICON_SOURCE "${__FILEDIR__}\icons\icon.ico"
+!define CHEVOINK_SETUP_DIR "${__FILEDIR__}"
 Var ChevoinkInstalled
 
 ; Existing shortcuts may cache the old executable icon by its unchanged path.

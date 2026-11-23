@@ -78,6 +78,19 @@ it('replaces only the model label while waiting and keeps the editor and its dra
   expect(useAgentStore.getState().composerDraft).toBe('等待读取模型时继续起草')
 })
 
+it('shows the selected built-in model by tier when the capability catalogue has not returned it', () => {
+  const input = { ...props(), modelTier: 'ultimate' as const, modelOptions: [] }
+  render(<AgentComposer {...input} />)
+  expect(screen.getByLabelText('模型档位').textContent).toContain('极致')
+  expect(screen.getByLabelText('模型档位').textContent).not.toContain('极速')
+})
+
+it('uses a neutral label for an unavailable dynamic built-in model', () => {
+  render(<AgentComposer {...props()} modelTier={'builtin_0123456789abcdef'} modelOptions={[]} />)
+  expect(screen.getByLabelText('模型档位').textContent).toContain('当前模型')
+  expect(screen.getByLabelText('模型档位').textContent).not.toContain('极速')
+})
+
 describe('composer slash menu', () => {
   it('matches plus entries, wording and capability gating, within a bounded full-width card', () => {
     const input = { ...props(), goalCreationEnabled: true, skills: [skill()] }

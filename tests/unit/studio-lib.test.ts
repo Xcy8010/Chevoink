@@ -6,6 +6,7 @@ import {
   BOOTSTRAP_NOVEL_SUMMARY,
   BOOTSTRAP_NOVEL_TITLE,
   DEFAULT_AGENT_TASK_TITLE,
+  buildAgentTaskWindowFromSession,
   choosePreferredAgentTaskWindow,
   createLocalAgentTaskWindow,
   dedupeAgentTaskWindows,
@@ -125,6 +126,17 @@ describe('agent-session：格式化与引导作品识别', () => {
 })
 
 describe('agent-session：任务窗构造与去重', () => {
+  it('不会为从未运行过的命名会话请求空历史', () => {
+    const emptySession = {
+      id: 'empty', userId: 'user', novelId: 'novel', title: '已命名空任务', status: 'active', pinnedAt: null,
+      toolPolicy: null, sandboxMode: 'workspace', lastRunAt: null, hasAgentHistory: false, createdAt: '2026-11-23T08:00:00.000Z',
+      updatedAt: '2026-11-23T08:00:00.000Z',
+    } as AgentSession
+    const usedSession = { ...emptySession, id: 'used', lastRunAt: null, hasAgentHistory: true }
+    expect(buildAgentTaskWindowFromSession(emptySession).loaded).toBe(true)
+    expect(buildAgentTaskWindowFromSession(usedSession).loaded).toBe(false)
+  })
+
   it('createLocalAgentTaskWindow：空白标题回退默认名，updatedAt 默认取 createdAt', () => {
     const window = createLocalAgentTaskWindow({ title: '   ', createdAt: '2026-08-16T00:00:00.000Z' })
     expect(window.title).toBe(DEFAULT_AGENT_TASK_TITLE)

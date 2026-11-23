@@ -10,7 +10,7 @@ const novels = ['甲', '乙'].map((label, index) => ({
 export const sessions = ['A', 'B', 'C', 'D'].map((letter, index) => {
   const owner = novels[index < 2 ? 0 : 1]
   return { id: 'session-' + letter, novelId: owner.id, userId: user.id, title: '试验任务' + letter, novelTitle: owner.title,
-    status: 'active', pinnedAt: null, lastRunAt: date, createdAt: date, updatedAt: date }
+    status: 'active', pinnedAt: null, lastRunAt: date, hasAgentHistory: true, createdAt: date, updatedAt: date }
 })
 function chapter(novel) {
   return { id: 'chapter-' + novel.id, novelId: novel.id, authorId: user.id, title: novel.title + '测试章节', content: novel.title + '测试正文',
@@ -27,8 +27,19 @@ function messageHistory(session) {
 export function studioApi(url) {
   const path = url.pathname
   if (path === '/api/app-releases/bootstrap') return { mode: 'legacy', release: null }
+  if (path === '/api/credits/summary') return { plan: 'free', publicBetaEnabled: false, publicBetaRevision: 1, planLabel: '免费版',
+    dailyAllowance: 0, dailyUsed: 0, dailyRemaining: 0, bonusRemaining: 0, totalRemaining: 0, usedPercent: 0,
+    periodStartedAt: date, resetsAt: date, resetTimeZone: 'UTC+8', globallyPaused: false, suspended: false,
+    models: ['lite', 'speed', 'standard', 'performance', 'ultimate'].map((tier, index) => ({
+      tier, label: ['轻量', '极速', '标准', '性能', '极致'][index], multiplier: index + 1, available: tier === 'standard',
+      selectedByDefault: false, reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false,
+    })) }
   if (path === '/api/users/me') return { user, authoredNovels: novels, activities: [], drafts: [], shelf: [], notifications: [], stats: [], statCards: [], recentConversations: [] }
   if (path === '/api/agent/sessions') return { items: sessions.filter(s => !url.searchParams.has('novelId') || s.novelId === url.searchParams.get('novelId')) }
+  if (path === '/api/agent/model-assignments') return { version: 1,
+    global: { revision: 1, assignments: { main: { modelTier: 'ultimate', reasoningEffort: 'high' } } },
+    novel: { revision: 0, assignments: {} },
+    effective: { main: { source: 'global', selection: { modelTier: 'ultimate', reasoningEffort: 'high' } } } }
   for (const novel of novels) {
     const first = chapter(novel)
     if (path === '/api/agent/novels/' + novel.id + '/skills') return {items: [], totalCount: 0, enabledCount: 0, recentRuns: []}
@@ -38,8 +49,10 @@ export function studioApi(url) {
   }
   for (const session of sessions) {
     const root = '/api/agent/sessions/' + session.id
+    if (path === root + '/configuration') return { sessionId: session.id, novelId: session.novelId, title: session.title, revision: 1,
+      configuration: { model: { modelTier: 'standard', reasoningEffort: 'high' }, creativeFreedom: 'balanced' }, source: 'saved', modelSelectionSource: 'explicit' }
     if (path === root + '/messages') return { messages: messageHistory(session), activeRunId: null, runGoalId: null, pagination: {hasMore: false, earliestRunStartedAt: null} }
-    if (path === root + '/history' || path === root + '/queue') return {items: []}
+    if (path === root + '/history/workspace' || path === root + '/history' || path === root + '/queue') return {items: []}
     if (path === root + '/questions/pending') return {question: null}
   }
   return undefined

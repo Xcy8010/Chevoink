@@ -66,10 +66,19 @@ export function useAgentModelPreference(novelId: string, sessionId: string | nul
     void queryClient.invalidateQueries({ queryKey: ['agent', 'model-assignments'] })
     return true
   }
+  const loadError = !windowConfiguration.readyForScope ? windowConfiguration.error
+    : !explicit && !assignments.data && assignments.error instanceof Error ? assignments.error.message : null
+  const loading = Boolean(novelId) && (windowConfiguration.loading || !explicit && assignments.isPending && !assignments.data)
   return { modelTier: choice.modelTier, customModelId: choice.customModelId ?? null, reasoningSelections: effectiveReasoningSelections,
     preferredEffort: choice.reasoningEffort, explicit, inheritMain: Boolean(inherited) && !explicit,
     importAssignment: assignments.data?.effective.import_analysis?.selection,
-    loading: Boolean(novelId) && assignments.isPending || windowConfiguration.loading,
+    loading, loadError,
+    retryLoad: () => Promise.all([
+      windowConfiguration.refresh(),
+      queryClient.invalidateQueries({ queryKey: ['agent', 'model-assignments', `novel:${novelId}`] }),
+      queryClient.invalidateQueries({ queryKey: ['credits', 'summary'] }),
+      queryClient.invalidateQueries({ queryKey: ['credits', 'custom-models'] }),
+    ]),
     windowConfiguration,
     selectModelTier, selectCustomModel, selectReasoningEffort, setFallbackTier, applyConfiguration }
 }

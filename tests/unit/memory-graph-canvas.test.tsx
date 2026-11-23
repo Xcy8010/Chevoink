@@ -22,10 +22,12 @@ vi.mock('@xyflow/react', () => ({
   BackgroundVariant: { Dots: 'dots' }, Position: { Left: 'left', Right: 'right' },
 }))
 vi.mock('../../src/features/studio/components/MemoryGraphGalaxy', () => ({
-  default: ({ nodes, selectedId, active, onSelect }: { nodes: unknown[]; selectedId: string | null; active: boolean; onSelect: (id: string) => void }) =>
-    <div data-testid="galaxy" data-nodes={nodes.length} data-selected={selectedId} data-active={String(active)}>
+  default: function MockGalaxy({ nodes, selectedId, active, onSelect, onFirstPaint }: { nodes: unknown[]; selectedId: string | null; active: boolean; onSelect: (id: string) => void; onFirstPaint: () => void }) {
+    React.useLayoutEffect(() => { if (active) onFirstPaint() }, [active, onFirstPaint])
+    return <div data-testid="galaxy" data-nodes={nodes.length} data-selected={selectedId} data-active={String(active)}>
       <button type="button" onClick={() => onSelect('node-002')}>选择第三个星图节点</button>
-    </div>,
+    </div>
+  },
 }))
 
 /** A controllable worker: the test, never render(), chooses when geometry returns. */
@@ -189,9 +191,11 @@ describe('关系网视图交互', () => {
     expect(LayoutWorker.instances).toHaveLength(2)
     expect(latestWorker().request.dimensions).toBe(3)
     expect(screen.getByTestId('map')).toBe(map)
-    expect(screen.getByRole('status')).toBeTruthy()
+    expect(map.closest('[hidden]')).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
     finish()
     const galaxy = screen.getByTestId('galaxy')
+    expect(map.closest('[hidden]')).toBeTruthy()
     expect(galaxy.dataset).toMatchObject({ nodes: '103', selected: 'node-000', active: 'true' })
     fireEvent.click(screen.getByRole('button', { name: '关系图视图' }))
     expect(screen.getByTestId('map')).toBe(map)
@@ -202,6 +206,9 @@ describe('关系网视图交互', () => {
     expect(screen.getByTestId('galaxy')).toBe(galaxy)
     expect(state.nodes.find((n) => n.id === 'node-000')!.className).toContain('is-focused')
     expect(LayoutWorker.instances).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: '关系图视图' }))
+    rerender(<MemoryGraphCanvas graph={{ ...memoryGraphFixture, edges: [] }} />)
+    expect(LayoutWorker.instances.map(worker => worker.request.dimensions)).toEqual([2, 3, 2])
   })
   it('拓扑替换终止旧计算并忽略迟到结果，卸载终止当前计算', () => {
     const { rerender, unmount } = render(<MemoryGraphCanvas graph={memoryGraphFixture} />)
@@ -222,17 +229,17 @@ describe('关系网视图交互', () => {
     unmount()
     expect(unfinished.terminated).toBe(true)
   })
-  it('离开尚在计算的星系会终止计算，返回后重新请求', () => {
+  it('快速来回切换共享尚在计算的星系布局，始终保留可见画布', () => {
     render(<MemoryGraphCanvas graph={memoryGraphFixture} />)
     finish()
     fireEvent.click(screen.getByRole('button', { name: '三维星系视图' }))
-    const obsolete = latestWorker()
+    const inFlight = latestWorker()
     fireEvent.click(screen.getByRole('button', { name: '关系图视图' }))
-    expect(obsolete.terminated).toBe(true)
-    finish(obsolete)
-    expect(screen.queryByTestId('galaxy')).toBeNull()
+    expect(inFlight.terminated).toBe(false)
+    expect(screen.getByTestId('map').closest('[hidden]')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '三维星系视图' }))
-    expect(latestWorker()).not.toBe(obsolete)
+    expect(latestWorker()).toBe(inFlight)
+    expect(screen.queryByRole('status')).toBeNull()
     finish()
     expect(screen.getByTestId('galaxy').dataset.active).toBe('true')
   })

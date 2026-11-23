@@ -75,6 +75,8 @@ jobs:
           $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid installer version' }
           $installer = Join-Path $PWD "src-tauri/target/release/bundle/nsis/Chevoink_${version}_x64-setup.exe"
+          python verify-installer-icon.py src-tauri/icons/icon.ico $installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Path test-results/installers/standard -Force | Out-Null
           Copy-Item -LiteralPath $installer -Destination "test-results/installers/standard/Chevoink_${version}_x64-setup.exe" -ErrorAction Stop
       - name: Launch packaged desktop and reject startup crashes
@@ -96,6 +98,8 @@ jobs:
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid installer version' }
           $installer = Join-Path $PWD "src-tauri/target/release/bundle/nsis/Chevoink_${version}_x64-setup.exe"
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Offline installer missing' }
+          python verify-installer-icon.py src-tauri/icons/icon.ico $installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Path test-results/installers/offline -Force | Out-Null
           Copy-Item -LiteralPath $installer -Destination "test-results/installers/offline/Chevoink_${version}_x64-webview2-offline-setup.exe" -ErrorAction Stop
       - uses: actions/upload-artifact@v4

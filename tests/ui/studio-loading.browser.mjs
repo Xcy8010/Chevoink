@@ -25,7 +25,7 @@ page.on('pageerror', error => errors.push(error.message))
 const types = {html: 'text/html', js: 'text/javascript', css: 'text/css', svg: 'image/svg+xml', webp: 'image/webp', png: 'image/png', json: 'application/json'}
 let hold
 const firstArtifactRead = Promise.withResolvers()
-const artifactPath = '/api/agent/sessions/session-A/history'
+const artifactPath = '/api/agent/sessions/session-A/history/workspace'
 await page.route('**/*', async route => {
   const req = route.request()
   const url = new URL(req.url())
@@ -89,8 +89,21 @@ async function assertNoPageFallback() {
   assert.equal(requests.filter(r => r.document).length, 1, 'browser document navigated')
 }
 try {
+  const sessionListStarted = Promise.withResolvers()
+  const sessionListGate = Promise.withResolvers()
+  hold = {matches: pathname => pathname === '/api/agent/sessions', started: sessionListStarted.resolve, resume: sessionListGate.promise}
   await page.goto(origin + '/studio/novel/novel-0?session=session-A&from=regression')
+  await sessionListStarted.promise
   await workspace.waitFor()
+  const modelChip = page.locator('[aria-label="模型档位"]')
+  const modelSkeleton = modelChip.getByRole('status', {name: '正在加载当前模型'})
+  await modelSkeleton.waitFor()
+  assert.doesNotMatch(await modelChip.innerText(), /极速|极致|标准/, 'model must stay unresolved while session identity is being resolved')
+  sessionListGate.resolve()
+  hold = undefined
+  await workspace.waitFor()
+  await page.locator('[aria-label="模型档位"]').getByText('标准', {exact: true}).waitFor()
+  assert.equal(await page.getByRole('status', {name: '正在加载当前模型'}).count(), 0, 'fast session configuration should render without an artificial delay')
   await contentVisible('试验任务A合成消息47')
   await page.evaluate(() => {
     window.studioFallbackFrames = 0
@@ -111,23 +124,18 @@ try {
   await page.mouse.wheel(0, -640)
   await page.waitForFunction(({node, bottom}) => node.scrollTop < bottom - 100, {node: await scroll.elementHandle(), bottom})
   await settled()
-  const position = await scroll.evaluate(el => el.scrollTop)
+  let position = await scroll.evaluate(el => el.scrollTop)
   assert.ok(position > 0 && position < bottom, 'reader must be in the middle of the conversation')
   const initialStudioRequests = requests.filter(r => r.path.endsWith('/studio')).length
-  const messageReads = requests.filter(r => r.path === '/api/agent/sessions/session-A/messages').length
   firstArtifactRead.resolve()
   const partialReadFailure = page.getByRole('status').filter({hasText: '任务资料暂未同步'}).filter({visible:true})
-  await partialReadFailure.waitFor()
-  assert.equal(new URL(page.url()).searchParams.get('session'), 'session-A')
-  await assertComposer(editor, position)
   await Promise.all([
     page.waitForResponse(response => new URL(response.url()).pathname === artifactPath && response.status() === 200),
-    button('重试', partialReadFailure).click(),
   ])
-  await partialReadFailure.waitFor({state:'hidden'})
   await page.waitForURL(u => !u.searchParams.has('session') && u.searchParams.get('from') === 'regression')
+  assert.equal(await partialReadFailure.count(), 0, 'one transient 503 should recover without showing the task warning')
   await assertComposer(editor, position)
-  assert.equal(requests.filter(r => r.path === '/api/agent/sessions/session-A/messages').length, messageReads, 'retry reloaded chat messages')
+  assert.equal(requests.filter(r => r.path === artifactPath).length, 2, 'one transient 503 should trigger exactly one automatic retry')
 
   await whilePending(chunk('StudioChapterViewer'), () => inspector.getByText(/甲作品测试章节/).filter({visible:true}).first().click(), async () => {
     await page.getByRole('status', {name: '正在打开章节查看器'}).waitFor()
@@ -170,13 +178,39 @@ try {
   await settings.waitFor({state: 'hidden'})
   assert.equal(requests.filter(r => r.path.endsWith('/studio')).length, initialStudioRequests, 'panels reloaded workspace payload')
 
-  const shell = await page.locator('[data-app-shell]').elementHandle()
-  const work = await workspace.elementHandle()
+  const historyB = '/api/agent/sessions/session-B/history/workspace'
+  const isHistoryB = url => new URL(url).pathname === historyB
+  let historyBAttempts = 0
+  await page.route(isHistoryB, async route => {
+    requests.push({path: historyB, document: false})
+    historyBAttempts++
+    await route.fulfill({status: 503, json: {success: false, error: {code: 'TEMPORARILY_UNAVAILABLE'}}})
+  })
+  const partialReadFailureB = page.getByRole('status').filter({hasText: '任务资料暂未同步'}).filter({visible:true})
   await whilePending(chunk('AgentMemoryCenter'), () => selectTask(1), async () => {
     await inspector.getByRole('status', {name: '正在打开记忆中心'}).waitFor()
-    assert.equal(await work.evaluate(el => el.isConnected && el.checkVisibility()), true, 'same-novel workspace disappeared')
+    await partialReadFailureB.waitFor()
+    assert.equal(historyBAttempts, 2, 'persistent temporary failures should stop after one automatic retry')
     await assertNoPageFallback()
   })
+  const messageReadsB = requests.filter(r => r.path === '/api/agent/sessions/session-B/messages').length
+  await page.unroute(isHistoryB)
+  await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === historyB && response.status() === 200),
+    button('重试', partialReadFailureB).click(),
+  ])
+  await partialReadFailureB.waitFor({state:'hidden'})
+  assert.equal(requests.filter(r => r.path === '/api/agent/sessions/session-B/messages').length, messageReadsB,
+    'task artifact retry reloaded chat messages')
+  assert.equal(await composer.innerText(), '', 'task B should keep its own empty composer draft')
+  await selectTask(0)
+  await contentVisible('试验任务A合成消息47')
+  assert.equal(await composer.evaluate((el, original) => el === original, editor), true, 'task switch remounted the composer')
+  assert.equal(await composer.innerText(), draft, 'task A draft was lost after returning from task B')
+
+  const shell = await page.locator('[data-app-shell]').elementHandle()
+  const work = await workspace.elementHandle()
+  await selectTask(1)
   await contentVisible('试验任务B合成消息47')
   assert.equal(await composer.innerText(), '')
   await composer.fill('未发送的虚构草稿 B')
@@ -261,10 +295,46 @@ try {
       await page.unroute(listUrl)
     }
   }
+  // A pending artifact read belongs to its task window, not to the latest selected task.
+  // Reset only the fixture snapshot's loaded bit so this exercises a cold history request.
+  const historyA = '/api/agent/sessions/session-A/history/workspace'
+  const historyReadsBefore = requests.filter(r => r.path === historyA).length
+  await page.evaluate(() => {
+    const key = 'studio-agent-workspace:novel-0'
+    const snapshot = JSON.parse(localStorage.getItem(key))
+    snapshot.tasks.find(task => task.sessionId === 'session-A').loaded = false
+    localStorage.setItem(key, JSON.stringify(snapshot))
+  })
+  await page.reload()
+  await contentVisible('试验任务B合成消息47')
+  const historyStarted = Promise.withResolvers(), historyGate = Promise.withResolvers()
+  const isHistoryA = url => new URL(url).pathname === historyA
+  await page.route(isHistoryA, async route => {
+    requests.push({path: historyA, document: false})
+    historyStarted.resolve()
+    await historyGate.promise
+    await route.fulfill({json: {success: true, data: {items: []}}})
+  })
+  try {
+    await selectTask(0)
+    await historyStarted.promise
+    await selectTask(1)
+    await contentVisible('试验任务B合成消息47')
+    historyGate.resolve()
+    await page.waitForResponse(response => new URL(response.url()).pathname === historyA && response.status() === 200)
+    await selectTask(0)
+    await contentVisible('试验任务A合成消息47')
+    assert.equal(requests.filter(r => r.path === historyA).length, historyReadsBefore + 1,
+      'switching away discarded a successful task history read and caused a duplicate request')
+  } finally {
+    historyGate.resolve()
+    await page.unroute(isHistoryA)
+  }
   assert.deepEqual(errors, [])
   console.log(JSON.stringify({ coldSurfaces: ['章节查看器', '技能', '创作区设置', '任务 B 记忆中心'], warmSkillsFallback: false,
     tasks: ['甲作品 A', '甲作品 B', '甲作品 A', '乙作品 C', '甲作品 B'], scrollTop: position,
     recoveredReads: ['task artifacts', 'session list'], staleListIgnored: ['new draft', 'away and back'],
+    taskHistoryCachedAfterSwitch: true,
     fullPageFallbacks: fallbackFrames, documentRequests: navigationCount }))
 } finally {
   await browser.close()

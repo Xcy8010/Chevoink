@@ -16,6 +16,9 @@ type Props = {
   markdown: string
   editable: boolean
   mobile: boolean
+  onReady?: () => void
+  onCreateError?: () => void
+  onCommitPending?: (markdown: string) => void
   onChange?: (markdown: string) => void
   onBlur?: () => void
   onSelectionChange?: (selection: EditorSelectionState) => void
@@ -23,7 +26,7 @@ type Props = {
   positionKey?: string
 }
 
-export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onChange, onBlur, onSelectionChange, streaming = false, positionKey }: Props) {
+export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onReady, onCreateError, onCommitPending, onChange, onBlur, onSelectionChange, streaming = false, positionKey }: Props) {
   const streamingScroll = useStreamingAutoFollow<HTMLDivElement>(streaming, markdown)
   const rootRef = streamingScroll.nodeRef
   const editorRef = useRef<CrepeBuilder | null>(null)
@@ -31,16 +34,18 @@ export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onC
   const desiredMarkdownRef = useRef(markdown)
   const synchronizedDocRef = useRef<ProseNode | null>(null)
   const editableRef = useRef(editable)
-  editableRef.current = editable
+  const flushBeforeLock = useRef<() => void>()
   const onChangeRef = useRef(onChange)
+  const onCommitPendingRef = useRef(onCommitPending)
   const onBlurRef = useRef(onBlur)
   const onSelectionChangeRef = useRef(onSelectionChange)
 
   useEffect(() => {
     onChangeRef.current = onChange
+    onCommitPendingRef.current = onCommitPending
     onBlurRef.current = onBlur
     onSelectionChangeRef.current = onSelectionChange
-  }, [onBlur, onChange, onSelectionChange])
+  }, [onBlur, onChange, onCommitPending, onSelectionChange])
 
   desiredMarkdownRef.current = markdown
 
@@ -56,20 +61,27 @@ export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onC
 
     currentMarkdownRef.current = markdown
     editor.setReadonly(!editable)
-    editor.on((listener) => {
-      listener.updated((ctx, doc) => {
-        if (disposed || !acceptingUpdates || !editableRef.current) return
-        // The listener is debounced. Compare actual documents: parsing its
-        // serialized Markdown would drop the trailing paragraph of a list.
-        if (!doc.eq(ctx.get(editorViewCtx).state.doc) || synchronizedDocRef.current?.eq(doc)) return
+    const publishCurrentEdit = (publish: typeof onChange, observed?: ProseNode) => {
+      if (!publish || disposed || !acceptingUpdates || !editableRef.current) return
+      editor.editor.action(ctx => {
+        const doc = ctx.get(editorViewCtx).state.doc
+        if ((observed && !observed.eq(doc)) || synchronizedDocRef.current?.eq(doc)) return
         // A later undo to the server document is a real edit after this save.
         synchronizedDocRef.current = null
         const nextMarkdown = ctx.get(serializerCtx)(doc)
         if (nextMarkdown === currentMarkdownRef.current) return
         currentMarkdownRef.current = nextMarkdown
-        onChangeRef.current?.(nextMarkdown)
+        publish(nextMarkdown)
       })
-      listener.blur(() => { if (!disposed) onBlurRef.current?.() })
+    }
+    flushBeforeLock.current = () => publishCurrentEdit(onCommitPendingRef.current)
+    editor.on((listener) => {
+      listener.updated((_ctx, doc) => publishCurrentEdit(onChangeRef.current, doc))
+      listener.blur(() => {
+        if (disposed) return
+        publishCurrentEdit(onChangeRef.current)
+        onBlurRef.current?.()
+      })
     })
 
     void editor.create().then(() => {
@@ -89,9 +101,13 @@ export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onC
       }
       // Restore only once, after the async editor has laid out its real document.
       root.scrollTop = readPlanPosition(positionKey)
-    })
+      onReady?.()
+    }).catch(() => { if (!disposed) onCreateError?.() })
 
     return () => {
+      // The listener can still be waiting to report the author's final keystroke.
+      publishCurrentEdit(onCommitPendingRef.current)
+      flushBeforeLock.current = undefined
       disposed = true
       if (editorRef.current === editor) editorRef.current = null
       if (created) void editor.destroy()
@@ -108,6 +124,8 @@ export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onC
   }, [markdown])
 
   useEffect(() => {
+    if (editableRef.current && !editable) flushBeforeLock.current?.()
+    editableRef.current = editable
     editorRef.current?.setReadonly(!editable)
   }, [editable])
 

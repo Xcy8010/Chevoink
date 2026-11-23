@@ -1,6 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 import type { EditorSelectionState } from '../types'
+import { markdownResources, safeMarkdownUrl } from '../agent/components/markdown-resources'
 import LocalFirstTextarea from './LocalFirstTextarea'
 import { useStreamingAutoFollow } from './useStreamingAutoFollow'
 import { readPlanPosition, savePlanPosition } from './plan-view-position'
@@ -67,6 +70,12 @@ function PlanMarkdownEditorDocument({
 }: Props) {
   const positionKey = positionScope ? `${positionScope}:${documentId}` : undefined
   const [mode, setMode] = useState<PlanEditorMode>('preview')
+  const [richReady, setRichReady] = useState(false)
+  const [richFailed, setRichFailed] = useState(false)
+  const previewKey = positionKey ? `${positionKey}:preview` : undefined
+  const restorePreviewScroll = useCallback((node: HTMLDivElement | null) => {
+    if (node) node.scrollTop = readPlanPosition(previewKey)
+  }, [previewKey])
   const markdownScroll = useStreamingAutoFollow<HTMLTextAreaElement>(streaming, markdown)
   const markdownRef = markdownScroll.ref
   const restoreMarkdownScroll = useCallback((node: HTMLTextAreaElement | null) => {
@@ -113,6 +122,14 @@ function PlanMarkdownEditorDocument({
     onBlurRef.current?.()
   }, [flushPendingMarkdown])
 
+  const commitLatestTransaction = useCallback((content: string) => {
+    if (markdownCommitTimerRef.current !== null) window.clearTimeout(markdownCommitTimerRef.current)
+    markdownCommitTimerRef.current = null
+    const commit = pendingMarkdownRef.current?.commit ?? onChangeRef.current
+    pendingMarkdownRef.current = null
+    commit?.(content)
+  }, [])
+
   // 卸载时上报最后一批输入，防止切计划丢字。
   useEffect(
     () => () => {
@@ -122,36 +139,43 @@ function PlanMarkdownEditorDocument({
     [],
   )
 
-  useEffect(() => {
-    setMode('preview')
-  }, [documentId])
-
   return (
     <div className={`plan-markdown-editor flex min-h-0 flex-1 flex-col ${className}`} data-mode={mode}>
       <div className="sticky top-0 z-20 flex shrink-0 justify-end bg-[var(--surface-default)]/95 pb-2 backdrop-blur-sm">
-        <PlanEditorModeSwitch mode={mode} onChange={setMode} />
+        <PlanEditorModeSwitch mode={mode} onChange={next => {
+          if (next === mode) return
+          setRichReady(false)
+          setRichFailed(false)
+          setMode(next)
+        }} />
       </div>
 
       {mode === 'preview' ? (
-        <Suspense
-          fallback={(
-            <div className="flex min-h-[12rem] flex-1 items-center justify-center text-sm text-[var(--text-tertiary)]">
-              正在准备 Markdown 预览…
-            </div>
-          )}
-        >
-          <PlanRichMarkdownEditor
-            key={documentId}
-            markdown={markdown}
-            editable={editable}
-            mobile={mobile}
-            onChange={handleRichMarkdownChange}
-            onBlur={handleRichEditorBlur}
-            onSelectionChange={onSelectionChange}
-            streaming={streaming}
-            positionKey={positionKey ? `${positionKey}:preview` : undefined}
-          />
-        </Suspense>
+        <div className={`grid flex-1 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)] ${mobile ? 'min-h-[60vh]' : 'min-h-0'}`}>
+          {!richReady && <div ref={restorePreviewScroll} onScroll={event => savePlanPosition(previewKey, event.currentTarget)} className="plan-rich-markdown overflow-auto [grid-area:1/1]" data-mobile={mobile} data-plan-reading-preview>
+            {richFailed && <p role="status" className="pb-2 text-xs text-[var(--text-secondary)]">富文本编辑器暂不可用，可切换到 Markdown 继续编辑。</p>}
+            <div className="milkdown"><div className="ProseMirror">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={markdownResources} urlTransform={safeMarkdownUrl}>{markdown}</ReactMarkdown>
+            </div></div>
+          </div>}
+          <div aria-hidden={!richReady} className={`flex min-h-0 flex-col [grid-area:1/1] ${richReady ? '' : 'invisible'}`}>
+            <Suspense fallback={null}>
+              <PlanRichMarkdownEditor
+                markdown={markdown}
+                editable={editable}
+                mobile={mobile}
+                onReady={() => setRichReady(true)}
+                onCreateError={() => setRichFailed(true)}
+                onChange={handleRichMarkdownChange}
+                onCommitPending={commitLatestTransaction}
+                onBlur={handleRichEditorBlur}
+                onSelectionChange={onSelectionChange}
+                streaming={streaming}
+                positionKey={previewKey}
+              />
+            </Suspense>
+          </div>
+        </div>
       ) : (
         <LocalFirstTextarea
           ref={restoreMarkdownScroll}

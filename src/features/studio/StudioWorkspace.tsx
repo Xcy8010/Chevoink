@@ -70,8 +70,8 @@ import type { AgentArtifact, AgentLocalRollbackSnapshot, AgentRunState, ChapterD
 
 
 
-import { buildArtifactsFromHistory, mergeRestoredArtifactsWithSnapshot, readStoredAgentWorkspace } from './lib/agent-persistence.js'
-import { BOOTSTRAP_NOVEL_SUMMARY, BOOTSTRAP_NOVEL_TITLE, DEFAULT_NOVEL_ID, STUDIO_LAST_NOVEL_STORAGE_KEY, buildAgentTaskWindowFromSession, createLocalAgentTaskWindow, dedupeAgentTaskWindows, formatDateTime, formatWordCount, getAgentWorkspaceStorageKey, isBootstrapNovel, pickFallbackAgentTaskWindow, resolveNovelTitleState, shouldDisplayListedAgentSession, shouldShowWorkspaceNovel } from './lib/agent-session.js'
+import { buildArtifactsFromHistory, mergeHydratedArtifactsWithCurrentSnapshot, mergeRestoredArtifactsWithSnapshot, readStoredAgentWorkspace, writeStoredAgentWorkspace } from './lib/agent-persistence.js'
+import { BOOTSTRAP_NOVEL_SUMMARY, BOOTSTRAP_NOVEL_TITLE, DEFAULT_NOVEL_ID, STUDIO_LAST_NOVEL_STORAGE_KEY, buildAgentTaskWindowFromSession, createLocalAgentTaskWindow, dedupeAgentTaskWindows, formatDateTime, formatWordCount, isBootstrapNovel, pickFallbackAgentTaskWindow, resolveNovelTitleState, shouldDisplayListedAgentSession, shouldShowWorkspaceNovel } from './lib/agent-session.js'
 import { buildChapterDraft, buildLocalChapterCreateInput, buildCoverForm, buildNovelFormState, buildNovelUpdatePayload, buildProjectNotes, createIdleAgentRunState, isNovelFormDirty } from './lib/form-state.js'
 import { buildCatalogPreview, buildChapterReviewDescription, buildPendingChapterReview, buildServerPlanFile, mergeServerPlanFile, buildWorkspacePlanFiles, mergeWorkspacePlanFiles, mergeCatalogContentWithChapters, removeChapterAndCompact, replaceChapterItem, toChapterListItem, upsertChapterItem } from './lib/plan-review.js'
 import { usePendingReviewStorage } from './components/use-pending-review-storage'
@@ -95,9 +95,10 @@ import { useChapterSnapshot } from './components/use-chapter-snapshot'
 import WorkPerspective from './components/WorkPerspective'
 import StudioWorkspaceSidebar from './components/StudioWorkspaceSidebar'
 import { loadStudioSurface } from './components/load-studio-surface'
+import MemoryGraph from './components/MemoryGraph'
+import { isWindowsDesktopApp } from '@/lib/desktop-app'
 
 const AgentMemoryCenter = loadStudioSurface(() => import('./agent/components/AgentMemoryCenter'), '记忆中心', 'memory')
-const MemoryGraph = loadStudioSurface(() => import('./components/MemoryGraph'), '关系网', 'graph')
 const SkillsPanel = loadStudioSurface(() => import('./components/SkillsPanel'), '技能')
 const EditorCanvas = loadStudioSurface(() => import('./components/EditorCanvas'), '编辑器', 'document')
 const ChapterSidebar = loadStudioSurface(() => import('./components/ChapterSidebar'), '作品目录')
@@ -231,6 +232,12 @@ export default function StudioWorkspace() {
   const [studioSettingsOpen, setStudioSettingsOpen] = useState<boolean | null>(null)
   const [studioSettingsSection, setStudioSettingsSection] = useState<StudioSettingsSection>('general')
   const featureFlags = studioQuery.data?.featureFlags ?? DEFAULT_AGENT2_FEATURE_FLAGS
+  useEffect(() => {
+    if (!featureFlags.memory2 || !isWindowsDesktopApp() || !window.requestIdleCallback) return
+    // Warm only renderer code after Studio is ready. Graph data and AI jobs stay demand-driven.
+    const idle = window.requestIdleCallback(() => { void import('./components/MemoryGraphCanvas').catch(() => {}) })
+    return () => window.cancelIdleCallback(idle)
+  }, [featureFlags.memory2])
   const workspaceActivities = useAgentStore((state) => state.workspaceActivities)
   const workspaceActivitiesVersion = useAgentStore((state) => state.activitiesVersion)
   const hasVisibleWorkspaceChanges = useMemo(() => workspaceBodyChanges(workspaceActivities).length > 0, [workspaceActivities])
@@ -258,6 +265,7 @@ export default function StudioWorkspace() {
   // 惰性初始化：从快照同步恢复当前会话 id，避免跨路由返回时 AgentPanel 先以 null 挂载冲掉进行中的任务直播
   // The same snapshot contains every task's artifacts. Parse it once for the
   // initial state and hand it to the first hydration effect.
+  const snapshotWriteFailure = useRef<string | null>(null)
   const mountSnapshot = useRef<{ novelId: string; data: StoredAgentWorkspaceSnapshot | null } | null | undefined>(undefined)
   if (mountSnapshot.current === undefined) {
     mountSnapshot.current = { novelId: activeNovelId, data: readStoredAgentWorkspace(activeNovelId) }
@@ -280,6 +288,8 @@ export default function StudioWorkspace() {
   const [agentTaskWindows, setAgentTaskWindows] = useState<AgentTaskWindowState[]>(() =>
     initialTaskWindows(mountData?.tasks ?? [], mountSession, createLocalAgentTaskWindow),
   )
+  const agentTaskWindowsRef = useRef(agentTaskWindows)
+  agentTaskWindowsRef.current = agentTaskWindows
   const [activeAgentTaskWindowId, setActiveAgentTaskWindowId] = useState<string | null>(() =>
     selectInitialTask(mountData?.tasks ?? [], mountData?.activeTaskId, mountSession)?.id ?? null,
   )
@@ -556,7 +566,7 @@ export default function StudioWorkspace() {
   /** 当前已应用（用户可见）的任务窗口 id：后台补载工件返回时据此判断用户是否已切走 */
   const appliedAgentTaskWindowIdRef = useRef<string | null>(null)
   const taskSelectionRevision = useRef(0)
-  const historyRequestRevision = useRef(0)
+  const historyRequestsRef = useRef(new Map<string, ReturnType<typeof getWritingAgentSessionHistory>>())
 
   const activateTaskWindowId = useCallback((id: string | null) => {
     if (appliedAgentTaskWindowIdRef.current !== id) taskSelectionRevision.current++
@@ -602,12 +612,23 @@ export default function StudioWorkspace() {
     )
   }, [activateTaskWindowId])
 
-  async function hydrateAgentTaskWindow(taskWindow: AgentTaskWindowState) {
+  async function hydrateAgentTaskWindow(taskWindow: AgentTaskWindowState, owner: typeof workspaceOwnerRef.current) {
     if (!taskWindow.sessionId || taskWindow.loaded) {
       return taskWindow
     }
 
-    const historyItems = await getWritingAgentSessionHistory(taskWindow.sessionId)
+    const requestKey = JSON.stringify([owner.novelId, owner.epoch, taskWindow.sessionId])
+    let historyRequest = historyRequestsRef.current.get(requestKey)
+    if (!historyRequest) {
+      historyRequest = getWritingAgentSessionHistory(taskWindow.sessionId)
+      historyRequestsRef.current.set(requestKey, historyRequest)
+      void historyRequest.finally(() => {
+        if (historyRequestsRef.current.get(requestKey) === historyRequest) {
+          historyRequestsRef.current.delete(requestKey)
+        }
+      }).catch(() => undefined)
+    }
+    const historyItems = await historyRequest
     const restoredArtifacts = mergeRestoredArtifactsWithSnapshot(buildArtifactsFromHistory(historyItems), taskWindow.artifacts)
 
     return {
@@ -641,12 +662,11 @@ export default function StudioWorkspace() {
     }
 
     const owner = workspaceOwnerRef.current
-    const revision = ++historyRequestRevision.current
     let loadedTaskWindow: AgentTaskWindowState
     try {
-      loadedTaskWindow = await hydrateAgentTaskWindow(targetTaskWindow)
+      loadedTaskWindow = await hydrateAgentTaskWindow(targetTaskWindow, owner)
     } catch (error) {
-      if (workspaceOwnerRef.current === owner && revision === historyRequestRevision.current && appliedAgentTaskWindowIdRef.current === targetTaskWindow.id) {
+      if (workspaceOwnerRef.current === owner && appliedAgentTaskWindowIdRef.current === targetTaskWindow.id) {
         if (error instanceof ApiClientError && [401, 403, 404].includes(error.status)) {
           setSessionResolutionError('这个任务已不可访问，请重新读取。')
         } else {
@@ -658,11 +678,25 @@ export default function StudioWorkspace() {
       }
       return
     }
-    if (workspaceOwnerRef.current !== owner || revision !== historyRequestRevision.current) return
+    if (workspaceOwnerRef.current !== owner) return
+
+    const currentTaskWindow = agentTaskWindowsRef.current.find(taskWindow =>
+      taskWindow.id === targetTaskWindow.id && taskWindow.sessionId === targetTaskWindow.sessionId,
+    )
+    if (!currentTaskWindow) return
+    const restoredArtifacts = mergeHydratedArtifactsWithCurrentSnapshot(
+      loadedTaskWindow.artifacts,
+      targetTaskWindow.artifacts,
+      currentTaskWindow.artifacts,
+    )
+    const activeArtifactId = currentTaskWindow.activeArtifactId && restoredArtifacts.some(artifact => artifact.id === currentTaskWindow.activeArtifactId)
+      ? currentTaskWindow.activeArtifactId
+      : loadedTaskWindow.activeArtifactId
 
     setAgentTaskWindows((current) =>
       current.map(taskWindow => taskWindow.id === targetTaskWindow.id
-        ? { ...taskWindow, artifacts: loadedTaskWindow.artifacts, activeArtifactId: loadedTaskWindow.activeArtifactId, loaded: true }
+        && taskWindow.sessionId === targetTaskWindow.sessionId
+        ? { ...taskWindow, artifacts: restoredArtifacts, activeArtifactId, loaded: true }
         : taskWindow),
     )
 
@@ -672,8 +706,8 @@ export default function StudioWorkspace() {
     }
 
     // Only history was fetched; title, composer and run state may have changed while it was in flight.
-    setAgentArtifacts(loadedTaskWindow.artifacts)
-    setActiveAgentArtifactId(loadedTaskWindow.activeArtifactId)
+    setAgentArtifacts(restoredArtifacts)
+    setActiveAgentArtifactId(activeArtifactId)
     setTaskReadNotice(null)
     if (requestedSessionId) setSearchParams(current => consumeSessionDeepLink(current, requestedSessionId), { replace: true })
   }
@@ -928,7 +962,6 @@ export default function StudioWorkspace() {
 
     return () => {
       cancelled = true
-      historyRequestRevision.current = historyRequestRevision.current + 1
       setAgentSessionsResolving(false)
     }
     // 任务深链只在作品切换/首载时消费一次；把 searchParams 加入依赖会在删除
@@ -993,7 +1026,7 @@ export default function StudioWorkspace() {
       return
     }
 
-    const storageKey = getAgentWorkspaceStorageKey(activeNovelId)
+
     const meaningfulTasks = agentTaskWindows.filter(
       (taskWindow) => shouldRetainAgentTaskWindow(
         taskWindow, activeAgentTaskWindowId,
@@ -1001,33 +1034,19 @@ export default function StudioWorkspace() {
       ),
     )
 
-    const hasAgentState = meaningfulTasks.length > 0
-    if (!hasAgentState) {
-      window.localStorage.removeItem(storageKey)
-      return
-    }
-
-    const snapshot: StoredAgentWorkspaceSnapshot = {
-      tasks: meaningfulTasks.map((taskWindow) => ({
-        id: taskWindow.id,
-        sessionId: taskWindow.sessionId,
-        title: taskWindow.title,
-        prompt: taskWindow.prompt,
-        artifacts: taskWindow.artifacts,
-        activeArtifactId: taskWindow.activeArtifactId,
-        loaded: taskWindow.loaded,
-        temporary: taskWindow.temporary,
-        customNamed: taskWindow.customNamed,
-        firstPromptSubmitted: taskWindow.firstPromptSubmitted,
-        createdAt: taskWindow.createdAt,
-        updatedAt: taskWindow.updatedAt,
-      })),
+    const saved = writeStoredAgentWorkspace(activeNovelId, meaningfulTasks.length ? {
+      tasks: meaningfulTasks,
       activeTaskId: activeAgentTaskWindowId,
       selectedTreeItemId,
       catalogDocument,
+    } : null)
+    if (saved) {
+      snapshotWriteFailure.current = null
+    } else if (snapshotWriteFailure.current !== activeNovelId) {
+      snapshotWriteFailure.current = activeNovelId
+      toast.info('本机未能保存本次工作区快照。关闭前请保存正在编辑的内容。')
     }
-    window.localStorage.setItem(storageKey, JSON.stringify(snapshot))
-  }, [activeAgentTaskWindowId, activeNovelId, agentStateNovelId, agentTaskWindows, catalogDocument, selectedTreeItemId, taskScopeOwner, agentSessionsResolving, sessionResolutionError])
+  }, [activeAgentTaskWindowId, activeNovelId, agentStateNovelId, agentTaskWindows, catalogDocument, selectedTreeItemId, taskScopeOwner, agentSessionsResolving, sessionResolutionError, toast])
 
   async function handleWorkspaceDialogConfirm() {
     if (!workspaceDialog) {
@@ -1046,6 +1065,11 @@ export default function StudioWorkspace() {
   const chapterQuery = useQuery({
     queryKey: ['studio-chapter', activeNovelId, selectedChapterId],
     queryFn: () => getChapterContent(activeNovelId, selectedChapterId as string),
+    initialData: () => {
+      const chapter = studioQuery.data?.draftChapter
+      return !studioQuery.isPlaceholderData && chapter?.novelId === activeNovelId && chapter.id === selectedChapterId ? chapter : undefined
+    },
+    initialDataUpdatedAt: studioQuery.dataUpdatedAt,
     enabled: Boolean(workPanelReady && selectedChapterId && !selectedChapterId.startsWith('local-')),
     refetchOnWindowFocus: false,
     retry: 1,
@@ -1756,7 +1780,9 @@ export default function StudioWorkspace() {
     return null
   }, [catalogDocument, catalogPreview, savedPlanFiles, selectedTreeItemId])
 
-  const workChapterDraft = workViewerMode === 'chapter' && chapterDraft?.id === viewerChapterId ? chapterDraft : null
+  const chapterUnavailable = chapterQuery.error instanceof ApiClientError && [401, 403, 404].includes(chapterQuery.error.status)
+  const workChapterDraft = workViewerMode === 'chapter' && chapterDraft?.id === viewerChapterId
+    && !(chapterUnavailable && viewerChapterId === selectedChapterId) ? chapterDraft : null
   const workChapterLoadError = workViewerMode === 'chapter' && viewerChapterId === selectedChapterId
     && !workChapterDraft && chapterQuery.isError
     ? (chapterQuery.error instanceof Error ? chapterQuery.error.message : '章节暂时无法打开，请重试。')
@@ -2909,6 +2935,9 @@ export default function StudioWorkspace() {
         toast.error('本地存储不可用。请复制未同步正文，或保持页面打开，联网后保存。')
       }
     }
+    // An outgoing editor can flush after its target changed. Its recovery copy belongs
+    // to that chapter, but it cannot replace the newly selected chapter's draft.
+    if (chapterStreamOwnerRef.current !== chapterStreamOwner || selectedChapterIdStateRef.current !== next.id) return
     chapterDraftStateRef.current = next
     chapterDirtyRef.current = true
     setChapterDraft(next)
@@ -4569,6 +4598,7 @@ export default function StudioWorkspace() {
                   positionScope={taskUiScope}
                   chapterRecoveryKey={chapterDraftChoice ? undefined : manuscriptKey}
                   draft={workChapterDraft}
+                  pendingChapterTitle={workViewerMode === 'chapter' ? chapters.find(chapter => chapter.id === viewerChapterId)?.title : undefined}
                   workspaceDocument={workViewerMode === 'document' ? activeWorkspaceDocument : null}
                   loading={workViewerMode === 'chapter' ? !workChapterDraft && !workChapterLoadError : plansLoadedNovelId !== activeNovelId || agentSessionsResolving}
                   selection={editorSelection}

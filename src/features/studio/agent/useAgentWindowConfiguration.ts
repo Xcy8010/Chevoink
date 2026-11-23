@@ -73,7 +73,8 @@ export function useAgentWindowConfiguration(novelId: string, sessionId: string |
       return { sessionId: scope, novelId, title: '', revision: 0, configuration }
     } : undefined,
   })
-  const configuration = query.data?.configuration ?? { model: null, creativeFreedom: DEFAULT_CREATIVE_FREEDOM }
+  const dataForScope = query.data?.sessionId === scope ? query.data : undefined
+  const configuration = dataForScope?.configuration ?? { model: null, creativeFreedom: DEFAULT_CREATIVE_FREEDOM }
   const update = (patch: Changes) => {
     setSaveError(null)
     if (!sessionId) {
@@ -89,9 +90,10 @@ export function useAgentWindowConfiguration(novelId: string, sessionId: string |
     return work
   }
   return { configuration, title: query.data?.title, revision: query.data?.revision ?? 0,
-    loading: Boolean(sessionId) && query.isPending,
-    error: (saveError?.scope === scope ? saveError.message : null) ?? (query.error instanceof Error ? query.error.message : null), update,
-    ready: async () => { await pending.get(sessionId ?? '')?.tail; if (query.error) throw query.error; if (sessionId && query.isPending) throw new Error('窗口配置尚未载入，请稍后重试。') },
+    loading: Boolean(sessionId) && !dataForScope && query.isPending,
+    readyForScope: Boolean(dataForScope),
+    error: (saveError?.scope === scope ? saveError.message : null) ?? (!dataForScope && query.error instanceof Error ? query.error.message : null), update,
+    ready: async () => { await pending.get(sessionId ?? '')?.tail; if (!dataForScope && query.error) throw query.error; if (sessionId && (query.isPending || !dataForScope)) throw new Error('窗口配置尚未载入，请稍后重试。') },
     promote: (targetSessionId: string) => saveWindowConfiguration(client, targetSessionId, configuration),
     refresh: () => client.invalidateQueries({ queryKey: key }),
   }

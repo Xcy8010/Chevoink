@@ -56,7 +56,9 @@ export default function MemoryGraphCanvas({ graph, layoutCache }: { graph: Memor
     if (id === null) setDetailCollapsed(false)
   }, [])
   const [mode, setMode] = useState<'map' | 'galaxy'>('map')
-  const [galaxyVisited, setGalaxyVisited] = useState(false)
+  const [visitedGalaxyTopology, setVisitedGalaxyTopology] = useState<string | null>(null)
+  const [galaxyPainted, setGalaxyPainted] = useState(false)
+  const onGalaxyFirstPaint = useCallback(() => setGalaxyPainted(true), [])
   const selected = graph.nodes.find((node) => node.id === selectedId) ?? null
   const effectiveSelectedId = selected?.id ?? null
 
@@ -81,11 +83,13 @@ export default function MemoryGraphCanvas({ graph, layoutCache }: { graph: Memor
   const topologyKey = useMemo(() => memoryGraphTopologyKey([...visibleIds], readableEdges), [visibleIds, readableEdges])
   const routeKey = useMemo(() => JSON.stringify(readableEdges.map(({ id, source, target, type }) => ({ id, source, target, type }))), [readableEdges])
   const mapLayout = useMemoryGraphLayout(topologyKey, routeKey, 2, mode === 'map', layoutCache)
-  const galaxyLayout = useMemoryGraphLayout(topologyKey, '', 3, galaxyVisited && mode === 'galaxy', layoutCache)
+  const galaxyLayout = useMemoryGraphLayout(topologyKey, '', 3, mode === 'galaxy' || visitedGalaxyTopology === topologyKey, layoutCache)
   const mapPositions = mapLayout.layout?.positions
   const routes = mapLayout.layout?.routes
   const galaxyPositions = galaxyLayout.layout?.positions
   const currentLayout = mode === 'map' ? mapLayout : galaxyLayout
+  // Keep the last usable surface visible until its replacement has pixels to show.
+  const showGalaxy = galaxyPainted && (mode === 'galaxy' || !mapLayout.layout)
   const galaxyNodes = useMemo(() => graph.nodes.filter((node) => galaxyPositions?.has(node.id)), [graph.nodes, galaxyPositions])
   const galaxyEdges = useMemo(() => readableEdges.filter((edge) => galaxyPositions?.has(edge.source) && galaxyPositions.has(edge.target)), [readableEdges, galaxyPositions])
   const neighbors = useMemo(() => memoryGraphNeighborhood(effectiveSelectedId, readableEdges), [effectiveSelectedId, readableEdges])
@@ -116,8 +120,8 @@ export default function MemoryGraphCanvas({ graph, layoutCache }: { graph: Memor
   const relations = selected ? readableEdges.filter((edge) => edge.source === selected.id || edge.target === selected.id) : []
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]))
 
-  return <div className={`memory-flow memory-graph relative h-full min-h-[300px] w-full overflow-hidden${mode === 'galaxy' ? ' is-galaxy' : ''}`}>
-    <div className="memory-map-view" hidden={mode !== 'map'}>
+  return <div className={`memory-flow memory-graph relative h-full min-h-[300px] w-full overflow-hidden${showGalaxy ? ' is-galaxy' : ''}`}>
+    <div className="memory-map-view" hidden={showGalaxy}>
       {mapLayout.layout ? <ReactFlow<FlowNode, FlowEdge>
         nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
         fitView fitViewOptions={{ padding: 0.18, maxZoom: 1.15 }}
@@ -130,14 +134,16 @@ export default function MemoryGraphCanvas({ graph, layoutCache }: { graph: Memor
         <MiniMap pannable zoomable position="bottom-left" style={{ width: 160, height: 112 }} nodeStrokeWidth={0} nodeBorderRadius={5} ariaLabel="关系网缩略图" nodeColor={(node) => memoryNodeColor(String((node.data as { memory?: MemoryGraphNode }).memory?.type ?? ''))} nodeClassName={(node) => effectiveSelectedId && !neighbors.has(node.id) ? 'memory-minimap-dimmed' : ''} />
       </ReactFlow> : null}
     </div>
-    {galaxyVisited ? <div className="memory-galaxy-view" hidden={mode !== 'galaxy'}>{galaxyPositions ? <MemoryGraphGalaxy nodes={galaxyNodes} edges={galaxyEdges} points={galaxyPositions} selectedId={effectiveSelectedId} onSelect={selectNode} active={mode === 'galaxy'} /> : null}</div> : null}
-    {currentLayout.pending && !currentLayout.layout ? <div className="pointer-events-none absolute inset-0">
+    {visitedGalaxyTopology !== null ? <div className="memory-galaxy-view" hidden={mode !== 'galaxy' && !showGalaxy} style={showGalaxy ? undefined : { visibility: 'hidden' }}>
+      {galaxyPositions ? <MemoryGraphGalaxy nodes={galaxyNodes} edges={galaxyEdges} points={galaxyPositions} selectedId={effectiveSelectedId} onSelect={selectNode} active={mode === 'galaxy' || showGalaxy} onFirstPaint={onGalaxyFirstPaint} /> : null}
+    </div> : null}
+    {currentLayout.pending && !mapLayout.layout && !galaxyPainted ? <div className="pointer-events-none absolute inset-0">
       <StudioPaneSkeleton label="正在布局关系网" shape="graph" bodyOnly />
-    </div> : currentLayout.pending ? <div role="status" aria-label="正在更新关系网布局" className="studio-pending skeleton-shimmer pointer-events-none absolute inset-x-0 top-0 h-0.5" /> : null}
+    </div> : currentLayout.pending && currentLayout.layout ? <div role="status" aria-label="正在更新关系网布局" className="studio-pending skeleton-shimmer pointer-events-none absolute inset-x-0 top-0 h-0.5" /> : null}
     {currentLayout.failed ? <div className="memory-graph-loading" role="alert">关系网布局载入失败。<button type="button" onClick={currentLayout.retry}>重试</button></div> : null}
     <div className="memory-graph-controls memory-graph-modes" role="group" aria-label="关系网视图">
-      <button type="button" title="关系图" aria-label="关系图视图" aria-pressed={mode === 'map'} onClick={() => setMode('map')}><Network size={17} /></button>
-      <button type="button" title="三维星系" aria-label="三维星系视图" aria-pressed={mode === 'galaxy'} onClick={() => { setGalaxyVisited(true); setMode('galaxy') }}><Orbit size={18} /></button>
+      <button type="button" title="关系图" aria-label="关系图视图" aria-pressed={mode === 'map'} onClick={() => { if (mode === 'galaxy') setVisitedGalaxyTopology(topologyKey); setMode('map') }}><Network size={17} /></button>
+      <button type="button" title="三维星系" aria-label="三维星系视图" aria-pressed={mode === 'galaxy'} onClick={() => { setVisitedGalaxyTopology(topologyKey); setMode('galaxy') }}><Orbit size={18} /></button>
     </div>
     <div className="memory-graph-legend" aria-label="实体颜色"><span><i style={{ background: memoryNodeColor('character') }} />人物</span><span><i style={{ background: memoryNodeColor('item') }} />物品</span><span><i style={{ background: memoryNodeColor('location') }} />其他实体</span></div>
     {selected ? <>

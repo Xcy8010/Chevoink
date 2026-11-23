@@ -3,7 +3,7 @@ import { buildApiUrl } from '@/app/api-base'
 import { ApiClientError, notifyAccountRequirement } from '@/app/api-client'
 import { buildAuthHeader } from '@/lib/auth-token'
 import type {
-  AgentActionResultPayload,
+  AgentSessionArtifactHistoryItem,
   ApplyChangeSetRequest,
   ApiResponse,
   Chapter,
@@ -22,7 +22,7 @@ import type {
   GenerateCoverPromptRequest,
   GenerateCoverPromptResponse,
   GetChapterResponse,
-  ListAgentSessionHistoryResponse,
+  ListAgentSessionWorkspaceHistoryResponse,
   ListAgentSessionsResponse,
   Novel,
   PublishNovelRequest,
@@ -68,7 +68,7 @@ type RequestDataOptions = RequestInit & {
   timeoutMs?: number
 }
 
-export type AgentSessionHistoryItem = AgentActionResultPayload
+export type AgentSessionHistoryItem = AgentSessionArtifactHistoryItem
 
 function normalizeFetchError(error: unknown): string {
   if (error instanceof Error) {
@@ -193,11 +193,18 @@ export async function deleteWritingAgentSession(
 
 export async function getWritingAgentSessionHistory(
   sessionId: string,
-): Promise<ListAgentSessionHistoryResponse['data']['items']> {
-  const data = await requestData<ListAgentSessionHistoryResponse['data']>(
-    `/api/agent/sessions/${sessionId}/history`,
-  )
-  return data.items
+): Promise<ListAgentSessionWorkspaceHistoryResponse['data']['items']> {
+  const path = `/api/agent/sessions/${sessionId}/history/workspace`
+  const read = () => requestData<ListAgentSessionWorkspaceHistoryResponse['data']>(path)
+  try {
+    return (await read()).items
+  } catch (error) {
+    // Authorization/not-found responses are final. A single cheap GET retry covers a short outage
+    // without surfacing a persistent task warning for a failure that immediately recovers.
+    if (error instanceof ApiClientError && error.status < 500) throw error
+    await new Promise(resolve => window.setTimeout(resolve, 180))
+    return (await read()).items
+  }
 }
 
 export type NovelPlanFileItem = PlanLinkFields & {

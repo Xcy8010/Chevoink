@@ -592,6 +592,26 @@ export type ListAgentSessionHistoryResponse = ApiSuccess<{
   items: AgentActionResultPayload[]
 }>
 
+/** Workspace-only projection for restoring task artifacts without duplicating each run's full action result. */
+export type AgentSessionArtifactHistoryItem = {
+  run: Pick<AgentRun, 'id' | 'sessionId' | 'action' | 'mode' | 'status' | 'inputSummary' | 'createdAt'>
+  prompt?: string
+  artifacts: Array<Pick<AgentArtifact, 'id' | 'runId' | 'artifactType' | 'title' | 'content' | 'metadata' | 'availableApplyStrategies' | 'createdAt'>>
+  memoryEntries: Array<Pick<import('./models.js').ProjectMemoryEntry, 'id' | 'memoryType' | 'title' | 'content' | 'importance' | 'createdAt'>>
+  actionPlan?: AgentActionResultPayload['actionPlan']
+  handoff?: AgentActionResultPayload['handoff']
+  executionMode?: AgentActionResultPayload['executionMode']
+  toolPolicy?: AgentActionResultPayload['toolPolicy']
+  activeAgent?: AgentActionResultPayload['activeAgent']
+  routeDecision?: AgentActionResultPayload['routeDecision']
+  ruleBundle?: AgentActionResultPayload['ruleBundle']
+  storyMemoryDigest?: AgentActionResultPayload['storyMemoryDigest']
+}
+
+export type ListAgentSessionWorkspaceHistoryResponse = ApiSuccess<{
+  items: AgentSessionArtifactHistoryItem[]
+}>
+
 export type AgentActionResponse = ApiSuccess<AgentActionResultPayload>
 
 export type GetAiConfigResponse = ApiSuccess<{

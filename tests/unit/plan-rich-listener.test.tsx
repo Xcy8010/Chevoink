@@ -50,6 +50,21 @@ it('saves a real list edit even though Markdown parsing omits its trailing parag
   })
 })
 
+it('flushes the current ProseMirror transaction to its original plan when switching before the listener reports it', async () => {
+  const pending = vi.fn(), updated = vi.fn()
+  const view = render(<PlanRichMarkdownEditor markdown="甲计划原文" editable mobile={false} onChange={updated} onCommitPending={pending} />)
+  await act(async () => { await vi.waitFor(() => expect(real.created).toBe(true)) })
+  act(() => real.editor!.editor.action(ctx => {
+    const view = ctx.get(editorViewCtx)
+    view.dispatch(view.state.tr.insertText('最后输入', 1))
+  }))
+  view.rerender(<PlanRichMarkdownEditor markdown="甲计划原文" editable={false} mobile={false} onChange={updated} onCommitPending={pending} />)
+  view.unmount()
+  expect(pending).toHaveBeenCalledTimes(1)
+  expect(pending.mock.calls[0][0]).toContain('最后输入甲计划原文')
+  expect(updated).not.toHaveBeenCalled()
+})
+
 it('does not save an external list update or the real trailing-plugin transaction it generates', async () => {
   const onChange = vi.fn(), updated = vi.fn()
   const view = await mount('初始计划', onChange)

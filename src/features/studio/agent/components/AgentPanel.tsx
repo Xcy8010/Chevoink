@@ -1282,7 +1282,10 @@ export function AgentPanel({
 
   const canContinue = savedQuestion?.state !== 'stopped' && !authorEnded
     && ((Boolean(runId) && (panelPhase === 'paused' || panelPhase === 'failed')) || (!runId && Boolean(resumeableRunId)))
-  const combinedError = actionError ?? windowConfiguration.error ?? errorMessage
+  const modelCatalog = modelTier === 'custom' ? customModelsQuery : creditSummaryQuery
+  const modelReadError = modelPreference.loadError ?? (!modelCatalog.data && modelCatalog.error instanceof Error ? modelCatalog.error.message : null)
+  const modelLabelPending = !modelReadError && (sessionResolving || modelPreference.loading || (!modelCatalog.data && modelCatalog.isPending))
+  const combinedError = actionError ?? windowConfiguration.error ?? modelReadError ?? errorMessage
 
   const handleCopyText = useCallback(async (id: string, text: string) => {
     if (await copyToClipboard(text)) {
@@ -1966,6 +1969,7 @@ export function AgentPanel({
         <div className="mx-4 mb-2 flex items-start gap-2 rounded-[14px] border border-rose-200 bg-rose-50 px-3 py-2">
           <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-500" />
           <p className="min-w-0 flex-1 text-xs leading-5 text-rose-600">{combinedError}</p>
+          {modelReadError && combinedError === modelReadError ? <button type="button" onClick={() => { void modelPreference.retryLoad() }} className="shrink-0 text-xs text-rose-600 underline">重试读取</button> : null}
           <button
             type="button"
             onClick={() => {
@@ -2055,10 +2059,10 @@ export function AgentPanel({
           running={active}
           nextPrompt={nextPrompt?.text}
           onContinue={canContinue ? goalView.runBelongsToGoal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
-          disabled={composerScopePending || modelPreference.loading}
+          disabled={composerScopePending || modelPreference.loading || Boolean(modelPreference.loadError)}
           draftReadOnly={composerScopePending || (modelPreference.loading && (!voiceScopeKey || sessionResolving))}
-          modelLoading={windowConfiguration.loading || (!modelSelectionExplicit && modelPreference.loading)
-            || (modelTier === 'custom' && customModelsQuery.isPending)}
+          modelLoading={modelLabelPending}
+          modelLabelOverride={modelReadError ? '读取失败' : modelCatalog.data && !selectedModelCapability ? '当前模型' : undefined}
           onSend={handleSend}
           creativeFreedom={creativeFreedom}
           onCreativeFreedomChange={setCreativeFreedom}

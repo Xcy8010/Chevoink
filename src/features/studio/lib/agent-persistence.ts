@@ -10,17 +10,35 @@ import { DEFAULT_AGENT_TASK_TITLE, createLocalAgentTaskWindow, getAgentWorkspace
 
 
 
+export function writeStoredAgentWorkspace(novelId: string, snapshot: StoredAgentWorkspaceSnapshot | null): boolean {
+  const key = getAgentWorkspaceStorageKey(novelId)
+  try {
+    if (snapshot) {
+      const tasks = snapshot.tasks.map(task => ({
+        ...task,
+        // An explicit null on disk refers to this artifact's content. Keep edited originals intact.
+        artifacts: task.artifacts.map(artifact => typeof artifact?.rawContent === 'string' && artifact.rawContent === artifact.content
+          ? { ...artifact, rawContent: null } : artifact),
+      }))
+      window.localStorage.setItem(key, JSON.stringify({ ...snapshot, tasks }))
+    } else {
+      window.localStorage.removeItem(key)
+    }
+    return true
+  } catch (error) {
+    if (error instanceof DOMException && ['QuotaExceededError', 'SecurityError'].includes(error.name)) return false
+    throw error
+  }
+}
+
 export function readStoredAgentWorkspace(novelId: string): StoredAgentWorkspaceSnapshot | null {
   if (typeof window === 'undefined') {
     return null
   }
 
-  const raw = window.localStorage.getItem(getAgentWorkspaceStorageKey(novelId))
-  if (!raw) {
-    return null
-  }
-
   try {
+    const raw = window.localStorage.getItem(getAgentWorkspaceStorageKey(novelId))
+    if (!raw) return null
     const parsed = JSON.parse(raw) as
       | (StoredAgentWorkspaceSnapshot & {
           sessionId?: string | null
@@ -40,7 +58,8 @@ export function readStoredAgentWorkspace(novelId: string): StoredAgentWorkspaceS
               sessionId: typeof task.sessionId === 'string' ? task.sessionId : null,
               title: typeof task.title === 'string' ? task.title : DEFAULT_AGENT_TASK_TITLE,
               prompt: typeof task.prompt === 'string' ? task.prompt : '',
-              artifacts: Array.isArray(task.artifacts) ? task.artifacts : [],
+              artifacts: Array.isArray(task.artifacts) ? task.artifacts.map(artifact =>
+                artifact?.rawContent === null ? { ...artifact, rawContent: artifact.content } : artifact) : [],
               activeArtifactId: typeof task.activeArtifactId === 'string' ? task.activeArtifactId : null,
               loaded: Boolean(task.loaded),
               temporary: Boolean(task.temporary),
@@ -359,46 +378,19 @@ export function buildArtifactsFromHistory(items: AgentSessionHistoryItem[]): Age
       typeof item.prompt === 'string' && item.prompt.trim() ? item.prompt : item.run.inputSummary ?? ''
 
     return item.artifacts.map((artifact) => {
-      const actionPlan =
-        item.actionPlan ??
-        (artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-          ? asArtifactActionPlan((artifact.metadata as Record<string, unknown>).actionPlan)
-          : null)
-      const handoff =
-        item.handoff ??
-        (artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-          ? asArtifactHandoff((artifact.metadata as Record<string, unknown>).handoff)
-          : null)
-      const executionMode =
-        item.executionMode ??
-        (artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-          ? asArtifactExecutionMode((artifact.metadata as Record<string, unknown>).executionMode)
-          : mapRunModeToExecutionMode(item.run.mode))
-      const toolPolicy =
-        item.toolPolicy ??
-        (artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-          ? asArtifactToolPolicy((artifact.metadata as Record<string, unknown>).toolPolicy)
-          : null)
-      const activeAgent =
-        item.activeAgent ??
-        (artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-          ? asArtifactExecutionAgent((artifact.metadata as Record<string, unknown>).activeAgent)
-          : null)
-      const routeDecision =
-        item.routeDecision ??
-        (artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-          ? asArtifactRouteDecision((artifact.metadata as Record<string, unknown>).routeDecision)
-          : null)
-      const ruleBundle =
-        item.ruleBundle ??
-        (artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-          ? asArtifactRuleBundle((artifact.metadata as Record<string, unknown>).ruleBundle)
-          : null)
-      const storyMemoryDigest =
-        item.storyMemoryDigest ??
-        (artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-          ? asArtifactStoryMemoryDigest((artifact.metadata as Record<string, unknown>).storyMemoryDigest)
-          : null)
+      const metadata = artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
+        ? artifact.metadata as Record<string, unknown>
+        : null
+      const actionPlan = item.actionPlan ?? (metadata ? asArtifactActionPlan(metadata.actionPlan) : null)
+      const handoff = item.handoff ?? (metadata ? asArtifactHandoff(metadata.handoff) : null)
+      const executionMode = item.executionMode ?? (metadata
+        ? asArtifactExecutionMode(metadata.executionMode) ?? mapRunModeToExecutionMode(item.run.mode)
+        : mapRunModeToExecutionMode(item.run.mode))
+      const toolPolicy = item.toolPolicy ?? (metadata ? asArtifactToolPolicy(metadata.toolPolicy) : null)
+      const activeAgent = item.activeAgent ?? (metadata ? asArtifactExecutionAgent(metadata.activeAgent) : null)
+      const routeDecision = item.routeDecision ?? (metadata ? asArtifactRouteDecision(metadata.routeDecision) : null)
+      const ruleBundle = item.ruleBundle ?? (metadata ? asArtifactRuleBundle(metadata.ruleBundle) : null)
+      const storyMemoryDigest = item.storyMemoryDigest ?? (metadata ? asArtifactStoryMemoryDigest(metadata.storyMemoryDigest) : null)
       const routeStatuses = buildHistoryStatusItems(actionPlan, routeDecision, item.run.id, item.run.createdAt)
 
       return {
@@ -409,11 +401,7 @@ export function buildArtifactsFromHistory(items: AgentSessionHistoryItem[]): Age
         content: artifact.content,
         rawContent: artifact.content,
         // plan_save 落库时在 metadata 标记 savedAsPlan，刷新后据此恢复到计划文件夹
-        savedAsPlan:
-          artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata) &&
-          (artifact.metadata as Record<string, unknown>).savedAsPlan === true
-            ? true
-            : undefined,
+        savedAsPlan: metadata?.savedAsPlan === true ? true : undefined,
         promptText,
         createdAt: artifact.createdAt,
         status: item.run.status === 'running' ? 'streaming' : 'ready',
@@ -448,6 +436,11 @@ export function buildArtifactsFromHistory(items: AgentSessionHistoryItem[]): Age
 
 
 
+function sameHistoryArtifact(a: AgentArtifact, b: AgentArtifact): boolean {
+  if (a.backendArtifactId && b.backendArtifactId) return a.backendArtifactId === b.backendArtifactId
+  return a.id === b.id || (a.runId === b.runId && a.promptText === b.promptText && a.createdAt === b.createdAt)
+}
+
 export function mergeRestoredArtifactsWithSnapshot(
   restoredArtifacts: AgentArtifact[],
   snapshotArtifacts: AgentArtifact[],
@@ -465,12 +458,7 @@ export function mergeRestoredArtifactsWithSnapshot(
   return restoredArtifacts.map((artifact) => {
     const snapshotArtifact =
       (artifact.backendArtifactId ? snapshotByBackendArtifactId.get(artifact.backendArtifactId) : null) ??
-      snapshotArtifacts.find(
-        (candidate) =>
-          candidate.runId === artifact.runId &&
-          candidate.promptText === artifact.promptText &&
-          candidate.createdAt === artifact.createdAt,
-      ) ??
+      snapshotArtifacts.find(candidate => sameHistoryArtifact(candidate, artifact)) ??
       null
 
     if (!snapshotArtifact) {
@@ -491,7 +479,8 @@ export function mergeRestoredArtifactsWithSnapshot(
 
     return {
       ...artifact,
-      content: snapshotArtifact.content?.trim() ? snapshotArtifact.content : artifact.content,
+      title: snapshotArtifact.planLocalDraft ? snapshotArtifact.title : artifact.title,
+      content: snapshotArtifact.planLocalDraft || snapshotArtifact.content?.trim() ? snapshotArtifact.content : artifact.content,
       rawContent: snapshotArtifact.rawContent ?? artifact.rawContent ?? artifact.content,
       runStatusMode: snapshotArtifact.runStatusMode ?? artifact.runStatusMode,
       runStatuses: snapshotStatuses ?? artifact.runStatuses,
@@ -517,4 +506,23 @@ export function mergeRestoredArtifactsWithSnapshot(
       actionPlan: snapshotArtifact.actionPlan ?? artifact.actionPlan,
     }
   })
+}
+
+
+export function mergeHydratedArtifactsWithCurrentSnapshot(
+  restoredArtifacts: AgentArtifact[],
+  requestSnapshot: AgentArtifact[],
+  currentSnapshot: AgentArtifact[],
+): AgentArtifact[] {
+  const merged = mergeRestoredArtifactsWithSnapshot(restoredArtifacts, currentSnapshot)
+  const hasMatchingHistoryArtifact = (snapshot: AgentArtifact) => merged.some(artifact => sameHistoryArtifact(artifact, snapshot))
+  const changedDuringRead = currentSnapshot.filter(snapshot => {
+    const original = requestSnapshot.find(candidate => candidate.id === snapshot.id)
+    return !original || original.title !== snapshot.title || original.content !== snapshot.content || original.rawContent !== snapshot.rawContent || original.status !== snapshot.status
+  })
+
+  for (const snapshot of changedDuringRead) {
+    if (!hasMatchingHistoryArtifact(snapshot)) merged.push(snapshot)
+  }
+  return merged
 }

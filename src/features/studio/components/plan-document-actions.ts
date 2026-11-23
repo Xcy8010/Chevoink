@@ -163,6 +163,7 @@ export function createPlanDocumentActions({
 
 
   function handleWorkspaceDocumentChange(next: { title: string; content: string }) {
+    if (!isCurrentNovel()) return
     if (selectedTreeItemId === 'catalog') {
       setCatalogDocument((current) => {
         const fallbackTitle = current?.title ?? catalogPreview.title

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import LayoutWorker from './memory-graph.worker?worker&inline'
 import type { MemoryGraphLayoutRequest, MemoryGraphLayoutResult } from './memory-graph.worker'
 
 /** Keep the last geometry mounted while a replacement is solved, preserving each renderer's browsing state. */
@@ -17,7 +18,7 @@ export function useMemoryGraphLayout(topologyKey: string, routeKey: string, dime
     let cancelled = false
     const fail = () => { if (!cancelled) setFailureKey(key) }
     try {
-      worker = new Worker(new URL('./memory-graph.worker.ts', import.meta.url), { type: 'module' })
+      worker = new LayoutWorker()
       worker.onmessage = ({ data }: MessageEvent<MemoryGraphLayoutResult>) => {
         if (!cancelled) { cache?.set(dimensions, data); setLayout(data); setFailureKey(null) }
       }

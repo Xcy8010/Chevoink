@@ -37,6 +37,7 @@ import type {
   AgentRun,
   AgentRunStatus,
   AgentSession,
+  AgentSessionArtifactHistoryItem,
   AgentSessionRunStatusPayload,
   AgentStoryMemoryDigest,
   AgentStreamEvent,
@@ -1699,6 +1700,7 @@ export function toAgentSession(record: {
   pinnedAt?: Date | string | null
   toolPolicy?: unknown
   sandboxMode?: string
+  hasAgentHistory?: boolean
   novel?: { title: string; displayTitle: string | null }
   lastRunAt?: Date | string | null
   forkedFromSessionId?: string | null
@@ -1718,6 +1720,7 @@ export function toAgentSession(record: {
     pinnedAt: toIso(record.pinnedAt),
     toolPolicy: policy && Object.keys(policy).length ? policy as AgentSession['toolPolicy'] : null,
     sandboxMode: record.sandboxMode === 'read_only' || record.sandboxMode === 'full_access' ? record.sandboxMode : 'workspace',
+    ...(typeof record.hasAgentHistory === 'boolean' ? { hasAgentHistory: record.hasAgentHistory } : {}),
     novelTitle: record.novel?.displayTitle?.trim() || record.novel?.title,
     lastRunAt: toIso(record.lastRunAt),
     forkedFromSessionId: record.forkedFromSessionId ?? null,
@@ -1937,7 +1940,10 @@ export async function listAgentSessionsData(userId: string, novelId?: string, op
         ] } } },
       ] } : {}),
     },
-    include: { novel: { select: { title: true, displayTitle: true } } },
+    include: {
+      novel: { select: { title: true, displayTitle: true } },
+      runs: { where: MAIN_RUN_FILTER, take: 1, select: { id: true } },
+    },
     orderBy: [{ pinnedAt: 'desc' }, { updatedAt: 'desc' }],
     take: 100,
   })
@@ -1946,7 +1952,10 @@ export async function listAgentSessionsData(userId: string, novelId?: string, op
   const visible = items.filter((session) => session.lastRunAt || !isDefaultSessionTitle(session.title))
 
   return {
-    items: visible.map(toAgentSession),
+    items: visible.map(session => toAgentSession({
+      ...session,
+      ...(Array.isArray(session.runs) ? { hasAgentHistory: session.runs.length > 0 } : {}),
+    })),
   }
 }
 
@@ -2331,6 +2340,106 @@ export async function listAgentSessionHistoryData(userId: string, sessionId: str
       buildAgentRunResultPayload(run, artifactMap.get(run.id) ?? [], memoryMap.get(run.id) ?? []),
     ),
   }
+}
+
+/** Task-workspace history projection: preserve every visible artifact while omitting duplicate run results. */
+export async function listAgentSessionWorkspaceHistoryData(userId: string, sessionId: string) {
+  await ensureOwnedSession(userId, sessionId)
+
+  const artifactRows = await prisma.agentArtifact.findMany({
+    where: { run: { sessionId, ...MAIN_RUN_FILTER } },
+    orderBy: [{ createdAt: 'asc' }],
+    select: {
+      id: true,
+      runId: true,
+      artifactType: true,
+      title: true,
+      content: true,
+      metadata: true,
+      createdAt: true,
+      run: { select: { id: true, sessionId: true, action: true, mode: true, status: true, inputSummary: true, agentType: true, createdAt: true } },
+    },
+  })
+
+  const visibleRows = artifactRows.filter(row => !isInternalAgentArtifact(row))
+  const runIds = [...new Set(visibleRows.map(row => row.runId))]
+  const memoryEntries = runIds.length === 0 ? [] : await prisma.projectMemoryEntry.findMany({
+    where: { runId: { in: runIds } },
+    orderBy: [{ createdAt: 'asc' }],
+    select: { id: true, runId: true, memoryType: true, title: true, content: true, importance: true, createdAt: true },
+  })
+
+  const memoriesByRun = new Map<string, typeof memoryEntries>()
+  for (const entry of memoryEntries) {
+    if (!entry.runId) continue
+    const items = memoriesByRun.get(entry.runId) ?? []
+    items.push(entry)
+    memoriesByRun.set(entry.runId, items)
+  }
+
+  const metadataFields = [
+    'actionPlan', 'handoff', 'executionMode', 'toolPolicy', 'routeDecision',
+    'ruleBundle', 'storyMemoryDigest', 'savedAsPlan',
+  ] as const
+  const artifactsByRun = new Map<string, typeof visibleRows>()
+  for (const row of visibleRows) {
+    const artifacts = artifactsByRun.get(row.runId) ?? []
+    artifacts.push(row)
+    artifactsByRun.set(row.runId, artifacts)
+  }
+  const items: AgentSessionArtifactHistoryItem[] = [...artifactsByRun.entries()].map(([runId, artifacts]) => {
+    const run = artifacts[0].run
+    const firstArtifact = artifacts[0]
+    const firstMetadata = asMetadataRecord(firstArtifact.metadata)
+    return {
+      run: {
+        id: run.id,
+        sessionId: run.sessionId,
+        action: run.action as unknown as AgentRun['action'],
+        mode: run.mode,
+        status: run.status,
+        inputSummary: run.inputSummary,
+        createdAt: toIso(run.createdAt) ?? new Date().toISOString(),
+      },
+      prompt: run.inputSummary ?? undefined,
+      actionPlan: asAgentActionPlan(firstMetadata?.actionPlan),
+      handoff: hydrateHandoffSource(asAgentActionHandoff(firstMetadata?.handoff), run.id, firstArtifact.id),
+      executionMode: firstMetadata?.executionMode === 'plan' || firstMetadata?.executionMode === 'build' || firstMetadata?.executionMode === 'review'
+        ? firstMetadata.executionMode
+        : null,
+      toolPolicy: asAgentWorkspaceToolPolicy(firstMetadata?.toolPolicy),
+      activeAgent: asAgentExecutionAgent(firstMetadata?.activeAgent) ?? buildExecutionAgent(run.agentType),
+      routeDecision: asAgentRouteDecision(firstMetadata?.routeDecision),
+      ruleBundle: asAgentRuleBundle(firstMetadata?.ruleBundle),
+      storyMemoryDigest: asAgentStoryMemoryDigest(firstMetadata?.storyMemoryDigest),
+      artifacts: artifacts.map(row => {
+        const metadata = asMetadataRecord(row.metadata)
+        const workspaceMetadata = metadata
+          ? Object.fromEntries(metadataFields.filter(key => key in metadata).map(key => [key, metadata[key]]))
+          : null
+        return {
+          id: row.id,
+          runId: row.runId,
+          artifactType: row.artifactType,
+          title: row.title,
+          content: row.content,
+          metadata: workspaceMetadata,
+          availableApplyStrategies: resolveArtifactApplyStrategies({ artifactType: row.artifactType, metadata }),
+          createdAt: toIso(row.createdAt) ?? new Date().toISOString(),
+        }
+      }),
+      memoryEntries: (memoriesByRun.get(runId) ?? []).map(entry => ({
+        id: entry.id,
+        memoryType: entry.memoryType,
+        title: entry.title,
+        content: entry.content,
+        importance: entry.importance,
+        createdAt: toIso(entry.createdAt) ?? new Date().toISOString(),
+      })),
+    }
+  })
+
+  return { items }
 }
 
 /** 侧栏任务窗口状态轮询：批量查询会话各自最新一条 run 的状态（30 天窗口内）。

@@ -1,4 +1,5 @@
 import { CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../../shared/contracts/agent-window-configuration.js'
+import { TIER_LABELS } from '../../../account/ledger-label'
 import { PUBLIC_WEB_QUESTION_LIMIT } from '../../../../../shared/contracts/public-web-research.js'
 import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../components/ModelPriceDetails'
 import {
@@ -90,6 +91,7 @@ type AgentComposerProps = {
   qualityMode: StoryCompilerMode
   modelTier: CreditModelTier
   modelLoading?: boolean
+  modelLabelOverride?: string
   modelOptions: CreditModelOption[]
   onModelTierChange: (value: CreditModelTier) => void
   customModels: CustomModelView[]
@@ -271,6 +273,7 @@ export function AgentComposer({
   qualityMode,
   modelTier,
   modelLoading = false,
+  modelLabelOverride,
   modelOptions,
   onModelTierChange,
   customModels,
@@ -472,7 +475,7 @@ export function AgentComposer({
   const activeBuiltInModel = modelOptions.find((item) => item.tier === modelTier)
   const activeCustomModel = modelTier === 'custom' ? customModels.find((item) => item.id === customModelId) : undefined
   const activeModelKey = modelTier === 'custom' && activeCustomModel ? `custom:${activeCustomModel.id}` : `tier:${modelTier}`
-  const activeModelLabel = activeCustomModel?.displayName ?? activeBuiltInModel?.label ?? (modelTier === 'custom' ? '自定义模型' : '极速')
+  const activeModelLabel = modelLabelOverride ?? activeCustomModel?.displayName ?? activeBuiltInModel?.label ?? TIER_LABELS[modelTier] ?? '当前模型'
   const activeReasoningEfforts = orderedReasoningEfforts(activeCustomModel?.reasoningEfforts ?? activeBuiltInModel?.reasoningEfforts ?? ['high'])
   const [styleLearningOpen, setStyleLearningOpen] = useState(false)
   const storedActiveEffort = reasoningSelections[activeModelKey]

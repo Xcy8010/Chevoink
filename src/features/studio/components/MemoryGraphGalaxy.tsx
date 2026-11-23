@@ -4,11 +4,12 @@ import type { MemoryGraphNode } from '../../../../shared/contracts/index.js'
 import type { GraphPoint, MemoryGraphRoutingEdge, ReadableMemoryGraphEdge } from '../lib/memory-graph-layout'
 import { buildGalaxyScene, createGalaxyBackdrop, createGalaxyWingSprite, DEFAULT_GALAXY_VIEW, galaxyClusterExposure, galaxyPaintOrder, pickGalaxyNode, prepareGalaxyGeometry, type GalaxyScreenNode } from '../lib/memory-galaxy-render'
 
-type Props = { nodes: MemoryGraphNode[]; edges: ReadableMemoryGraphEdge[]; points: Map<string, GraphPoint>; selectedId: string | null; onSelect: (id: string | null) => void; active: boolean }
+type Props = { nodes: MemoryGraphNode[]; edges: ReadableMemoryGraphEdge[]; points: Map<string, GraphPoint>; selectedId: string | null; onSelect: (id: string | null) => void; active: boolean; onFirstPaint?: () => void }
 type GalaxyAssets = { wings: Map<string, HTMLCanvasElement>; backdrop: HTMLCanvasElement | null; width: number; height: number; dpr: number }
 
-export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, onSelect, active }: Props) {
+export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, onSelect, active, onFirstPaint }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const painted = useRef(false)
   const viewRef = useRef({ ...DEFAULT_GALAXY_VIEW })
   const redrawRef = useRef<() => void>(() => {})
   const projectedRef = useRef<GalaxyScreenNode[]>([])
@@ -112,6 +113,10 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
       }
       labelOpacityRef.current = currentOpacity
       ctx.globalAlpha = 1
+      if (!painted.current) {
+        painted.current = true
+        onFirstPaint?.()
+      }
       // Only opacity changes get a short finite follow-up. Geometry, particles and physics never run while idle.
       if (transitioning) scheduleFrame()
     }
@@ -232,7 +237,7 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
       canvas.removeEventListener('keydown', keyDown)
       redrawRef.current = () => {}
     }
-  }, [nodes, edges, points, selectedId, onSelect, active, geometry])
+  }, [nodes, edges, points, selectedId, onSelect, active, geometry, onFirstPaint])
 
   const zoom = (factor: number) => {
     viewRef.current.zoom = Math.min(4.5, Math.max(0.4, viewRef.current.zoom * factor))

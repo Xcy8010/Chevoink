@@ -86,6 +86,36 @@ describe('Agent model preference ownership', () => {
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current).toMatchObject({ modelTier: 'speed', explicit: false, inheritMain: false })
   })
+  it('keeps the model placeholder scoped to B until both B configuration sources resolve', async () => {
+    windows.set('session-a', { sessionId: 'session-a', novelId: 'novel-a', title: 'A', revision: 1,
+      configuration: { model: { modelTier: 'ultimate', reasoningEffort: 'high' }, creativeFreedom: 'balanced' } })
+    let resolveAssignmentsB!: (value: ModelAssignmentsPayload) => void
+    let resolveConfigurationB!: (value: AgentWindowConfigurationPayload) => void
+    const assignmentsB = new Promise<ModelAssignmentsPayload>(resolve => { resolveAssignmentsB = resolve })
+    const configurationB = new Promise<AgentWindowConfigurationPayload>(resolve => { resolveConfigurationB = resolve })
+    api.assignments.mockImplementation((path: string) => path.includes('novel-b') ? assignmentsB : Promise.resolve(payload(false)))
+    api.request.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path.includes('model-assignments')) return api.assignments(path)
+      if (path.endsWith('/sessions/session-b/configuration')) return configurationB
+      const id = path.split('/').at(-2)!
+      const before = windows.get(id) ?? { sessionId: id, novelId: 'novel-a', title: id, revision: 0, configuration: { model: null, creativeFreedom: 'balanced' } }
+      if (options?.method === 'PATCH') throw new Error('unexpected model write during load')
+      return before
+    })
+
+    const { result, rerender } = mount()
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.modelTier).toBe('ultimate')
+    rerender({ novelId: 'novel-b', sessionId: 'session-b' })
+    expect(result.current.loading).toBe(true)
+    expect(result.current.windowConfiguration.readyForScope).toBe(false)
+    resolveConfigurationB({ sessionId: 'session-b', novelId: 'novel-b', title: 'B', revision: 1,
+      configuration: { model: { modelTier: 'standard', reasoningEffort: 'high' }, creativeFreedom: 'balanced' } })
+    resolveAssignmentsB(payload(false))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.modelTier).toBe('standard')
+    expect(result.current.explicit).toBe(true)
+  })
   it('keeps the newly chosen custom id when the composer batches custom and tier callbacks', async () => {
     const { result } = mount()
     await waitFor(() => expect(result.current.loading).toBe(false))
