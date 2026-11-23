@@ -1,5 +1,6 @@
 import AgentContextPanel from './AgentContextPanel'
 import AgentMemoryCards from './AgentMemoryCards'
+import { useShellStore } from '@/store/useShellStore'
 
 type Props = {
   sessionId: string | null
@@ -15,11 +16,12 @@ type Props = {
  * 下半是整部作品的创作记忆卡片轨。单一滚动容器，不做嵌套滚动。
  */
 export default function AgentMemoryCenter({ sessionId, novelId, active = false, scrollable = true, onOpenDetail }: Props) {
+  const userId = useShellStore(state => state.sessionUser?.id)
   return (
     <div className={scrollable ? 'h-full overflow-y-auto' : ''}>
-      <AgentContextPanel sessionId={sessionId} active={active} scrollable={false} onOpenDetail={onOpenDetail} />
+      <AgentContextPanel key={JSON.stringify([userId, novelId, sessionId])} userId={userId} novelId={novelId} sessionId={sessionId} active={active} scrollable={false} onOpenDetail={onOpenDetail} />
       <div className="mx-4 border-t border-[var(--border-subtle)]" />
-      <AgentMemoryCards novelId={novelId} />
+      <AgentMemoryCards novelId={novelId} sessionId={sessionId} active={active} />
     </div>
   )
 }

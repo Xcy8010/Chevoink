@@ -1,11 +1,12 @@
 import { Suspense, useEffect, useSyncExternalStore, type ComponentType } from 'react'
+import type { StudioPaneShape } from './StudioPaneSkeleton'
 import StudioSurfaceStatus from './StudioSurfaceStatus'
 
 /** Cache successful imports across tasks. A failed chunk is retryable within its own pane. */
 export function loadStudioSurface<P extends object>(
   load: () => Promise<{ default: ComponentType<P> }>,
   label: string,
-  dialog?: (props: P) => { open: boolean; onClose: () => void },
+  presentation: StudioPaneShape | ((props: P) => { open: boolean; onClose: () => void }) = 'list',
 ) {
   type State = 'idle' | 'loading' | 'failed' | ComponentType<P>
   let state: State = 'idle'
@@ -26,10 +27,10 @@ export function loadStudioSurface<P extends object>(
   }
   return function StudioSurface(props: P) {
     const current = useSyncExternalStore(subscribe, snapshot, snapshot)
-    const modal = dialog?.(props)
+    const modal = typeof presentation === 'function' ? presentation(props) : undefined
     const visible = modal?.open ?? true
     useEffect(() => { if (visible && current === 'idle') start() }, [current, visible])
-    const pending = visible ? <StudioSurfaceStatus label={label} close={modal?.onClose}
+    const pending = visible ? <StudioSurfaceStatus label={label} close={modal?.onClose} shape={typeof presentation === 'string' ? presentation : 'dialog'}
       retry={current === 'failed' ? start : undefined} /> : null
     if (typeof current === 'string') return pending
     const Loaded = current

@@ -36,7 +36,7 @@ import { StudioSkeleton } from '@/components/ui/Skeleton'
 import ConfirmDialog from './components/ConfirmDialog'
 import CoverPanel from './components/CoverPanel'
 import ExportDialog from './components/ExportDialog'
-import LoadingMark from '@/components/ui/LoadingMark'
+import StudioPaneSkeleton from './components/StudioPaneSkeleton'
 import { useImportCapabilities } from './components/use-import-capabilities'
 import { readImportHandoff, readImportJobId, clearImportHandoff, type ImportAgentAttachment } from './lib/import-handoff'
 import type { NovelImportModelSelection } from '../../../shared/contracts/novel-import.js'
@@ -95,12 +95,12 @@ import WorkPerspective from './components/WorkPerspective'
 import StudioWorkspaceSidebar from './components/StudioWorkspaceSidebar'
 import { loadStudioSurface } from './components/load-studio-surface'
 
-const AgentMemoryCenter = loadStudioSurface(() => import('./agent/components/AgentMemoryCenter'), '记忆中心')
-const MemoryGraph = loadStudioSurface(() => import('./components/MemoryGraph'), '关系网')
+const AgentMemoryCenter = loadStudioSurface(() => import('./agent/components/AgentMemoryCenter'), '记忆中心', 'memory')
+const MemoryGraph = loadStudioSurface(() => import('./components/MemoryGraph'), '关系网', 'graph')
 const SkillsPanel = loadStudioSurface(() => import('./components/SkillsPanel'), '技能')
-const EditorCanvas = loadStudioSurface(() => import('./components/EditorCanvas'), '编辑器')
+const EditorCanvas = loadStudioSurface(() => import('./components/EditorCanvas'), '编辑器', 'document')
 const ChapterSidebar = loadStudioSurface(() => import('./components/ChapterSidebar'), '作品目录')
-const StudioChapterViewer = loadStudioSurface(() => import('./components/StudioChapterViewer'), '章节查看器')
+const StudioChapterViewer = loadStudioSurface(() => import('./components/StudioChapterViewer'), '章节查看器', 'document')
 const ImportDialog = loadStudioSurface(() => import('./components/ImportDialog'), '导入面板', props => props)
 const StudioSettingsDialog = loadStudioSurface(() => import('./components/StudioSettingsDialog'), '创作区设置', props => props)
 
@@ -1355,6 +1355,12 @@ export default function StudioWorkspace() {
           ?? (event.draft.toolName === 'chapter_create' ? null : selectedChapterIdStateRef.current)
         if (targetId) agentFollowChapterRef.current(targetId)
       }
+      if (event.type === 'tool.result' && event.ok && ['memory_save', 'memory_event_save', 'memory_relation_save'].includes(event.toolName)) {
+        void queryClient.invalidateQueries({ queryKey: ['studio', 'memory-sets', taskUiUserId, activeNovelId] }, { cancelRefetch: false })
+      }
+      if (event.type === 'run.finished' || (event.type === 'context.compaction' && event.state === 'completed')) {
+        void queryClient.invalidateQueries({ queryKey: ['studio', 'memory-context', taskUiUserId, activeNovelId, live.activeSessionId] }, { cancelRefetch: false })
+      }
       if (event.type === 'tool.result' && event.ok && event.toolName.startsWith('memory_')) {
         void queryClient.invalidateQueries({ queryKey: ['studio', activeNovelId, 'memory-graph'] })
       }
@@ -1619,7 +1625,7 @@ export default function StudioWorkspace() {
         void refreshWorkspaceAfterAgentWrite()
       }
     },
-    [activeNovelId, chapterStreamOwner, captureAgentChapterReview, queryClient, refreshWorkspaceAfterAgentWrite, refreshPlanLinks],
+    [activeNovelId, taskUiUserId, chapterStreamOwner, captureAgentChapterReview, queryClient, refreshWorkspaceAfterAgentWrite, refreshPlanLinks],
   )
 
   useEffect(
@@ -4203,6 +4209,7 @@ export default function StudioWorkspace() {
     setWorkspacePerspective('ide')
   }
 
+  const memorySessionId = agentStateNovelId === activeNovelId && currentNovel.id === activeNovelId ? agentSessionId : null
   const switchingWork = currentNovel.id !== activeNovelId || studioQuery.isPlaceholderData
   const lockOutgoingContent = (element: HTMLDivElement | null) => { if (element) element.inert = switchingWork }
   const mobileConversationOwner = workspaceOwnerRef.current
@@ -4235,7 +4242,7 @@ export default function StudioWorkspace() {
             }}
           />
           <div ref={lockOutgoingContent} aria-busy={switchingWork} className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]">
-            <Suspense fallback={<LoadingMark className="m-auto" label="正在打开创作面板" />}>
+            <Suspense fallback={<StudioPaneSkeleton label="正在打开创作面板" />}>
 
             {mobileView === 'editor' ? (
               <div className="flex min-h-0 flex-1 flex-col">
@@ -4295,13 +4302,13 @@ export default function StudioWorkspace() {
 
             {mobileView === 'memory' && featureFlags.memory2 ? (
               <div className="min-h-0 flex-1 overflow-hidden border-t border-[var(--border-subtle)]">
-                <MemoryGraph novelId={currentNovel.id} active={agentRunState.active} />
+                <MemoryGraph key={currentNovel.id} novelId={currentNovel.id} active={agentRunState.active} />
               </div>
             ) : null}
 
             {mobileView === 'context' ? (
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain border-t border-[var(--border-subtle)]">
-                <AgentMemoryCenter sessionId={agentSessionId} novelId={currentNovel.id} active={agentRunState.active} scrollable={false} onOpenDetail={() => setContextDetailOpen(true)} />
+                <AgentMemoryCenter sessionId={memorySessionId} novelId={currentNovel.id} active={agentRunState.active} scrollable={false} onOpenDetail={() => setContextDetailOpen(true)} />
               </div>
             ) : null}
 
@@ -4546,9 +4553,9 @@ export default function StudioWorkspace() {
                   projectNotes={projectNotes}
                   activeTaskTitle={activeAgentTaskWindow?.title ?? null}
                   taskCount={agentTaskSidebarItems.length}
-                  memoryGraph={featureFlags.memory2 ? <MemoryGraph novelId={currentNovel.id} active={agentRunState.active} /> : null}
+                  memoryGraph={featureFlags.memory2 ? <MemoryGraph key={currentNovel.id} novelId={currentNovel.id} active={agentRunState.active} /> : null}
                   skillsPanel={<SkillsPanel novelId={currentNovel.id} chapters={chapters} />}
-                  contextPanel={<AgentMemoryCenter sessionId={agentSessionId} novelId={currentNovel.id} active={agentRunState.active} onOpenDetail={() => setContextDetailOpen(true)} />}
+                  contextPanel={<AgentMemoryCenter sessionId={memorySessionId} novelId={currentNovel.id} active={agentRunState.active} onOpenDetail={() => setContextDetailOpen(true)} />}
                 />}
                 viewer={workViewerMode ? <StudioChapterViewer
                   positionScope={taskUiScope}
@@ -4644,7 +4651,7 @@ export default function StudioWorkspace() {
                     activeTaskTitle={activeAgentTaskWindow?.title ?? null}
                     taskCount={agentTaskSidebarItems.length}
                     skillsPanel={<SkillsPanel novelId={currentNovel.id} chapters={chapters} />}
-                    contextPanel={<AgentMemoryCenter sessionId={agentSessionId} novelId={currentNovel.id} active={agentRunState.active} onOpenDetail={() => setContextDetailOpen(true)} />}
+                    contextPanel={<AgentMemoryCenter sessionId={memorySessionId} novelId={currentNovel.id} active={agentRunState.active} onOpenDetail={() => setContextDetailOpen(true)} />}
                   />}
                 />
                 {ideTreeOpen ? <PanelResizeHandle

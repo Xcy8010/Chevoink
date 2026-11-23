@@ -650,6 +650,31 @@ body.autohide-scrollbars *:not([data-scrolling='true'])::-webkit-scrollbar-thumb
   animation: skeleton-sweep 1.4s linear infinite;
 }
 
+/* Reserve the local geometry immediately. Reveal only indicators that survive a quick read. */
+@keyframes studio-pending-reveal {
+  from { visibility: hidden; }
+  to { visibility: visible; }
+}
+.studio-pending {
+  animation: studio-pending-reveal 0s 200ms backwards;
+}
+.studio-pending.skeleton-shimmer {
+  animation: studio-pending-reveal 0s 200ms backwards, skeleton-sweep 1.4s linear 200ms infinite;
+}
+
+/* Background refresh keeps the last readable value in place. */
+.studio-metric-updating {
+  border-radius: 3px;
+  background-image: linear-gradient(100deg, transparent 25%, color-mix(in srgb, currentColor 13%, transparent) 50%, transparent 75%);
+  background-size: 200% 100%;
+  background-position: 200% 0;
+  background-repeat: no-repeat;
+  animation: skeleton-sweep 1.5s ease-in-out 200ms infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .studio-metric-updating { animation: none; background-image: none; }
+}
+
 /* Work 默认收起查看器时：44px 轨道 + 44px 检查栏 + 296px 停靠卡 + 920px 对话。 */
 .studio-skeleton-work { container: studio-skeleton-work / inline-size; }
 .studio-skeleton-work, .work-agent-frame { --work-agent-optical-offset: 16px; }
@@ -673,6 +698,7 @@ html.dark .studio-workspace :is(
 }
 @media (prefers-reduced-motion: reduce) {
   .skeleton-shimmer { animation: none; background-image: none; }
+  .studio-pending.skeleton-shimmer { animation: studio-pending-reveal 0s 200ms backwards; }
 }
 
 @media (max-width: 767px) {

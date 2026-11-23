@@ -78,6 +78,7 @@ type AgentComposerProps = {
   running: boolean
   stopping?: boolean
   disabled?: boolean
+  draftReadOnly?: boolean
   /** 可返回 Promise：启动失败时抛错，输入框保留草稿与附件 */
   onSend: (prompt: string, attachments: AgentAttachmentMeta[], creativeFreedom: CreativeFreedom, qualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string, publicWebQuestion?: string) => Promise<void> | void
   onStop: () => void
@@ -88,6 +89,7 @@ type AgentComposerProps = {
   onCreativeFreedomChange: (value: CreativeFreedom) => void
   qualityMode: StoryCompilerMode
   modelTier: CreditModelTier
+  modelLoading?: boolean
   modelOptions: CreditModelOption[]
   onModelTierChange: (value: CreditModelTier) => void
   customModels: CustomModelView[]
@@ -258,6 +260,7 @@ export function AgentComposer({
   running,
   stopping = false,
   disabled = false,
+  draftReadOnly = disabled,
   onSend,
   onStop,
   onContinue,
@@ -267,6 +270,7 @@ export function AgentComposer({
   onCreativeFreedomChange,
   qualityMode,
   modelTier,
+  modelLoading = false,
   modelOptions,
   onModelTierChange,
   customModels,
@@ -343,7 +347,7 @@ export function AgentComposer({
   const publicSearch = publicSearchDraft && sameComposerDraftScope(publicSearchDraft.scope, scope) ? publicSearchDraft : null
   const voice = useVoiceInput({
     scopeKey: scope,
-    disabled: !scope || voiceDisabled || disabled || running || sending || uploading > 0,
+    disabled: !scope || voiceDisabled || disabled || modelLoading || running || sending || uploading > 0,
     onNotice: voiceNotice,
     onTranscript: (text) => {
       const bookmark = voiceBookmark.current
@@ -357,6 +361,7 @@ export function AgentComposer({
     },
   })
   const voiceActive = voice.state !== 'idle' && voice.state !== 'checking'
+  const editorLocked = draftReadOnly || voiceActive || sending
 
   useEffect(() => {
     voiceBookmark.current = null
@@ -437,12 +442,12 @@ export function AgentComposer({
   const fileFull = fileCount >= MAX_AGENT_FILE_COUNT
 
   const canSend =
-    !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0 && (!publicSearch || Boolean(publicSearch.query.trim()))
+    !disabled && !modelLoading && !sending && !voiceActive && !pendingVoice && uploading === 0 && (!publicSearch || Boolean(publicSearch.query.trim()))
     && (!isComposerBlank(prompt) || references.length > 0)
   const continueLock = useRef(false)
   const submitting = sending && !continueLock.current
   const showContinue = !submitting && !publicSearch && Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
-  const canContinue = showContinue && !running && !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0
+  const canContinue = showContinue && !running && !disabled && !modelLoading && !sending && !voiceActive && !pendingVoice && uploading === 0
   const showPlaceholder = !composing && (submitting || (isComposerBlank(prompt) && references.length === 0))
   const offeredNextPrompt = showPlaceholder && !running && !stopping && !disabled && !sending && !voiceActive &&
     !pendingVoice && !showContinue && !goalMode && !goalActive && uploading === 0 && attachments.length === 0
@@ -467,7 +472,7 @@ export function AgentComposer({
   const activeBuiltInModel = modelOptions.find((item) => item.tier === modelTier)
   const activeCustomModel = modelTier === 'custom' ? customModels.find((item) => item.id === customModelId) : undefined
   const activeModelKey = modelTier === 'custom' && activeCustomModel ? `custom:${activeCustomModel.id}` : `tier:${modelTier}`
-  const activeModelLabel = activeCustomModel?.displayName ?? activeBuiltInModel?.label ?? '极速'
+  const activeModelLabel = activeCustomModel?.displayName ?? activeBuiltInModel?.label ?? (modelTier === 'custom' ? '自定义模型' : '极速')
   const activeReasoningEfforts = orderedReasoningEfforts(activeCustomModel?.reasoningEfforts ?? activeBuiltInModel?.reasoningEfforts ?? ['high'])
   const [styleLearningOpen, setStyleLearningOpen] = useState(false)
   const storedActiveEffort = reasoningSelections[activeModelKey]
@@ -618,7 +623,7 @@ export function AgentComposer({
   }
 
   const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    if (voiceActive) { event.preventDefault(); return }
+    if (editorLocked) { event.preventDefault(); return }
     const files = Array.from(event.clipboardData.items)
       .filter((item) => item.kind === 'file')
       .map((item) => item.getAsFile())
@@ -662,7 +667,7 @@ export function AgentComposer({
   const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     setDragActive(false)
-    if (voiceActive) return
+    if (editorLocked) return
     const transferredReference = parseComposerReferenceTransfer(event.dataTransfer.getData(COMPOSER_REFERENCE_MIME))
     if (transferredReference) {
       await attachReference(transferredReference)
@@ -683,8 +688,9 @@ export function AgentComposer({
     .filter((skill): skill is AgentSkillListItem => Boolean(skill))
 
   const handleSend = async () => {
+    if (disabled || sending || modelLoading) return
     const current = syncComposerFromDom()
-    if ((isComposerBlank(current.draft) && current.references.length === 0) || disabled || sending || [...sendLock.current].some(owner => sameComposerDraftScope(owner, scope)) || voiceActive || pendingVoice || uploading > 0) {
+    if ((isComposerBlank(current.draft) && current.references.length === 0) || [...sendLock.current].some(owner => sameComposerDraftScope(owner, scope)) || voiceActive || pendingVoice || uploading > 0) {
       return
     }
     const effectivePrompt = buildComposerPrompt(current.draft, current.references)
@@ -755,7 +761,7 @@ export function AgentComposer({
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (voiceActive) { event.preventDefault(); return }
+    if (editorLocked) { event.preventDefault(); return }
     if (event.nativeEvent.isComposing || composingRef.current || event.keyCode === 229) return
     if (offeredNextPrompt && event.key === 'Tab' && !event.repeat && !event.defaultPrevented &&
       !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && document.activeElement === event.currentTarget) {
@@ -1160,18 +1166,19 @@ export function AgentComposer({
           aria-expanded={slashVisible}
           aria-controls={slashVisible ? slashListId : undefined}
           aria-activedescendant={slashVisible && !slashSubmenu && activeSlashTool ? `${slashListId}-${activeSlashTool}` : undefined}
-          contentEditable={!disabled && !voiceActive && !sending}
+          contentEditable={!editorLocked}
+          aria-readonly={editorLocked}
           hidden={submitting}
           suppressContentEditableWarning
-          onInput={(event) => { const composing = (event.nativeEvent as InputEvent).isComposing || composingRef.current; syncComposerFromDom(composing); refreshSlashToken(composing) }}
+          onInput={(event) => { if (editorLocked) return; const composing = (event.nativeEvent as InputEvent).isComposing || composingRef.current; syncComposerFromDom(composing); refreshSlashToken(composing) }}
           onCompositionStart={() => { composingRef.current = true; setComposing(true); setSlashToken(null); setSlashSubmenu(null) }}
-          onCompositionEnd={() => { composingRef.current = false; setComposing(false); syncComposerFromDom(); refreshSlashToken() }}
+          onCompositionEnd={() => { composingRef.current = false; setComposing(false); if (!editorLocked) { syncComposerFromDom(); refreshSlashToken() } }}
           onKeyUp={event => { if (!['ArrowUp', 'ArrowDown', 'Enter', 'Escape'].includes(event.key)) refreshSlashToken(event.nativeEvent.isComposing) }}
           onClick={handleEditorClick}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           className="max-h-40 min-h-12 w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent px-1.5 py-1 text-sm leading-7 text-[var(--text-primary)] focus:outline-none data-[disabled=true]:opacity-50"
-          data-disabled={disabled}
+          data-disabled={editorLocked}
         />
         {offeredNextPrompt ? (
           <button
@@ -1260,10 +1267,10 @@ export function AgentComposer({
             </div>
           </details>
           {canUseGoalEntry ? <GoalModeChip active={goalActive} draft={goalMode} busy={sending || voiceActive || disabled} onOpen={() => onGoalOpen?.()} onCancel={() => setGoalMode(false)} /> : null}
-          <details ref={modelMenuRef} className="group/model relative z-[120] ml-auto min-w-0" data-disabled={disabled || undefined} onToggle={(event) => { if (!(event.currentTarget as HTMLDetailsElement).open) { setMobileModelsOpen(false) } }}>
+          <details ref={modelMenuRef} className="group/model relative z-[120] ml-auto min-w-0" data-disabled={(disabled || modelLoading) || undefined} onToggle={(event) => { if (!(event.currentTarget as HTMLDetailsElement).open) { setMobileModelsOpen(false) } }}>
             <summary
               onClick={(event) => {
-                if (disabled) { event.preventDefault(); return }
+                if (disabled || modelLoading) { event.preventDefault(); return }
                 if (window.innerWidth < 768) {
                   event.preventDefault()
                   editorRef.current?.blur()
@@ -1272,11 +1279,17 @@ export function AgentComposer({
                 }
               }}
               aria-label="模型档位"
+              aria-disabled={disabled || modelLoading}
               title="选择模型性能与 Credits 倍率"
               className="flex h-7 cursor-pointer list-none items-center gap-1 rounded-full px-2 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] group-data-[disabled=true]/model:pointer-events-none group-data-[disabled=true]/model:opacity-45 [&::-webkit-details-marker]:hidden"
             >
-              <span className="min-w-0 max-w-24 truncate">{activeModelLabel}</span>
-              <span className="text-[9px] text-[var(--text-tertiary)]">{activeReasoningEffort}</span>
+              {modelLoading ? <span role="status" aria-label="正在加载当前模型" className="studio-pending inline-flex h-4 items-center gap-1">
+                <span aria-hidden="true" className="skeleton-shimmer h-2.5 w-7 rounded" />
+                <span aria-hidden="true" className="skeleton-shimmer h-2 w-4 rounded" />
+              </span> : <>
+                <span className="min-w-0 max-w-24 truncate">{activeModelLabel}</span>
+                <span className="text-[9px] text-[var(--text-tertiary)]">{activeReasoningEffort}</span>
+              </>}
               <ChevronDown className="h-3 w-3 transition-transform group-open/model:rotate-180" />
             </summary>
             <div className={cn('absolute bottom-full right-0 z-[140] mb-2 w-[248px] overflow-visible rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[0_18px_46px_rgba(15,23,42,0.18)] motion-safe:origin-bottom-right motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(0.2,0.8,0.2,1)]', mobileModelsOpen && 'mobile:invisible mobile:pointer-events-none')}>

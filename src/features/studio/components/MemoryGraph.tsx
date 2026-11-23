@@ -2,8 +2,13 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { LoaderCircle, Network, RefreshCw } from 'lucide-react'
 
+import StudioPaneSkeleton from './StudioPaneSkeleton'
+import type { MemoryGraphLayoutResult } from '../lib/memory-graph.worker'
 import { cn } from '@/lib/utils'
 import { getMemoryGraphJob, getNovelMemoryGraph, syncNovelMemoryGraph } from '../api'
+
+// Geometry lives as long as the queried graph; returning to a warm graph skips another worker solve.
+const layoutsByGraph = new WeakMap<object, Map<number, MemoryGraphLayoutResult>>()
 
 const MemoryGraphCanvas = lazy(() => import('./MemoryGraphCanvas'))
 
@@ -60,7 +65,7 @@ export default function MemoryGraph({ novelId, active = false, className }: { no
   }, [graph, novelId, jobBusy, startMutation])
 
   if (graphQuery.isLoading) {
-    return <div className={cn('flex h-full items-center justify-center gap-2 text-sm text-[var(--text-secondary)]', className)}><LoaderCircle className="h-4 w-4 animate-spin" />正在载入小说关系网…</div>
+    return <StudioPaneSkeleton label="正在载入小说关系网" shape="graph" />
   }
 
   if (graphQuery.isError) {
@@ -75,18 +80,24 @@ export default function MemoryGraph({ novelId, active = false, className }: { no
     return <div className={cn('flex h-full flex-col items-center justify-center px-8 text-center', className)}><Network className="h-9 w-9 text-[var(--text-tertiary)]" /><h3 className="mt-3 text-sm font-medium text-[var(--text-primary)]">关系网还没有内容</h3><p className="mt-2 max-w-sm text-xs leading-6 text-[var(--text-secondary)]">作品有正文后会用低推理 AI 自动建立一次，覆盖人物、地点、组织、物件、事件和概念。</p></div>
   }
 
+  let layoutCache = layoutsByGraph.get(graph.nodes)
+  if (!layoutCache) {
+    layoutCache = new Map()
+    layoutsByGraph.set(graph.nodes, layoutCache)
+  }
+
   return <section className={cn('relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--surface-default)]', className)} aria-label="小说关系网">
     <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[var(--border-subtle)] px-3">
       <Network className="h-4 w-4 text-[var(--text-secondary)]" />
       <span className="text-xs font-medium text-[var(--text-primary)]">关系网</span>
-      <span className="truncate text-[10px] text-[var(--text-tertiary)]">{graph.nodes.length} 个实体 · {graph.edges.length} 条关系</span>
+      <span aria-busy={graphQuery.isFetching} className={cn("truncate text-[10px] tabular-nums text-[var(--text-tertiary)]", graphQuery.isFetching && "studio-metric-updating")}>{graph.nodes.length} 个实体 · {graph.edges.length} 条关系</span>
       <button type="button" disabled={jobBusy} onClick={() => startMutation.mutate(true)} className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-tertiary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] disabled:opacity-45" aria-label="刷新关系网" title="用低推理 AI 刷新关系网（10 分钟内限一次）">{jobBusy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}</button>
     </div>
     {jobBusy ? <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] px-3 py-2 text-[10px] text-[var(--text-secondary)]"><LoaderCircle className="h-3 w-3 animate-spin" />AI 正在从正文刷新关系网{job && job.total > 0 ? `（${job.done}/${job.total}）` : ''}，请稍候…</div> : null}
     {job?.status === 'failed' && job.error ? <p className="border-b border-[var(--border-subtle)] px-3 py-2 text-[10px] text-rose-500">{job.error}</p> : null}
     <div className="min-h-0 flex-1">
-      <Suspense fallback={<div className="flex h-full items-center justify-center"><LoaderCircle className="h-4 w-4 animate-spin text-[var(--text-tertiary)]" /></div>}>
-        <MemoryGraphCanvas graph={graph} />
+      <Suspense fallback={<StudioPaneSkeleton label="正在打开关系网画布" shape="graph" bodyOnly />}>
+        <MemoryGraphCanvas graph={graph} layoutCache={layoutCache} />
       </Suspense>
     </div>
   </section>

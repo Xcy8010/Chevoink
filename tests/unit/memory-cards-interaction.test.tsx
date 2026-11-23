@@ -1,20 +1,34 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import type { ReactElement } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { act, cleanup, fireEvent, render as renderReact, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import AgentMemoryCards from '../../src/features/studio/agent/components/AgentMemoryCards'
-import { fetchStoryMemories, fetchStoryMemorySets, updateStoryMemory } from '../../src/features/studio/agent/agentApi'
+import AgentMemoryCenter from '../../src/features/studio/agent/components/AgentMemoryCenter'
+import { AgentApiError, compactAgentContext, fetchAgentContextState, fetchStoryMemories, fetchStoryMemorySets, updateStoryMemory } from '../../src/features/studio/agent/agentApi'
 import type { StoryMemoryCard } from '../../shared/contracts'
 
 const store = vi.hoisted(() => ({ addComposerReference: vi.fn(), requestToolNavigation: vi.fn(), composerDraft: '', memorySpotlight: null as null | { nonce: number; memoryType: string; title: string; memoryId?: string } }))
 vi.mock('../../src/features/studio/agent/agentStore', () => ({ useAgentStore: (select: (s: unknown) => unknown) => select(store) }))
-vi.mock('../../src/store/useShellStore', () => ({ useShellStore: (select: (s: unknown) => unknown) => select({ sessionUser: { id: 'u' } }) }))
-vi.mock('../../src/features/studio/agent/agentApi', () => ({ fetchStoryMemories: vi.fn(), fetchStoryMemorySets: vi.fn(), deleteStoryMemory: vi.fn(), updateStoryMemory: vi.fn() }))
+const viewer = vi.hoisted(() => ({ id: 'u' as string | undefined }))
+vi.mock('../../src/store/useShellStore', () => ({ useShellStore: (select: (s: unknown) => unknown) => select({ sessionUser: viewer }) }))
+vi.mock('../../src/features/studio/agent/agentApi', async importOriginal => ({
+  ...await importOriginal<typeof import('../../src/features/studio/agent/agentApi')>(),
+  compactAgentContext: vi.fn(), fetchAgentContextState: vi.fn(), fetchStoryMemories: vi.fn(),
+  fetchStoryMemorySets: vi.fn(), deleteStoryMemory: vi.fn(), updateStoryMemory: vi.fn(),
+}))
+let queryClient: QueryClient
+function render(ui: ReactElement) {
+  return renderReact(ui, { wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider> })
+}
 const firstCard: StoryMemoryCard = { id: 'card', title: '真正的卡片', content: '内容', memoryType: 'worldbuilding', layer: 'L1', importance: 50, status: 'inferred', reviewStatus: 'pending', version: 1, createdAt: '2026-09-12T00:00:00Z', updatedAt: '2026-09-12T00:00:00Z' }
 const secondCard = { ...firstCard, id: 'second', title: '第二张卡片', content: '另一段正文', version: 2 }
 const originalShow = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal')
 const originalClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'close')
 
 beforeEach(() => {
+  viewer.id = 'u'
+  queryClient = new QueryClient()
   vi.clearAllMocks(); store.memorySpotlight = null
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', '') } })
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute('open') } })
@@ -22,7 +36,7 @@ beforeEach(() => {
   vi.mocked(fetchStoryMemories).mockResolvedValue({ total: 1, typeCounts: { worldbuilding: 1 }, items: [firstCard] })
 })
 afterEach(() => {
-  cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); sessionStorage.clear()
+  cleanup(); queryClient.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals(); sessionStorage.clear()
   if (originalShow) Object.defineProperty(HTMLDialogElement.prototype, 'showModal', originalShow); else Reflect.deleteProperty(HTMLDialogElement.prototype, 'showModal')
   if (originalClose) Object.defineProperty(HTMLDialogElement.prototype, 'close', originalClose); else Reflect.deleteProperty(HTMLDialogElement.prototype, 'close')
 })
@@ -121,7 +135,7 @@ it('shows category counts and keeps the same open dialog through rapid category 
     ? pending : { total: 1, items: [firstCard], typeCounts: { worldbuilding: 1 } })
   render(<AgentMemoryCards novelId="n" />)
   const tile = await screen.findByRole('button', { name: '人物卡片集 3 张' })
-  expect(within(tile).getByText('共 3 个')).toBeTruthy()
+  expect(tile.textContent).toContain('共 3 个')
   expect(within(tile).queryByText(character.title)).toBeNull()
   await openWorldbuilding()
   const dialog = screen.getByRole('dialog', { name: '创作记忆' })
@@ -232,4 +246,94 @@ it('opens the saved card by ID even when the current name has changed', async ()
   render(<AgentMemoryCards novelId="n" />)
   await screen.findByRole('heading', { name: firstCard.title })
   expect(fetchStoryMemories).toHaveBeenCalledWith('n', { memoryType: 'worldbuilding', memoryId: firstCard.id, page: 1, pageSize: 2 })
+})
+
+const contextA = { usageRatio: 0.42, estimatedTokens: 4200, contextWindowTokens: 10_000,
+  compactionThreshold: 0.85, warningThreshold: 0.75, activeDirectiveCount: 3, checkpoint: null }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: Error) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
+}
+
+it('paints a scoped cache immediately on revisit and keeps values through transient failures', async () => {
+  vi.mocked(fetchAgentContextState).mockResolvedValueOnce(contextA)
+  const initial = render(<AgentMemoryCenter sessionId="task-a" novelId="n" />)
+  expect(screen.getByText('正在读取上下文状态')).toBeTruthy()
+  await screen.findByText('42%')
+  await screen.findByRole('button', { name: '世界观卡片集 1 张' })
+  initial.unmount()
+  const fresh = render(<AgentMemoryCenter sessionId="task-a" novelId="n" />)
+  expect(screen.getByText('42%').className).not.toContain('studio-metric-updating')
+  expect(fetchAgentContextState).toHaveBeenCalledTimes(1)
+  expect(fetchStoryMemorySets).toHaveBeenCalledTimes(1)
+  fresh.unmount()
+  await queryClient.invalidateQueries({ queryKey: ['studio'], refetchType: 'none' })
+  const contextRead = deferred<typeof contextA>()
+  const setsRead = deferred<Awaited<ReturnType<typeof fetchStoryMemorySets>>>()
+  vi.mocked(fetchAgentContextState).mockReturnValueOnce(contextRead.promise)
+  vi.mocked(fetchStoryMemorySets).mockReturnValueOnce(setsRead.promise)
+  render(<AgentMemoryCenter sessionId="task-a" novelId="n" />)
+  expect(screen.getByText('42%').className).toContain('studio-metric-updating')
+  expect(within(screen.getByRole('button', { name: '世界观卡片集 1 张' })).getByText('1').className).toContain('studio-metric-updating')
+  await act(async () => {
+    contextRead.reject(new Error('连接暂时中断'))
+    setsRead.reject(new Error('数量暂不可更新'))
+  })
+  await screen.findByText('数量暂不可更新')
+  expect(screen.getByText('42%').className).not.toContain('studio-metric-updating')
+  expect(screen.getByRole('button', { name: '世界观卡片集 1 张' })).toBeTruthy()
+})
+
+it('discards an inaccessible snapshot even if the next retry fails, and isolates the next user and task', async () => {
+  vi.mocked(fetchAgentContextState).mockResolvedValueOnce(contextA)
+  const panel = render(<AgentMemoryCenter sessionId="task-a" novelId="n" />)
+  await screen.findByText('42%')
+  const response = deferred<Awaited<ReturnType<typeof compactAgentContext>>>()
+  vi.mocked(compactAgentContext).mockReturnValueOnce(response.promise)
+  fireEvent.click(screen.getByRole('button', { name: '手动压缩当前会话' }))
+  const pending = deferred<typeof contextA>()
+  vi.mocked(fetchAgentContextState).mockReturnValueOnce(pending.promise)
+  panel.rerender(<AgentMemoryCenter sessionId="task-b" novelId="n" />)
+  expect(screen.queryByText('42%')).toBeNull()
+  await act(async () => response.resolve({ state: contextA, checkpoint: null }))
+  expect(screen.queryByText('当前有效对话较短，暂时无需压缩。')).toBeNull()
+  await act(async () => pending.resolve({ ...contextA, usageRatio: 0.25 }))
+  await screen.findByText('25%')
+  vi.mocked(fetchAgentContextState).mockRejectedValueOnce(new AgentApiError('无权访问', 403, null))
+  fireEvent.click(screen.getByRole('button', { name: '刷新上下文状态' }))
+  await screen.findByText('无权访问')
+  expect(screen.queryByText('25%')).toBeNull()
+  vi.mocked(fetchAgentContextState).mockRejectedValueOnce(new Error('断线'))
+  fireEvent.click(screen.getByRole('button', { name: '刷新上下文状态' }))
+  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: '刷新上下文状态' }).disabled).toBe(false))
+  expect(screen.queryByText('25%')).toBeNull()
+  viewer.id = undefined
+  panel.rerender(<AgentMemoryCenter sessionId="task-a" novelId="n" />)
+  expect(screen.queryByText('42%')).toBeNull()
+  expect(screen.queryByRole('button', { name: '世界观卡片集 1 张' })).toBeNull()
+  viewer.id = 'reader-b'
+  vi.mocked(fetchAgentContextState).mockRejectedValueOnce(new Error('暂不可用'))
+  vi.mocked(fetchStoryMemorySets).mockResolvedValueOnce({ sets: [] })
+  panel.rerender(<AgentMemoryCenter sessionId="task-a" novelId="n" />)
+  await screen.findByText('还没有创作记忆。')
+  expect(screen.queryByText('42%')).toBeNull()
+})
+
+it('closes a revoked catalog and never shows the first novel while a second novel is pending', async () => {
+  const panel = render(<AgentMemoryCards novelId="first" />)
+  vi.mocked(fetchStoryMemories).mockRejectedValueOnce(new AgentApiError('作品已不可访问', 404, null))
+  await openWorldbuilding()
+  await screen.findByText('作品已不可访问')
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(screen.queryByRole('button', { name: '世界观卡片集 1 张' })).toBeNull()
+  const next = deferred<Awaited<ReturnType<typeof fetchStoryMemorySets>>>()
+  vi.mocked(fetchStoryMemorySets).mockReturnValueOnce(next.promise)
+  panel.rerender(<AgentMemoryCards novelId="second" />)
+  expect(screen.queryByText('作品已不可访问')).toBeNull()
+  expect(screen.getByRole('status', { name: '正在读取创作记忆' })).toBeTruthy()
+  await act(async () => next.resolve({ sets: [] }))
+  await screen.findByText('还没有创作记忆。')
 })

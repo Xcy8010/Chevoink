@@ -1,3 +1,5 @@
+import { Skeleton } from '@/components/ui/Skeleton'
+import StudioPaneSkeleton from './StudioPaneSkeleton'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BookOpenCheck, Check, Fingerprint, History, Import, Inbox, LoaderCircle, Plus, RefreshCw, Search, Share2, ShieldCheck, Trash2, Wrench, X } from 'lucide-react'
@@ -97,7 +99,7 @@ export default function SkillsPanel({ novelId, chapters, className }: { novelId:
   })
 
   if (skillsQuery.isLoading) {
-    return <div className={cn('flex h-full items-center justify-center gap-2 text-sm text-[var(--text-secondary)]', className)}><LoaderCircle className="h-4 w-4 animate-spin" />正在载入作品技能…</div>
+    return <StudioPaneSkeleton label="正在载入作品技能" />
   }
 
   if (skillsQuery.isError || !skillsQuery.data) {
@@ -110,7 +112,7 @@ export default function SkillsPanel({ novelId, chapters, className }: { novelId:
       <div className="flex items-center gap-2">
         <Wrench className="h-4 w-4 text-[var(--text-secondary)]" />
         <h2 className="text-sm font-semibold text-[var(--text-primary)]">技能</h2>
-        <span className="text-[10px] tabular-nums text-[var(--text-tertiary)]">{payload.enabledCount}/{payload.totalCount} 已启用</span>
+        <span aria-busy={skillsQuery.isFetching} className={cn("text-[10px] tabular-nums text-[var(--text-tertiary)]", skillsQuery.isFetching && "studio-metric-updating")}>{payload.enabledCount}/{payload.totalCount} 已启用</span>
         <button type="button" onClick={() => setDialog('create')} className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]" aria-label="新建作品技能" title="新建作品技能"><Plus className="h-4 w-4" /><span>新建</span></button>
         <button type="button" onClick={() => setDialog('import')} className="inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]" aria-label="导入第三方技能" title="导入第三方技能"><Import className="h-4 w-4" /><span>导入</span></button>
         <button type="button" onClick={() => void skillsQuery.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]" aria-label="刷新技能" title="刷新技能"><RefreshCw className={cn('h-3.5 w-3.5', skillsQuery.isFetching && 'animate-spin')} /></button>
@@ -123,7 +125,7 @@ export default function SkillsPanel({ novelId, chapters, className }: { novelId:
           <Search className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-tertiary)]" />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2"><h3 className="text-xs font-medium text-[var(--text-primary)]">创作研究台</h3><span className="rounded-[5px] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[9px] text-[var(--text-tertiary)]">按需联网</span></div>
-            {researchQuery.isLoading ? <p className="mt-1 text-[11px] text-[var(--text-secondary)]">正在读取研究资产…</p> : researchQuery.data?.dossier ? <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">{researchQuery.data.dossier.genre} · dossier v{researchQuery.data.dossier.version} · {researchQuery.data.dossier.sources.length} 个摘要来源 · 已复用 {researchQuery.data.dossier.reusedCount} 次</p> : <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">新书、换题材或事实高风险时由 Agent 建立；普通续写不会重复联网。</p>}
+            {researchQuery.isLoading ? <div role="status" aria-label="正在读取研究资产" className="studio-pending flex h-5 items-center"><Skeleton className="h-2 w-3/4" /></div> : researchQuery.data?.dossier ? <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">{researchQuery.data.dossier.genre} · dossier v{researchQuery.data.dossier.version} · {researchQuery.data.dossier.sources.length} 个摘要来源 · 已复用 {researchQuery.data.dossier.reusedCount} 次</p> : <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">新书、换题材或事实高风险时由 Agent 建立；普通续写不会重复联网。</p>}
           </div>
           <button type="button" onClick={() => void researchQuery.refetch()} className="shrink-0 text-[10px] text-[var(--text-secondary)] underline underline-offset-4">刷新</button>
         </div>
@@ -143,7 +145,7 @@ export default function SkillsPanel({ novelId, chapters, className }: { novelId:
           <Fingerprint className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-tertiary)]" />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2"><h3 className="text-xs font-medium text-[var(--text-primary)]">作者 Style DNA</h3><span className="rounded-[5px] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[9px] text-[var(--text-tertiary)]">仅本作品</span></div>
-            {styleQuery.isLoading ? <p className="mt-1 text-[11px] text-[var(--text-secondary)]">正在读取风格画像…</p> : <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">{styleQuery.data ? `${styleQuery.data.name} · ${styleQuery.data.sampleCount} 份样章。` : ''}查看样章、让 Agent 分段学习；确认启用规则后，本作品后续写作自动使用。保存统计不等于完成学习。</p>}
+            {styleQuery.isLoading ? <div role="status" aria-label="正在读取风格画像" className="studio-pending flex h-5 items-center"><Skeleton className="h-2 w-3/4" /></div> : <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">{styleQuery.data ? `${styleQuery.data.name} · ${styleQuery.data.sampleCount} 份样章。` : ''}查看样章、让 Agent 分段学习；确认启用规则后，本作品后续写作自动使用。保存统计不等于完成学习。</p>}
           </div>
           <button type="button" onClick={() => setStyleSetupOpen(true)} className="shrink-0 text-[10px] text-[var(--text-secondary)] underline underline-offset-4">{styleQuery.data ? '更新' : '建立'}</button>
         </div>

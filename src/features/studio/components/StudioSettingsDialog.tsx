@@ -488,7 +488,7 @@ function ProfilePanel() {
       ) : null}
 
       {activityQuery.isLoading ? (
-        <div className="space-y-8" aria-label="正在加载 Credits 活动">
+        <div className="studio-pending space-y-8" aria-label="正在加载 Credits 活动">
           <div className="grid grid-cols-5 overflow-hidden rounded-[14px] border border-[var(--border-subtle)]">{Array.from({ length: 5 }, (_, index) => <div key={index} className="border-l border-[var(--border-subtle)] px-3 py-5 first:border-l-0"><span className="skeleton-shimmer mx-auto block h-5 w-16 rounded" /><span className="skeleton-shimmer mx-auto mt-2 block h-3 w-20 rounded" /></div>)}</div>
           <div className="skeleton-shimmer h-44 rounded-[14px]" />
         </div>

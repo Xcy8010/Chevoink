@@ -202,8 +202,8 @@ export function fetchSessionsRunStatus(sessionIds: string[]): Promise<AgentSessi
   return requestData<AgentSessionRunStatusPayload>(`/api/agent/sessions/run-status?ids=${encodeURIComponent(sessionIds.join(','))}`)
 }
 
-export function fetchAgentContextState(sessionId: string): Promise<ContextState> {
-  return requestData<ContextState>(`/api/agent/sessions/${sessionId}/context-state`)
+export function fetchAgentContextState(sessionId: string, signal?: AbortSignal): Promise<ContextState> {
+  return requestData<ContextState>(`/api/agent/sessions/${sessionId}/context-state`, { signal })
 }
 
 export function compactAgentContext(sessionId: string): Promise<{ checkpoint: ContextState['checkpoint']; state: ContextState }> {
@@ -241,13 +241,13 @@ export function fetchStoryMemories(
 }
 
 /** 记忆卡片集封面墙：每类型一叠牌的数量/最近更新/标题预览，一次拿全 */
-export async function fetchStoryMemorySets(novelId: string): Promise<StoryMemorySets> {
+export async function fetchStoryMemorySets(novelId: string, signal?: AbortSignal): Promise<StoryMemorySets> {
   const path = `/api/agent/novels/${novelId}/memory-sets`
   try {
-    return await requestData<StoryMemorySets>(path, { method: 'POST' })
+    return await requestData<StoryMemorySets>(path, { method: 'POST', signal })
   } catch (error) {
     if (error instanceof AgentApiError && (error.status === 405
-      || error.status === 404 && (!error.code || error.code === 'NOT_FOUND'))) return requestData<StoryMemorySets>(path)
+      || error.status === 404 && (!error.code || error.code === 'NOT_FOUND'))) return requestData<StoryMemorySets>(path, { signal })
     throw error
   }
 }

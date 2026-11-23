@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, ArrowUpRight, BookMarked, BookOpen, ChevronLeft, ChevronRight, Clapperboard,
   Feather, Globe, HeartHandshake, History, Library, LoaderCircle, MapPin, Package, PenLine, PencilLine,
@@ -7,6 +8,7 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { fetchStoryMemories, fetchStoryMemorySets } from '../agentApi'
+import { isMemoryAccessError, readMemorySnapshot } from '../lib/memory-read'
 import MemoryCardEditor, { MemoryCardDeleteDialog } from './MemoryCardEditor'
 import { MemoryMarkdown, MemorySnippet } from './MemoryMarkdown'
 import { useAgentStore } from '../agentStore'
@@ -50,16 +52,27 @@ type CatalogLocation = { memoryType: string; card?: StoryMemoryCard }
 type CardPage = { items: StoryMemoryCard[]; page: number; total: number; loading: boolean; error: string | null }
 const EMPTY_PAGE: CardPage = { items: [], page: 0, total: 0, loading: true, error: null }
 
-export default function AgentMemoryCards({ novelId }: { novelId: string }) {
-  const userId = useShellStore(state => state.sessionUser?.id ?? 'anonymous')
-  return <MemoryShelf key={JSON.stringify([userId, novelId])} novelId={novelId} />
+type ShelfProps = { novelId: string; sessionId?: string | null; active?: boolean }
+
+export default function AgentMemoryCards(props: ShelfProps) {
+  const userId = useShellStore(state => state.sessionUser?.id)
+  return <MemoryShelf key={JSON.stringify([userId, props.novelId])} userId={userId} {...props} />
 }
 
-function MemoryShelf({ novelId }: { novelId: string }) {
-  const [sets, setSets] = useState<StoryMemorySet[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [refresh, setRefresh] = useState(0)
+function MemoryShelf({ userId, novelId, sessionId, active }: ShelfProps & { userId?: string }) {
+  const queryClient = useQueryClient()
+  const queryKey = useMemo(() => ['studio', 'memory-sets', userId, novelId], [userId, novelId])
+  const { data: snapshot, error: failure, isFetching, isStale, refetch } = useQuery({
+    queryKey,
+    queryFn: ({ signal }) => readMemorySnapshot(fetchStoryMemorySets(novelId, signal).then(result =>
+      [...result.sets].sort((left, right) =>
+        (MEMORY_ORDER.get(left.memoryType) ?? MEMORY_ORDER.size) - (MEMORY_ORDER.get(right.memoryType) ?? MEMORY_ORDER.size)),
+    )),
+    enabled: Boolean(userId && novelId), staleTime: 30_000, retry: false,
+  })
+  const sets = snapshot?.value
+  const error = snapshot?.denied || failure?.message
+  const lastTask = useRef({ sessionId, active })
   const [location, setLocation] = useState<CatalogLocation | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const section = useRef<HTMLElement>(null)
@@ -68,24 +81,21 @@ function MemoryShelf({ novelId }: { novelId: string }) {
   const memorySpotlight = useAgentStore(state => state.memorySpotlight)
   const addComposerReference = useAgentStore(state => state.addComposerReference)
   const composerDraft = useAgentStore(state => state.composerDraft)
+  const denyCatalog = useCallback((reason: string) => {
+    void queryClient.cancelQueries({ queryKey, exact: true })
+    queryClient.setQueryData(queryKey, { denied: reason || '当前作品已不可访问。' })
+    setLocation(null)
+  }, [queryClient, queryKey])
 
   useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    void fetchStoryMemorySets(novelId).then(result => {
-      if (!cancelled) {
-        setSets([...result.sets].sort((left, right) =>
-          (MEMORY_ORDER.get(left.memoryType) ?? MEMORY_ORDER.size) - (MEMORY_ORDER.get(right.memoryType) ?? MEMORY_ORDER.size),
-        ))
-      }
-    }).catch((reason: unknown) => {
-      if (!cancelled) setError(reason instanceof Error ? reason.message : '创作记忆读取失败。')
-    }).finally(() => {
-      if (!cancelled) setLoading(false)
-    })
-    return () => { cancelled = true }
-  }, [novelId, refresh])
+    if (snapshot?.denied) setLocation(null)
+  }, [snapshot?.denied])
+
+  useEffect(() => {
+    const previous = lastTask.current
+    lastTask.current = { sessionId, active }
+    if (userId && (previous.sessionId === sessionId ? previous.active && !active : isStale)) void refetch({ cancelRefetch: false })
+  }, [sessionId, active, refetch, isStale, userId])
 
   useEffect(() => {
     if (!toast) return
@@ -94,7 +104,7 @@ function MemoryShelf({ novelId }: { novelId: string }) {
   }, [toast])
 
   useEffect(() => {
-    if (!memorySpotlight || memorySpotlight.nonce === spotlightNonce.current) return
+    if (!userId || snapshot?.denied || !memorySpotlight || memorySpotlight.nonce === spotlightNonce.current) return
     if (Date.now() - memorySpotlight.nonce > 8000 || !section.current || section.current.offsetParent === null) return
     const { memoryType, title, nonce, memoryId } = memorySpotlight
     let cancelled = false
@@ -111,9 +121,12 @@ function MemoryShelf({ novelId }: { novelId: string }) {
         trigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
         setLocation({ memoryType, card: result.items[0] })
       } else unavailable()
-    }).catch(unavailable)
+    }).catch((reason: unknown) => {
+      if (!cancelled && isMemoryAccessError(reason)) denyCatalog(reason.message)
+      else unavailable()
+    })
     return () => { cancelled = true }
-  }, [memorySpotlight, novelId])
+  }, [memorySpotlight, novelId, userId, snapshot?.denied, denyCatalog])
 
   const open = (memoryType: string, button: HTMLButtonElement) => {
     trigger.current = button
@@ -128,19 +141,24 @@ function MemoryShelf({ novelId }: { novelId: string }) {
     setToast('已引用到对话')
   }
   const changed = (message: string) => {
-    setRefresh(current => current + 1)
+    void refetch()
     setToast(message)
   }
-  const total = sets.reduce((sum, set) => sum + set.count, 0)
+  const total = sets?.reduce((sum, set) => sum + set.count, 0) ?? 0
+  const countClass = sets && isFetching ? 'studio-metric-updating' : undefined
 
   return (
     <section ref={section} aria-label="创作记忆" className="memory-shelf">
       <header className="memory-shelf-header">
         <h3><BookMarked aria-hidden="true" size={16} />创作记忆</h3>
-        {total > 0 && <span>{total} 张</span>}
+        {total > 0 && <span><span className={countClass}>{total}</span> 张</span>}
       </header>
-      {loading && sets.length === 0 ? <div className="memory-notice" role="status"><LoaderCircle aria-hidden="true" className="animate-spin" size={16} />读取创作记忆…</div>
-        : error && sets.length === 0 ? <div className="memory-notice"><p role="alert">{error}</p><button type="button" onClick={() => setRefresh(current => current + 1)}>重试</button></div>
+      {!sets && !error ? <div className="studio-pending memory-shelf-index" role="status" aria-label="正在读取创作记忆">
+        {Array.from({ length: 6 }, (_, i) => <div className="memory-shelf-tile" key={i} aria-hidden="true">
+          <span className="memory-shelf-tile-label"><span className="skeleton-shimmer h-4 w-4 rounded" /><span className="skeleton-shimmer h-3 w-16 rounded" /></span>
+          <span className="memory-shelf-tile-caption"><span className="skeleton-shimmer inline-block h-2.5 w-9 rounded" /></span>
+        </div>)}
+      </div> : !sets ? null
           : sets.length === 0 ? <p className="memory-notice">还没有创作记忆。</p>
             : <div className="memory-shelf-index">
               {sets.map(set => {
@@ -152,15 +170,16 @@ function MemoryShelf({ novelId }: { novelId: string }) {
                     <span className="memory-shelf-tile-title">{label}</span>
                     <ArrowUpRight size={15} aria-hidden="true" className="memory-tile-arrow" />
                   </span>
-                  <span className="memory-shelf-tile-caption">共 {set.count} 个</span>
+                  <span className="memory-shelf-tile-caption">共 <span className={countClass}>{set.count}</span> 个</span>
                 </button>
               })}
             </div>}
-      {location && <MemoryCatalog
+      {error && <div className="memory-notice"><p role="alert">{error}</p><button type="button" onClick={() => void refetch()}>重试</button></div>}
+      {location && sets && <MemoryCatalog
         key={JSON.stringify([location.memoryType, location.card?.id])}
         novelId={novelId} sets={sets} location={location} trigger={trigger.current} feedback={toast}
         onClose={() => setLocation(null)}
-        onChanged={changed} onQuote={quote}
+        onChanged={changed} onQuote={quote} onDenied={denyCatalog}
       />}
       {!location && <>
         <div role="status" className="sr-only">{toast}</div>
@@ -179,9 +198,10 @@ type CatalogProps = {
   onClose: () => void
   onChanged: (message: string) => void
   onQuote: (card: StoryMemoryCard) => void
+  onDenied: (message: string) => void
 }
 
-function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, onChanged, onQuote }: CatalogProps) {
+function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, onChanged, onQuote, onDenied }: CatalogProps) {
   const navigate = useAgentStore(state => state.requestToolNavigation)
   const { card: startCard } = location
   const [memoryType, setMemoryType] = useState(location.memoryType)
@@ -215,9 +235,13 @@ function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, on
       }))
     } catch (reason) {
       if (id !== request.id) return
+      if (isMemoryAccessError(reason)) {
+        onDenied(reason.message)
+        return
+      }
       setPage(current => ({ ...current, loading: false, error: reason instanceof Error ? reason.message : '卡片读取失败。' }))
     }
-  }, [novelId, memoryType, query, request])
+  }, [novelId, memoryType, query, request, onDenied])
 
   useEffect(() => {
     void loadPage(1)
@@ -360,7 +384,7 @@ function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, on
           <h3 ref={listHeading} tabIndex={-1} className="memory-index-heading">{label}<span>{page.loading && page.page === 0 ? '' : `${page.total} 张`}</span></h3>
           <div className="memory-index-scroll" ref={indexScroll}>
             {page.page === 0 && page.loading
-              ? <div className="memory-notice" role="status"><LoaderCircle aria-hidden="true" className="animate-spin" size={16} />读取记忆…</div>
+              ? <div className="studio-pending memory-notice" role="status"><LoaderCircle aria-hidden="true" className="animate-spin" size={16} />读取记忆…</div>
               : page.items.length === 0 && !page.error && <p className="memory-notice">{query ? '没有找到匹配的记忆。' : '这个分类还没有记忆。'}</p>}
             {page.items.length > 0 && <ul className="memory-card-list">
               {page.items.map(card => <li key={card.id}>

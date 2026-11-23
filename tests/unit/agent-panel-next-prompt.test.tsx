@@ -158,7 +158,15 @@ it.each([
     <AgentPanel novelId="opening-book" novelName="Test" sessionId={sessionId} ensureSession={async () => sessionId} />
   </ToastProvider></QueryClientProvider>)
   await waitFor(() => expect(client.getQueryData(['agent-queue', sessionId])).toMatchObject(first))
-  if (cached) expect(useAgentStore.getState().messages[0]?.id).toBe('cached')
+  const loading = () => screen.queryByRole('status', { name: '正在载入对话' })
+  if (cached) {
+    expect(useAgentStore.getState().messages[0]?.id).toBe('cached')
+    await screen.findByText('cached')
+    expect(loading()).toBeNull()
+  } else {
+    expect(loading()?.closest('.agent-conversation-scroll')).toBeTruthy()
+    expect(loading()?.querySelector('.skeleton-shimmer')).toBeTruthy()
+  }
   if (concurrent) {
     head = second
     act(() => remote.changed?.(sessionId))

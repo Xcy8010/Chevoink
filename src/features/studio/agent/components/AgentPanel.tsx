@@ -22,7 +22,7 @@ import {
 
 import { useWorkConversation } from '../../components/work-conversation-context'
 import { WorkConversationRestore } from '../../components/WorkConversationRestore'
-import LoadingMark from '@/components/ui/LoadingMark'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { copyToClipboard } from '@/lib/clipboard'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
@@ -190,8 +190,19 @@ type AgentPanelProps = {
   onImportModelSelection?: (novelId: string, selection: NovelImportModelSelection | null) => void
 }
 
-/** 无缓存首次拉取时图标流光的保底展示时长（一个完整扫光周期），避免快请求下只闪一下 */
-const MIN_SHIMMER_HOLD_MS = 1500
+function ConversationSkeleton() {
+  return <div role="status" aria-label="正在载入对话" className="studio-pending w-full space-y-7 py-4">
+    <div aria-hidden="true" className="ml-auto w-2/5 max-w-64 rounded-[18px] bg-[var(--surface-muted)] px-4 py-3">
+      <Skeleton className="h-2.5 w-4/5" />
+    </div>
+    <div aria-hidden="true" className="space-y-3">
+      <Skeleton className="mb-5 h-2.5 w-20" />
+      <Skeleton className="h-3 w-11/12" />
+      <Skeleton className="h-3 w-4/5" />
+      <Skeleton className="h-3 w-7/12" />
+    </div>
+  </div>
+}
 
 export function AgentPanel({
   voiceScopeKey,
@@ -256,7 +267,6 @@ export function AgentPanel({
   const sendScope = voiceScopeKey ?? `${novelId}:${sessionId ?? 'new'}`
   const messages = useMemo(() => projectOutgoingMessages(storeLoadedSessionId === sessionId ? canonicalMessages : [], outgoing, sendScope, novelId, sessionId, requestClocks), [canonicalMessages, outgoing, sendScope, novelId, sessionId, storeLoadedSessionId, requestClocks])
   const lastUserRequest = [...messages].reverse().find(message => message.role === 'user')
-  const hasOutgoing = messages.some(message => message.delivery)
   const deliveryErrorRef = useRef<{ clientRequestId: string; scope: string; sessionId: string | null; message: string } | null>(null)
   const { recentConversationText, blockInfoById, blockByAuthorId, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
   const activityGroups = useMemo(() => projectActivityGroups(messages), [messages])
@@ -499,21 +509,12 @@ export function AgentPanel({
   const [olderPagination, setOlderPagination] = useState<{ hasMore: boolean; before: string | null } | null>(null)
   const [loadingOlder, setLoadingOlder] = useState(false)
   useLayoutEffect(() => { setLoadingOlder(false); setOlderPagination(null) }, [sendScope])
-  // 无缓存首次加载的流光保底窗口（快请求下也走完一个扫光周期）
-  const [shimmerHolding, setShimmerHolding] = useState(false)
-  // 历史拉取失败的会话：不能标记成“已恢复”（否则不再重试），但需让渲染层退出加载态，避免流光永久转圈
   const [historyErrorSessionId, setHistoryErrorSessionId] = useState<string | null>(null)
-  // 加载态完全由全局 store 状态派生，不再依赖任何局部标记：
-  // 只有 store 明确宣告「本会话已水合」（loadedSessionId 命中）或「本就没有会话」时才允许欢迎页，
-  // 其余一切中间态（切换中/拉取中/宿主解析中/水合归属不明）都走图标流光，从结构上杜绍欢迎页闪现
   const conversationReady = messages.length > 0
-  const conversationSettled =
-    sessionId === null || storeLoadedSessionId === sessionId || historyErrorSessionId === sessionId
-  const conversationLoading =
-    // 保底窗口优先：无缓存首载即便请求 200ms 就回来，也走完一个完整扫光周期再显示，避免流光一闪而过
-    !hasOutgoing && (shimmerHolding ||
-    (!conversationReady &&
-      (sessionResolving || (sessionId !== null && hydratingSessionId === sessionId) || !conversationSettled)))
+  const conversationLoading = !conversationReady && (sessionId
+    ? storeLoadedSessionId !== sessionId && historyErrorSessionId !== sessionId
+    : sessionResolving)
+  const composerScopePending = conversationLoading || (sessionResolving && !voiceScopeKey)
   const visibleQuestion = storeLoadedSessionId === sessionId && conversationReady && !conversationLoading && !workConversation.collapsed
     ? pendingQuestion
     : null
@@ -1070,17 +1071,12 @@ export function AgentPanel({
     }
 
     const cached = readSessionMessagesCache(sessionId)
-    let holdTimer: number | null = null
     setHistoryErrorSessionId(null)
     // 切到别的会话才丢弃分支信息，回到同一会话时保留，避免提示闪一下再出现
     setForkInfo((current) => (current && current.sessionId === sessionId ? current : null))
     if (cached) {
       // 有缓存：绘制前同步复原，切换即显示，全程不进任何加载态（后续请求静默修正）
       useAgentStore.getState().restoreMessages(cached, sessionId)
-    } else {
-      // 无缓存：进图标流光，并保底一个完整扫光周期
-      setShimmerHolding(true)
-      holdTimer = window.setTimeout(() => setShimmerHolding(false), MIN_SHIMMER_HOLD_MS)
     }
 
     useAgentStore.getState().beginSessionHydration(sessionId)
@@ -1134,10 +1130,6 @@ export function AgentPanel({
 
     return () => {
       cancelled = true
-      if (holdTimer !== null) {
-        window.clearTimeout(holdTimer)
-      }
-      setShimmerHolding(false)
       // 兜底：会话切换/面板卸载时结束水合标记，不让加载态悬挂
       useAgentStore.getState().endSessionHydration(sessionId)
     }
@@ -1744,11 +1736,9 @@ export function AgentPanel({
       {/* 消息流 */}
       <div data-agent-body className="agent-conversation-body">
       <div ref={scrollRef} onScroll={handleMessagesScroll} className="agent-conversation-scroll min-h-0 overflow-y-auto">
-      <div ref={scrollContentRef} className={cn('agent-conversation-width', conversationLoading && 'flex items-center justify-center')}>
+      <div ref={scrollContentRef} className="agent-conversation-width">
         {conversationLoading ? (
-          /* 任何「归属不明」的中间态都走 Codex 式 Agent 图标流光（居中）：图标形状作 mask、渐变光带扫过。
-             必须排在内容分支之前：否则请求一返回就被 conversationReady 短路掉，1.5s 保底窗口形同虚设 */
-          <LoadingMark className="flex items-center justify-center" label="正在载入对话" />
+          <ConversationSkeleton />
         ) : conversationReady ? (
           /* 已有内容直接呈现：切回已加载会话 / 同会话重用 / 直播收尾时不插任何加载态，做到「有缓存直接显示」。
              按会话取 key：跨会话切换重放淡入，同会话流式追加不重挂载 */
@@ -1767,7 +1757,7 @@ export function AgentPanel({
                 </button>
               </div>
             ) : null}
-            <Suspense fallback={<LoadingMark className="mx-auto" label="正在载入对话" />}>
+            <Suspense fallback={<ConversationSkeleton />}>
             {messages.map((message) => {
               if (message.role === 'user') {
                 // Expanding execution history must not turn internal goal
@@ -2044,7 +2034,10 @@ export function AgentPanel({
           running={active}
           nextPrompt={nextPrompt?.text}
           onContinue={canContinue ? goalView.runBelongsToGoal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
-          disabled={conversationLoading || modelPreference.loading}
+          disabled={composerScopePending || modelPreference.loading}
+          draftReadOnly={composerScopePending || (modelPreference.loading && (!voiceScopeKey || sessionResolving))}
+          modelLoading={windowConfiguration.loading || (!modelSelectionExplicit && modelPreference.loading)
+            || (modelTier === 'custom' && customModelsQuery.isPending)}
           onSend={handleSend}
           creativeFreedom={creativeFreedom}
           onCreativeFreedomChange={setCreativeFreedom}

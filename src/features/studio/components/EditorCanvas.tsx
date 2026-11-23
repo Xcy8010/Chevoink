@@ -1,5 +1,6 @@
+import StudioPaneSkeleton from './StudioPaneSkeleton'
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
-import { ChevronDown, FilePenLine, FolderPlus, LoaderCircle, MessageSquarePlus, MoreHorizontal, RefreshCcw, Settings2, Upload } from 'lucide-react'
+import { ChevronDown, FilePenLine, FolderPlus, MessageSquarePlus, MoreHorizontal, RefreshCcw, Settings2, Upload } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import type { ChapterStatus } from '../../../../shared/contracts/index.js'
@@ -328,12 +329,7 @@ export default function EditorCanvas({
 
   if (chapterLoading && !chapterDraft) {
     return (
-      <section className="flex h-full min-h-0 items-center justify-center p-6">
-        <div className="flex items-center gap-3 text-sm text-[var(--text-secondary)]">
-          <LoaderCircle className="h-5 w-5 animate-spin" />
-          <span>正在加载章节内容...</span>
-        </div>
-      </section>
+      <StudioPaneSkeleton label="正在载入章节内容" shape="document" />
     )
   }
 

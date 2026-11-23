@@ -235,7 +235,7 @@ export function StudioSkeleton() {
       aria-label="创作区加载中"
     >
       {/* 手机端：顶部双视图导航、实际任务控件与底部输入区。 */}
-      <div className="flex min-h-0 flex-1 flex-col lg:hidden" data-studio-skeleton="mobile">
+      <div className="studio-pending flex min-h-0 flex-1 flex-col lg:hidden" data-studio-skeleton="mobile">
         <div ref={mobileSystemSurfaceRef} className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--app-bg)] pl-[max(8px,var(--safe-left,0px))] pr-[max(8px,var(--safe-right,0px))] pt-[var(--safe-top,0px)]" data-studio-region="mobile-header">
           <div className="grid h-14 grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2">
             <div data-studio-nav-key="menu"><Skeleton className="h-11 w-11 rounded-xl" /></div>
@@ -274,7 +274,7 @@ export function StudioSkeleton() {
       </div>
 
       {/* 桌面端：作品与任务融合侧栏固定在左侧，命令栏保留唯一折叠入口。 */}
-      <div className="hidden min-h-0 flex-1 lg:flex" data-studio-skeleton="desktop">
+      <div className="studio-pending hidden min-h-0 flex-1 lg:flex" data-studio-skeleton="desktop">
         <aside className="flex w-[284px] shrink-0 flex-col border-r border-[var(--border-subtle)] p-3" data-studio-region="desktop-workspace-sidebar">
           <div className="flex h-9 items-center gap-2"><Skeleton className="h-5 w-5 rounded-full" /><Skeleton className="h-3.5 w-24" /><Skeleton className="ml-auto h-7 w-7 rounded-[7px]" /></div>
           <Skeleton className="mt-3 h-8 w-full rounded-[4px]" />

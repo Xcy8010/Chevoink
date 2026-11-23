@@ -50,6 +50,34 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); window.getSelection()?.removeAllRanges(); vi.restoreAllMocks() })
 
+it('replaces only the model label while waiting and keeps the editor and its draft mounted', () => {
+  const input = props()
+  const view = render(<AgentComposer {...input} />)
+  typeDraft('模型切换期间的草稿')
+  const draft = editor()
+  view.rerender(<AgentComposer {...input} disabled modelLoading draftReadOnly={false} />)
+  expect(draft.getAttribute('contenteditable')).toBe('true')
+  typeDraft('等待读取模型时继续起草')
+  fireEvent.keyDown(draft, { key: 'Enter' })
+  const send = screen.getByRole('button', { name: '发送' }) as HTMLButtonElement
+  expect(send.disabled).toBe(true)
+  expect(input.onSend).not.toHaveBeenCalled()
+  const loading = screen.getByRole('status', { name: '正在加载当前模型' })
+  expect(loading.closest('summary')).toBe(screen.getByLabelText('模型档位'))
+  expect(loading.querySelector('.skeleton-shimmer')).toBeTruthy()
+  expect(fireEvent.click(screen.getByLabelText('模型档位'))).toBe(false)
+  view.rerender(<AgentComposer {...input} />)
+  expect(screen.queryByRole('status', { name: '正在加载当前模型' })).toBeNull()
+  expect(screen.getByLabelText('模型档位').textContent).toContain('极速')
+  expect(editor()).toBe(draft)
+  expect(draft.textContent).toBe('等待读取模型时继续起草')
+  expect(send.disabled).toBe(false)
+  view.rerender(<AgentComposer {...input} disabled modelLoading />)
+  expect(draft.getAttribute('contenteditable')).toBe('false')
+  fireEvent.keyDown(draft, { key: 'Enter', shiftKey: true })
+  expect(useAgentStore.getState().composerDraft).toBe('等待读取模型时继续起草')
+})
+
 describe('composer slash menu', () => {
   it('matches plus entries, wording and capability gating, within a bounded full-width card', () => {
     const input = { ...props(), goalCreationEnabled: true, skills: [skill()] }

@@ -69,6 +69,21 @@ describe('关系网视图交互', () => {
     const color = state.minimap.nodeColor as (node: Record<string, unknown>) => string
     expect(color(state.nodes[0])).not.toBe(color(state.nodes[1]))
   })
+  it('返回同一关系网时立即使用已完成的布局，拓扑变化后才重新计算', () => {
+    const cache = new Map<number, MemoryGraphLayoutResult>()
+    const first = render(<MemoryGraphCanvas graph={memoryGraphFixture} layoutCache={cache} />)
+    finish()
+    first.unmount()
+    const next = render(<MemoryGraphCanvas graph={memoryGraphFixture} layoutCache={cache} />)
+    expect(screen.getByTestId('map')).toBeTruthy()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(LayoutWorker.instances).toHaveLength(1)
+    next.rerender(<MemoryGraphCanvas graph={{ ...memoryGraphFixture, edges: [] }} layoutCache={cache} />)
+    expect(screen.getByTestId('map')).toBeTruthy()
+    expect(LayoutWorker.instances).toHaveLength(2)
+    finish()
+    expect(state.edges).toHaveLength(0)
+  })
   it('真实 ReactFlow 节点包装器允许指针事件并将点击传回实体选择', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(function (this: HTMLElement) { return Number.parseFloat(this.style.width) || 800 })

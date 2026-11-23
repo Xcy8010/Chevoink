@@ -1,11 +1,13 @@
 import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Background, BackgroundVariant, BaseEdge, Controls, Handle, MiniMap, Position, ReactFlow, type Edge, type EdgeProps, type Node, type NodeProps } from '@xyflow/react'
-import { LoaderCircle, Network, Orbit, PanelBottomClose, PanelBottomOpen, X } from 'lucide-react'
+import { Network, Orbit, PanelBottomClose, PanelBottomOpen, X } from 'lucide-react'
 import '@xyflow/react/dist/style.css'
 import type { MemoryGraph, MemoryGraphNode } from '../../../../shared/contracts/index.js'
 import { buildReadableMemoryGraphEdges, MEMORY_NODE_HEIGHT, MEMORY_NODE_WIDTH, memoryGraphNeighborhood, memoryGraphTopologyKey, memoryNodeColor, type MemoryGraphRoute } from '../lib/memory-graph-layout'
 import { useMemoryGraphLayout } from '../lib/use-memory-graph-layout'
 import MemoryGraphGalaxy from './MemoryGraphGalaxy'
+import type { MemoryGraphLayoutResult } from '../lib/memory-graph.worker'
+import StudioPaneSkeleton from './StudioPaneSkeleton'
 import './memory-graph.css'
 
 type FlowNode = Node<{ memory: MemoryGraphNode; onSelect: (id: string) => void; selected: boolean; dimmed: boolean }, 'memory'>
@@ -41,7 +43,7 @@ function MemoryRelationship({ id, data }: EdgeProps<FlowEdge>) {
 const nodeTypes = { memory: MemoryNode }
 const edgeTypes = { memory: MemoryRelationship }
 
-export default function MemoryGraphCanvas({ graph }: { graph: MemoryGraph }) {
+export default function MemoryGraphCanvas({ graph, layoutCache }: { graph: MemoryGraph; layoutCache?: Map<number, MemoryGraphLayoutResult> }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detailCollapsed, setDetailCollapsed] = useState(false)
   const detailId = useId()
@@ -78,8 +80,8 @@ export default function MemoryGraphCanvas({ graph }: { graph: MemoryGraph }) {
   // Topology keys remain equal across polling responses with identical entities and links.
   const topologyKey = memoryGraphTopologyKey(graph.nodes.map((node) => node.id), readableEdges)
   const routeKey = JSON.stringify(readableEdges.map(({ id, source, target, type }) => ({ id, source, target, type })))
-  const mapLayout = useMemoryGraphLayout(topologyKey, routeKey, 2, mode === 'map')
-  const galaxyLayout = useMemoryGraphLayout(topologyKey, '', 3, galaxyVisited && mode === 'galaxy')
+  const mapLayout = useMemoryGraphLayout(topologyKey, routeKey, 2, mode === 'map', layoutCache)
+  const galaxyLayout = useMemoryGraphLayout(topologyKey, '', 3, galaxyVisited && mode === 'galaxy', layoutCache)
   const mapPositions = mapLayout.layout?.positions
   const routes = mapLayout.layout?.routes
   const galaxyPositions = galaxyLayout.layout?.positions
@@ -129,7 +131,9 @@ export default function MemoryGraphCanvas({ graph }: { graph: MemoryGraph }) {
       </ReactFlow> : null}
     </div>
     {galaxyVisited ? <div className="memory-galaxy-view" hidden={mode !== 'galaxy'}>{galaxyPositions ? <MemoryGraphGalaxy nodes={galaxyNodes} edges={galaxyEdges} points={galaxyPositions} selectedId={effectiveSelectedId} onSelect={selectNode} active={mode === 'galaxy'} /> : null}</div> : null}
-    {currentLayout.pending ? <div className="memory-graph-loading" role="status"><LoaderCircle size={16} className="animate-spin" />正在布局关系网…</div> : null}
+    {currentLayout.pending && !currentLayout.layout ? <div className="pointer-events-none absolute inset-0">
+      <StudioPaneSkeleton label="正在布局关系网" shape="graph" bodyOnly />
+    </div> : currentLayout.pending ? <div role="status" aria-label="正在更新关系网布局" className="studio-pending skeleton-shimmer pointer-events-none absolute inset-x-0 top-0 h-0.5" /> : null}
     {currentLayout.failed ? <div className="memory-graph-loading" role="alert">关系网布局载入失败。<button type="button" onClick={currentLayout.retry}>重试</button></div> : null}
     <div className="memory-graph-controls memory-graph-modes" role="group" aria-label="关系网视图">
       <button type="button" title="关系图" aria-label="关系图视图" aria-pressed={mode === 'map'} onClick={() => setMode('map')}><Network size={17} /></button>
