@@ -59,6 +59,7 @@ import IdePerspective from './components/IdePerspective'
 import IdeNavigationRail from './components/IdeNavigationRail'
 import { AgentPanel } from './agent/components/AgentPanel'
 import { fetchAgentSessions, updateAgentSessionSettings } from './agent/agentApi'
+import { refreshMemoryAfterWrite } from './agent/lib/memory-read'
 import { AgentActivityBar } from './agent/components/AgentActivityBar'
 import ContextDetailDialog from './agent/components/ContextDetailDialog'
 import { WORKSPACE_WRITE_TOOLS, useAgentStore, type ComposerReference } from './agent/agentStore'
@@ -1356,10 +1357,10 @@ export default function StudioWorkspace() {
         if (targetId) agentFollowChapterRef.current(targetId)
       }
       if (event.type === 'tool.result' && event.ok && ['memory_save', 'memory_event_save', 'memory_relation_save'].includes(event.toolName)) {
-        void queryClient.invalidateQueries({ queryKey: ['studio', 'memory-sets', taskUiUserId, activeNovelId] }, { cancelRefetch: false })
+        void refreshMemoryAfterWrite(queryClient, ['studio', 'memory-sets', taskUiUserId, activeNovelId])
       }
       if (event.type === 'run.finished' || (event.type === 'context.compaction' && event.state === 'completed')) {
-        void queryClient.invalidateQueries({ queryKey: ['studio', 'memory-context', taskUiUserId, activeNovelId, live.activeSessionId] }, { cancelRefetch: false })
+        void refreshMemoryAfterWrite(queryClient, ['studio', 'memory-context', taskUiUserId, activeNovelId, live.activeSessionId])
       }
       if (event.type === 'tool.result' && event.ok && event.toolName.startsWith('memory_')) {
         void queryClient.invalidateQueries({ queryKey: ['studio', activeNovelId, 'memory-graph'] })

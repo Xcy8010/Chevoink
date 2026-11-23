@@ -61,8 +61,9 @@ export default function AgentContextPanel({ userId, novelId, sessionId, active =
     setMessage(null)
     compression.mutate(sessionId, {
       onSuccess: result => {
-        void queryClient.cancelQueries({ queryKey, exact: true })
-        queryClient.setQueryData(queryKey, { value: result.state })
+        if (!queryClient.getQueryData<typeof snapshot>(queryKey)?.value) return
+        // Only a current authorized read can replace the displayed checkpoint.
+        void queryClient.invalidateQueries({ queryKey, exact: true })
         setMessage(result.checkpoint ? `已生成第 ${result.checkpoint.version} 版上下文检查点。` : '当前有效对话较短，暂时无需压缩。')
       },
       onError: reason => {

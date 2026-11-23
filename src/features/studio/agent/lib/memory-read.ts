@@ -1,4 +1,12 @@
+import type { QueryClient, QueryKey } from '@tanstack/react-query'
 import { AgentApiError } from '../agentApi'
+
+export function refreshMemoryAfterWrite(client: QueryClient, queryKey: QueryKey) {
+  const filter = { queryKey, exact: true }
+  // Also supersede a cold read, which normal invalidation would otherwise reuse.
+  void client.cancelQueries(filter)
+  return client.invalidateQueries(filter)
+}
 
 // A definitive loss of access replaces the snapshot. Later network failures
 // must not make previously visible private data reappear.

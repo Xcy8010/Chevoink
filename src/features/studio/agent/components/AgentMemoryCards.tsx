@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { fetchStoryMemories, fetchStoryMemorySets } from '../agentApi'
-import { isMemoryAccessError, readMemorySnapshot } from '../lib/memory-read'
+import { isMemoryAccessError, readMemorySnapshot, refreshMemoryAfterWrite } from '../lib/memory-read'
 import MemoryCardEditor, { MemoryCardDeleteDialog } from './MemoryCardEditor'
 import { MemoryMarkdown, MemorySnippet } from './MemoryMarkdown'
 import { useAgentStore } from '../agentStore'
@@ -94,8 +94,10 @@ function MemoryShelf({ userId, novelId, sessionId, active }: ShelfProps & { user
   useEffect(() => {
     const previous = lastTask.current
     lastTask.current = { sessionId, active }
-    if (userId && (previous.sessionId === sessionId ? previous.active && !active : isStale)) void refetch({ cancelRefetch: false })
-  }, [sessionId, active, refetch, isStale, userId])
+    if (!userId) return
+    if (previous.sessionId === sessionId && previous.active && !active) void refreshMemoryAfterWrite(queryClient, queryKey)
+    else if (previous.sessionId !== sessionId && isStale) void refetch({ cancelRefetch: false })
+  }, [sessionId, active, refetch, isStale, userId, queryClient, queryKey])
 
   useEffect(() => {
     if (!toast) return

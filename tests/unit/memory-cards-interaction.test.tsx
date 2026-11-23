@@ -322,6 +322,32 @@ it('discards an inaccessible snapshot even if the next retry fails, and isolates
   expect(screen.queryByText('42%')).toBeNull()
 })
 
+it('supersedes a pending first memory read when the run finishes', async () => {
+  const oldRead = deferred<Awaited<ReturnType<typeof fetchStoryMemorySets>>>()
+  vi.mocked(fetchStoryMemorySets).mockReturnValueOnce(oldRead.promise)
+  const panel = render(<AgentMemoryCards novelId="n" sessionId="task-a" active />)
+  panel.rerender(<AgentMemoryCards novelId="n" sessionId="task-a" active={false} />)
+  await screen.findByRole('button', { name: '世界观卡片集 1 张' })
+  await act(async () => oldRead.resolve({ sets: [] }))
+  expect(screen.getByRole('button', { name: '世界观卡片集 1 张' })).toBeTruthy()
+})
+
+it('does not restore a revoked checkpoint when an earlier compaction finishes', async () => {
+  vi.mocked(fetchAgentContextState).mockResolvedValueOnce(contextA)
+  const late = deferred<Awaited<ReturnType<typeof compactAgentContext>>>()
+  vi.mocked(compactAgentContext).mockReturnValueOnce(late.promise)
+  render(<AgentMemoryCenter sessionId="task-a" novelId="n" />)
+  await screen.findByText('42%')
+  fireEvent.click(screen.getByRole('button', { name: '手动压缩当前会话' }))
+  vi.mocked(fetchAgentContextState).mockRejectedValueOnce(new AgentApiError('无权访问', 403, null))
+  fireEvent.click(screen.getByRole('button', { name: '刷新上下文状态' }))
+  await screen.findByText('无权访问')
+  await act(async () => late.resolve({ state: contextA, checkpoint: null }))
+  expect(screen.getByText('无权访问')).toBeTruthy()
+  expect(screen.queryByText('42%')).toBeNull()
+  expect(fetchAgentContextState).toHaveBeenCalledTimes(2)
+})
+
 it('closes a revoked catalog and never shows the first novel while a second novel is pending', async () => {
   const panel = render(<AgentMemoryCards novelId="first" />)
   vi.mocked(fetchStoryMemories).mockRejectedValueOnce(new AgentApiError('作品已不可访问', 404, null))
