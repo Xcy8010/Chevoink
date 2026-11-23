@@ -13,6 +13,22 @@ beforeEach(() => {
   useAgentStore.setState({ runId: 'r', activeSessionId: 's', loadedSessionId: 's', phase: 'starting', messages: [{ ...user }], lastSeq: 0, workspaceActivities: [] })
 })
 const current = () => useAgentStore.getState().messages[0].runTiming!
+it('anchors each compression cycle to its own first measurement through remote event replay', () => {
+  const { applyEvent } = useAgentStore.getState()
+  const measure = (seq: number, estimatedTokens: number) => applyEvent({ type: 'context.usage', runId: 'r', seq,
+    ts: ts(seq), estimatedTokens, contextWindowTokens: 128000, compactAtTokens: 99840 })
+  const complete = (seq: number) => applyEvent({ type: 'context.compaction', state: 'completed', runId: 'r', seq,
+    messageId: 'compact-' + seq, ts: ts(seq) })
+  measure(1, 115391)
+  complete(2)
+  measure(3, 91570)
+  measure(4, 103082)
+  complete(2)
+  expect(useAgentStore.getState().requestCompaction).toEqual({ runId: 'r', seq: 2, retainedTokens: 91570 })
+  complete(5)
+  measure(6, 70400)
+  expect(useAgentStore.getState().requestCompaction).toEqual({ runId: 'r', seq: 5, retainedTokens: 70400 })
+})
 it.each(['succeeded', 'failed', 'cancelled'] as const)('freezes %s runs using their terminal event', status => {
   useAgentStore.getState().applyEvent(start(1, 0))
   useAgentStore.getState().applyEvent({ type: 'message.start', runId: 'r', seq: 2, ts: ts(1), messageId: 'a', role: 'assistant' })

@@ -288,7 +288,8 @@ it('does not release a later-stage report while a previous stage still has an ac
   const next = message('outline', [report, call('plan', 'plan_save', { status: 'running' })])
   const view = render(<Transcript active="r" messages={[message('read', [activity, initial]), next]} />)
   expect(screen.queryByText(report.text)).toBeNull()
-  expect(screen.queryByRole('button', { name: `已${goalTitle}` })).toBeNull()
+  expect(screen.getByRole('button', { name: `正在${goalTitle}` }).querySelector('.agent-processing-shimmer')).toBeTruthy()
+  expect(screen.getByRole('button', { name: '正在写入创作计划' }).querySelector('.agent-processing-shimmer')).toBeTruthy()
   view.rerender(<Transcript active="r" messages={[message('read', [activity, { ...initial, status: 'success' }]), next]} />)
   const finished = screen.getByRole('button', { name: `已${goalTitle}` })
   const narrative = screen.getByText(report.text)
@@ -384,6 +385,30 @@ it('keeps the same activity while awaiting approval or an answer, and does not c
   expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(0)
 })
 
+it('keeps a parent tool running when its child settles with the same provider call ID', () => {
+  const store = useAgentStore.getState()
+  const runId = 'nested'
+  const base = { runId, messageId: 'batch', callId: 'call_0', ts: '2026-11-20T10:00:00Z' }
+  try {
+    store.beginRun(runId, '核对人物', 'session')
+    store.applyEvent({ ...base, seq: 1, type: 'message.start', role: 'assistant' })
+    store.applyEvent({ ...base, seq: 2, type: 'tool.call', toolName: 'subagent_run', title: '协作创作', args: {} })
+    store.applyEvent({ ...base, seq: 3, type: 'tool.call', subagentCallId: 'call_0', toolName: 'chapter_read', title: '查看章节', args: {} })
+    store.applyEvent({ ...base, seq: 4, type: 'tool.result', subagentCallId: 'call_0', toolName: 'chapter_read', ok: true, summary: '已读取' })
+    const view = render(<Transcript active={runId} messages={useAgentStore.getState().messages} />)
+    const row = screen.getByRole('button', { name: '正在协作创作' })
+    expect(row.querySelector('.agent-processing-shimmer')).toBeTruthy()
+    fireEvent.click(row)
+    expect(view.container.querySelector('[data-activity-tool="chapter_read"]')?.textContent).toContain('已查看章节')
+    store.applyEvent({ ...base, seq: 5, type: 'tool.result', toolName: 'subagent_run', ok: true, summary: '协作完成' })
+    view.rerender(<Transcript active={runId} messages={useAgentStore.getState().messages} />)
+    expect(screen.getByRole('button', { name: '已协作创作' })).toBe(row)
+    expect(row.querySelector('.agent-processing-shimmer')).toBeNull()
+  } finally {
+    store.resetRun()
+  }
+})
+
 it('projects the same title and receipt after a stream disconnect and a fresh history load', () => {
   const store = useAgentStore.getState()
   const runId = 'reconnection'
@@ -438,6 +463,20 @@ it('keeps a resumed durable goal together and gives a separate request its own r
   expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(previous)
   expect(screen.getByRole('button', { name: `正在${goalTitle}` })).not.toBe(previous)
   expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(2)
+})
+
+it('does not complete a resumed stage from an earlier execution or a stale message completion timestamp', () => {
+  const timestamp = '2026-11-20T10:00:00Z'
+  const finished = { scopeId: 'root:one', sourceRunId: 'old', status: 'finished' as const, elapsedMs: 100, activeSince: null, lastSeq: 4, completedAt: timestamp }
+  const live = { ...finished, sourceRunId: 'resumed', status: 'running' as const, completedAt: null }
+  const original = { ...message('one', [activity, call('read', 'chapter_read')], 'old'), runTiming: finished, completedAt: timestamp }
+  const resumed = { ...message('two', [activity, call('read2', 'chapter_read')], 'resumed'), runTiming: live }
+  const user = { ...message('request', [], 'resumed'), role: 'user' as const, runTiming: live }
+  const view = render(<Transcript active="resumed" messages={[original, user, resumed]} />)
+  const row = screen.getByRole('button', { name: `正在${goalTitle}` })
+  expect(row.querySelector('.agent-processing-shimmer')).toBeTruthy()
+  view.rerender(<Transcript active="resumed" messages={[{ ...original, runTiming: live }, user, resumed]} />)
+  expect(screen.getByRole('button', { name: `正在${goalTitle}` })).toBe(row)
 })
 
 it('upgrades one focused disclosure from preparation to persisted write, without showing thought or parameters', () => {
@@ -712,11 +751,11 @@ it('folds creation settings and the cover workflow while keeping the live row an
     message('cover', [{ type: 'text', text: '用刚保存的构图生成候选。' }, picture]),
   ]
   const view = render(<Transcript active="r" messages={messages(setup, generate)} />)
-  const settingsRow = screen.getByRole('button', { name: '查看创作设定有未完成项', exact: true })
+  const settingsRow = screen.getByRole('button', { name: '正在查看创作设定', exact: true })
   const coverRow = screen.getByRole('button', { name: '正在制作封面', exact: true })
   fireEvent.click(settingsRow)
   fireEvent.click(coverRow)
-  expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(1)
+  expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(2)
   expect(screen.queryByText('核对记忆冲突')).toBeNull()
   expect(screen.getByText('查看文风画像未完成')).toBeTruthy()
   expect(screen.getByText('正在查看人物声口')).toBeTruthy()

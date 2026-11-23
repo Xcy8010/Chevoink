@@ -240,14 +240,14 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, chapte
   const calls = group.calls
   const grouped = calls.length - group.stageStart > 1
   const unresolved = group.unsettled
-  const running = runActive && active ? [...calls].reverse().find(part => part.status === 'running') : undefined
+  const running = runActive ? [...calls].reverse().find(part => part.status === 'running') : undefined
   const part = running ?? unresolved ?? calls.at(-1)
   const iconPart = group.title ? calls[group.stageStart] : part
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
   const waitingForAnswer = runActive && calls.some(call => call.toolName === 'ask_user' && call.status === 'running')
   const waitingForApproval = runActive && awaitingApprovalCallId !== undefined
     && calls.some(call => !call.preparing && call.status === 'running' && call.callId === awaitingApprovalCallId)
-  const namedInProgress = Boolean(group.title && runActive && active && (running || !group.closed && !group.completed))
+  const namedInProgress = Boolean(group.title && runActive && (running || active && !group.closed && !group.completed))
   const waiting = Boolean(importWaiting || waitingForAnswer || waitingForApproval)
   const Icon = iconPart && toolIcon(iconPart)
   const stageCalls = calls.slice(group.stageStart)
@@ -268,9 +268,9 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, chapte
       ? `${readLabel}有未完成项` : `已${readLabel}`
     else if (grouped && !running && unresolved) label = `${getAgentToolPresentation(part.toolName).label}有未完成项`
     else if (readChapterIds && readChapterIds.size > 1 && stageCalls.every(call => call.status === 'success' && !call.preparing)) label = `已查看 ${readChapterIds.size} 章正文`
-    else label = activitySummary(part, runActive && active, chapters, false, grouped && !readChapterIds, group.staleReviewCalls?.has(part))
+    else label = activitySummary(part, runActive, chapters, false, grouped && !readChapterIds, group.staleReviewCalls?.has(part))
   }
-  const showingActivity = Boolean(active && running && !waiting)
+  const showingActivity = Boolean(running && !waiting)
   const shimmer = runActive && Boolean(showingActivity || namedInProgress) && !waiting
   const step = group.title ? label : part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : ''
   const enter = useRef<boolean | undefined>(undefined)

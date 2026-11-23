@@ -132,6 +132,41 @@ it('keeps canonical request replacement and queued-message updates from overridi
   expect(node.scrollTop).toBe(500)
 })
 
+it('keeps the observer on the same visible message when remote history changes earlier row heights', () => {
+  vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(1)
+  const { result, node, rerender } = fixture()
+  rerender({ loading: false })
+  node.scrollTop = 500
+  node.dispatchEvent(touch('touchstart', 15))
+  node.dispatchEvent(touch('touchmove', 50))
+  const earlier = node.appendChild(document.createElement('div'))
+  const reading = node.appendChild(document.createElement('div'))
+  earlier.id = 'agent-message-earlier'
+  reading.id = 'agent-message-reading'
+  let start = 488
+  const rect = (top: number, bottom: number) => ({ top, bottom } as DOMRect)
+  vi.spyOn(earlier, 'getBoundingClientRect').mockImplementation(() => rect(-500, start - node.scrollTop))
+  vi.spyOn(reading, 'getBoundingClientRect').mockImplementation(() => rect(start - node.scrollTop, start + 250 - node.scrollTop))
+  act(() => result.current.captureRemoteViewport())
+  start -= 140
+  rerender({ loading: false })
+  expect(reading.getBoundingClientRect().top).toBe(-12)
+  expect(result.current.lastScrollTopRef.current).toBe(360)
+  expect(result.current.pinnedToBottomRef.current).toBe(false)
+})
+
+it('positions the observer at the new tail before the first follow frame when already following', () => {
+  vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(1)
+  const { result, node, rerender } = fixture()
+  rerender({ loading: false })
+  node.scrollTop = 800
+  act(() => result.current.captureRemoteViewport())
+  node.scrollTop = 290 // browser clamp during snapshot replacement
+  rerender({ loading: false })
+  expect(node.scrollTop).toBe(1000)
+  expect(result.current.pinnedToBottomRef.current).toBe(true)
+})
+
 it('follows changing layout only while pinned and cancels queued frames on unmount', () => {
   let frame!: FrameRequestCallback
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((next) => { frame = next; return 42 })

@@ -328,30 +328,49 @@ export async function getContextState(userId: string, sessionId: string, preferR
     preferRequest ? prisma.agentRun.findFirst({
       where: { userId, sessionId, ...MAIN_RUN_FILTER, events: { some: { type: 'context.usage' } } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      select: { id: true, status: true, events: { where: { type: 'context.usage' }, orderBy: { seq: 'desc' }, take: 1,
+      select: { id: true, events: { where: { type: 'context.usage' }, orderBy: { seq: 'desc' }, take: 1,
         select: { seq: true, createdAt: true, payload: true } } },
     }) : null,
   ])
   const base = { warningThreshold: WARNING_THRESHOLD, activeDirectiveCount: directives.length,
     checkpoint: checkpoint ? checkpointRecord(checkpoint) : null }
   const event = latest?.events[0]
-  if (latest && event && (!checkpoint || event.createdAt > checkpoint.createdAt || ['running', 'queued', 'awaiting_approval'].includes(latest.status))) {
+  if (latest && event && (!checkpoint || event.createdAt > checkpoint.createdAt)) {
     const sample = contextUsageSchema.safeParse(event.payload)
     if (sample.success) {
       const { estimatedTokens, contextWindowTokens, compactAtTokens } = sample.data
+      // Both execution protocols record the post-compaction measurement directly
+      // after completion. Read that exact pair, including for existing sessions.
+      const runScope = { userId, sessionId, ...MAIN_RUN_FILTER }
+      const completion = await prisma.agentRunEvent.findFirst({
+        where: { run: runScope, type: 'context.compaction', payload: { path: ['state'], equals: 'completed' },
+          OR: [{ runId: { not: latest.id } }, { seq: { lt: event.seq } }],
+          createdAt: { ...(checkpoint && { gt: checkpoint.createdAt }), lte: event.createdAt } },
+        orderBy: [{ createdAt: 'desc' }, { seq: 'desc' }], select: { runId: true, seq: true },
+      })
+      const first = completion
+        ? await prisma.agentRunEvent.findUnique({ where: { runId_seq: { runId: completion.runId, seq: completion.seq + 1 }, type: 'context.usage' },
+          select: { type: true, payload: true } })
+        : checkpoint ? await prisma.agentRunEvent.findFirst({ where: { run: runScope, type: 'context.usage',
+          createdAt: { gt: checkpoint.createdAt, lte: event.createdAt } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }],
+          select: { type: true, payload: true } }) : null
+      const retained = first?.type === 'context.usage' ? contextUsageSchema.safeParse(first.payload) : null
       return { ...base, requestSample: { runId: latest.id, seq: event.seq }, estimatedTokens, contextWindowTokens,
+        ...(retained?.success && { retainedTokens: retained.data.estimatedTokens }),
         usageRatio: estimatedTokens / contextWindowTokens, compactionThreshold: compactAtTokens / contextWindowTokens }
     }
   }
   // Historical clients and sessions without a measured request use saved history.
   const [recent, contextWindowTokens] = await Promise.all([
     prisma.agentMessage.findMany({ where: windowMessagesWhere(sessionId, checkpointBoundary(checkpoint)),
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true } }),
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true, createdAt: true } }),
     resolveSessionContextWindowTokens(userId, sessionId),
   ])
   const estimatedTokens = estimateTextTokens(recent.map((item) => messageText(item.parts)).join('\n')) + (checkpoint?.summaryTokens ?? 0)
   return {
     ...base, estimatedTokens, contextWindowTokens,
+    ...(preferRequest && checkpoint && { retainedTokens: checkpoint.summaryTokens + estimateTextTokens(
+      recent.filter(item => item.createdAt <= checkpoint.createdAt).map(item => messageText(item.parts)).join('\n')) }),
     usageRatio: estimatedTokens / contextWindowTokens, compactionThreshold: CONTEXT_COMPACTION_THRESHOLD,
   }
 }

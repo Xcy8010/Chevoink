@@ -26,6 +26,14 @@ it('omits process-only headlines while keeping summaries of real creative subjec
   }
 })
 
+it('leaves status to tool receipts, including model titles restored from history', () => {
+  for (const title of ['已完成章节复查', '复查完成', '已经查看正文', '未完成']) {
+    expect(visibleAgentActivityTitle(title)).toBeUndefined()
+  }
+  expect(visibleAgentActivityTitle('正在核对第十二章')).toBe('核对第十二章')
+  expect(visibleAgentActivityTitle('检查《已完成》的正文')).toBe('检查《已完成》的正文')
+})
+
 it('does not stream fragments of the title or drop text from a split chunk', () => {
   const title = '<activity-title>核对老周的出场时间</activity-title>\n'
   const text = '查看章节后发现，老周是在夜里到的。'

@@ -296,6 +296,15 @@ export function AgentPanel({
   const pendingQuestion = storeLoadedSessionId === sessionId && !pendingApproval
     ? (streamedQuestion && !streamedQuestion.longWait ? streamedQuestion : savedQuestion)
     : null
+  const [historyErrorSessionId, setHistoryErrorSessionId] = useState<string | null>(null)
+  const conversationReady = messages.length > 0
+  const conversationLoading = !conversationReady && (sessionId
+    ? storeLoadedSessionId !== sessionId && historyErrorSessionId !== sessionId
+    : sessionResolving)
+  const { scrollRef, scrollContentRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll, captureRemoteViewport } = useMessageScroll({
+    scopeKey: sendScope, messages, pendingApproval, pendingQuestion, conversationLoading, collapsed: workConversation.collapsed,
+    revealingText: settlingBlocks.size > 0,
+  })
   const refreshPendingQuestion = useCallback(() => {
     if (!questionOwner || !sessionId) return
     // A request issued before a stop, new question or terminal commit may
@@ -501,6 +510,7 @@ export function AgentPanel({
         ? now.messages.slice(0, overlap).filter(message => !coveredRuns.has(message.runId)) : []
       const keepOlderPages = older.length > 0
       const history = keepOlderPages ? [...older, ...payload.messages] : payload.messages
+      captureRemoteViewport()
       if (!keepOlderPages && payload.pagination) setOlderPagination({ hasMore: payload.pagination.hasMore, before: payload.pagination.earliestRunStartedAt })
       appliedHistory.current = revision
       if (payload.activeRunId) {
@@ -519,7 +529,7 @@ export function AgentPanel({
       }
     }).catch(() => { /* Next queue poll retries; never erase existing history. */ })
     return () => { cancelled = true }
-  }, [sessionId, storeLoadedSessionId, hydratingSessionId, phase, queueQuery.data, queueQuery.dataUpdatedAt, queryClient, connect, onRemoteTurnCompleted])
+  }, [sessionId, storeLoadedSessionId, hydratingSessionId, phase, queueQuery.data, queueQuery.dataUpdatedAt, queryClient, connect, onRemoteTurnCompleted, captureRemoteViewport])
 
   // 开始/结束时仅同步当前任务清单；请求期间有新待办事件或切换任务则丢弃响应。
   const todoSyncStage = phase === 'starting' ? null : isRunActive(phase) ? 'active' : 'settled'
@@ -543,7 +553,6 @@ export function AgentPanel({
   const [olderPagination, setOlderPagination] = useState<{ hasMore: boolean; before: string | null } | null>(null)
   const [loadingOlder, setLoadingOlder] = useState(false)
   useLayoutEffect(() => { setLoadingOlder(false); setOlderPagination(null) }, [sendScope])
-  const [historyErrorSessionId, setHistoryErrorSessionId] = useState<string | null>(null)
   const [historyReadAttempt, setHistoryReadAttempt] = useState(0)
   const retryHistorySession = useRef<string | null>(null)
   const historyReadNotice = sessionId && historyErrorSessionId === sessionId ? {
@@ -555,10 +564,6 @@ export function AgentPanel({
     },
   } : null
   const readNotice = historyReadNotice ?? taskReadNotice
-  const conversationReady = messages.length > 0
-  const conversationLoading = !conversationReady && (sessionId
-    ? storeLoadedSessionId !== sessionId && historyErrorSessionId !== sessionId
-    : sessionResolving)
   const [conversationSkeleton, setConversationSkeleton] = useState<{ sessionId: string | null; visible: boolean }>({ sessionId: null, visible: false })
   useEffect(() => {
     if (!conversationLoading) {
@@ -700,10 +705,6 @@ export function AgentPanel({
   // 懒创建会话：首次发送时 sessionId 从 null 变为新建 id，此时正在流式输出，需跳过历史恢复避免冲掉直播消息
   const lazySessionRef = useRef<string | null>(null)
 
-  const { scrollRef, scrollContentRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll } = useMessageScroll({
-    scopeKey: sendScope, messages, pendingApproval, pendingQuestion, conversationLoading, collapsed: workConversation.collapsed,
-    revealingText: settlingBlocks.size > 0,
-  })
   const goalView = selectAgentGoalView({ goal, goalSessionId, sessionId, runId, resumeableRunId, phase, runGoalId })
   const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
   const panelPhase = selectAgentPanelPhase(goalView, phase)
@@ -1813,7 +1814,6 @@ export function AgentPanel({
                 </button>
               </div>
             ) : null}
-            <Suspense fallback={<ConversationSkeleton />}>
             {messages.map((message) => {
               if (message.role === 'user') {
                 // Expanding execution history must not turn internal goal
@@ -1853,8 +1853,8 @@ export function AgentPanel({
                     <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button>
                   </div> : !messageActions && showSummary ? <div aria-hidden className="h-7 mobile:h-10" /> : null}
                   {showSummary ? <div className="agent-reading-column pt-3">
-                    <AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
-                      onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} />
+                    <Suspense fallback={null}><AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
+                      onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} /></Suspense>
                   </div> : null}
                 </div>
                 )
@@ -1897,7 +1897,7 @@ export function AgentPanel({
                 reportVisibility={reportVisibility}
               />
               if (!showSummary && !hasActivity && !hasAuthorText && !receipt) {
-                return revealText !== undefined && !reportVisibility?.deferred ? authorParts : null
+                return revealText !== undefined && !reportVisibility?.deferred ? <Suspense key={messageKey} fallback={null}>{authorParts}</Suspense> : null
               }
 
               return (
@@ -1907,10 +1907,12 @@ export function AgentPanel({
                   id={`agent-message-${message.id}`}
                   className={cn('agent-reading-column group/reply min-w-0', message.id !== lastAssistantId && !messageRunActive && 'agent-msg-cv')}
                 >
+                  <Suspense fallback={null}>
                   {showSummary ? <AuthorActivitySummary timing={timing} active={blockRunActive} open={processOpen}
                     onToggle={hasProcess && !blockRunActive && !settling ? () => toggleBlock(message.id) : undefined} /> : null}
                   {authorParts}
                   {receipt ? <AuthorProgressText text={receipt} /> : null}
+                  </Suspense>
                   {/* Only confirmed completed replies expose copy and branch actions. */}
                   {isBlockLast && !messageRunActive && message.completedAt && (finalText || receipt) ? (
                     <div className="mt-1 flex items-center justify-start gap-0.5">
@@ -1946,7 +1948,6 @@ export function AgentPanel({
                 </AgentProcessRegion>
               )
             })}
-            </Suspense>
             {/* 分支副本尚无新对话：底部分隔线提示可从此继续聊，一发新消息就消失 */}
             {branchContinueVisible ? (
               <div className="flex select-none items-center gap-3 py-1 text-[11px] text-[var(--text-tertiary)]">

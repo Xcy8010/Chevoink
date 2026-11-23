@@ -207,7 +207,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
   }
   const executingScopes = new Set([...reportedCalls.values()].filter(call => call.status === 'running').map(call => call.scope))
   const displayedPreparations = new Set<string>()
-  const completedScopes = new Set<string>()
+  const completedRuns = new Set<string>()
   const runByScope = new Map<string, string>()
   let current: ActivityGroup | undefined
   let previousScope: string | undefined
@@ -235,7 +235,10 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
 
     const sourceRunId = message.runTiming?.sourceRunId ?? message.runId
     runByScope.set(scope, sourceRunId)
-    if (message.completedAt || message.runTiming?.completedAt) completedScopes.add(scope)
+    // Resumes share the durable scope but have their own completion witness.
+    // A message's old timestamp cannot override an explicitly open run timing.
+    const completedAt = message.runTiming?.completedAt !== undefined ? message.runTiming.completedAt : message.completedAt
+    if (completedAt) completedRuns.add(sourceRunId)
     const messageGroups = new Map<string, ActivityGroup>()
     byMessage.set(message.id, messageGroups)
     let textIndex = 0
@@ -368,7 +371,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
     const stageCalls = group.calls.slice(group.stageStart)
     group.unsettled = findUnsettledCall(stageCalls, stale)
     group.unfinished = Boolean(group.unsettled) || group.calls.some(part => !part.preparing && part.status === 'running') || stageCalls.every(part => part.preparing)
-    group.completed = completedScopes.has(scope)
+    group.completed = completedRuns.has(sourceRunId)
     if (group.title && !group.closed && !group.completed) activeByRun.set(sourceRunId, group)
     for (const part of group.calls) {
       const reply = savedReply(part)

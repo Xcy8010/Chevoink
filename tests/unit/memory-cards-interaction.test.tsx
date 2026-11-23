@@ -12,6 +12,7 @@ import type { AgentStreamEvent } from '../../shared/contracts/agent-events'
 const store = vi.hoisted(() => ({ addComposerReference: vi.fn(), requestToolNavigation: vi.fn(), composerDraft: '',
   activeSessionId: null as string | null, runId: null as string | null, phase: 'idle',
   requestContext: null as Extract<AgentStreamEvent, { type: 'context.usage' }> | null,
+  requestCompaction: null as { runId: string; seq: number; retainedTokens: number | null } | null,
   memorySpotlight: null as null | { nonce: number; memoryType: string; title: string; memoryId?: string } }))
 vi.mock('../../src/features/studio/agent/agentStore', async importOriginal => ({
   ...await importOriginal<typeof import('../../src/features/studio/agent/agentStore')>(),
@@ -279,6 +280,44 @@ it('displays a newer live model estimate only for the owning task and rejects an
     expect(screen.queryByText('78%')).toBeNull()
   } finally {
     store.requestContext = null
+    store.activeSessionId = null
+    store.runId = null
+    store.phase = 'idle'
+  }
+})
+
+it('resets growth on completion, counts only new input, and restores the same values after remount', async () => {
+  const limits = { contextWindowTokens: 128000, compactAtTokens: 99840 }
+  const sample = { ...contextA, ...limits, estimatedTokens: 115391, usageRatio: 115391 / 128000,
+    compactionThreshold: 0.78, requestSample: { runId: 'r', seq: 7 } }
+  vi.mocked(fetchAgentContextState).mockResolvedValue(sample)
+  store.activeSessionId = 'a'
+  store.runId = 'r'
+  store.phase = 'running'
+  store.requestContext = { type: 'context.usage', ...limits, estimatedTokens: 91570, seq: 9, runId: 'r', ts: new Date().toISOString() }
+  store.requestCompaction = { runId: 'r', seq: 8, retainedTokens: 91570 }
+  try {
+    const ui = () => <AgentMemoryCenter sessionId="a" novelId="n" />
+    const panel = render(ui())
+    await screen.findByText('0%')
+    expect(screen.getByText('最近一次模型输入估算 72%')).toBeTruthy()
+    store.requestContext = { ...store.requestContext, seq: 10, estimatedTokens: 103082 }
+    panel.rerender(ui())
+    expect(screen.getByText('9%')).toBeTruthy()
+    expect(screen.getByText('最近一次模型输入估算 81%')).toBeTruthy()
+    panel.unmount()
+    store.requestContext = null
+    store.requestCompaction = null
+    store.phase = 'idle'
+    queryClient.clear()
+    vi.mocked(fetchAgentContextState).mockResolvedValue({ ...sample, estimatedTokens: 103082, usageRatio: 103082 / 128000,
+      retainedTokens: 91570, requestSample: { runId: 'r', seq: 10 } })
+    render(ui())
+    await screen.findByText('9%')
+    expect(screen.getByText('最近一次模型输入估算 81%')).toBeTruthy()
+  } finally {
+    store.requestContext = null
+    store.requestCompaction = null
     store.activeSessionId = null
     store.runId = null
     store.phase = 'idle'

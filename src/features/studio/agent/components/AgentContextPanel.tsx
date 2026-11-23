@@ -44,11 +44,19 @@ export default function AgentContextPanel({ userId, novelId, sessionId, active =
   const state = snapshot?.value
   const live = useAgentStore(store => active && store.activeSessionId === sessionId && store.requestContext?.runId === store.runId
     ? store.requestContext : null)
-  const measured = state && live && !(state.requestSample?.runId === live.runId && state.requestSample.seq >= live.seq) ? live : null
+  const measured = state && live && !(state.requestSample?.runId === live.runId && state.requestSample.seq >= live.seq)
+    && !(state.checkpoint && Date.parse(live.ts) <= Date.parse(state.checkpoint.createdAt)) ? live : null
+  const liveCompaction = useAgentStore(store => active && store.activeSessionId === sessionId && store.requestCompaction?.runId === store.runId
+    ? store.requestCompaction : null)
   const windowTokens = measured?.contextWindowTokens ?? state?.contextWindowTokens
   const tokens = measured?.estimatedTokens ?? state?.estimatedTokens
   const usageRatio = measured ? measured.estimatedTokens / measured.contextWindowTokens : state?.usageRatio ?? 0
   const threshold = measured ? measured.compactAtTokens / measured.contextWindowTokens : state?.compactionThreshold ?? 0
+  const retained = measured && liveCompaction && liveCompaction.seq < measured.seq && liveCompaction.retainedTokens !== null
+    ? liveCompaction.retainedTokens : state?.retainedTokens
+  const cycleRatio = retained != null && tokens !== undefined && windowTokens
+    ? Math.max(0, tokens - retained) / windowTokens : usageRatio
+  const thresholdPosition = Math.max(0, threshold - (windowTokens && retained != null ? retained / windowTokens : 0))
   const hasRequest = Boolean(measured || state?.requestSample)
   const readError = snapshot?.denied || error?.message
   const refreshing = Boolean(state && isFetching)
@@ -61,7 +69,7 @@ export default function AgentContextPanel({ userId, novelId, sessionId, active =
     wasActiveRef.current = active
   }, [userId, sessionId, active, refetch])
 
-  const percent = Math.max(0, Math.round(usageRatio * 100))
+  const percent = Math.max(0, Math.round(cycleRatio * 100))
   const cappedPercent = Math.min(100, percent)
   const checkpoint = state?.checkpoint ?? null
 
@@ -105,16 +113,16 @@ export default function AgentContextPanel({ userId, novelId, sessionId, active =
           className="absolute right-2.5 top-2.5 inline-flex items-center gap-0.5 rounded-full px-2 py-1 text-[10px] text-[var(--text-tertiary)] transition-colors duration-200 hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)]"
           aria-label="查看上下文详情"
         >查看详情<ChevronRight className="h-3 w-3" /></button> : null}
-        <div className="flex items-end justify-between gap-3"><div><p className="text-[11px] text-[var(--text-secondary)]">上下文占用</p><p className="mt-1 text-2xl font-semibold tabular-nums text-[var(--text-primary)]"><Metric value={state && `${percent}%`} refreshing={refreshing} /></p></div><p className="pb-1 pr-16 text-right text-[10px] tabular-nums text-[var(--text-tertiary)]"><Metric value={tokens !== undefined && windowTokens !== undefined ? `${formatContextTokenCount(tokens)} / ${formatContextTokenCount(windowTokens)}` : undefined} refreshing={refreshing} /></p></div>
+        <div className="flex items-end justify-between gap-3"><div><p className="text-[11px] text-[var(--text-secondary)]">{retained != null ? '压缩后新增占用' : '上下文占用'}</p><p className="mt-1 text-2xl font-semibold tabular-nums text-[var(--text-primary)]"><Metric value={state && `${percent}%`} refreshing={refreshing} /></p></div><p className="pb-1 pr-16 text-right text-[10px] tabular-nums text-[var(--text-tertiary)]"><Metric value={tokens !== undefined && windowTokens !== undefined ? `${formatContextTokenCount(tokens)} / ${formatContextTokenCount(windowTokens)}` : undefined} refreshing={refreshing} /></p></div>
         <div className={`relative mt-3 h-2 overflow-hidden rounded-full bg-[var(--surface-default)] ${state ? '' : 'studio-pending skeleton-shimmer'}`}>
           {state && <>
             <div className={`relative h-full overflow-hidden rounded-full transition-[width] duration-500 ${usageRatio >= threshold ? 'bg-rose-500' : usageRatio >= state.warningThreshold ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${cappedPercent}%` }}>
               {refreshing && <span aria-hidden="true" className="studio-pending skeleton-shimmer absolute inset-0 opacity-25" />}
             </div>
-            <span className="absolute inset-y-0 w-px bg-[var(--text-tertiary)]/70" style={{ left: `${Math.min(100, threshold * 100)}%` }} />
+            <span className="absolute inset-y-0 w-px bg-[var(--text-tertiary)]/70" style={{ left: `${Math.min(100, thresholdPosition * 100)}%` }} />
           </>}
         </div>
-        <div className="mt-2 flex justify-between text-[9px] text-[var(--text-tertiary)]"><span>{hasRequest ? '最近一次模型输入估算' : '已保存的会话历史估算'}</span><span>自动压缩阈值 <Metric value={state && `${Math.round(threshold * 100)}%`} refreshing={refreshing} /></span></div>
+        <div className="mt-2 flex justify-between text-[9px] text-[var(--text-tertiary)]"><span>{hasRequest ? '最近一次模型输入估算' : '已保存的会话历史估算'}{retained != null && ` ${Math.round(usageRatio * 100)}%`}</span><span>自动压缩阈值 <Metric value={state && `${Math.round(threshold * 100)}%`} refreshing={refreshing} /></span></div>
       </section>
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">

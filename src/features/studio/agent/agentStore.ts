@@ -245,6 +245,7 @@ type AgentStoreState = {
   sessionSignals: Record<string, SessionSignal>
   usage: AgentTokenUsage
   requestContext: Extract<AgentStreamEvent, { type: 'context.usage' }> | null
+  requestCompaction: { runId: string; seq: number; retainedTokens: number | null } | null
   currentTurn: number
   lastSeq: number
   lastVisibleOutput: { runId: string; at: number } | null
@@ -507,6 +508,10 @@ function messageBelongsToRun(message: AgentUIMessage, runId: string): boolean {
   return message.runId === runId || Boolean(message.runTiming?.scopeId?.startsWith('root:') && message.runTiming.sourceRunId === runId)
 }
 
+function matchesToolEvent(part: AgentMessagePart, event: { callId: string; subagentCallId?: string }): part is Extract<AgentMessagePart, { type: 'tool-call' }> {
+  return part.type === 'tool-call' && part.callId === event.callId && part.subagentCallId === event.subagentCallId
+}
+
 /** Reconnection may start mid-message. Restore only its exact owned assistant message. */
 function ensureAssistantMessage(messages: AgentUIMessage[], event: { messageId: string; runId: string; ts: string }, goalId: string | null): AgentUIMessage[] | null {
   const existing = messages.find(message => message.id === event.messageId)
@@ -665,6 +670,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   sessionSignals: {},
   usage: emptyUsage,
   requestContext: null,
+  requestCompaction: null,
   currentTurn: 0,
   lastSeq: 0,
   lastVisibleOutput: null,
@@ -1345,17 +1351,21 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           return base
         case 'context.usage':
           if (event.runId !== state.runId) return {}
-          return { ...base, requestContext: event }
+          return { ...base, requestContext: event,
+            ...(state.requestCompaction?.runId === event.runId && state.requestCompaction.seq + 1 === event.seq
+              ? { requestCompaction: { ...state.requestCompaction, retainedTokens: event.estimatedTokens } } : {}) }
 
         case 'context.compaction': {
           if (event.runId !== state.runId) return {}
           const owned = ensureAssistantMessage(state.messages, event, state.runGoalId)
           if (!owned) return {}
-          return { ...base, messages: updateMessageParts(owned, event.messageId, parts => {
-            const previous = parts.find(part => part.type === 'context-compaction')
-            if (previous?.state === 'completed' || previous?.state === event.state) return parts
-            return [...parts.filter(part => part.type !== 'context-compaction'), { type: 'context-compaction', state: event.state }]
-          }) }
+          return { ...base,
+            ...(event.state === 'completed' && { requestCompaction: { runId: event.runId, seq: event.seq, retainedTokens: null } }),
+            messages: updateMessageParts(owned, event.messageId, parts => {
+              const previous = parts.find(part => part.type === 'context-compaction')
+              if (previous?.state === 'completed' || previous?.state === event.state) return parts
+              return [...parts.filter(part => part.type !== 'context-compaction'), { type: 'context-compaction', state: event.state }]
+            }) }
         }
         case 'activity.title': {
           const owned = ensureAssistantMessage(state.messages, event, state.runGoalId)
@@ -1421,7 +1431,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           // 子 Agent 内嵌执行内部的写工具不进主活动区（卡片已嵌套在子 Agent 容器内展示）
           const isSubagentInternal = Boolean(event.subagentCallId)
           const priorCall = state.messages.find(message => message.id === event.messageId)?.parts
-            .find(part => part.type === 'tool-call' && part.callId === event.callId)
+            .find(part => matchesToolEvent(part, event))
           const question = event.toolName === 'ask_user' ? parseQuestionArgs(event.callId, event.args) : null
           // 同一 callId 可能先收到参数生成中的预告事件（args 为 null），再收到执行时的正式事件：按 callId upsert 保证只有一张卡片
           const existingActivity = state.workspaceActivities.some((activity) => activity.callId === event.callId)
@@ -1451,7 +1461,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                 }
               : {}),
             messages: updateMessageParts(messages, event.messageId, (parts) => {
-              const index = parts.findIndex((part) => part.type === 'tool-call' && part.callId === event.callId)
+              const index = parts.findIndex(part => matchesToolEvent(part, event))
               const previous = index >= 0 ? parts[index] : undefined
               // Preview order is the model's proposal order. Server-inserted
               // prerequisite checks may execute first; render actual calls
@@ -1508,7 +1518,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const messages = ensureAssistantMessage(state.messages, event, state.runGoalId)
           if (!messages) return {}
           const existing = messages.find(message => message.id === event.messageId)?.parts
-            .find(part => part.type === 'tool-call' && part.callId === event.callId)
+            .find(part => matchesToolEvent(part, event))
           if (existing?.type === 'tool-call' && existing.status !== 'running') return base
           return {
             ...base,
@@ -1521,7 +1531,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                 args: null, status: 'running', preparing: true, progressChars: event.argsChars,
               }]
               return parts.map((part) =>
-                part.type === 'tool-call' && part.callId === event.callId && part.status === 'running'
+                matchesToolEvent(part, event) && part.status === 'running'
                   ? { ...part, progressChars: event.argsChars }
                   : part,
               )
@@ -1536,7 +1546,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...base,
             liveToolDrafts: Object.fromEntries(Object.entries(state.liveToolDrafts).filter(([callId]) => !callIds.has(callId))),
             messages: updateMessageParts(state.messages, event.messageId, parts => parts.filter(part =>
-              !(part.type === 'tool-call' && callIds.has(part.callId)
+              !(part.type === 'tool-call' && !part.subagentCallId && callIds.has(part.callId)
                 && (part.preparing || event.type === 'tool.deferred' && part.status === 'running')))),
           }
         }
@@ -1547,7 +1557,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...base,
             messages: updateMessageParts(state.messages, event.messageId, (parts) =>
               parts.map((part) =>
-                part.type === 'tool-call' && part.callId === event.callId
+                matchesToolEvent(part, event)
                   ? { ...part, subagentProgress: { step: event.step, message: event.message } }
                   : part,
               ),
@@ -1563,7 +1573,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           noteReplayedTool(event)
           const extracted = activityFromDisplay(event.display)
           const previousCall = state.messages.find(message => message.id === event.messageId)?.parts
-            .find(part => part.type === 'tool-call' && part.callId === event.callId)
+            .find(part => matchesToolEvent(part, event))
           const resultStatus = event.ok ? 'success' : 'failed'
           const visibleResultChanged = !previousCall || previousCall.type === 'tool-call' && (previousCall.status !== resultStatus || previousCall.reviewOutcome !== event.reviewOutcome
             || projectAgentToolSummary(previousCall.summary ?? '', previousCall.status) !== projectAgentToolSummary(event.summary, resultStatus))
@@ -1583,13 +1593,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...(clearQuestion ? { phase: 'running' as const, pendingQuestion: null, ...withoutActiveSessionSignal(state) } : {}),
             ...(clearImport ? { phase: 'running' as const, ...withoutActiveSessionSignal(state) } : {}),
             ...todoUpdate,
-            liveToolDrafts: Object.fromEntries(Object.entries(state.liveToolDrafts).filter(([callId]) => callId !== event.callId)),
+            liveToolDrafts: event.subagentCallId ? state.liveToolDrafts : Object.fromEntries(Object.entries(state.liveToolDrafts).filter(([callId]) => callId !== event.callId)),
             workspaceActivities: [...state.workspaceActivities, ...(!event.subagentCallId
               && (WORKSPACE_WRITE_TOOLS.has(event.toolName) || event.ok && (event.display?.kind === 'chapterDiff' || event.display?.kind === 'planDiff' || qualityAppliedBodyChange(event.display)))
               && !state.workspaceActivities.some(activity => activity.callId === event.callId)
               ? [{ callId: event.callId, toolName: WORKSPACE_WRITE_TOOLS.has(event.toolName) || qualityAppliedBodyChange(event.display) ? event.toolName : 'body_edit',
                   label: extracted.label ?? WRITE_TOOL_LABELS[event.toolName] ?? '正文变更', chapterId: extracted.chapterId, deltaChars: extracted.deltaChars, status: event.ok ? 'done' as const : 'failed' as const }] : [])].map((activity) =>
-              activity.callId === event.callId
+              !event.subagentCallId && activity.callId === event.callId
                 ? {
                     ...activity,
                     status: event.ok ? ('done' as const) : ('failed' as const),
@@ -1604,7 +1614,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                 : activity,
             ),
             messages: updateMessageParts(messages, event.messageId, (parts) => {
-              const index = parts.findIndex(part => part.type === 'tool-call' && part.callId === event.callId)
+              const index = parts.findIndex(part => matchesToolEvent(part, event))
               const previous = parts[index]
               const settled: AgentMessagePart = {
                 ...(previous?.type === 'tool-call' ? previous : {}),

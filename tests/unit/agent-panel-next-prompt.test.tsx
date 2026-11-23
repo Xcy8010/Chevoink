@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, expect, it, vi } from 'vitest'
 import { ToastProvider } from '../../src/components/ui/Toast'
 import { AgentPanel } from '../../src/features/studio/agent/components/AgentPanel'
-import { useAgentStore } from '../../src/features/studio/agent/agentStore'
+import { restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 const remote = vi.hoisted(() => ({ changed: undefined as undefined | ((id: string) => void) }))
 vi.mock('../../src/features/studio/agent/useAgentGoalStream', () => {
@@ -18,6 +18,23 @@ afterEach(() => {
   window.localStorage.clear()
   vi.unstubAllGlobals()
   vi.useRealTimers()
+})
+
+it('keeps the loaded timeline visible on the first render of a remote activity header', async () => {
+  const sessionId = 'reader', runId = 'remote-turn'
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ success: true, data: null })))
+  const row = (id: string) => ({ id, runId: id, role: 'user' as const, createdAt: '', parts: [{ type: 'text' as const, text: id }] })
+  const history = [row('正在阅读的旧消息')]
+  useAgentStore.getState().restoreMessages(history, sessionId)
+  const client = new QueryClient({ defaultOptions: { queries: { enabled: false, retry: false } } })
+  render(<QueryClientProvider client={client}><ToastProvider>
+    <AgentPanel novelId="book" novelName="合成作品" sessionId={sessionId} ensureSession={async () => sessionId} />
+  </ToastProvider></QueryClientProvider>)
+  act(() => restoreActiveRunHistory([...history, row(runId)], runId, sessionId))
+  expect(screen.queryByRole('status', { name: '正在载入对话' })).toBeNull()
+  expect(screen.getByText('正在阅读的旧消息').closest('[style*="display: none"]')).toBeNull()
+  await waitFor(() => expect(document.querySelector('[data-author-timer]')).toBeTruthy(), { timeout: 3000 })
 })
 
 it('reoffers the current run suggestion after Tab acceptance and clearing the composer', () => {

@@ -21,11 +21,13 @@ export function useMessageScroll({
   const lastScrollTopRef = useRef(0)
   const draggingRef = useRef(false)
   const scopeOwner = useRef({ key: scopeKey })
+  const remoteViewport = useRef<{ node: HTMLDivElement; top: number; row?: HTMLElement; offset?: number } | null>(null)
   if (scopeOwner.current.key !== scopeKey) scopeOwner.current = { key: scopeKey }
   useLayoutEffect(() => {
     pinnedToBottomRef.current = true
     lastScrollTopRef.current = 0
     draggingRef.current = false
+    remoteViewport.current = null
   }, [scopeKey])
 
   // Scroll events also come from browser anchoring when virtualized history
@@ -87,6 +89,45 @@ export function useMessageScroll({
     lastScrollTopRef.current = node.scrollTop
     return true
   }, [])
+
+  // A remote prompt refresh replaces the recent history window in one commit.
+  // Save the visible message before that replacement changes the heights above it.
+  const captureRemoteViewport = useCallback(() => {
+    const node = scrollRef.current
+    if (!node || !node.clientHeight) return
+    const viewport = { node, top: node.scrollTop }
+    remoteViewport.current = viewport
+    if (pinnedToBottomRef.current) return
+    const top = node.getBoundingClientRect().top
+    const rows = node.querySelectorAll<HTMLElement>('[id^="agent-message-"]')
+    let start = 0, end = rows.length
+    while (start < end) {
+      const middle = Math.floor((start + end) / 2)
+      if (rows[middle].getBoundingClientRect().bottom <= top) start = middle + 1
+      else end = middle
+    }
+    const row = rows[start]
+    if (row) remoteViewport.current = { ...viewport, row, offset: row.getBoundingClientRect().top - top }
+  }, [])
+
+  useLayoutEffect(() => {
+    const saved = remoteViewport.current
+    remoteViewport.current = null
+    if (!saved || saved.node !== scrollRef.current || !saved.node.clientHeight) return
+    const { node, row, offset } = saved
+    if (pinnedToBottomRef.current) {
+      followToBottom(node)
+      return
+    }
+    const currentRow = row && (node.contains(row) ? row :
+      Array.from(node.querySelectorAll<HTMLElement>('[id^="agent-message-"]')).find(element => element.id === row.id))
+    if (currentRow && offset !== undefined) {
+      node.scrollTop += currentRow.getBoundingClientRect().top - node.getBoundingClientRect().top - offset
+    } else {
+      node.scrollTop = saved.top
+    }
+    lastScrollTopRef.current = node.scrollTop
+  }, [messages, followToBottom])
 
   // Delayed timeline chunks, images and streaming text can resize after the follow frames settle.
   useEffect(() => {
@@ -197,5 +238,5 @@ export function useMessageScroll({
   // 键盘弹起 / 底部导航隐藏使消息容器变矮时，像微信/QQ 一样把对话顶上去
   useKeyboardPushScroll(scrollRef)
 
-  return { scrollRef, scrollContentRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll }
+  return { scrollRef, scrollContentRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll, captureRemoteViewport }
 }
