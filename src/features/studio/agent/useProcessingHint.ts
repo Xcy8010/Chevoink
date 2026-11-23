@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAgentStore } from './agentStore'
 import { shouldShowProcessingHint } from './lib/panel-helpers'
-import { activityReportVisibility, type projectActivityGroups } from './lib/activity-groups'
 import type { AgentUIMessage } from '../../../../shared/contracts/index.js'
 
 export const OUTPUT_SILENCE_MS = 1500
@@ -24,18 +23,4 @@ function useOutputSilence(eligible: boolean, lastOutputAt?: number) {
     return () => window.clearTimeout(timer)
   }, [eligible, recent, expiresAt])
   return eligible && !recent
-}
-
-export function useRunActivityIndicator(messages: AgentUIMessage[], runId: string | null, phase: string, enabled: boolean,
-  groups: ReturnType<typeof projectActivityGroups>) {
-  const hasStarted = Boolean(runId && (groups.authorSpokeByRun.has(runId) || groups.lastGroupByRun.has(runId)))
-  const textOutput = useAgentStore(state => state.lastAuthorTextOutput)
-  // Private reasoning and a paragraph held behind a tool can both stream
-  // while the author sees only the last settled receipt.
-  const reports = textOutput ? groups.reportsByMessage.get(textOutput.messageId) : undefined
-  const lastReport = reports && [...reports.keys()].at(-1)
-  const hidden = lastReport !== undefined && activityReportVisibility(reports, enabled)?.hidden.has(lastReport)
-  const eligible = enabled && hasStarted && shouldShowProcessingHint(messages, runId, phase)
-  const silent = useOutputSilence(eligible, !hidden && textOutput?.runId === runId ? textOutput.at : undefined)
-  return enabled && (!hasStarted || silent)
 }

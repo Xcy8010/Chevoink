@@ -84,7 +84,6 @@ import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMes
 import { useAgentStream } from '../useAgentStream'
 import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgentModelPreference'
 import { useAgentGoalStream } from '../useAgentGoalStream'
-import { useRunActivityIndicator } from '../useProcessingHint'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
@@ -722,17 +721,6 @@ export function AgentPanel({
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
   const working = activityRunActive && (panelPhase === 'starting' || panelPhase === 'running') && !pendingApproval && !pendingQuestion
   const currentActivity = activityRunActive && runId ? activityGroups.activeByRun.get(runId) : undefined
-  const showRunIndicator = useRunActivityIndicator(messages, runId, panelPhase, working && !currentActivity, activityGroups)
-  const waitingForFirstResponse = lastUserRequest?.runId === runId && lastUserRequest.requestTiming?.elapsedMs === null
-  const hasActivityEvidence = runId && (activityGroups.authorSpokeByRun.has(runId) || activityGroups.lastGroupByRun.has(runId))
-  const workingMessage = showRunIndicator && runId && (!waitingForFirstResponse || hasActivityEvidence)
-    ? [...messages].reverse().find(message => message.role === 'assistant' && (message.runTiming?.sourceRunId ?? message.runId) === runId) : undefined
-  const latestWorkingGroup = workingMessage ? [...(activityGroups.byMessage.get(workingMessage.id)?.values() ?? [])].at(-1) : undefined
-  const visibleWorkingText = workingMessage && hasVisibleActivityText(workingMessage.parts,
-    activityReportVisibility(activityGroups.reportsByMessage.get(workingMessage.id), true))
-  const workingGroup = latestWorkingGroup ?? (workingMessage && runId && !visibleWorkingText
-    ? activityGroups.lastGroupByRun.get(runId) : undefined)
-  const workingMessageId = workingGroup?.messageId ?? workingMessage?.id
   const creditSummaryQuery = useModelCreditSummary(active ? 20_000 : 60_000)
   const refetchCredits = creditSummaryQuery.refetch
   const previousActiveRef = useRef(active)
@@ -1889,7 +1877,6 @@ export function AgentPanel({
               const showSummary = timing && (blockRunActive || timing.elapsedMs !== null || hasProcess)
               const settling = settlingBlocks.has(block?.firstId)
               const processOpen = !hasProcess || blockRunActive || settling || isBlockExpanded(block, message.runId)
-              const showMessageIndicator = message.id === workingMessageId && showRunIndicator
               const wholeMessageIsProcess = hasProcess && !showSummary && !finalText && !receipt
               const messageKey = JSON.stringify([novelId, sessionId, voiceScopeKey ?? null, message.id])
               const revealText = textRevealTargets[message.id]
@@ -1905,13 +1892,11 @@ export function AgentPanel({
                 runActive={messageRunActive}
                 processOpen={hasProcess && !wholeMessageIsProcess ? processOpen : undefined}
                 collapseText={hasProcess && !isBlockLast && !wholeMessageIsProcess}
-                showRunIndicator={showMessageIndicator}
-                workingGroupId={workingGroup?.id}
                 activityChapters={activityChapters}
                 awaitingApprovalCallId={pendingApproval?.callId}
                 reportVisibility={reportVisibility}
               />
-              if (!showSummary && !hasActivity && !hasAuthorText && !receipt && !showMessageIndicator) {
+              if (!showSummary && !hasActivity && !hasAuthorText && !receipt) {
                 return revealText !== undefined && !reportVisibility?.deferred ? authorParts : null
               }
 

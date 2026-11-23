@@ -1092,8 +1092,9 @@ export default function StudioWorkspace() {
   })
 
   const prepareChapter = useCallback((chapterId: string) => {
-    if (!workPanelReady || !canWarmChapter() || chapterId === selectedChapterId || chapterId.startsWith('local-')) return
-    void queryClient.prefetchQuery({
+    if (!workPanelReady || !canWarmChapter() || chapterId === selectedChapterId || chapterId.startsWith('local-')
+      || queryClient.isFetching({ queryKey: ['studio-chapter', activeNovelId] }) >= 2) return
+    return queryClient.prefetchQuery({
       queryKey: ['studio-chapter', activeNovelId, chapterId],
       queryFn: () => getChapterContent(activeNovelId, chapterId),
       retry: false,
@@ -1109,22 +1110,26 @@ export default function StudioWorkspace() {
     : mobileView === 'editor' && selectedTreeItemId !== 'catalog' && !selectedTreeItemId?.startsWith('plan:')
   useEffect(() => {
     if (!workPanelReady || (!browsingChapters && !readingChapter) || !canWarmChapter()) return
-    const warm = () => {
+    let obsolete = false
+    const warm = async () => {
       if (!canWarmChapter()) return
       if (workDesktop && browsingChapters) StudioChapterViewer.preload()
       if (chapterQuery.isFetching || chapterQuery.isError || queryClient.isFetching({ queryKey: ['studio-chapter', activeNovelId] })) return
       const currentId = selectedChapterId ?? studioQuery.data?.draftChapter?.id
       const index = chapters.findIndex(chapter => chapter.id === currentId)
-      const next = chapters[index + 1]
-      if (next) prepareChapter(next.id)
+      const neighbors = desktopLayout ? [chapters[index + 1], chapters[index - 1], chapters[index + 2]] : [chapters[index + 1]]
+      for (const chapter of neighbors) {
+        if (obsolete || !canWarmChapter() || queryClient.isFetching({ queryKey: ['studio-chapter', activeNovelId] })) return
+        if (chapter) await prepareChapter(chapter.id)
+      }
     }
     if (window.requestIdleCallback) {
       const idle = window.requestIdleCallback(warm)
-      return () => window.cancelIdleCallback(idle)
+      return () => { obsolete = true; window.cancelIdleCallback(idle) }
     }
     const timer = window.setTimeout(warm, 80)
-    return () => window.clearTimeout(timer)
-  }, [activeNovelId, browsingChapters, chapterQuery.isError, chapterQuery.isFetching, chapters, prepareChapter, queryClient, readingChapter,
+    return () => { obsolete = true; window.clearTimeout(timer) }
+  }, [activeNovelId, browsingChapters, chapterQuery.isError, chapterQuery.isFetching, chapters, desktopLayout, prepareChapter, queryClient, readingChapter,
     selectedChapterId, studioQuery.data?.draftChapter?.id, workDesktop, workPanelReady])
 
   useEffect(() => {
@@ -2873,6 +2878,7 @@ export default function StudioWorkspace() {
       return
     }
 
+    void prepareChapter(nextChapterId)
     guardUnsavedChanges(() => {
       if (chapterStreamOwnerRef.current !== scope) return
       selectChapter()
@@ -4333,6 +4339,7 @@ export default function StudioWorkspace() {
           >
           <StudioMobileHeader
             view={mobileView}
+            animatedTabs={mobileMotion}
             navigationOpen={mobileMoreOpen}
             onOpenNavigation={() => setMobileMoreOpen(true)}
             onBack={() => setMobileView(mobileBackView)}

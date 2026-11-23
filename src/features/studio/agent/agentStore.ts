@@ -248,7 +248,6 @@ type AgentStoreState = {
   currentTurn: number
   lastSeq: number
   lastVisibleOutput: { runId: string; at: number } | null
-  lastAuthorTextOutput: { runId: string; messageId: string; at: number } | null
   outputSummary: string
   errorMessage: string | null
   errorCode: string | null
@@ -669,7 +668,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   currentTurn: 0,
   lastSeq: 0,
   lastVisibleOutput: null,
-  lastAuthorTextOutput: null,
   outputSummary: '',
   errorMessage: null,
   errorCode: null,
@@ -756,7 +754,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       currentTurn: 0,
       lastSeq: 0,
       lastVisibleOutput: null,
-      lastAuthorTextOutput: null,
       outputSummary: '',
       errorMessage: null,
       errorCode: null,
@@ -827,7 +824,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       currentTurn: 0,
       lastSeq: 0,
       lastVisibleOutput: null,
-      lastAuthorTextOutput: null,
       outputSummary: '',
       errorMessage: null,
       errorCode: null,
@@ -860,7 +856,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       liveToolReceiptIds: new Set<string>(),
       messages: restored,
       lastVisibleOutput: null,
-      lastAuthorTextOutput: null,
       phase: 'idle',
       runId: null,
       runGoalId: null,
@@ -956,7 +951,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       currentTurn: 0,
       lastSeq: 0,
       lastVisibleOutput: null,
-      lastAuthorTextOutput: null,
       outputSummary: '',
       errorMessage: null,
       errorCode: null,
@@ -1341,8 +1335,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const text = messages.find(message => message.id === event.messageId)?.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('') ?? ''
           return {
             ...base,
-            ...(event.runId === state.runId && delta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() },
-              lastAuthorTextOutput: { runId: event.runId, messageId: event.messageId, at: Date.now() } } : {}),
+            ...(event.runId === state.runId && delta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
             ...(delta ? { messages, ...(state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
               ? { textRevealTargets: { ...state.textRevealTargets, [event.messageId]: text } } : {}) } : {}),
           }
@@ -1395,8 +1388,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           }
           return {
             ...base,
-            ...(visible && revealedText !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() },
-              lastAuthorTextOutput: { runId: event.runId, messageId: event.messageId, at: Date.now() } } : {}),
+            ...(visible && revealedText !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
             ...(revealTargets ? { textRevealTargets: revealTargets } : {}),
             finalizedTextIds: state.finalizedTextIds.includes(event.messageId)
               ? state.finalizedTextIds : [...state.finalizedTextIds, event.messageId],
@@ -1585,7 +1577,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               : {}
           return {
             ...base,
-            ...(!event.subagentCallId && visibleResultChanged ? { lastVisibleOutput: { runId: event.runId, at: Date.now() }, lastAuthorTextOutput: null } : {}),
+            ...(!event.subagentCallId && visibleResultChanged ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
             // 工具结果到达同样证明正文流早已结束：兜底登记定稿，确保光标不残留
             ...(state.finalizedTextIds.includes(event.messageId) ? {} : { finalizedTextIds: [...state.finalizedTextIds, event.messageId] }),
             ...(clearQuestion ? { phase: 'running' as const, pendingQuestion: null, ...withoutActiveSessionSignal(state) } : {}),

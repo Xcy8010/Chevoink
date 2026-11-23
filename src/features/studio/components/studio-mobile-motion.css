@@ -19,7 +19,7 @@
 .studio-mobile-motion > .studio-mobile-motion-main,
 .studio-mobile-push-navigation > .studio-mobile-drawer,
 .studio-mobile-tab-page,
-.studio-mobile-motion .studio-mobile-tabs::after {
+.studio-mobile-motion .studio-mobile-tab-indicator {
   transition: transform var(--studio-mobile-duration) var(--studio-mobile-ease);
 }
 
@@ -46,13 +46,12 @@
   transform: translate3d(calc((var(--studio-mobile-drawer-progress) - 1) * 100%), 0, 0);
 }
 
-.studio-mobile-push-navigation[data-state='open'] > :is(.studio-mobile-backdrop, .studio-mobile-drawer) {
+.studio-mobile-push-navigation[data-state='open'] > :is(.studio-mobile-push-dismiss, .studio-mobile-drawer) {
   pointer-events: auto;
 }
 
-.studio-mobile-push-navigation > .studio-mobile-backdrop {
+.studio-mobile-push-navigation > .studio-mobile-push-dismiss {
   left: var(--studio-mobile-drawer-width);
-  width: auto;
   background: transparent;
 }
 
@@ -87,8 +86,7 @@
 
 .studio-mobile-motion .studio-mobile-tabs .studio-mobile-view-tab::after { display: none; }
 
-.studio-mobile-motion .studio-mobile-tabs::after {
-  content: '';
+.studio-mobile-tab-indicator {
   position: absolute;
   inset: auto auto 0 21px;
   width: 22px;
@@ -101,8 +99,21 @@
 
 .studio-mobile-motion[data-swipe-dragging='drawer'] :is(.studio-mobile-motion-main, .studio-mobile-push-navigation > .studio-mobile-drawer),
 .studio-mobile-motion[data-swipe-dragging='tabs'] .studio-mobile-tab-page,
-.studio-mobile-motion[data-swipe-dragging='tabs'] .studio-mobile-tabs::after {
+.studio-mobile-motion[data-swipe-dragging='tabs'] .studio-mobile-tab-indicator {
   transition: none;
+}
+
+.studio-mobile-motion[data-swipe-moving='drawer'] :is(.studio-mobile-motion-main, .studio-mobile-push-navigation > .studio-mobile-drawer),
+.studio-mobile-motion[data-swipe-moving='tabs'] :is(.studio-mobile-tab-page, .studio-mobile-tab-indicator) {
+  will-change: transform;
+}
+
+.studio-mobile-motion:is([data-swipe-moving], [data-drawer-open='true']) .agent-composer-halo::before {
+  visibility: hidden;
+}
+.studio-mobile-motion:is([data-swipe-moving], [data-drawer-open='true']) .agent-activity-capsule {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 @starting-style {

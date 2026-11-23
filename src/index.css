@@ -1095,6 +1095,11 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 html.dark .studio-mobile-drawer-search { background: #242424; }
 html.dark .studio-mobile-backdrop { background: rgb(28 28 28 / 82%); }
 
+.studio-tree-guide { border-inline-start: 1px solid transparent; }
+@media (hover: hover) and (pointer: fine) {
+  .studio-tree-guide:hover { border-inline-start-color: var(--border-subtle); }
+}
+
 /* Mobile creator surfaces share one palette, including body portals. Desktop tokens stay intact. */
 @media (max-width: 1023px) {
   .studio-workspace,

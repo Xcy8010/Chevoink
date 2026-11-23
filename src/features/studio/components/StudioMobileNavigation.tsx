@@ -56,7 +56,7 @@ export default function StudioMobileNavigation({ open, push = false, dragging = 
     const panel = panelRef.current!
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
+    if (!push) document.body.style.overflow = 'hidden'
     const firstControl = () => panel.querySelector<HTMLElement>(focusableSelector) ?? panel
     // WorkspaceNovelSwitcher keeps its existing body portal. Keep it usable inside this modal.
     const novelMenu = () => document.querySelector<HTMLElement>('[role="region"][aria-label="我的作品"]')
@@ -98,18 +98,18 @@ export default function StudioMobileNavigation({ open, push = false, dragging = 
       document.removeEventListener('focusin', focusInside)
       document.removeEventListener('keydown', keydown)
       window.removeEventListener('resize', resize)
-      document.body.style.overflow = previousOverflow
+      if (!push) document.body.style.overflow = previousOverflow
       const returnFocus = previousFocus?.isConnected ? previousFocus : document.querySelector<HTMLElement>('[data-studio-mobile-primary-control]')
       returnFocus?.focus({ preventScroll: true })
     }
-  }, [open])
+  }, [open, push])
 
-  if (!open && !present && !dragging) return null
+  if (!open && !present && !dragging && !push) return null
   const wrapper = push ? 'studio-mobile-push-navigation' : 'studio-mobile-navigation fixed inset-0 z-[100] lg:hidden'
   const navigation = (
     <div ref={navigationRef} data-state={open ? 'open' : 'closed'} aria-hidden={!open || undefined} className={`studio-workspace ${wrapper} ${!open ? 'pointer-events-none' : ''}`}>
-      <button type="button" tabIndex={-1} aria-label="关闭导航遮罩" onClick={onClose} className="studio-mobile-backdrop absolute inset-0 h-full w-full bg-black/55" />
-      <div ref={panelRef} id="studio-mobile-navigation" role="dialog" aria-modal="true" aria-label="创作区导航" tabIndex={-1} className="studio-mobile-drawer absolute inset-y-0 left-0 flex w-[min(360px,82%)] max-w-full flex-col overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--app-bg)] pl-[var(--safe-left,0px)] pt-[var(--safe-top,0px)] text-[var(--text-primary)] shadow-xl outline-none">
+      {open || !push ? <button type="button" tabIndex={-1} aria-label="关闭导航遮罩" onClick={onClose} className={push ? 'studio-mobile-push-dismiss absolute inset-y-0 right-0' : 'studio-mobile-backdrop absolute inset-0 h-full w-full bg-black/55'} /> : null}
+      <div ref={panelRef} id="studio-mobile-navigation" role="dialog" aria-modal="true" aria-label="创作区导航" tabIndex={-1} className={`studio-mobile-drawer absolute inset-y-0 left-0 flex w-[min(360px,82%)] max-w-full flex-col overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--app-bg)] pl-[var(--safe-left,0px)] pt-[var(--safe-top,0px)] text-[var(--text-primary)] outline-none ${push ? '' : 'shadow-xl'}`}>
         <header className="flex shrink-0 items-center gap-2 px-3 pb-3 pt-2">
           <div className="studio-mobile-drawer-search flex h-11 min-w-0 flex-1 items-center gap-2.5 rounded-[14px] pl-3 pr-1 focus-within:outline focus-within:outline-1 focus-within:outline-[var(--border-strong)]">
             <Search aria-hidden="true" className="h-[19px] w-[19px] shrink-0" />

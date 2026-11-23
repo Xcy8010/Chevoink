@@ -372,7 +372,7 @@ export default function ChapterSidebar({
           </div>
 
           {novelExpanded ? (
-            <div className="ml-3.5 border-l border-[var(--border-subtle)] pl-1.5">
+            <div className="studio-tree-guide ml-3.5 pl-1.5">
               <button
                 type="button"
                 onClick={onSelectCatalog}
@@ -407,7 +407,7 @@ export default function ChapterSidebar({
               </div>
 
               {planFolderExpanded ? (
-                <div className="ml-3 border-l border-[var(--border-subtle)] pl-1.5">
+                <div className="studio-tree-guide ml-3 pl-1.5">
                   {(['outline', 'detail', 'legacy'] as const).map(kind => {
                     const plans = savedPlans.filter(plan => (plan.planKind ?? 'legacy') === kind)
                     if (kind === 'legacy' && plans.length === 0) return null
@@ -520,7 +520,7 @@ export default function ChapterSidebar({
               </div>
 
               {chapterFolderExpanded ? (
-                <div className="ml-3.5 border-l border-[var(--border-subtle)] pl-1.5">
+                <div className="studio-tree-guide ml-3.5 pl-1.5">
                   {volumeGroups.map(({ volume, chapters: volumeChapters }) => {
                     const volumeTarget = { kind: 'volume', id: volume.id, title: volume.title } as const
                     return (
@@ -574,7 +574,7 @@ export default function ChapterSidebar({
                         )}
                         {showExtendedMenus && <div className={rowActionsClass}>{treeMenuButton(volumeTarget)}</div>}
                       </div>
-                      {!collapsedVolumes.has(volume.id) ? <div className="ml-2.5 border-l border-[var(--border-subtle)] pl-1">
+                      {!collapsedVolumes.has(volume.id) ? <div className="studio-tree-guide ml-2.5 pl-1">
                   {volumeChapters.map((chapter) => {
                     const chapterTarget = { kind: 'chapter', id: chapter.id, title: chapter.title.trim() || `第 ${chapter.orderInVolume} 章` } as const
                     const chapterActive =
@@ -626,6 +626,7 @@ export default function ChapterSidebar({
                         <button
                           type="button"
                           onClick={() => onSelectChapter(chapter.id)}
+                          onPointerDown={event => { if (event.button === 0) onPrepareChapter?.(chapter.id) }}
                           onPointerEnter={event => {
                             cancelChapterHover()
                             if (event.pointerType === 'mouse' && onPrepareChapter) {

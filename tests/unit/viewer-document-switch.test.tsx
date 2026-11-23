@@ -74,6 +74,7 @@ it('retains the previous body read-only during a cold read and flushes buffered 
   expect(select).not.toHaveBeenCalled()
   ui.rerender(<StudioChapterViewer {...common} draft={null} pendingChapterTitle="冷启动乙章" loading />)
   expect(screen.getByRole('status').textContent).toContain('冷启动乙章')
+  expect(screen.getByRole('status').classList.contains('sr-only')).toBe(true)
   const retained = screen.getByRole('textbox') as HTMLTextAreaElement
   expect(retained.value).toBe('目录正文')
   expect(retained.readOnly).toBe(true)

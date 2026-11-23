@@ -5,10 +5,9 @@ import { ProcessingHint } from '../../src/features/studio/agent/components/Proce
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { projectAgentAuthorParts } from '../../shared/agent-author-view'
 import { isAssistantMessageStreaming, shouldShowProcessingHint } from '../../src/features/studio/agent/lib/panel-helpers'
-import { projectActivityGroups } from '../../src/features/studio/agent/lib/activity-groups'
 import type { AgentUIMessage } from '../../shared/contracts/index.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
-import { OUTPUT_SILENCE_MS, useRunActivityIndicator, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
+import { OUTPUT_SILENCE_MS, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
 afterEach(() => { cleanup(); useAgentStore.getState().resetRun(); vi.useRealTimers() })
 
 function expectActiveAnalysis(container: HTMLElement) {
@@ -108,42 +107,6 @@ it('hides on published paragraph output and returns only after silence without a
   expect(view.result.current).toBe(true)
   view.unmount()
   expect(vi.getTimerCount()).toBe(0)
-})
-
-it('keeps run liveness separate from tool titles during silence and private reasoning', () => {
-  vi.useFakeTimers()
-  const store = useAgentStore.getState()
-  store.resumeRun('r', 'session')
-  const base = { messageId: 'm', runId: 'r', ts: new Date().toISOString() }
-  const view = renderHook(() => {
-    const messages = useAgentStore(state => state.messages)
-    const groups = projectActivityGroups(messages)
-    return useRunActivityIndicator(messages, 'r', 'running', !groups.runningByRun.has('r'), groups)
-  })
-  expect(view.result.current).toBe(true)
-  act(() => store.applyEvent({ ...base, type: 'reasoning.delta', delta: '合成内部思考。', activity: true, seq: 1 }))
-  expect(view.result.current).toBe(true)
-  act(() => store.applyEvent({ ...base, type: 'text.delta', delta: '我先核对这段对话。\n\n', seq: 2 }))
-  expect(view.result.current).toBe(false)
-  act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 1))
-  expect(view.result.current).toBe(false)
-  act(() => vi.advanceTimersByTime(1))
-  expect(view.result.current).toBe(true)
-  act(() => store.applyEvent({ ...base, messageId: 'later', type: 'message.start', role: 'assistant', seq: 3 }))
-  expect(view.result.current).toBe(true)
-  act(() => store.applyEvent({ ...base, messageId: 'later', type: 'tool.call', callId: 'read', toolName: 'chapter_read', args: {}, title: '核对前文', seq: 4 }))
-  expect(view.result.current).toBe(false)
-  act(() => store.applyEvent({ ...base, messageId: 'later', type: 'tool.result', callId: 'read', toolName: 'chapter_read', ok: true, summary: '已核对', durationMs: 10, seq: 5 }))
-  expect(view.result.current).toBe(true)
-  for (let seq = 6; seq < 12; seq++) {
-    act(() => { vi.advanceTimersByTime(800); store.applyEvent({ ...base, messageId: 'later', type: 'reasoning.delta', delta: '合成思考。', activity: true, seq }) })
-    expect(view.result.current).toBe(true)
-  }
-  act(() => store.applyEvent({ ...base, messageId: 'next', type: 'text.final', text: '第十章停在渡口。', asReasoning: false, seq: 12 }))
-  // This paragraph is held in the author view until the phase turns over.
-  expect(view.result.current).toBe(true)
-  act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
-  expect(view.result.current).toBe(true)
 })
 
 it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to real %s activity, and restores one timer after silence', type => {

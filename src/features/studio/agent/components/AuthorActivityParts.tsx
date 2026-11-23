@@ -230,33 +230,32 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters,
   </li>
 })
 
-const ActivityRow = memo(function ActivityRow({ group, runActive, active, showRunIndicator, chapters, readOnly, awaitingApprovalCallId, animateLive }: {
-  group?: ActivityGroup; runActive: boolean; active: boolean; showRunIndicator?: boolean; chapters?: ActivityChapters; readOnly?: boolean
+const ActivityRow = memo(function ActivityRow({ group, runActive, active, chapters, readOnly, awaitingApprovalCallId, animateLive }: {
+  group: ActivityGroup; runActive: boolean; active: boolean; chapters?: ActivityChapters; readOnly?: boolean
   awaitingApprovalCallId?: string
   animateLive?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
-  const calls = group?.calls ?? []
-  const grouped = calls.length - (group?.stageStart ?? 0) > 1
-  const unresolved = group?.unsettled
+  const calls = group.calls
+  const grouped = calls.length - group.stageStart > 1
+  const unresolved = group.unsettled
   const running = runActive && active ? [...calls].reverse().find(part => part.status === 'running') : undefined
   const part = running ?? unresolved ?? calls.at(-1)
-  const iconPart = group?.title ? calls[group.stageStart] : part
+  const iconPart = group.title ? calls[group.stageStart] : part
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
   const waitingForAnswer = runActive && calls.some(call => call.toolName === 'ask_user' && call.status === 'running')
   const waitingForApproval = runActive && awaitingApprovalCallId !== undefined
     && calls.some(call => !call.preparing && call.status === 'running' && call.callId === awaitingApprovalCallId)
-  const namedInProgress = Boolean(group?.title && runActive && active && (running || !group.closed && !group.completed))
+  const namedInProgress = Boolean(group.title && runActive && active && (running || !group.closed && !group.completed))
   const waiting = Boolean(importWaiting || waitingForAnswer || waitingForApproval)
-  const showIndicator = runActive && showRunIndicator && !running && !namedInProgress && !waiting
   const Icon = iconPart && toolIcon(iconPart)
-  const stageCalls = calls.slice(group?.stageStart ?? 0)
+  const stageCalls = calls.slice(group.stageStart)
   const readChapterIds = grouped && stageCalls.every(call => call.toolName === 'chapter_read' && activityChapterId(call))
     ? new Set(stageCalls.map(activityChapterId)) : undefined
-  const readLabel = group?.readLabel
+  const readLabel = group.readLabel
   let label: string | undefined
-  if (group?.title) {
+  if (group.title) {
     const title = group.title
     if (waitingForAnswer) label = `等待你回答 · ${title}`
     else if (importWaiting || waitingForApproval) label = `等待你确认 · ${title}`
@@ -265,17 +264,17 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, showRu
     else label = `${title}未完成`
   } else if (part) {
     if (readLabel && running) label = activitySummary(running, runActive, chapters, true)
-    else if (readLabel) label = group?.unfinished
+    else if (readLabel) label = group.unfinished
       ? `${readLabel}有未完成项` : `已${readLabel}`
     else if (grouped && !running && unresolved) label = `${getAgentToolPresentation(part.toolName).label}有未完成项`
     else if (readChapterIds && readChapterIds.size > 1 && stageCalls.every(call => call.status === 'success' && !call.preparing)) label = `已查看 ${readChapterIds.size} 章正文`
-    else label = activitySummary(part, runActive && active, chapters, false, grouped && !readChapterIds, group?.staleReviewCalls?.has(part))
+    else label = activitySummary(part, runActive && active, chapters, false, grouped && !readChapterIds, group.staleReviewCalls?.has(part))
   }
   const showingActivity = Boolean(active && running && !waiting)
   const shimmer = runActive && Boolean(showingActivity || namedInProgress) && !waiting
-  const step = group?.title ? label : part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : ''
+  const step = group.title ? label : part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : ''
   const enter = useRef<boolean | undefined>(undefined)
-  if (group && enter.current === undefined) {
+  if (enter.current === undefined) {
     enter.current = Boolean(animateLive && document.visibilityState !== 'hidden'
       && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
   }
@@ -292,8 +291,8 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, showRu
     return () => animation?.cancel()
   }, [animateLive, step])
 
-  return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={showIndicator ? '' : undefined} data-author-step>
-    {group && <button type="button" aria-expanded={open} aria-controls={detailsId}
+  return <div className="min-w-0" data-author-activity data-author-step>
+    <button type="button" aria-expanded={open} aria-controls={detailsId}
       onClick={() => setOpen(value => !value)}
       className="agent-activity-step min-h-7 w-fit max-w-full text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
       <span ref={headline} className={cn('agent-activity-line items-center', enter.current && 'agent-tool-enter')}>
@@ -306,12 +305,9 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, showRu
           <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} />
         </span>
       </span>
-    </button>}
-    {showIndicator && <span role="status" aria-label="任务仍在运行" className="inline-flex min-h-7 items-center gap-1 px-2 align-top motion-safe:animate-pulse">
-      <span aria-hidden className="text-xs tracking-widest text-[var(--text-secondary)]">•••</span>
-    </span>}
+    </button>
     {!readOnly && importWaiting?.importWaiting ? <a className="ml-6 text-xs underline" href={importWaiting.importWaiting.url}>核对原文并确认导入</a> : null}
-    {group ? <AgentProcessRegion open={open} id={detailsId}>
+    <AgentProcessRegion open={open} id={detailsId}>
       <ActivityScrollArea><ul>
         {calls.flatMap((call, index) => {
           const key = group.callKeys[index]
@@ -324,7 +320,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, showRu
           </li>) ?? []]
         })}
       </ul></ActivityScrollArea>
-    </AgentProcessRegion> : null}
+    </AgentProcessRegion>
   </div>
 })
 
@@ -348,7 +344,7 @@ export function AuthorProgressText({ text, className }: { text: string; classNam
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, showRunIndicator, workingGroupId, revealText, onTextRevealed, activityChapters, readOnly, awaitingApprovalCallId, reportVisibility, liveToolReceiptIds,
+  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, revealText, onTextRevealed, activityChapters, readOnly, awaitingApprovalCallId, reportVisibility, liveToolReceiptIds,
 }: {
   parts: AgentMessagePart[]
   messageId: string
@@ -357,8 +353,6 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   runActive: boolean
   processOpen?: boolean
   collapseText?: boolean
-  showRunIndicator?: boolean
-  workingGroupId?: string
   revealText?: string
   onTextRevealed?: (messageId: string, text: string) => void
   activityChapters?: ActivityChapters
@@ -391,7 +385,6 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   const rendered = new Set<string>()
 
   const stepKey = `${messageId}:step`
-  const liveGroupId = workingGroupId ?? (showRunIndicator ? [...(localGroups?.values() ?? [])].at(-1)?.id : undefined)
   const entries = authorParts.map<ReactNode>((part, index) => {
       if (part.type === 'context-compaction') return <div key={`${messageId}:compaction`} role="status" title="模型请求的上下文包含当轮工具输入、输出和模型指令，并预留回答空间。" className="flex items-center gap-2 text-sm font-normal text-muted-foreground">
         <ListCollapse aria-hidden="true" className="size-4" />
@@ -417,15 +410,9 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       rendered.add(group.id)
       return <AgentProcessRegion key={key} open={processOpen ?? true}>
         <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} chapters={activityChapters} readOnly={readOnly}
-          showRunIndicator={liveGroupId === group.id ? showRunIndicator : undefined} awaitingApprovalCallId={awaitingApprovalCallId}
+          awaitingApprovalCallId={awaitingApprovalCallId}
           animateLive={!readOnly && group.receiptKeys.some(key => liveToolReceiptIds?.has(key))} />
       </AgentProcessRegion>
   })
-  if (showRunIndicator && !liveGroupId) {
-    // Reserve the first tool's position without inventing an action title.
-    entries.push(<AgentProcessRegion key={stepKey} open={processOpen ?? true}>
-      <ActivityRow key="activity" runActive={runActive} active={false} showRunIndicator={showRunIndicator} animateLive={revealText !== undefined} />
-    </AgentProcessRegion>)
-  }
   return entries.some(Boolean) ? <div className="flex flex-col gap-3 font-medium">{entries}</div> : null
 })

@@ -6,6 +6,7 @@ import type { MobileView } from '../types'
 type Props = {
   view: MobileView
   navigationOpen: boolean
+  animatedTabs?: boolean
   onOpenNavigation: () => void
   onSelectView: (view: 'assistant' | 'editor' | 'chapters') => void
   onBack: () => void
@@ -17,7 +18,7 @@ const titles = {
   chapters: '卷章', cover: '封面工坊', meta: '作品设置', memory: '小说关系网', context: '记忆', skills: '作品技能',
 } as const
 
-export default function StudioMobileHeader({ view, navigationOpen, onOpenNavigation, onSelectView, onBack, onExit, backLabel = '返回工作台' }: Props) {
+export default function StudioMobileHeader({ view, navigationOpen, animatedTabs = false, onOpenNavigation, onSelectView, onBack, onExit, backLabel = '返回工作台' }: Props) {
   const systemSurfaceRef = useNativeSystemSurface<HTMLElement>()
   const primary = view === 'assistant' || view === 'editor'
   const buttonClass = 'inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none'
@@ -36,6 +37,7 @@ export default function StudioMobileHeader({ view, navigationOpen, onOpenNavigat
             {([{ key: 'assistant', label: '工作台' }, { key: 'editor', label: '写作' }] as const).map(({ key, label }) => (
               <button key={key} type="button" aria-pressed={view === key} onClick={() => onSelectView(key)} className={cn('studio-mobile-view-tab relative h-full min-w-0 px-1 text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none', view === key ? 'font-semibold text-[var(--text-primary)]' : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]')}>{label}</button>
             ))}
+            {animatedTabs && <span className="studio-mobile-tab-indicator" aria-hidden="true" />}
           </nav>
         ) : <h1 className="min-w-0 truncate text-center text-sm font-semibold text-[var(--text-primary)]">{titles[view]}</h1>}
         <button type="button" aria-label="退出创作区" title="退出创作区" onClick={onExit} className={buttonClass}><LogOut className="h-5 w-5" /></button>

@@ -663,33 +663,33 @@ it('preserves two chapter receipts through parallel reads, a silent gap and inte
     const parts = [read('a', first), read('b', second)]
     const projection = projectActivityGroups([message('m', parts)])
     return <AuthorActivityParts parts={parts} messageId="m" groups={projection.byMessage.get('m')}
-      activeGroupId={live ? projection.activeByRun.get('r')?.id : undefined} runActive={live} showRunIndicator={live} activityChapters={chapterDirectory} />
+      activeGroupId={live ? projection.activeByRun.get('r')?.id : undefined} runActive={live} activityChapters={chapterDirectory} />
   }
   const view = render(frame('running', 'running'))
   const row = screen.getByRole('button', { name: '正在查看《灯火》' })
   fireEvent.click(row)
   view.rerender(frame('running', 'success'))
   expect(screen.getByRole('button', { name: '正在查看《渡口》', expanded: true })).toBe(row)
-  expect(screen.queryByRole('status', { name: '任务仍在运行' })).toBeNull()
+  expect(screen.queryByText('正在处理')).toBeNull()
   view.rerender(frame('success', 'success'))
   expect(screen.getByRole('button', { name: '已查看 2 章正文', expanded: true })).toBe(row)
   expect(screen.getByText('已查看《渡口》')).toBeTruthy()
   expect(screen.getByText('已查看《灯火》')).toBeTruthy()
-  expect(screen.getByRole('status', { name: '任务仍在运行' }).closest('button')).toBeNull()
-  expect(view.container.textContent).not.toContain('正在处理')
+  expect(row.querySelector('.agent-processing-shimmer')).toBeNull()
+  expect(view.container.textContent).not.toMatch(/正在处理|•••/)
   view.rerender(frame('failed', 'success', false))
   expect(screen.getByRole('button', { name: '核对前文有未完成项', expanded: true })).toBe(row)
-  expect(screen.queryByRole('status', { name: '任务仍在运行' })).toBeNull()
+  expect(screen.queryByText('正在处理')).toBeNull()
 })
 
-it('keeps the settled goal title and details while the run continues', () => {
+it('keeps the settled goal and its details while the run continues without a new step', () => {
   const ending = { type: 'text', text: '信件送抵了渡口。', afterTools: true } as const
   const parts = [activity, call('read', 'chapter_read'), ending]
   const groups = projectActivityGroups([message('batch', parts)]).byMessage.get('batch')
-  const view = render(<AuthorActivityParts parts={parts} messageId="batch" groups={groups} runActive showRunIndicator activityChapters={chapters} />)
+  const view = render(<AuthorActivityParts parts={parts} messageId="batch" groups={groups} runActive activityChapters={chapters} />)
   const row = screen.getByRole('button', { name: `已${goalTitle}` })
   expect(row.querySelector('.agent-processing-shimmer')).toBeNull()
-  expect(screen.getByRole('status', { name: '任务仍在运行' }).closest('button')).toBeNull()
+  expect(view.container.textContent).not.toMatch(/正在处理|•••/)
   fireEvent.click(row)
   expect(screen.getByText(`已查看《${title}》`)).toBeTruthy()
   view.rerender(<AuthorActivityParts parts={parts} messageId="batch" groups={groups} runActive={false} activityChapters={chapters} />)
@@ -876,33 +876,32 @@ it('keeps an actual saved result on silent legacy outlines without inserting tra
   }])]).savedReplyByRun.has('r')).toBe(false)
 })
 
-it('hands the shimmer between model work, tool execution and the next step, then shows the final reply', () => {
+it('shows the shimmer only on actual tool work and preserves the completed receipt', () => {
   const opening: AgentMessagePart = { type: 'text', text: '我先核对前文，再写这章。' }
   const read = call('read', 'chapter_read', { status: 'running' })
-  const view = render(<AuthorActivityParts parts={[opening, reasoning]} messageId="run" runActive showRunIndicator />)
+  const view = render(<AuthorActivityParts parts={[opening, reasoning]} messageId="run" runActive />)
   const shimmer = () => view.container.querySelectorAll('.agent-processing-shimmer')
   expect(shimmer()).toHaveLength(0)
-  expect(screen.getByRole('status', { name: '任务仍在运行' })).toBeTruthy()
+  expect(view.container.textContent).not.toMatch(/正在处理|正在思考|•••/)
   const slot = view.container.querySelector('[data-author-step]')
   const openingNode = screen.getByText(opening.text)
-  expect(slot?.querySelector('button')).toBeNull()
+  expect(slot).toBeNull()
   const group = projectActivityGroups([message('run', [opening, read])])
   view.rerender(<AuthorActivityParts parts={[opening, read]} messageId="run" runActive activeGroupId={group.runningByRun.get('r')?.id}
     groups={group.byMessage.get('run')} liveToolReceiptIds={new Set([JSON.stringify(['run', null, 'read'])])} activityChapters={chapters} />)
   expect(shimmer()).toHaveLength(1)
   const step = screen.getByRole('button', { name: `正在查看《${title}》` })
-  expect(step.closest('[data-author-step]')).toBe(slot)
+  expect(step.closest('[data-author-step]')).toBeTruthy()
   expect(step.querySelector('.agent-tool-enter')).toBeTruthy()
   expect(screen.getByText(opening.text)).toBe(openingNode)
   fireEvent.click(step!)
   expect(step?.getAttribute('aria-expanded')).toBe('true')
   expect(shimmer()[0].closest('button')?.className).not.toMatch(/hover:bg|rounded/)
-  expect(view.container.querySelector('[data-author-working]')).toBeNull()
   const done = { ...read, status: 'success' as const }
-  view.rerender(<AuthorActivityParts parts={[opening, done]} messageId="run" runActive showRunIndicator />)
+  view.rerender(<AuthorActivityParts parts={[opening, done]} messageId="run" runActive />)
   expect(shimmer()).toHaveLength(0)
   expect(screen.getByRole('button', { name: '已核对前文' })).toBe(step)
-  expect(screen.getByRole('status', { name: '任务仍在运行' }).closest('button')).toBeNull()
+  expect(view.container.textContent).not.toMatch(/正在处理|•••/)
   expect(step?.getAttribute('aria-expanded')).toBe('true')
   view.rerender(<AuthorActivityParts parts={[opening, done, { type: 'text', text: '这是正文信道的答复。' }]} messageId="run" runActive={false} />)
   expect(shimmer()).toHaveLength(0)
@@ -1055,22 +1054,18 @@ it('keeps lengthy read receipts collapsed and signals remaining content independ
   expect(document.activeElement).toBe(toggle)
 })
 
-it('shows the opening report before the pending activity and reuses that activity for the first tool', () => {
+it('shows the opening report before the first actual activity', () => {
   const text: AgentMessagePart = { type: 'text', text: '前文已经有来访情节。' }
   const tool = call('new-check', 'chapter_read', { status: 'running' })
-  const view = render(<AuthorActivityParts parts={[reasoning]} messageId="work" runActive showRunIndicator />)
-  const original = view.container.querySelector('[data-author-step]')!
-  view.rerender(<AuthorActivityParts parts={[reasoning, text]} messageId="work" runActive showRunIndicator />)
+  const view = render(<AuthorActivityParts parts={[reasoning]} messageId="work" runActive />)
+  view.rerender(<AuthorActivityParts parts={[reasoning, text]} messageId="work" runActive />)
   const paragraph = screen.getByText(text.text)
-  expect(view.container.querySelector('[data-author-step]')).toBe(original)
-  expect(paragraph.compareDocumentPosition(original) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(view.container.querySelector('[data-author-step]')).toBeNull()
 
   const projection = projectActivityGroups([message('work', [reasoning, text, tool])])
   view.rerender(<AuthorActivityParts parts={[reasoning, text, tool]} messageId="work" runActive
     groups={projection.byMessage.get('work')} activeGroupId={projection.runningByRun.get('r')?.id} />)
   const activeTool = screen.getByRole('button', { name: '正在核对前文' })
-  expect(view.container.querySelector('[data-author-step]')).toBe(original)
-  expect(activeTool.closest('[data-author-step]')).toBe(original)
   expect(paragraph.compareDocumentPosition(activeTool) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   expect(view.container.querySelectorAll('[data-author-step]')).toHaveLength(1)
   expect(view.container.querySelectorAll('.agent-processing-shimmer')).toHaveLength(1)
@@ -1080,7 +1075,7 @@ it('shows the opening report before the pending activity and reuses that activit
   view.rerender(<AuthorActivityParts parts={[reasoning, text, finished, followup]} messageId="work" runActive={false} />)
   expect(view.container.querySelectorAll('[data-author-step]')).toHaveLength(1)
   expect(screen.getByRole('button', { name: '已核对前文' })).toBe(activeTool)
-  expect(original.compareDocumentPosition(screen.getByText(followup.text)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(activeTool.compareDocumentPosition(screen.getByText(followup.text)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   expect(view.container.textContent).not.toMatch(/梳理前文|RAW_THOUGHT_ONLY/)
 })
 
