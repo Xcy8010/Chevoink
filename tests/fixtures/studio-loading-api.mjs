@@ -51,7 +51,15 @@ export function studioApi(url) {
     const root = '/api/agent/sessions/' + session.id
     if (path === root + '/configuration') return { sessionId: session.id, novelId: session.novelId, title: session.title, revision: 1,
       configuration: { model: { modelTier: 'standard', reasoningEffort: 'high' }, creativeFreedom: 'balanced' }, source: 'saved', modelSelectionSource: 'explicit' }
-    if (path === root + '/messages') return { messages: messageHistory(session), activeRunId: null, runGoalId: null, pagination: {hasMore: false, earliestRunStartedAt: null} }
+    if (path === root + '/messages') {
+      const all = messageHistory(session)
+      const before = url.searchParams.get('before')
+      const eligible = before ? all.filter(message => message.createdAt < before) : all
+      const runLimit = Number(url.searchParams.get('runLimit'))
+      const page = runLimit > 0 ? eligible.slice(-runLimit * 2) : eligible
+      return { messages: page, activeRunId: null, runGoalId: null,
+        pagination: {hasMore: page.length < eligible.length, earliestRunStartedAt: page[0]?.createdAt ?? null} }
+    }
     if (path === root + '/history/workspace' || path === root + '/history' || path === root + '/queue') return {items: []}
     if (path === root + '/questions/pending') return {question: null}
   }

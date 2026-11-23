@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight, FilePlus2, FileText, FolderPlus, FolderTree, GripVertical, NotebookPen, NotebookText, PencilLine, ScrollText, Settings2, Trash2, type LucideIcon } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -72,6 +72,7 @@ type ChapterSidebarProps = {
   novelTitle: string
   activeCoverLabel: string
   onSelectChapter: (chapterId: string) => void
+  onPrepareChapter?: (chapterId: string) => void
   onSelectPlan: (planId: string) => void
   onSelectCatalog: () => void
   onCreateChapter: () => void
@@ -133,8 +134,12 @@ export default function ChapterSidebar({
   onSelectCatalog,
   onSelectPlan,
   onSelectChapter,
+  onPrepareChapter,
   embedded = false,
 }: ChapterSidebarProps) {
+  const chapterHoverTimer = useRef<number>()
+  function cancelChapterHover() { window.clearTimeout(chapterHoverTimer.current) }
+  useEffect(() => cancelChapterHover, [onPrepareChapter])
   const [volumeState, setVolumeState] = useState(() => ({ scope: taskScope, collapsed: readCollapsedVolumes(taskScope) }))
   const collapsedVolumes = volumeState.scope === taskScope ? volumeState.collapsed : readCollapsedVolumes(taskScope)
   useLayoutEffect(() => { setVolumeState({ scope: taskScope, collapsed: readCollapsedVolumes(taskScope) }) }, [taskScope])
@@ -621,6 +626,14 @@ export default function ChapterSidebar({
                         <button
                           type="button"
                           onClick={() => onSelectChapter(chapter.id)}
+                          onPointerEnter={event => {
+                            cancelChapterHover()
+                            if (event.pointerType === 'mouse' && onPrepareChapter) {
+                              chapterHoverTimer.current = window.setTimeout(() => onPrepareChapter(chapter.id), 65)
+                            }
+                          }}
+                          onPointerLeave={cancelChapterHover}
+                          onFocus={() => onPrepareChapter?.(chapter.id)}
                           className={cn(
                             'flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] transition',
                             chapterActive

@@ -113,6 +113,8 @@ function historyRevisionKey(sessionId: string, head: Pick<import('../../../../..
 }
 
 const loadAuthorActivity = () => import('./AuthorActivityParts')
+const CONVERSATION_SKELETON_DELAY_MS = 120
+const INITIAL_HISTORY_RUN_LIMIT = 10
 const AuthorActivityParts = lazy(async () => ({ default: (await loadAuthorActivity()).AuthorActivityParts }))
 const AuthorActivitySummary = lazy(async () => ({ default: (await loadAuthorActivity()).AuthorActivitySummary }))
 const AuthorProgressText = lazy(async () => ({ default: (await loadAuthorActivity()).AuthorProgressText }))
@@ -450,7 +452,7 @@ export function AgentPanel({
     // A slow history read survives repeated wakeups. The scoped key prevents old sessions sharing results.
     void queryClient.fetchQuery({
       queryKey: ['agent', 'observed-run-history', sessionId, revision],
-      queryFn: () => fetchAgentSessionMessages(sessionId, { runLimit: 50 }),
+      queryFn: () => fetchAgentSessionMessages(sessionId, { runLimit: INITIAL_HISTORY_RUN_LIMIT }),
       staleTime: 0,
       gcTime: 0,
     }).then(payload => {
@@ -527,6 +529,16 @@ export function AgentPanel({
   const conversationLoading = !conversationReady && (sessionId
     ? storeLoadedSessionId !== sessionId && historyErrorSessionId !== sessionId
     : sessionResolving)
+  const [conversationSkeleton, setConversationSkeleton] = useState<{ sessionId: string | null; visible: boolean }>({ sessionId: null, visible: false })
+  useEffect(() => {
+    if (!conversationLoading) {
+      setConversationSkeleton({ sessionId, visible: false })
+      return
+    }
+    setConversationSkeleton({ sessionId, visible: false })
+    const timer = window.setTimeout(() => setConversationSkeleton({ sessionId, visible: true }), CONVERSATION_SKELETON_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [conversationLoading, sessionId])
   const composerScopePending = conversationLoading || (sessionResolving && !voiceScopeKey)
   const visibleQuestion = storeLoadedSessionId === sessionId && conversationReady && !conversationLoading && !workConversation.collapsed
     ? pendingQuestion
@@ -1087,7 +1099,10 @@ export function AgentPanel({
       return
     }
 
-    const cached = retrying ? null : readSessionMessagesCache(sessionId)
+    const cachedHistory = readSessionMessagesCache(sessionId)
+    const cached = retrying ? null : cachedHistory
+    const cachedRunCount = new Set(cachedHistory?.map(message => message.runId) ?? []).size
+    const historyRunLimit = Math.min(200, Math.max(INITIAL_HISTORY_RUN_LIMIT, cachedRunCount))
     setHistoryErrorSessionId(null)
     // 切到别的会话才丢弃分支信息，回到同一会话时保留，避免提示闪一下再出现
     setForkInfo((current) => (current && current.sessionId === sessionId ? current : null))
@@ -1100,7 +1115,7 @@ export function AgentPanel({
     // Fetch the formatted timeline alongside its history, without blocking the composer.
     void loadAuthorActivity().catch(() => undefined)
     const historyRunId = useAgentStore.getState().runId
-    fetchAgentSessionMessages(sessionId, { runLimit: 50 })
+    fetchAgentSessionMessages(sessionId, { runLimit: historyRunLimit })
       .then((payload) => {
         if (cancelled) {
           return
@@ -1761,9 +1776,7 @@ export function AgentPanel({
       </div>}
       <div ref={scrollRef} onScroll={handleMessagesScroll} className="agent-conversation-scroll min-h-0 overflow-y-auto">
       <div ref={scrollContentRef} className="agent-conversation-width">
-        {conversationLoading ? (
-          <ConversationSkeleton />
-        ) : conversationReady ? (
+        {conversationLoading ? (conversationSkeleton.sessionId === sessionId && conversationSkeleton.visible ? <ConversationSkeleton /> : null) : conversationReady ? (
           /* 已有内容直接呈现：切回已加载会话 / 同会话重用 / 直播收尾时不插任何加载态，做到「有缓存直接显示」。
              按会话取 key：跨会话切换重放淡入，同会话流式追加不重挂载 */
           <div className="flex flex-col gap-4 pb-2">

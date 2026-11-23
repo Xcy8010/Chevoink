@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -9,6 +9,10 @@ import { useStreamingAutoFollow } from './useStreamingAutoFollow'
 import { readPlanPosition, savePlanPosition } from './plan-view-position'
 
 const PlanRichMarkdownEditor = lazy(() => import('./PlanRichMarkdownEditor'))
+
+const ReadingMarkdown = memo(function ReadingMarkdown({ markdown }: { markdown: string }) {
+  return <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={markdownResources} urlTransform={safeMarkdownUrl}>{markdown}</ReactMarkdown>
+})
 
 export type PlanEditorMode = 'preview' | 'markdown'
 
@@ -72,6 +76,13 @@ function PlanMarkdownEditorDocument({
   const [mode, setMode] = useState<PlanEditorMode>('preview')
   const [richReady, setRichReady] = useState(false)
   const [richFailed, setRichFailed] = useState(false)
+  const [mountEditor, setMountEditor] = useState(false)
+  useEffect(() => {
+    // Let the selected plan paint before constructing the editable ProseMirror document.
+    let timer: number | undefined
+    const frame = requestAnimationFrame(() => { timer = window.setTimeout(() => setMountEditor(true), 0) })
+    return () => { cancelAnimationFrame(frame); window.clearTimeout(timer) }
+  }, [])
   const previewKey = positionKey ? `${positionKey}:preview` : undefined
   const restorePreviewScroll = useCallback((node: HTMLDivElement | null) => {
     if (node) node.scrollTop = readPlanPosition(previewKey)
@@ -155,12 +166,12 @@ function PlanMarkdownEditorDocument({
           {!richReady && <div ref={restorePreviewScroll} onScroll={event => savePlanPosition(previewKey, event.currentTarget)} className="plan-rich-markdown overflow-auto [grid-area:1/1]" data-mobile={mobile} data-plan-reading-preview>
             {richFailed && <p role="status" className="pb-2 text-xs text-[var(--text-secondary)]">富文本编辑器暂不可用，可切换到 Markdown 继续编辑。</p>}
             <div className="milkdown"><div className="ProseMirror">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={markdownResources} urlTransform={safeMarkdownUrl}>{markdown}</ReactMarkdown>
+              <ReadingMarkdown markdown={markdown} />
             </div></div>
           </div>}
           <div aria-hidden={!richReady} className={`flex min-h-0 flex-col [grid-area:1/1] ${richReady ? '' : 'invisible'}`}>
             <Suspense fallback={null}>
-              <PlanRichMarkdownEditor
+              {mountEditor && <PlanRichMarkdownEditor
                 markdown={markdown}
                 editable={editable}
                 mobile={mobile}
@@ -172,7 +183,7 @@ function PlanMarkdownEditorDocument({
                 onSelectionChange={onSelectionChange}
                 streaming={streaming}
                 positionKey={previewKey}
-              />
+              />}
             </Suspense>
           </div>
         </div>

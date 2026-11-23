@@ -1075,6 +1075,22 @@ export default function StudioWorkspace() {
     retry: 1,
   })
 
+  const prepareChapter = useCallback((chapterId: string) => {
+    if (!workPanelReady || chapterId === selectedChapterId || chapterId.startsWith('local-')) return
+    void queryClient.prefetchQuery({
+      queryKey: ['studio-chapter', activeNovelId, chapterId],
+      queryFn: () => getChapterContent(activeNovelId, chapterId),
+      retry: false,
+    })
+  }, [activeNovelId, queryClient, selectedChapterId, workPanelReady])
+
+  useEffect(() => {
+    if (workViewerMode !== 'chapter' || chapterQuery.data?.novelId !== activeNovelId
+      || chapterQuery.data.id !== viewerChapterId) return
+    const index = chapters.findIndex(chapter => chapter.id === viewerChapterId)
+    if (index >= 0 && chapters[index + 1]) prepareChapter(chapters[index + 1].id)
+  }, [activeNovelId, chapterQuery.data, chapters, prepareChapter, viewerChapterId, workViewerMode])
+
   useEffect(() => {
     if (!chapterQuery.isError) {
       return
@@ -1333,6 +1349,11 @@ export default function StudioWorkspace() {
 
       const changedChapterIds = agentChangedChapterIdsRef.current
       agentChangedChapterIdsRef.current = new Set()
+      for (const chapterId of changedChapterIds) {
+        if (chapterId !== currentChapterId) {
+          queryClient.removeQueries({ queryKey: ['studio-chapter', activeNovelId, chapterId], exact: true, type: 'inactive' })
+        }
+      }
       if (currentChapterId && changedChapterIds.has(currentChapterId) && !chapterDirtyRef.current) {
         void chapterQueryRefetchRef.current()
       }
@@ -4311,6 +4332,7 @@ export default function StudioWorkspace() {
                   novelTitle={novelTitle}
                   activeCoverLabel={coverLabel}
                   onSelectChapter={handleSelectChapter}
+                  onPrepareChapter={prepareChapter}
                   onSelectPlan={handleSelectPlanFromTree}
                   onOpenChapterSettings={(chapterId) => handleSelectChapter(chapterId, { openSettings: true })}
                   onOpenVolumeSettings={handleOpenVolumeSettings}
@@ -4565,7 +4587,7 @@ export default function StudioWorkspace() {
                     selectedChapterId={workPanelReady ? selectedChapterId : null} selectedTreeItemId={workPanelReady ? selectedTreeItemId : null}
                     catalogPreview={catalogPreview} novelWordCountLabel={wordCountLabel}
                     chapterCountLabel={chapterCountLabel} novelTitle={novelTitle} activeCoverLabel={coverLabel}
-                    onSelectChapter={handleSelectWorkChapter} onSelectPlan={handleSelectPlanFromTree}
+                    onSelectChapter={handleSelectWorkChapter} onPrepareChapter={prepareChapter} onSelectPlan={handleSelectPlanFromTree}
                     onOpenChapterSettings={(chapterId) => handleSelectChapter(chapterId, { openSettings: true })}
                     onOpenVolumeSettings={handleOpenVolumeSettings}
                     onOpenPlanSettings={setPlanSettingsPlanId} onSelectCatalog={handleSelectCatalogFromTree}
@@ -4652,6 +4674,7 @@ export default function StudioWorkspace() {
                     novelTitle={novelTitle}
                     activeCoverLabel={coverLabel}
                     onSelectChapter={handleSelectChapter}
+                    onPrepareChapter={prepareChapter}
                     onSelectPlan={handleSelectPlanFromTree}
                     onOpenChapterSettings={(chapterId) => handleSelectChapter(chapterId, { openSettings: true })}
                     onOpenVolumeSettings={handleOpenVolumeSettings}

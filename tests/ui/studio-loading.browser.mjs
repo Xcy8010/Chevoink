@@ -20,6 +20,7 @@ await page.addInitScript(() => {
 page.setDefaultTimeout(8000)
 const origin = 'http://studio.test'
 const requests = []
+const historyPages = []
 const errors = []
 page.on('pageerror', error => errors.push(error.message))
 const types = {html: 'text/html', js: 'text/javascript', css: 'text/css', svg: 'image/svg+xml', webp: 'image/webp', png: 'image/png', json: 'application/json'}
@@ -41,6 +42,10 @@ await page.route('**/*', async route => {
   }
   if (url.pathname.startsWith('/api/')) {
     const data = studioApi(url)
+    if (url.pathname.endsWith('/messages') && data?.messages) historyPages.push({
+      session: url.pathname.split('/').at(-2), runLimit: Number(url.searchParams.get('runLimit')) || null,
+      messages: data.messages.length, hasMore: data.pagination?.hasMore ?? false,
+    })
     return data === undefined ? route.fulfill({status: 404, json: {success: false, error: {code: 'NO_FIXTURE'}}})
       : route.fulfill({json: {success: true, data}})
   }
@@ -105,6 +110,8 @@ try {
   await page.locator('[aria-label="模型档位"]').getByText('标准', {exact: true}).waitFor()
   assert.equal(await page.getByRole('status', {name: '正在加载当前模型'}).count(), 0, 'fast session configuration should render without an artificial delay')
   await contentVisible('试验任务A合成消息47')
+  assert.deepEqual(historyPages.find(page => page.session === 'session-A'), { session: 'session-A', runLimit: 10, messages: 20, hasMore: true },
+    'first chat page should return ten complete synthetic runs and preserve a cursor for older history')
   await page.evaluate(() => {
     window.studioFallbackFrames = 0
     window.warmSkillsFallback = null
@@ -334,6 +341,7 @@ try {
   console.log(JSON.stringify({ coldSurfaces: ['章节查看器', '技能', '创作区设置', '任务 B 记忆中心'], warmSkillsFallback: false,
     tasks: ['甲作品 A', '甲作品 B', '甲作品 A', '乙作品 C', '甲作品 B'], scrollTop: position,
     recoveredReads: ['task artifacts', 'session list'], staleListIgnored: ['new draft', 'away and back'],
+    initialHistoryPage: historyPages.find(page => page.session === 'session-A'),
     taskHistoryCachedAfterSwitch: true,
     fullPageFallbacks: fallbackFrames, documentRequests: navigationCount }))
 } finally {

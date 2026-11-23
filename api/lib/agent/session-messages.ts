@@ -231,6 +231,7 @@ export async function listLoopSessionMessages(
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: runLimit + 1,
+      select: { id: true, engine: true, status: true, createdAt: true, updatedAt: true, taskRootId: true, runtimeProtocolVersion: true },
     })
     const hasMore = runs.length > runLimit
     // Capture the queue's revision before reading messages. An edit during hydration must still trigger reconciliation.
@@ -252,10 +253,14 @@ export async function listLoopSessionMessages(
         })
       : []
 
-    const timings = await loadMessageTimings(userId, sessionId, [...pageRunIds, ...records.map(record => record.runId)])
-    const serverNotices = await loadServerRunNotices(userId, records.map(record => record.runId))
+    const messageRunIds = records.map(record => record.runId)
+    const [timings, serverNotices, visibleRecords] = await Promise.all([
+      loadMessageTimings(userId, sessionId, [...pageRunIds, ...messageRunIds]),
+      loadServerRunNotices(userId, messageRunIds),
+      projectLegacyQualityBodyChanges(userId, records),
+    ])
     const pagedMessages: AgentUIMessage[] = []
-    for (const record of await projectLegacyQualityBodyChanges(userId, records)) {
+    for (const record of visibleRecords) {
       const stripped = visibleHistoryParts(record.parts as unknown as AgentMessagePart[], record.run, serverNotices.has(record.id))
       pagedMessages.push({
         id: record.id,
@@ -271,11 +276,15 @@ export async function listLoopSessionMessages(
       })
     }
 
+    const [runState, todoSnapshot] = await Promise.all([
+      getSessionRunState(sessionId, !options.beforeRunStartedAt),
+      loadCurrentTodoSnapshot(userId, sessionId),
+    ])
     return {
       messages: pagedMessages,
       ...(historyHead && { historyHead }),
-      ...await getSessionRunState(sessionId, !options.beforeRunStartedAt),
-      todoSnapshot: await loadCurrentTodoSnapshot(userId, sessionId),
+      ...runState,
+      todoSnapshot,
       pagination: {
         hasMore,
         earliestRunStartedAt: pageRuns.length ? pageRuns[pageRuns.length - 1].createdAt.toISOString() : null,
