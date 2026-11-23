@@ -485,8 +485,8 @@ export type ChatImageContentPart = { type: 'image_url'; image_url: { url: string
 export type ChatTextContentPart = { type: 'text'; text: string }
 export type ChatMessage =
   | { role: 'system'; content: string }
-  | { role: 'user'; content: string | Array<ChatTextContentPart | ChatImageContentPart>; sessionReadingMaterial?: true }
-  | { role: 'assistant'; content: string | null; reasoning?: string; toolCalls?: ToolCallRequest[]; responsesContinuation?: ResponsesContinuation }
+  | { role: 'user'; content: string | Array<ChatTextContentPart | ChatImageContentPart>; sessionReadingMaterial?: true; historySourceId?: string }
+  | { role: 'assistant'; content: string | null; reasoning?: string; toolCalls?: ToolCallRequest[]; responsesContinuation?: ResponsesContinuation; historySourceId?: string }
   | { role: 'tool'; toolCallId: string; content: string }
 
 export type ToolCallRequest = {
@@ -776,6 +776,9 @@ export function buildProviderToolChoice(input: ProviderReasoningInput, requested
 }
 
 export type ChatWithToolsParams = {
+  semanticCompaction?: true
+  semanticCompactionEvidence?: { modelConfigId: string | null; modelConfigRevision: number | null; ownerSeq: number; ownerHash: string }
+  beforeProviderDispatch?: (usageId: string) => Promise<void>
   operationPrice?: TokenPrice
   weightedRoute?: WeightedRouteSelection
   physicalRouteId?: string
@@ -947,6 +950,7 @@ function snapshotDurableChatParams(params: ChatWithToolsParams): ChatWithToolsPa
     ...(params.preparedMainRequest ? { preparedMainRequest: structuredClone(params.preparedMainRequest) } : {}),
     ...(params.personalization ? { personalization: { ...params.personalization } } : {}),
     durableExecution: { ...params.durableExecution, lease: { ...params.durableExecution.lease },
+      ...(params.durableExecution.summarySource ? { summarySource: { ...params.durableExecution.summarySource } } : {}),
       ...(params.durableExecution.price ? { price: structuredClone(params.durableExecution.price) } : {}),
       ...(params.durableExecution.cursor ? { cursor: { ...params.durableExecution.cursor } } : {}) } }
 }
@@ -963,6 +967,14 @@ async function chatWithGoalAccounting(params: ChatWithToolsParams): Promise<Chat
     params = { ...params, operationPrice, usageLog: { ...params.usageLog, multiplierBps: operationModelMultiplier(operationPrice, params.usageLog.multiplierBps ?? 10000) } }
   }
   if (!params.durableExecution && params.operationPrice) params = { ...params, usageLog: { ...params.usageLog, multiplierBps: operationModelMultiplier(params.operationPrice, params.usageLog.multiplierBps ?? 10000) } }
+  if (params.semanticCompaction) {
+    if (params.tools.length || params.messages.length !== 2 || params.messages[0].role !== 'system'
+      || params.messages[1].role !== 'user' || typeof params.messages[1].content !== 'string'
+      || params.personalization || params.nextPromptMarker || params.preparedMainRequest
+      || (params.preparedAuxiliaryRequest && !params.durableExecution?.summarySource))
+      throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '摘要必须使用独立的无工具请求。')
+    if (!params.durableExecution) return chatWithToolsImpl(params)
+  }
   if (!params.durableExecution) return withModelRoutePool(params, async route => {
     try { return await chatWithToolsImpl(route) }
     catch (error) {
@@ -985,7 +997,9 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
   const model = params.model ?? env.aiTextModel
   const baseUrl = params.providerBaseUrl ?? env.aiTextBaseUrl
   const chatEndpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`
-  const reasoningEffort = params.reasoningEffort ?? env.aiReasoningEffort
+  const lowest = params.semanticCompaction && (['none', 'minimal', 'low'] as const).find(effort =>
+    !(effort === 'none' && isGlmThinkingOnly(model)) && params.reasoningEfforts?.includes(effort))
+  const reasoningEffort = lowest || params.reasoningEffort || env.aiReasoningEffort
   const frozenAuxiliary = params.preparedAuxiliaryRequest
   const frozenMain = params.preparedMainRequest
   const route = { model, baseUrl, reasoningEffort, reasoningParameterMode: params.reasoningParameterMode }
@@ -997,11 +1011,16 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     .update(JSON.stringify(['responses-tool-route', ...routeIdentity])).digest('hex') : null
   const observed = toolRouteKey ? responsesToolRouteHints.get(toolRouteKey) : undefined
   const responsesEndpoint = possibleResponses && (useConfirmedAlternative || frozenMain?.endpoint === possibleResponses
+    || (params.semanticCompaction && frozenAuxiliary?.endpoint === possibleResponses)
     || (observed !== undefined && observed > Date.now())
     || resolveResponsesEndpoint({ ...route, toolCallingProtocol: params.toolCallingProtocol })) ? possibleResponses : null
-  if (frozenAuxiliary && (!params.durableExecution?.auxiliaryStep || params.durableExecution.auxiliaryStep !== params.usageLog.action
-    || params.tools.length || frozenAuxiliary.endpoint !== chatEndpoint || frozenAuxiliary.body.model !== model
-    || frozenAuxiliary.body.stream !== true || !Array.isArray(frozenAuxiliary.body.messages) || frozenAuxiliary.body.tools !== undefined)) {
+  const frozenSummary = params.semanticCompaction && params.durableExecution?.summarySource && params.usageLog.action === 'agent_context_summary'
+  const summaryResponses = frozenSummary && frozenAuxiliary?.endpoint === responsesEndpoint
+  if (frozenAuxiliary && ((!frozenSummary && (!params.durableExecution?.auxiliaryStep || params.durableExecution.auxiliaryStep !== params.usageLog.action))
+    || params.tools.length || (!summaryResponses && frozenAuxiliary.endpoint !== chatEndpoint) || frozenAuxiliary.body.model !== model
+    || frozenAuxiliary.body.stream !== true || (summaryResponses && frozenAuxiliary.body.store !== false)
+    || !Array.isArray(summaryResponses ? frozenAuxiliary.body.input : frozenAuxiliary.body.messages)
+    || (frozenAuxiliary.body.tools !== undefined && !(summaryResponses && Array.isArray(frozenAuxiliary.body.tools) && !frozenAuxiliary.body.tools.length)))) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原辅助请求与冻结路由不匹配。')
   }
   if (frozenMain && (!params.durableExecution?.cursor || frozenAuxiliary || params.durableExecution.auxiliaryStep
@@ -1026,7 +1045,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
   }
   const useResponses = responsesEndpoint !== null && (frozenRequest
     ? frozenRequest.endpoint === responsesEndpoint
-    : hasToolWork)
+    : hasToolWork || params.semanticCompaction)
   const endpoint = useResponses ? responsesEndpoint : chatEndpoint
   if (useResponses && frozenMain) {
     const opaqueItems = (frozenMain.body.input as Array<{ type?: unknown } | null>).filter(item => item?.type === 'reasoning')
@@ -1041,8 +1060,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
   const auxiliaryReview = params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
     && ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry',
       'continuity_critic', 'continuity_format_recovery', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'continuity_coordinated_revision'].includes(params.usageLog.action)
-  const isolatedReview = !frozenRequest && auxiliaryReview
-  const reviewTransport = auxiliaryReview || params.tools.length === 0 && params.boundedReview === true
+  const isolatedReview = !frozenRequest && (auxiliaryReview || params.semanticCompaction)
+  const reviewTransport = auxiliaryReview || params.semanticCompaction || params.tools.length === 0 && params.boundedReview === true
   const reviewReasoning = isolatedReview ? buildReviewReasoningPayload({ ...params, model,
     providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort }) : undefined
   const body: Record<string, unknown> = frozenRequest ? structuredClone(frozenRequest.body)
@@ -1059,7 +1078,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     ...(params.reasoningParameterMode || reasoningEffort !== 'none' ? {} : { temperature: params.temperature ?? 0.6 }),
     // 显式拉满单轮输出上限：不传时 DeepSeek 默认仅 4096，
     // Agent 写 3000+ 字长章时工具参数 JSON 会被 length 截断导致写入失败
-    [params.outputTokenParameter ?? 'max_tokens']: params.maxOutputTokens ?? env.aiTextMaxOutputTokens,
+    [params.semanticCompaction ? resolveTextOutputTokenParameter(params.outputTokenParameter, { provider: params.provider, providerBaseUrl: baseUrl, model }, true)
+      : params.outputTokenParameter ?? 'max_tokens']: params.maxOutputTokens ?? env.aiTextMaxOutputTokens,
     stream: true,
     stream_options: { include_usage: true },
     messages: providerMessages,
@@ -1085,7 +1105,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     }, params.toolChoice))
   }
   const encodedBody = JSON.stringify(body)
-  const routeEvidence = weightedRouteEvidence(params.weightedRoute, params.provider ?? env.aiTextProvider, model, params.physicalRouteId)
+  const routeEvidence = { ...weightedRouteEvidence(params.weightedRoute, params.provider ?? env.aiTextProvider, model, params.physicalRouteId),
+    ...(params.semanticCompactionEvidence ? { semanticCompaction: params.semanticCompactionEvidence } : {}) }
   const tier = params.usageLog.modelTier ?? 'speed'
   if (params.durableExecution?.cursor) await validateModelCursor(params.durableExecution.lease, params.durableExecution.cursor, {
     operationKey: params.durableExecution.operationKey, parentOperationId: params.durableExecution.parentOperationId,
@@ -1141,10 +1162,12 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
         throw new DataAccessError(409, STALE_PERSONALIZATION_REQUEST, '全局记忆已更新，本次旧上下文未发送。')
     }
     params.signal?.throwIfAborted()
+    if (prepared && params.beforeProviderDispatch) await params.beforeProviderDispatch(prepared.id)
+    params.signal?.throwIfAborted()
     providerDispatched = true
     const requestInit = {
       method: 'POST',
-      ...(useResponses ? { redirect: 'error' as const } : {}),
+      ...(useResponses || params.semanticCompaction ? { redirect: 'error' as const } : {}),
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${params.providerApiKey ?? env.aiTextApiKey}`,
@@ -1270,7 +1293,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
   let lastEvidenceSave = 0
   const persistObservation = async (force = false) => {
     if (!durable) {
-      if (prepared && (force || Date.now() - lastEvidenceSave >= 1000)) {
+      if (prepared && !params.semanticCompaction && (force || Date.now() - lastEvidenceSave >= 1000)) {
         const output = content + reasoning + [...toolCallsByIndex.values()].map(call => call.arguments).join('')
         await saveOutputEvidence(prepared.id, estimateTokenCount(encodedBody), output, routeEvidence)
         lastEvidenceSave = Date.now()
@@ -1492,7 +1515,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
       ? { responsesContinuation: { binding: responsesBinding, items: reasoningItems } } : {}) }
   if (durable) return durable.finish(result)
 
-  await recordStreamUsage(true)
+  await recordStreamUsage(!params.semanticCompaction)
 
   if (params.usageLog.action === 'agentLoopTurn' && toolCalls.length === 0 && prepared) {
     // Reuse the single-use bounded-review proof. A returned stream alone does

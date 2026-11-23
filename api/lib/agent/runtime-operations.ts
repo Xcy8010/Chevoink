@@ -287,7 +287,24 @@ export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: 
         && !await (await import('./runtime-cover-accounting.js')).readCoverAdmission(tx, attempt.id)) return runtimeError('RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED', '子任务模型请求缺少可验证的输出上限。')
 
     }
-    await assertPendingProviderState(tx, token.taskRootId, attempt.operationId)
+    if (operation.action === 'agent_context_summary') {
+      const { assertSummarySource, summarySourceSchema, summaryOperationKey } = await import('./runtime-semantic-cursor.js')
+      const { readExecutionStateInTransaction } = await import('./runtime-state.js')
+      const input = (operation.inputSnapshot as Prisma.JsonObject).input as Prisma.JsonObject
+      const source = summarySourceSchema.parse(input.source)
+      if (operation.parentOperationId || operation.operationKey !== summaryOperationKey(source) || attempt.attemptKey !== '1'
+        || runtimeJsonHash({ provider: attempt.provider, model: attempt.model, request: input.request }) !== attempt.requestHash) {
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '上下文摘要尝试与原请求不一致。')
+      }
+      const state = await readExecutionStateInTransaction(tx, token.taskRootId)
+      assertSummarySource(source, state)
+      const model = state.configuration.model
+      if (model.tier === 'custom' && (!model.customModelId || !model.customModelRevision
+        || !(await tx.$queryRaw<{ id: string }[]>`SELECT id FROM ai_model_configs WHERE id = ${model.customModelId}
+          AND owner_user_id = ${token.userId} AND revision = ${model.customModelRevision} AND enabled = true FOR SHARE`).length)) {
+        return runtimeError('RUNTIME_IDENTITY_CONFLICT', '自定义摘要模型的账户版本已变化，未派发请求。')
+      }
+    } else await assertPendingProviderState(tx, token.taskRootId, attempt.operationId)
     const memoryEpoch = (attempt.requestSnapshot as { request?: { personalizationMemoryEpoch?: number } }).request?.personalizationMemoryEpoch
     if (memoryEpoch !== undefined) {
       if (env.appEnv === 'production' && !await (await import('../app-releases.js')).hasAgentPersonalizationCapability(token.userId, tx))

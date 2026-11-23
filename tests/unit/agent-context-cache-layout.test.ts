@@ -10,6 +10,7 @@ vi.mock('../../api/lib/prisma.js', () => ({
   prisma: {
     $transaction: vi.fn(),
     agentRun: { findFirst: vi.fn(async () => null) },
+    agentRunEvent: { findFirst: vi.fn(async () => null) },
     // Context assembly covers ordinary runs; no persisted goal execution is
     // attached to this fixture.
     agentGoalExecution: { findUnique: vi.fn(async () => null) },
@@ -250,6 +251,32 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(Object.values(result.timings).every(value => Number.isFinite(value) && value >= 0)).toBe(true)
     expect(JSON.stringify(result.messages)).not.toContain('checkpointMs')
     console.info('[synthetic-context-timing]', result.timings)
+  })
+  it('reuses the vetted digest on the next prompt and pins the actual chapter write despite a later stale read', async () => {
+    const { planSemanticCompaction } = await import('../../api/lib/agent/semantic-compaction.js')
+    const quote = '需要核对这份旧回执。'
+    const record = (id: string, parts: unknown[], role = 'assistant') => ({ id, runId: 'prior', role, parts, createdAt: new Date('2026-10-10') })
+    const edit = record('edit', [{ type: 'tool-call', toolName: 'chapter_edit_range', status: 'success', summary: '保存修订',
+      display: { kind: 'chapterDiff', appliedDirectly: true, chapterId: 'c', revision: 6 } }])
+    const stale = record('read', [{ type: 'tool-call', toolName: 'chapter_read', status: 'success', summary: '旧回执',
+      display: { kind: 'chapterRef', chapterId: 'c', revision: 4 } }])
+    const rows = [record('latest', [{ type: 'text', text: '保留末次交接。' }]), stale, edit,
+      record('archived', [{ type: 'text', text: '过去的讨论。'.repeat(2000) + quote }]),
+      record('author', [{ type: 'text', text: '只改日期，保留人物动机。' }], 'user')]
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(rows as never)
+    const first = await assembleContext(buildInput())
+    const original = first.messages.filter(m => 'historySourceId' in m && m.historySourceId)
+    expect(original.map(m => 'historySourceId' in m && m.historySourceId)).toEqual(['archived:text'])
+    const plan = planSemanticCompaction(original, 1000, estimateChatMessagesTokens)!
+    const historyDigest = plan.receipt(plan.apply(JSON.stringify({ notes: [{ source: 1, quote }] }))!)
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([record('checkpoint', [{ type: 'context-compaction', state: 'completed', historyDigest }]), ...rows] as never)
+    const next = await assembleContext(buildInput())
+    const text = next.messages.map(m => m.content).join('\n')
+    expect(text).toContain('[archived] ' + quote)
+    expect(text).not.toContain('过去的讨论。')
+    expect(text).toContain('"revision":6')
+    expect(text).toContain('只改日期，保留人物动机。')
+    expect(text).toContain('保留末次交接。')
   })
   it('accounts for every assembled input section without recording story text or changing request order', async () => {
     const input = buildInput()
@@ -649,8 +676,25 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(continued.inputEstimates!.readingMaterial.tokens).toBeGreaterThanOrEqual(20000)
     expect(compactSessionContext).not.toHaveBeenCalled()
     console.info('[synthetic-context-continuity]', { previousTotal, nextTotal, materials: continued.inputEstimates!.readingMaterial.tokens })
+    // Older receipts can also describe entire chapters. Their availability alone must not inflate the next request.
+    const oldChapter = { ...chapter, id: 'older-chapter', content: '远'.repeat(53000) }
+    const oldRead = { ...report, id: 'older-reading', runId: 'older-run', parts: [{ ...report.parts[0], display: {
+      kind: 'chapterRef', chapterId: oldChapter.id, revision: oldChapter.revision, range: { start: 0, end: oldChapter.content.length },
+    } }] }
+    vi.mocked(prisma.chapter.findMany).mockResolvedValue([chapter, oldChapter] as never)
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([report, original, oldRead] as never)
+    const measured = { estimatedTokens: previousTotal, contextWindowTokens: 258000, compactAtTokens: 228000 }
+    vi.mocked(prisma.agentRunEvent.findFirst).mockResolvedValueOnce({ payload: measured } as never)
+    const bounded = await assembleContext({ ...next, sessionMaterialReads: allowed })
+    expect(bounded.messages.some(message => String(message.content).includes(plan.content))).toBe(true)
+    expect(bounded.messages.some(message => String(message.content).includes(oldChapter.content))).toBe(false)
+    expect(bounded.messages.at(-1)!.content).toBe(asReceipts.messages.at(-1)!.content)
+    const measuredStart = input.toolDefinitionTokens + estimateChatMessagesTokens(bounded.messages)
+    expect(measuredStart).toBeLessThanOrEqual(previousTotal + bounded.inputEstimates!.task.tokens + bounded.inputEstimates!.intent.tokens)
+    const unbounded = await assembleContext({ ...next, sessionMaterialReads: allowed })
+    expect(estimateChatMessagesTokens(unbounded.messages) - estimateChatMessagesTokens(bounded.messages)).toBeGreaterThan(50000)
     await assembleContext({ ...next, includeCurrentRunHistory: true, sessionMaterialReads: allowed })
-    expect(allowed).toHaveBeenCalledTimes(1)
+    expect(allowed).toHaveBeenCalledTimes(3)
   })
 
   it('omits an archived durable read range when the long tool output may have reached the model only as a reference', async () => {
@@ -689,6 +733,19 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     ]
     expect(result.inputEstimates!.history.tokens).toBeGreaterThan(20000)
     expect(estimateChatMessagesTokens([...result.messages, ...nextRound]) + input.toolDefinitionTokens).toBeLessThan(228000)
+  })
+  it('hands above-threshold archived prose and the full author instruction to the admitted model gate before a chronological checkpoint', async () => {
+    const original = '作者要求。'.repeat(500) + '结尾人物动机必须保留。'
+    const rows = [{ id: 'last', role: 'assistant', parts: [{ type: 'text', text: '已保存，等待校对。' }] },
+      { id: 'source', role: 'assistant', parts: [{ type: 'text', text: '旧笔记。'.repeat(26000) }] },
+      { id: 'author', role: 'user', parts: [{ type: 'text', text: original }] }]
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(rows.map(r => ({ ...r, runId: 'archived-run' })) as never)
+    const input = { ...buildInput(), contextWindowTokens: 258000, toolDefinitionTokens: 127000 }
+    const result = await assembleContext(input)
+    expect(estimateChatMessagesTokens(result.messages) + input.toolDefinitionTokens).toBeGreaterThanOrEqual(228000)
+    expect(result.messages.some(m => 'historySourceId' in m && m.historySourceId === 'source:text')).toBe(true)
+    expect(result.messages.some(m => typeof m.content === 'string' && m.content.includes(original))).toBe(true)
+    expect(compactSessionContext).not.toHaveBeenCalled()
   })
 
   it('indicates earlier history is available when the database read limit is reached even if all 500 returned messages fit', async () => {

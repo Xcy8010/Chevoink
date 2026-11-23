@@ -13,6 +13,7 @@ import { failedToolResultSchema, hasAnsweredQuestionBatch } from './runtime-redu
 import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { isDurablePublicWebOperation, projectDurablePublicWeb } from './runtime-public-web.js'
 import { toolActivityReport } from './activity-report.js'
+import { semanticHistoryDigest } from './semantic-compaction.js'
 
 export const durableMessageId = (rootId: string, turn: number) => `dm-${runtimeJson({ rootId, turn }).hash.slice(0, 48)}`
 const sourceSchema = z.object({ revision: z.number().int().nonnegative(), snapshotHash: z.string(), previousHash: z.string().nullable() }).strict()
@@ -32,7 +33,9 @@ export async function persistProjectedMessages(tx: RuntimeTx, source: AgentExecu
     }
     let parts = (old?.parts ?? []) as unknown as AgentMessagePart[]
     if (body.type === 'context.compaction') {
-      parts = [{ type: 'context-compaction', state: body.state }]
+      const receipt = z.object({ historyDigest: semanticHistoryDigest }).safeParse(source.payload)
+      parts = [{ type: 'context-compaction', state: body.state,
+        ...(body.state === 'completed' && receipt.success ? { historyDigest: receipt.data.historyDigest } : {}) }]
     } else if (body.type === 'activity.title') {
       parts = prependAgentActivityTitle(parts, body.title)
     } else if (body.type === 'reasoning.delta') {

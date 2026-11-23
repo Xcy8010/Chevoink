@@ -28,6 +28,60 @@ beforeEach(() => {
   db.save.mockImplementation((_tx, _lease, input) => ({ revision: 3, snapshotHash: 'e'.repeat(64), state: input.snapshot }))
 })
 
+it.each(['success', 'invalid quote', 'stale frame', 'under trigger'] as const)('handles a semantic-only pressure boundary: %s', async scenario => {
+  const older: ChatMessage = { role: 'assistant', historySourceId: 'm1:text', content: '保留版本甲。' + '文'.repeat(20_000) }
+  const author: ChatMessage = { role: 'user', content: '请在当前版本上继续，保持结局。' }
+  const original = [older, author]
+  const fixture = { frame: { revision: 2, snapshotHash: 'f'.repeat(64), state: { phase: 'idle', messages: original } },
+    configuration: { tools: [], toolAuthority: [] }, head: { configurationHash: 'c'.repeat(64) } }
+  db.read.mockResolvedValue(fixture)
+  const summarize = vi.fn(async () => {
+    if (scenario === 'stale frame') db.read.mockResolvedValue({ ...fixture, frame: { ...fixture.frame, revision: 3 } })
+    return JSON.stringify({ notes: [{ source: 1, quote: scenario === 'invalid quote' ? '不存在的新内容' : '保留版本甲。' }] })
+  })
+  const request = advanceDurableContext(token, { ...budget, compactAtTokens: scenario === 'under trigger' ? 30_000 : 18_000, canReadArchive: false, summarize })
+  if (scenario === 'stale frame') await expect(request).rejects.toMatchObject({ code: 'RUNTIME_STATE_CONFLICT' })
+  else if (scenario === 'success') {
+    const result = await request
+    expect(result?.state.messages).toEqual([{ role: 'user', content: expect.stringContaining('保留版本甲。') }, author])
+    expect(db.archive).toHaveBeenCalledWith({ data: expect.objectContaining({ payload: expect.objectContaining({
+      archivedRounds: 0, beforeTokens: estimateChatMessagesTokens(original), afterTokens: estimateChatMessagesTokens(result!.state.messages),
+      historyDigest: expect.objectContaining({ sourceIds: ['m1:text'] }),
+    }) }) })
+  } else expect(await request).toBeNull()
+  expect(summarize).toHaveBeenCalledTimes(scenario === 'under trigger' ? 0 : 1)
+  expect(db.save).toHaveBeenCalledTimes(scenario === 'success' ? 1 : 0)
+  expect(original[0]).toBe(older)
+})
+
+it.each(['invalid', 'valid-but-too-long', 'unavailable', 'unknown'] as const)('uses exact history pointers at the hard limit with a %s summary', async outcome => {
+  const author: ChatMessage = { role: 'user', content: '作者的约束保持完整。' }
+  const completeSentence = '初稿'.repeat(900) + '。'
+  const older: ChatMessage = { role: 'assistant', historySourceId: 'm1:text', content: completeSentence.repeat(10) }
+  const original = [older, author]
+  const fixture = await db.read()
+  db.read.mockResolvedValue({ ...fixture, head: { configurationHash: 'c'.repeat(64) },
+    frame: { ...fixture.frame, state: { phase: 'idle', messages: original } } })
+  const summarize = vi.fn(async () => {
+    if (outcome === 'unknown') throw new Error('派发结果未知')
+    if (outcome === 'valid-but-too-long') return JSON.stringify({ notes: [{ source: 1, quote: completeSentence }] })
+    return '{"notes":[{"source":1,"quote":"捏造内容"}]}'
+  })
+  const hardLimit = outcome === 'valid-but-too-long' ? 600 : 10_000
+  const request = advanceDurableContext(token, { ...budget, hardLimit, compactAtTokens: hardLimit, canReadArchive: false,
+    ...(outcome !== 'unavailable' ? { summarize } : {}) })
+  if (outcome === 'unknown') {
+    await expect(request).rejects.toThrow('派发结果未知')
+    expect(db.save).not.toHaveBeenCalled()
+  } else {
+    const result = await request
+    expect(result?.state.messages).toEqual([{ role: 'user', content: expect.stringContaining('m1') }, author])
+    expect(db.archive.mock.calls[0][0].data.payload.historyDigest).toBeUndefined()
+    expect(estimateChatMessagesTokens(result!.state.messages)).toBeLessThan(hardLimit)
+  }
+  expect(original).toEqual([older, author])
+})
+
 it('can release optional reading material without an archive reader, but never changes a prepared request', async () => {
   const content = '〔材料标题相同的作者原话〕' + '文'.repeat(600)
   const author = { role: 'user' as const, content }
@@ -58,6 +112,23 @@ it('compacts the projected request once and retains the author and latest tool r
     compactAtTokens: budget.compactAtTokens, contextWindowTokens: budget.contextWindowTokens,
   }) }) })
   expect(messages).toHaveLength(7)
+})
+
+it('releases excerpts and archives old rounds together with pointers into the original frame', async () => {
+  const optional = { role: 'user' as const, content: '旧章'.repeat(6000), sessionReadingMaterial: true as const }
+  const original = [optional, ...messages]
+  const fixture = await db.read()
+  db.read.mockResolvedValue({ ...fixture, frame: { ...fixture.frame, state: { phase: 'idle', messages: original } } })
+  const actualBudget = { ...budget, compactAtTokens: 38000, hardLimit: 38000 }
+  const next = await advanceDurableContext(token, actualBudget)
+  expect(estimateChatMessagesTokens(next!.state.messages)).toBeLessThanOrEqual(38000 * 0.45)
+  expect(next!.state.messages[0]).toEqual(messages[0])
+  expect(next!.state.messages.at(-1)).toEqual(messages.at(-1))
+  const receipt = String(next!.state.messages[1].content)
+  const { references } = JSON.parse(receipt.split('\n').at(-1)!)
+  expect(references).toEqual([2, 3].map(messageIndex => ({ revision: 2, hash: 'f'.repeat(64), messageIndex })))
+  expect(original[references[1].messageIndex]).toEqual(messages[2])
+  expect(db.archive).toHaveBeenCalledOnce()
 })
 
 it('keeps an intact frame below the trigger, without a reader, or for a negligible projected saving', async () => {

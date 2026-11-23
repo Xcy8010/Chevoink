@@ -19,8 +19,57 @@ import { getCreditWindow } from '../../api/lib/credits.js'
 import { prisma } from '../../api/lib/prisma.js'
 import * as providerOperations from '../../api/lib/agent/runtime-operations.js'
 import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
+import { callDurableContextSummary } from '../../api/lib/agent/runtime-semantic-call.js'
+import { summaryOperationKey, SEMANTIC_ACTION } from '../../api/lib/agent/runtime-semantic-cursor.js'
 
 describe.runIf(available)('model tool model durable execution chain', () => {
+  it.each(['known', 'unknown'] as const)('binds the %s independent summary result to one paid attempt on its original frame', async outcome => {
+    await fixture(async f => {
+      const window = getCreditWindow()
+      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 1000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      const lease = await claim(f)
+      const baseUrl = 'https://provider.invalid/v1'
+      const route = { provider: 'fixture', model: 'fixture', endpoint: baseUrl + '/chat/completions', reasoningEffort: 'high' as const }
+      const price = { version: 'credits-v1-exact' as const, modelTier: 'speed' as const, multiplierBps: 10000 }
+      const state = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator',
+        creativeFreedom: 'balanced', qualityMode: 'premium', model: { tier: 'speed', provider: route.provider, modelName: route.model,
+          tokenPrice: price, customModelId: null, reasoningEffort: route.reasoningEffort, routeRevision: modelRouteRevision(route) },
+        tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [] }, snapshot: {
+        version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: '保留初稿' }], successfulToolSignatures: [] } })
+      const system = '只摘录已读资料', content = '已确认甲方案'
+      const source = { revision: state.frame.revision, snapshotHash: state.frame.snapshotHash, configurationHash: state.head.configurationHash,
+        planHash: runtimeJson({ system, content }).hash }
+      const call = (boundSource = source) => callDurableContextSummary({ lease, source: boundSource, system, content, signal: AbortSignal.timeout(20_000),
+        window: 258000, maxOutputTokens: 8192, model: state.configuration.model, runtime: { tier: 'speed', provider: route.provider,
+          modelName: route.model, baseUrl, apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['low', 'high'],
+          multiplierBps: 10000, contextWindowTokens: 258000, visionEnabled: false } })
+      const summary = '{"notes":[{"source":1,"quote":"甲方案"}]}'
+      const fetchMock = vi.fn(async () => {
+        if (outcome === 'unknown') throw new TypeError('transport interrupted')
+        const body = { choices: [{ delta: { content: summary }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 10 } }
+        return new Response(`data: ${JSON.stringify(body)}\n\ndata: [DONE]\n\n`)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      await expect(call({ ...source, configurationHash: 'e'.repeat(64) })).rejects.toMatchObject({ code: 'RUNTIME_STATE_CONFLICT' })
+      await expect(call({ ...source, planHash: '0'.repeat(64) })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      expect(fetchMock).not.toHaveBeenCalled()
+      if (outcome === 'unknown') {
+        await expect(call()).rejects.toThrow()
+        await expect(call()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+      } else {
+        expect(await call()).toBe(summary)
+        expect(await call()).toBe(summary)
+        await expect(call({ ...source, planHash: 'a'.repeat(64) })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      }
+      expect(fetchMock).toHaveBeenCalledOnce()
+      const operation = await prisma.agentOperation.findUniqueOrThrow({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: summaryOperationKey(source) } } })
+      expect(operation).toMatchObject({ action: SEMANTIC_ACTION, parentOperationId: null, status: outcome === 'known' ? 'succeeded' : 'unknown' })
+      expect(await prisma.agentProviderAttempt.count({ where: { operationId: operation.id } })).toBe(1)
+      expect(await prisma.creditLedgerEntry.count({ where: { idempotencyKey: `operation:${operation.id}` } })).toBe(outcome === 'known' ? 1 : 0)
+      expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(state.frame.snapshotHash)
+    })
+  })
   it.each(['wrapped', 'default-target', 'syntax-repair', 'mismatch', 'incomplete', 'frozen-denied', 'stale', 'append', 'edit', 'approved', 'approval-denied', 'approval-expired', 'approval-scope', 'approval-stopped'] as const)('%s', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     await fixture(async f => {

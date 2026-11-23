@@ -72,8 +72,11 @@ describe('P0 credit admission and auxiliary model ownership', () => {
     })
   })
   it('resolves only an enabled model owned by the caller for standalone export and graph', async () => {
-    mocks.model.mockResolvedValueOnce({ id: 'custom' }).mockResolvedValueOnce({ provider: 'openai', modelName: 'custom', baseUrl: 'https://fixture.example/v1', apiKeyCiphertext: 'fixture', metadata: {} })
-    expect(await getAuxiliaryModelRuntime('owner')).toMatchObject({ tier: 'custom', multiplierBps: 0 })
+    mocks.model.mockResolvedValueOnce({ id: 'custom' }).mockResolvedValueOnce({ revision: 7,
+      provider: 'openai', modelName: 'custom', baseUrl: 'https://fixture.example/v1', apiKeyCiphertext: 'fixture', metadata: {} })
+    const runtime = await getAuxiliaryModelRuntime('owner')
+    expect(runtime).toMatchObject({ tier: 'custom', customModelRevision: 7, multiplierBps: 0 })
+    expect(runtime).not.toHaveProperty('modelConfigId')
     expect(mocks.model.mock.calls[0][0].where).toEqual({ ownerUserId: 'owner', enabled: true })
     expect(mocks.model.mock.calls[1][0].where).toEqual({ id: 'custom', ownerUserId: 'owner', enabled: true })
   })

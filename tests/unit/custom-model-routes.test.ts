@@ -61,6 +61,7 @@ describe('custom model routes capability validation', () => {
     expect(mocks.validate).toHaveBeenCalledWith(expect.objectContaining({ baseUrl, apiKey }))
     expect(mocks.validate.mock.calls[0][0]).not.toHaveProperty('toolCallingProtocol')
     expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      revision: { increment: 1 },
       metadata: expect.objectContaining({ toolCallingProtocol: null, capabilityValidation: verified.capabilityValidation }),
     }) }))
   })
@@ -91,7 +92,7 @@ describe('custom model routes capability validation', () => {
     mocks.findFirst.mockResolvedValue({ ...target, provider: 'local-openai', baseUrl: 'http://127.0.0.1:7863/v1' })
     await request(app).patch('/credits/models/model-id').send({ enabled: true, contextWindowTokens: 16000 }).expect(200)
     expect(mocks.validate).toHaveBeenCalledWith(expect.objectContaining({ provider: 'local-openai', userId: 'owner', apiKey: 'stored-test-key' }))
-    expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'model-id', ownerUserId: 'owner', updatedAt: target.updatedAt }, data: expect.objectContaining({ enabled: true, metadata: expect.objectContaining({ contextWindowTokens: 258000 }) }) }))
+    expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'model-id', ownerUserId: 'owner', updatedAt: target.updatedAt }, data: expect.objectContaining({ enabled: true, revision: { increment: 1 }, metadata: expect.objectContaining({ contextWindowTokens: 258000 }) }) }))
     mocks.validate.mockClear(); mocks.updateMany.mockClear()
     await request(app).patch('/credits/models/model-id').send({ modelName: 'new-model', enabled: true }).expect(409)
     expect(mocks.validate).not.toHaveBeenCalled(); expect(mocks.updateMany).not.toHaveBeenCalled()

@@ -179,6 +179,9 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   await assertQueuedModelVersion(run)
   const runtime = selectWeightedModelRuntime(await getModelTierRuntime(run.modelTier as import('../../../shared/contracts/index.js').CreditModelTier, userId, run.customModelId,
     run.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort))
+  const customAdmission = z.object({ customModelAdmission: z.object({ id: z.string().min(1), revision: z.number().int().positive() }).strict() }).safeParse(run.startRequest)
+  const customModelRevision = runtime.tier === 'custom' && customAdmission.success && customAdmission.data.customModelAdmission.id === run.customModelId
+    && customAdmission.data.customModelAdmission.revision === runtime.customModelRevision ? runtime.customModelRevision : undefined
   if (runtime.tier !== run.modelTier || run.modelTier === 'custom' && !run.customModelId) throw new DataAccessError(409, 'RUNTIME_MODEL_ADAPTER_REQUIRED', '原模型配置缺少可核验的模型身份。')
   if (run.modelConfigId && (runtime.modelConfigId !== run.modelConfigId || runtime.modelConfigRevision !== run.modelConfigRevision)) {
     throw new DataAccessError(409, 'MODEL_SELECTION_REQUIRED', '排队任务的模型身份已变化，请明确重新选择；未初始化或派发请求。')
@@ -251,6 +254,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
       ...(input.modelAssignments ? { modelAssignments: input.modelAssignments } : {}),
       ...(input.pinnedSubagentId ? { pinnedSubagentId: input.pinnedSubagentId } : {}),
       model: { ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}),
+        ...(customModelRevision ? { customModelRevision } : {}),
         ...(run.modelPriceSnapshot ? { tokenPrice: tokenPriceSchema.parse(run.modelPriceSnapshot) } : {}), ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
         customModelId: runtime.tier === 'custom' ? run.customModelId : null,
         ...(runtime.toolCallingProtocol ? { toolCallingProtocol: runtime.toolCallingProtocol } : {}),
@@ -593,7 +597,9 @@ export async function startLoopRunLocked(
     // options. Its effective default belongs in the frozen task contract.
     const startInput = freshGoal ? input : { ...input, creativeFreedom }
     const startRequest = JSON.parse(JSON.stringify({ ...(options.humanOrigin === 'http' && !options.goal && options.concurrencyScope !== 'orchestration'
-      ? withHumanAdmission(startInput) : startInput), ...(authorSteering ? { authorSteering } : {}) })) as Prisma.InputJsonValue
+      ? withHumanAdmission(startInput) : startInput), ...(authorSteering ? { authorSteering } : {}),
+      customModelAdmission: modelTier === 'custom' && input.customModelId && modelRuntime.customModelRevision
+        ? { id: input.customModelId, revision: modelRuntime.customModelRevision } : undefined })) as Prisma.InputJsonValue
     let created = await tx.agentRun.create({ ...runData, data: { ...runData.data, startRequest, manuscriptRevision: manuscript.manuscriptRevision } })
     if (previousSpec && typeof previousSpec === 'object' && !Array.isArray(previousSpec)) {
       const inherited = taskSpecSchema.safeParse(previousSpec)

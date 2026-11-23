@@ -48,6 +48,7 @@ function visibleHistoryParts(parts: AgentMessagePart[], run: { runtimeProtocolVe
   if (serverNotice) parts = parts.filter(part => part.type !== 'text')
   const stopped = run.runtimeProtocolVersion === 1 && ['paused', 'completed'].includes(run.taskRoot?.status ?? '')
   return parts.map(part => {
+    if (part.type === 'context-compaction') return { type: part.type, state: part.state }
     if (part.type !== 'tool-call') return publicAgentProgressPart(part)
     const visible = publicAgentProgressPart(publicReviewExecution(part.snapshot ? { ...part, snapshot: undefined } : part))
     // Match the existing live terminal reducer without marking the operation

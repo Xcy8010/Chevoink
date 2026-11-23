@@ -68,6 +68,22 @@ function buildToolRound(id: string, argumentText: string, outputText: string): C
 }
 
 describe('Agent 运行中上下文预算与压缩', () => {
+  it('continues toward the target when dropping excerpts alone leaves 70% occupied', () => {
+    const author = { role: 'user' as const, content: '保留作者的六条要求' }
+    const optional = { role: 'user' as const, content: '章'.repeat(80000), sessionReadingMaterial: true as const }
+    const latest = buildToolRound('current', '参数', '最近校对的结论')
+    const messages = [author, optional, ...buildToolRound('old', '稿'.repeat(90000), '已保存旧稿'), ...latest]
+    const estimate = (items: ChatMessage[]) => estimateChatMessagesTokens(items) + 70000
+    const budget = resolveAgentContextBudget(258000, 8192)
+    expect(estimate(messages.filter(item => item !== optional)) / 228000).toBeCloseTo(0.70, 2)
+    const result = planInRunCompaction(messages, estimate(messages), budget, 8, estimate)!
+    expect(result.afterTokens).toBeLessThanOrEqual(102600)
+    expect(result.messages[0]).toBe(author)
+    expect(result.messages.slice(-2)).toEqual(latest)
+    expect(result.collapsedToolRounds).toBe(1)
+    expect(messages).toContain(optional)
+  })
+
   it('announces only actual compaction, leaving protected and previously retired rounds quiet', () => {
     const messages = buildToolRound('recent', 'input', 'result')
     let events = 0
@@ -370,7 +386,7 @@ it('reuses the reduced context across turns while preserving the author request 
   expect(planInRunCompaction(planned.messages, planned.afterTokens, budget, 1, estimate)).toBeNull()
 })
 
-it('at 228k keeps useful recent rounds close to 45% and reports the measured result', () => {
+it('at 228k keeps useful recent rounds close to 25% and reports the measured result', () => {
   const budget = resolveAgentContextBudget(258_000, 8192)
   const messages: ChatMessage[] = [{ role: 'system', content: '保留当前要求' },
     ...Array.from({ length: 32 }, (_, index) => buildToolRound(String(index), '{}', '字'.repeat(7000))).flat()]
@@ -379,7 +395,7 @@ it('at 228k keeps useful recent rounds close to 45% and reports the measured res
   expect(planInRunCompaction(messages, 227_999, budget, 8, estimate)).toBeNull()
   const plan = planInRunCompaction(messages, estimate(messages), budget, 8, estimate)!
   expect(plan.afterTokens).toBe(estimate(plan.messages))
-  expect(plan.afterTokens).toBeGreaterThanOrEqual(228_000 * 0.4)
-  expect(plan.afterTokens).toBeLessThanOrEqual(228_000 * 0.5)
+  expect(plan.afterTokens).toBeGreaterThanOrEqual(228_000 * 0.20)
+  expect(plan.afterTokens).toBeLessThanOrEqual(228_000 * 0.30)
   expect(plan.messages.at(-1)).toEqual(messages.at(-1))
 })

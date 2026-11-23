@@ -92,8 +92,12 @@ export const modelAssignmentTool = defineTool({ name: 'model_assign', title: '�
           if (state.frame.state.phase !== 'awaiting_operation' || await tx.agentProviderAttempt.count({ where: { operation: { taskRootId: run.taskRootId }, status: { in: ['prepared', 'dispatched', 'unknown'] } } }))
             throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原模型请求尚待核对，不能切换配置。')
           const runtime = appliesMain ? selectWeightedModelRuntime(selected.runtime) : selected.runtime
-          const { weightedRoute: _oldChoice, toolCallingProtocol: _oldProtocol, ...previousModel } = state.configuration.model
+          const { weightedRoute: _oldChoice, toolCallingProtocol: _oldProtocol, customModelRevision: _oldCustomRevision,
+            modelConfigId: _oldId, modelConfigRevision: _oldRevision, tokenPrice: _oldPrice, ...previousModel } = state.configuration.model
           const configuration = { ...state.configuration, modelAssignments: frozen, ...(appliesMain ? { model: { ...previousModel, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}),
+            ...(runtime.tier === 'custom' && runtime.customModelRevision ? { customModelRevision: runtime.customModelRevision } : {}),
+            ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}),
+            tokenPrice: runtime.tokenPrice ?? { version: 'credits-v1-exact', modelTier: runtime.tier, multiplierBps: runtime.multiplierBps },
             tier: runtime.tier, customModelId: selected.selection.customModelId ?? null, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
             reasoningEffort: runtime.reasoningEffort, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
             ...(runtime.toolCallingProtocol ? { toolCallingProtocol: runtime.toolCallingProtocol } : {}),

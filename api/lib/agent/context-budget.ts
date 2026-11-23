@@ -296,13 +296,13 @@ export function planInRunCompaction(messages: ChatMessage[], beforeTokens: numbe
   const retained = releaseSessionReadingMaterial(messages, beforeTokens, triggerTokens)
   let chosen = retained ?? messages
   let afterTokens = retained ? estimate(retained) : beforeTokens
-  if (retained && afterTokens < triggerTokens) return { messages: retained, triggerTokens, afterTokens, compactedToolOutputs: 0, collapsedToolRounds: 0 }
+  const targetTokens = targetContextTokens(triggerTokens)
+  if (retained && afterTokens <= targetTokens) return { messages: retained, triggerTokens, afterTokens, compactedToolOutputs: 0, collapsedToolRounds: 0 }
   let compactedToolOutputs = 0
   let collapsedToolRounds = 0
   const firstCandidate = [...chosen]
   releaseCompletedReasoning(firstCandidate)
-  const targetTokens = targetContextTokens(triggerTokens)
-  const firstStage = compactEarlyToolPayloads(firstCandidate, toolOutputsToKeep(firstCandidate, beforeTokens - targetTokens, keepRecentToolOutputs))
+  const firstStage = compactEarlyToolPayloads(firstCandidate, toolOutputsToKeep(firstCandidate, afterTokens - targetTokens, keepRecentToolOutputs))
   const firstTokens = estimate(firstCandidate)
   if (firstTokens < afterTokens && (hasProactiveCompactionGain(beforeTokens, firstTokens, triggerTokens) || beforeTokens > budget.hardRequestTokens)) {
     chosen = firstCandidate
@@ -328,7 +328,7 @@ export function planInRunCompaction(messages: ChatMessage[], beforeTokens: numbe
 /** Durable variant: the source frame is immutable and remains readable through
  * execution_context_read. Never substitute excerpts for original observations.
  * User/system text and assistant prose are preserved, including task decisions. */
-export function archiveEarlyToolRounds(messages: ChatMessage[], source: { revision: number; hash: string }, keepRecentToolOutputs = 8) {
+export function archiveEarlyToolRounds(messages: ChatMessage[], source: { revision: number; hash: string }, keepRecentToolOutputs = 8, retained?: ReadonlySet<ChatMessage>) {
   if (!Number.isSafeInteger(source.revision) || source.revision < 0 || !/^[a-f0-9]{64}$/.test(source.hash)) throw new Error('Invalid context archive source')
   const archived = structuredClone(messages)
   const removed = new Set<ChatMessage>()
@@ -354,5 +354,6 @@ export function archiveEarlyToolRounds(messages: ChatMessage[], source: { revisi
       + JSON.stringify({ callId: output.toolCallId, references: [{ revision: source.revision, hash: source.hash, messageIndex: index }] }) }
     archivedRounds++
   }
-  return { messages: archived.filter(message => !removed.has(message)), archivedRounds }
+  // Calculate all archive pointers against the immutable source before omitting optional excerpts.
+  return { messages: archived.filter((message, index) => !removed.has(message) && (!retained || retained.has(messages[index]))), archivedRounds }
 }

@@ -41,6 +41,9 @@ const mocks = vi.hoisted(() => ({
   hiddenTools: [] as AgentTool[],
   skillReceipt: vi.fn(async () => ({})), skillLoads: vi.fn(async (...args: unknown[]) => { void args }),
   db: {} as Record<string, unknown>, runs: new Map<string, Record<string, unknown>>(),
+  contextCompactionReceipts: [] as Array<Record<string, unknown>>,
+  customModel: null as Record<string, unknown> | null,
+  configurationChanges: [] as Array<{ response: Record<string, unknown> }>,
   buses: new Map<string, { close: () => Promise<void> }>(),
   runEvents: [] as Array<{ id?: string; runId: string; seq: number; type: string; payload: AgentStreamEvent; createdAt: Date }>,
   chapters: [] as Array<{ id: string; authorId: string; novelId: string; orderIndex: number; orderInVolume: number; volumeId: string; volume: { orderIndex: number; novelId: string; archivedAt: null }; title: string; content: string; revision: number; archivedAt: null }>,
@@ -232,9 +235,10 @@ vi.mock('../../api/lib/prisma.js', () => {
       return row
     }),
   },
-  agentConfigurationChange: { findMany: vi.fn(async () => []) },
+  agentConfigurationChange: { findMany: vi.fn(async () => mocks.configurationChanges) },
   agentSkillRun: { upsert: mocks.skillReceipt },
-  aiUsageLog: { findMany: vi.fn(async () => []) },
+  aiUsageLog: { findMany: vi.fn(async (input: Query) => mocks.contextCompactionReceipts.filter(row => matches(row, input.where))) },
+  aiModelConfig: { findFirst: vi.fn(async (input: Query) => mocks.customModel && matches(mocks.customModel, input.where) ? mocks.customModel : null) },
   $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const sql = strings.join('?').replace(/\s+/gu, ' ').trim()
     if (sql === 'SELECT id FROM agent_runs WHERE id = ? FOR UPDATE') return mocks.runs.has(String(values[0])) ? [{ id: values[0] }] : []
@@ -649,6 +653,9 @@ beforeEach(() => {
   mocks.assertLimitedDelivery.mockReset().mockResolvedValue(undefined)
   mocks.reviewProbe.mockReset().mockResolvedValue({ open: true })
   mocks.runs.clear()
+  mocks.contextCompactionReceipts = []
+  mocks.customModel = null
+  mocks.configurationChanges = []
   mocks.runEvents = []
   mocks.buses.clear()
   mocks.chapters = Array.from({ length: 19 }, (_, index) => ({ id: index === 0 ? 'c' : `chapter-${index + 1}`,
@@ -6549,6 +6556,222 @@ it('does not add a length reminder or compact when normal requests exceed the ol
   const [request] = mocks.chat.mock.calls[0]
   expect(request.messages.some(message => typeof message.content === 'string' && message.content.includes('对话已较长'))).toBe(false)
   expect(events().filter(event => event.type === 'context.compaction')).toHaveLength(0)
+})
+
+describe('legacy semantic context compaction', () => {
+  const original = '请核对上次讨论留下的任务限制。'
+  const quote = '暂不修改章节。'
+  const history = quote + '旧'.repeat(78_000)
+  const optionalExcerpt = '可'.repeat(152_000)
+  const request = { runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: original } as const
+  const nativeCall = call('recent-pair')
+  const modelOutput = JSON.stringify({ notes: [{ source: 1, quote }] })
+  const seedCompactionContext = (authorMessage = original) => vi.mocked(assembleContext).mockResolvedValueOnce({ messages: [
+    { role: 'assistant', content: history, historySourceId: 'older-message:text' },
+    { role: 'user', content: optionalExcerpt, sessionReadingMaterial: true },
+    { role: 'user', content: authorMessage },
+    { role: 'assistant', content: null, toolCalls: [nativeCall] },
+    { role: 'tool', toolCallId: nativeCall.id, content: 'recent result' },
+  ], skillRoute: null, availableSkillVersions: [], timings: {} })
+  const seedCompactionRuntime = async () => {
+    const runtime = { ...await mocks.modelRuntime(), contextWindowTokens: 258_000, maxOutputTokens: 8192, modelConfigId: 'config-a',
+      modelConfigRevision: 4, reasoningEffort: 'high', reasoningEfforts: ['low', 'high'], baseUrl: 'https://fixed.invalid/v1', apiKey: 'synthetic' }
+    mocks.modelRuntime.mockResolvedValue(runtime)
+    return runtime
+  }
+  const prepared = async (options: Parameters<typeof chatType>[0], billingStatus = 'settled', completionTokens: number | null = 6) => {
+    const receipt = { ...options.usageLog, id: 'semantic-receipt', billingStatus: 'prepared', usageSource: 'prepared', requestTokens: 27,
+      responseTokens: completionTokens, reservedCreditMilli: 0 }
+    mocks.contextCompactionReceipts.push(receipt)
+    await options.beforeProviderDispatch?.(receipt.id)
+    options.onUsage?.({ promptTokens: 27, completionTokens, totalTokens: 27 + (completionTokens ?? 0) })
+    Object.assign(receipt, { billingStatus, usageSource: completionTokens === null ? 'unknown' : 'reported' })
+    return receipt
+  }
+  const resume = () => executeRealAgentRun({ ...request, resume: true, eventStartSeq: Math.max(...mocks.runEvents.map(event => event.seq)) })
+  const digests = () => mocks.persist.mock.calls.flatMap(([data]) => (data.create?.parts ?? []).flatMap((part: { historyDigest?: unknown }) =>
+    part.historyDigest ? [part.historyDigest] : []))
+
+  it('dispatches once to the admitted model, preserves the original author and native pair, and records usage and the digest', async () => {
+    const runtime = await seedCompactionRuntime()
+    seedCompactionContext()
+    mocks.chat.mockImplementation(async options => {
+      if (!options.semanticCompaction) return response('收到。')
+      await prepared(options)
+      return response(modelOutput)
+    })
+    await run(original)
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    const [summary, mainRequest] = mocks.chat.mock.calls.map(([input]) => input)
+    expect(summary).toMatchObject({ semanticCompaction: true, tools: [], model: runtime.modelName, provider: runtime.provider,
+      providerBaseUrl: runtime.baseUrl, providerApiKey: runtime.apiKey, physicalRouteId: runtime.modelConfigId, maxOutputTokens: 8192,
+      semanticCompactionEvidence: { modelConfigId: runtime.modelConfigId, modelConfigRevision: 4, ownerSeq: 1, ownerHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      usageLog: { agentRunId: 'run', userId: 'user', novelId: 'novel', chapterId: 'c', action: 'agentContextCompaction', turn: 1 } })
+    expect(summary.messages.map(message => message.role)).toEqual(['system', 'user'])
+    expect(summary.messages[1].content).toContain(quote)
+    expect(summary.messages[1].content).not.toContain(original)
+    expect(summary.messages[1].content).not.toContain('recent result')
+    expect(mainRequest.messages).toEqual(expect.arrayContaining([{ role: 'user', content: original },
+      { role: 'assistant', content: null, toolCalls: [nativeCall] }, { role: 'tool', toolCallId: nativeCall.id, content: 'recent result' }]))
+    expect(mainRequest.messages).toContainEqual(expect.objectContaining({ role: 'user', content: expect.stringContaining(`[older-message] ${quote}`) }))
+    expect(mainRequest.messages.some(message => message.content === history || message.content === optionalExcerpt)).toBe(false)
+    expect(digests()).toEqual([expect.objectContaining({ sourceIds: ['older-message:text'], notes: [{ source: 1, quote }] })])
+    expect(events().filter(event => event.type === 'context.compaction')).toEqual([
+      expect.objectContaining({ state: 'running' }), expect.objectContaining({ state: 'completed' }),
+    ])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', usage: { promptTokens: 37, completionTokens: 6, totalTokens: 43 } })
+  })
+
+  it.each(['malformed', 'length', 'too-long', 'tool-calls'] as const)('uses deterministic context after a billed %s summary', async scenario => {
+    await seedCompactionRuntime()
+    seedCompactionContext()
+    mocks.chat.mockImplementation(async options => {
+      if (!options.semanticCompaction) return response('收到。')
+      await prepared(options)
+      if (scenario === 'length') return { ...response(modelOutput), finishReason: 'length' }
+      if (scenario === 'tool-calls') return response(modelOutput, [call('ignored-semantic-tool')])
+      return response(scenario === 'too-long' ? '旧'.repeat(31_000) : '{"invented":true}')
+    })
+    await run(original)
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    const mainRequest = mocks.chat.mock.calls[1][0]
+    expect(mainRequest.messages).toContainEqual({ role: 'assistant', content: history, historySourceId: 'older-message:text' })
+    expect(mainRequest.messages.some(message => message.content === optionalExcerpt)).toBe(false)
+    expect(digests()).toEqual([])
+    expect(mocks.tools[0].execute).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', usage: { totalTokens: 43 } })
+  })
+
+  it('does not dispatch compaction when its reserved usage would exceed the explicit budget', async () => {
+    await seedCompactionRuntime()
+    seedCompactionContext()
+    queue(response('收到。'))
+    await run(original, 80_000)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(mocks.chat.mock.calls[0][0]).not.toHaveProperty('semanticCompaction')
+    expect(digests()).toEqual([])
+  })
+
+  it.each(['matched', 'missing', 'changed'] as const)('requires the saved BYOK admission and exact revision (%s)', async state => {
+    const runtime = await seedCompactionRuntime()
+    const customRuntime = { ...runtime, tier: 'custom', modelConfigId: undefined, modelConfigRevision: undefined, customModelRevision: 4, multiplierBps: 0 }
+    mocks.modelRuntime.mockResolvedValue(customRuntime)
+    const customModelId = 'owned-custom'
+    mocks.customModel = { id: customModelId, revision: 4, enabled: true, ownerUserId: request.userId }
+    seedAdmission(original, request.chapterId)
+    Object.assign(mocks.runs.get('run')!, { modelTier: 'custom', customModelId,
+      startRequest: { prompt: original, ...(state !== 'missing' && { customModelAdmission: { id: customModelId, revision: state === 'matched' ? 4 : 3 } }) } })
+    seedCompactionContext()
+    mocks.chat.mockImplementation(async options => {
+      if (!options.semanticCompaction) return response('收到。')
+      await prepared(options)
+      return response(modelOutput)
+    })
+    await executeRealAgentRun({ ...request, modelTier: 'custom', customModelId })
+    expect(mocks.chat).toHaveBeenCalledTimes(state === 'matched' ? 2 : 1)
+    expect(mocks.chat.mock.calls.at(-1)?.[0]).toMatchObject({ model: customRuntime.modelName, usageLog: { modelTier: 'custom' } })
+    if (state === 'matched') {
+      expect(mocks.chat.mock.calls[0][0]).toMatchObject({ semanticCompaction: true,
+        semanticCompactionEvidence: { modelConfigId: customModelId, modelConfigRevision: 4 } })
+      expect(digests()).toHaveLength(1)
+    } else expect(digests()).toEqual([])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+
+  it('keeps exact history recovery pointers when deterministic context is still over the hard limit', async () => {
+    await seedCompactionRuntime()
+    const authorMessage = original + '原'.repeat(151_000)
+    seedCompactionContext(authorMessage)
+    mocks.chat.mockImplementation(async options => {
+      if (!options.semanticCompaction) return response('收到。')
+      await prepared(options)
+      return response('malformed summary')
+    })
+    await run(original)
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    const mainMessages = mocks.chat.mock.calls[1][0].messages
+    expect(mainMessages).toContainEqual({ role: 'user', content: authorMessage })
+    expect(mainMessages).toContainEqual(expect.objectContaining({ role: 'user', content: expect.stringContaining('消息 ID]\nolder-message') }))
+    expect(mainMessages.some(message => message.content === history)).toBe(false)
+    expect(digests()).toEqual([])
+  })
+
+  it('keeps partial usage through an unknown result, waits on Continue, and never resends the original summary', async () => {
+    await seedCompactionRuntime()
+    seedCompactionContext()
+    mocks.chat.mockImplementationOnce(async options => {
+      await prepared(options, 'pending_usage', null)
+      throw new TypeError('synthetic incomplete transport')
+    })
+    await run(original)
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', usage: { totalTokens: 27 } })
+    expect(digests()).toEqual([])
+    await resume()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', usage: { totalTokens: 27 } })
+    Object.assign(mocks.contextCompactionReceipts[0], { responseTokens: 6, usageSource: 'reported', billingStatus: 'settled' })
+    seedCompactionContext()
+    queue(response('收到。'))
+    await resume()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(mocks.chat.mock.calls[1][0]).not.toHaveProperty('semanticCompaction')
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', usage: { promptTokens: 37, completionTokens: 6, totalTokens: 43 } })
+  })
+
+  it('keeps billed usage and discards a result observed after cancellation', async () => {
+    await seedCompactionRuntime()
+    seedCompactionContext()
+    mocks.chat.mockImplementationOnce(async options => {
+      expect(options.signal?.aborted).toBe(false)
+      await prepared(options)
+      const { getActiveRun } = await import('../../api/lib/agent/active-runs.js')
+      getActiveRun('run')!.controller.abort()
+      expect(options.signal?.aborted).toBe(true)
+      return response(modelOutput)
+    })
+    await run(original)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(digests()).toEqual([])
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', usage: { totalTokens: 33 } })
+  })
+
+  it('does not publish a summary or overwrite the newer owner after the original owner loses the run', async () => {
+    await seedCompactionRuntime()
+    seedCompactionContext()
+    mocks.chat.mockImplementationOnce(async options => {
+      await prepared(options)
+      const owner = mocks.runEvents.find(event => event.type === 'run.started')!
+      const seq = Math.max(...mocks.runEvents.map(event => event.seq)) + 1
+      mocks.runEvents.push({ ...owner, seq, payload: { ...owner.payload, seq } })
+      return response(modelOutput)
+    })
+    await run(original)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(digests()).toEqual([])
+    expect(events().some(event => event.type === 'context.compaction' && event.state === 'completed')).toBe(false)
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'running', usage: { totalTokens: 0 } })
+    expect(mocks.contextCompactionReceipts[0]).toMatchObject({ billingStatus: 'settled', requestTokens: 27, responseTokens: 6 })
+  })
+
+  it('discards the summary and refreshes the main model after the admitted model changes', async () => {
+    const runtime = await seedCompactionRuntime()
+    mocks.modelRuntime.mockResolvedValueOnce(runtime).mockResolvedValue({ ...runtime, modelName: 'new-main', reasoningEffort: 'low' })
+    seedCompactionContext()
+    mocks.chat.mockImplementation(async options => {
+      if (!options.semanticCompaction) return response('收到。')
+      await prepared(options)
+      Object.assign(mocks.runs.get('run')!, { modelTier: 'speed', customModelId: null, reasoningEffort: 'low' })
+      mocks.configurationChanges.push({ response: { appliesToRun: true } })
+      return response(modelOutput)
+    })
+    await run(original)
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    const [summary, mainRequest] = mocks.chat.mock.calls.map(([input]) => input)
+    expect(summary).toMatchObject({ model: runtime.modelName, reasoningEffort: 'high' })
+    expect(mainRequest).toMatchObject({ model: 'new-main', reasoningEffort: 'low' })
+    expect(mainRequest.messages).toContainEqual({ role: 'assistant', content: history, historySourceId: 'older-message:text' })
+    expect(digests()).toEqual([])
+  })
 })
 
 it('holds one weighted supplier across real Agent tool roundtrips until its final reply', async () => {

@@ -70,6 +70,10 @@ const runCheckpointFields = {
   // One persisted conversion identity, never replenished by resume. It allows
   // one authenticated diagnostic read before correcting legacy locator input.
   inputProtocolRecovery: z.object({ protocol: z.literal(2), key: z.string().regex(/^[a-f0-9]{64}$/u) }).strict().optional(),
+  // Observed semantic compaction tokens are part of the run's existing totals.
+  // A later provider receipt can supply only the missing delta on Continue.
+  contextCompactionUsage: z.record(z.string().min(1), z.object({ promptTokens: z.number().int().nonnegative(),
+    completionTokens: z.number().int().nonnegative(), totalTokens: z.number().int().nonnegative() }).strict()).optional(),
   // A completed question without the author's required scope decision parks
   // locally. This is not new authority and cannot be cleared by Continue.
   authorInputRequired: authorInputRequiredSchema.optional(),

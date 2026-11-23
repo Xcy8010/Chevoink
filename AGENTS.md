@@ -38,6 +38,9 @@ paths and the current checkout, not another machine's absolute paths.
   ordinary API restart can proceed under existing session authority; do not add
   idle/drain waits. Reconcile an unknown result before any retry. Never replay
   a whole deployment. The script has no automatic rollback.
+- For authorized online acceptance tests, use a Codex sub-agent running
+  `gpt-6.1-terra` with high reasoning effort. Keep the author's in-product
+  model selection for the test.
 - Native builds preserve the existing application ID and signing identity.
   Every new Tag and Release needs concrete update notes. Do not rewrite old
   tags, releases, evidence, backups or installers. Build success is not device

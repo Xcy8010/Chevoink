@@ -32,6 +32,25 @@ function stream(text: string) {
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
 
+it('sends the isolated summary once on the selected route at its advertised low effort and keeps missing usage unknown', async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"摘要"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'))
+  vi.stubGlobal('fetch', fetch)
+  const beforeProviderDispatch = vi.fn(async () => { expect(fetch).not.toHaveBeenCalled() })
+  const messages: ChatMessage[] = [{ role: 'system', content: '提炼' }, { role: 'user', content: '旧记录' }]
+  await chatWithTools({ semanticCompaction: true, beforeProviderDispatch, model: 'bound-model',
+    providerApiKey: 'fake-test-key', providerBaseUrl: 'https://example.test/v1', reasoningEffort: 'high',
+    reasoningParameterMode: 'native', reasoningEfforts: ['low', 'high'], maxOutputTokens: 8192,
+    messages, tools: [], usageLog: { action: 'agentContextCompaction', userId: 'test' } })
+  expect(beforeProviderDispatch).toHaveBeenCalledWith('usage')
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(fetch.mock.calls[0][0]).toBe('https://example.test/v1/chat/completions')
+  const body = JSON.parse(fetch.mock.calls[0][1].body)
+  expect(body).toMatchObject({ model: 'bound-model', messages, reasoning_effort: 'low', max_tokens: 8192 })
+  expect(body).not.toHaveProperty('tools')
+  expect(vi.mocked(prisma.aiUsageLog.update).mock.calls.at(-1)?.[0].data).toMatchObject({
+    usageSource: 'unknown', requestTokens: null, responseTokens: null })
+})
+
 it('keeps the chosen text-only route, offers the conditional public-query prompt, and sends past tools as read-only context', async () => {
   const original = '请联网核对月港公告的生效日期。'
   const answer = '这条规则尚未查证。如果当前界面提供「联网查证」，请填写可公开发送的检索词。'

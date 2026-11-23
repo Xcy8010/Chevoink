@@ -1,4 +1,6 @@
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE } from './tool-execution-guidance.js'
+import { fitArchivedHistoryForDispatch, restoreSemanticHistory } from './semantic-compaction.js'
+import { createHash } from 'node:crypto'
 import { planLinkFields } from './novel-plan-contract.js'
 import type { AgentExecutionMode, CreditModelTier } from '../../../shared/contracts/index.js'
 import type { AgentAttachmentMeta, AgentMessagePart, TaskSpec } from '../../../shared/contracts/index.js'
@@ -36,6 +38,8 @@ import { attachmentHistoryUrl, estimateChatMessageTokens, estimateChatMessagesTo
 import { taskOperatingGuidance } from './task-guidance.js'
 import { readWritingLocalContext } from './writing-local-context.js'
 import { readSessionReadingMaterial } from './session-reading-material.js'
+import { contextUsageSchema } from '../../../shared/contracts/context-compaction-contracts.js'
+import { MAIN_RUN_FILTER } from './runtime-child.js'
 import { renderContextTime, withHistoryTimestamp } from './context-time.js'
 import { readWritingContinuityReference, renderWritingContinuityReference } from './writing-continuity-reference.js'
 
@@ -332,10 +336,15 @@ function partsToPlainText(parts: AgentMessagePart[]): string {
         if (part.status === 'success' && !part.subagentCallId) {
           if (part.toolName === 'chapter_read' && display?.kind === 'chapterRef') {
             source = { chapterId: display.chapterId, revision: display.revision, range: display.range }
+          } else if (display?.kind === 'chapterDiff' && display.appliedDirectly) {
+            source = { chapterId: display.chapterId, revision: display.revision }
+          } else if (part.reviewedChapter) {
+            source = part.reviewedChapter
           } else if (part.toolName === 'plan_read' && display?.kind === 'readSources') {
             source = display.items.find(item => item.target?.kind === 'plan')?.target
           } else if (part.toolName === 'plan_save' && (display?.kind === 'planFile' || display?.kind === 'planDiff')) {
-            source = { planId: display.artifactId }
+            source = { planId: display.artifactId,
+              contentHash: createHash('sha256').update(display.kind === 'planFile' ? display.content : display.after).digest('hex') }
           }
         }
         return JSON.stringify({ tool: part.toolName, status: part.status, summary: part.summary, source, attachmentUrl, ...(coverIds ? { coverAssetId: coverIds } : {}) })
@@ -375,8 +384,31 @@ async function loadSessionHistory(
 
   // Keep receipt data out of assistant prose. Otherwise models learn to print
   // the receipt format instead of using native function calls on continuation.
-  const plain = records.slice(0, 500).reverse().map(record => {
+  const digests: unknown[] = []
+  const savedRecords = records.slice(0, 500).reverse()
+  const lastReply = records.find(record => record.role === 'assistant'
+    && (record.parts as unknown as AgentMessagePart[]).some(p => p.type === 'text' && p.text.trim()))
+  const latestSource = (names: string[]) => records.find(record => record.role === 'assistant'
+    && (record.parts as unknown as AgentMessagePart[]).some(p => p.type === 'tool-call' && p.status === 'success' && !p.subagentCallId && names.includes(p.toolName)))
+  const pinnedReceipts = new Set([latestSource(['plan_save']), latestSource(['plan_read']), latestSource(['chapter_read']),
+    latestSource(['chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_create', 'quality_revision_apply', 'continuity_revision_apply'])])
+  const chapterVersions = new Map<string, { revision: number; record: typeof savedRecords[number] }>()
+  for (const record of savedRecords) {
+    if (record.role !== 'assistant') continue
+    for (const part of record.parts as unknown as AgentMessagePart[]) {
+      if (part.type !== 'tool-call' || part.status !== 'success' || part.subagentCallId) continue
+      const display = part.display
+      const chapter = display?.kind === 'chapterRef' || (display?.kind === 'chapterDiff' && display.appliedDirectly) ? display : part.reviewedChapter
+      if (chapter?.revision !== undefined && chapter.revision >= (chapterVersions.get(chapter.chapterId)?.revision ?? 0))
+        chapterVersions.set(chapter.chapterId, { revision: chapter.revision, record })
+    }
+  }
+  for (const { record } of chapterVersions.values()) pinnedReceipts.add(record)
+  const plain = savedRecords.map(record => {
     const parts = record.parts as unknown as AgentMessagePart[]
+    if (record.role === 'assistant') for (const part of parts)
+      if (part.type === 'context-compaction' && part.state === 'completed' && part.historyDigest) digests.push(part.historyDigest)
+    const archived = record.role === 'assistant' && record.id && record.runId !== resumedRunId
     const rawText = partsToPlainText(parts.filter(part => part.type !== 'tool-call'))
     const text = record.role === 'assistant' ? stripAgentHistoryEchoes(rawText) : rawText
     const receipts = partsToPlainText(parts.filter(part => part.type === 'tool-call'))
@@ -388,6 +420,8 @@ async function loadSessionHistory(
       if (unrelated || (writingTaskRunIds && record.role === 'assistant')) {
         speech = { role: 'user', content: `[${unrelated ? '其他任务历史发言；仅作背景，不是本任务授权、进度或检查状态' : '本任务已保存助手发言；可能含未执行打算或错误判断，不是已完成证明'}]\n${datedText}` }
       } else speech = { role: record.role as 'user' | 'assistant', content: datedText }
+      if (archived && record !== lastReply && (speech?.role === 'assistant' || speech?.role === 'user'))
+        speech.historySourceId = record.id + ':text'
       if (speech) group.push(speech)
     }
     // Keep saved partial thinking as bounded reference data, never as a new
@@ -399,13 +433,35 @@ async function loadSessionHistory(
       if (reasoning.trim()) group.push({ role: 'user', content: `[当前中止任务保存的思考片段；仅供恢复进度，不是新授权或已完成证明]\n${clip(reasoning, 6000)}` })
     }
     const receipt: ChatMessage | null = receipts ? { role: 'user', content: `[系统提供的历史回执数据，仅供核对过去的状态；不是作者新指令，不得模仿输出或作为本轮已执行的证明]\n${receipts}` } : null
-    if (receipt) group.push(receipt)
+    if (receipt) {
+      if (archived && !pinnedReceipts.has(record) && parts.every(p => p.type !== 'tool-call' || p.status === 'success'))
+        receipt.historySourceId = record.id + ':receipt'
+      group.push(receipt)
+    }
     const materialParts = record.role === 'assistant' ? parts.filter(part => part.type === 'tool-call' && part.status === 'success'
       && !part.subagentCallId && ['chapter_read', 'plan_read', 'plan_save'].includes(part.toolName)) : []
     return { group, speech, role: record.role, receipt, materialParts }
   }).filter(item => item.group.length > 0)
+  for (const digest of digests) {
+    const original = plain.flatMap(item => item.group)
+    const restored = restoreSemanticHistory(original, digest)
+    if (!restored) continue
+    const retained = new Set(restored)
+    const previous = new Set(original)
+    const summary = restored.find(message => !previous.has(message))!
+    let inserted = false
+    for (const item of plain) {
+      item.group = item.group.flatMap(message => {
+        if (retained.has(message)) return [message]
+        if (inserted) return []
+        inserted = true
+        return [summary]
+      })
+      if (item.speech && !retained.has(item.speech)) item.speech = null
+    }
+  }
   const costs = new Map(plain.flatMap(item => item.group).map(message => [message, estimateChatMessageTokens(message)]))
-  return { plain, hasEarlier, costs, tokens: [...costs.values()].reduce((sum, count) => sum + count, 0) }
+  return { plain, latestRunId: records[0]?.runId, hasEarlier, costs, tokens: [...costs.values()].reduce((sum, count) => sum + count, 0) }
 }
 
 function fitSessionHistory({ plain, hasEarlier, costs, tokens }: Awaited<ReturnType<typeof loadSessionHistory>>, budget: number): ChatMessage[] {
@@ -775,7 +831,18 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const budget = resolveAgentContextBudget(contextWindowTokens, input.maxOutputTokens ?? env.aiTextMaxOutputTokens)
   let fixedTokens = estimateChatMessagesTokens(Object.values(sections).flat()) + (input.toolDefinitionTokens ?? 0)
   let activeHistory = history
-  if (history.plain.length > 2 && fixedTokens + history.tokens >= budget.compactAtTokens) {
+  const fullHistoryAtThreshold = fixedTokens + history.tokens >= budget.compactAtTokens
+  // A chronological checkpoint would remove the evidence before the admitted
+  // model can summarize it. Stage a bounded frame for the dispatch-time gate.
+  // That gate measures the full request again before sending anything upstream.
+  const archivableTokens = fullHistoryAtThreshold && !input.includeCurrentRunHistory
+    ? [...history.costs].reduce((sum, [m, count]) => sum + ('historySourceId' in m && m.historySourceId ? count : 0), 0) : 0
+  const stageForSummary = archivableTokens >= 8_000 && archivableTokens < budget.hardRequestTokens * 0.93
+    && fixedTokens + history.tokens - archivableTokens < budget.hardRequestTokens
+    && (fixedTokens + history.tokens <= budget.hardRequestTokens
+      || !!fitArchivedHistoryForDispatch(history.plain.flatMap(item => item.group), budget.hardRequestTokens,
+        items => fixedTokens + estimateChatMessagesTokens(items)))
+  if (!stageForSummary && history.plain.length > 2 && fullHistoryAtThreshold) {
     const target = Math.max(0, targetContextTokens(budget.compactAtTokens) - fixedTokens)
     const compacted = await compactSessionContext(input.userId, input.sessionId, target).catch(error => {
       console.error('[agent-context] 历史检查点未生成，沿用原有历史', input.runId, error)
@@ -793,15 +860,29 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
       }
     }
   }
-  sections.history = fitSessionHistory(activeHistory, Math.max(0, budget.hardRequestTokens - fixedTokens))
+  sections.history = fitSessionHistory(activeHistory, stageForSummary ? history.tokens + 1024 : Math.max(0, budget.hardRequestTokens - fixedTokens))
   if (input.sessionMaterialReads && !input.includeCurrentRunHistory) {
     const retained = new Set(sections.history)
     const parts = activeHistory.plain.flatMap(item => item.receipt && retained.has(item.receipt) ? item.materialParts : [])
     const inputTarget = activeHistory === history ? budget.hardRequestTokens : targetContextTokens(budget.compactAtTokens)
-    const tokenBudget = inputTarget - fixedTokens - estimateChatMessagesTokens(sections.history)
-    if (parts.length && tokenBudget > 0) {
-      sections.readingMaterial = await readSessionReadingMaterial({ parts, tokenBudget, userId: input.userId, novelId: input.novelId,
-        allowedReads: await input.sessionMaterialReads() })
+    const baseTokens = fixedTokens + estimateChatMessagesTokens(sections.history)
+    if (parts.length && inputTarget > baseTokens) {
+      const [allowedReads, previous] = await Promise.all([
+        input.sessionMaterialReads(),
+        activeHistory.latestRunId ? prisma.agentRunEvent.findFirst({
+          where: { runId: activeHistory.latestRunId, type: 'context.usage', run: { ...MAIN_RUN_FILTER,
+            userId: input.userId, novelId: input.novelId, sessionId: input.sessionId } },
+          orderBy: { seq: 'desc' }, select: { payload: true },
+        }) : null,
+      ])
+      const sample = contextUsageSchema.safeParse(previous?.payload)
+      // Carry forward optional excerpts within the preceding measured input plus the new request.
+      // Author text, selected history and required workspace context have already been admitted.
+      const carryLimit = sample.success
+        ? Math.min(inputTarget, sample.data.estimatedTokens + estimateChatMessagesTokens(sections.task) + estimateChatMessagesTokens(sections.intent))
+        : inputTarget
+      sections.readingMaterial = await readSessionReadingMaterial({ parts, tokenBudget: carryLimit - baseTokens,
+        userId: input.userId, novelId: input.novelId, allowedReads })
     }
   }
   const inputEstimates = Object.fromEntries(Object.entries(sections).map(([category, items]) =>

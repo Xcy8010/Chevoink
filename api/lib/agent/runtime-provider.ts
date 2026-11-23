@@ -14,9 +14,11 @@ import { readGoalExecution } from './goal-fence.js'
 import { estimateChatMessagesTokens } from './context-budget.js'
 import { DataAccessError } from '../prisma.js'
 import { providerRequestOutputLimit } from '../ai-responses-route.js'
+import { SEMANTIC_ACTION, prepareSemanticModelOperation, type SummarySource } from './runtime-semantic-cursor.js'
 
 export type DurableChatExecution = { lease: RunLeaseToken; operationKey: string; attemptKey: string; parentOperationId?: string; cursor?: ModelExecutionCursor;
   auxiliaryStep?: AuxiliaryModelStep;
+  summarySource?: SummarySource;
   /** Server-frozen admission price, never sourced from model output. */
   price?: DurableTokenPrice }
 const resultSchema = durableChatResultSchema
@@ -27,7 +29,8 @@ export async function beginDurableChat(input: {
   provider: string; model: string; request: Prisma.InputJsonValue; price: DurableTokenPrice;
   admit: () => Promise<void>
 }) {
-  const execution = { ...input.execution, lease: { ...input.execution.lease }, ...(input.execution.cursor ? { cursor: { ...input.execution.cursor } } : {}) }
+  const execution = { ...input.execution, lease: { ...input.execution.lease }, ...(input.execution.cursor ? { cursor: { ...input.execution.cursor } } : {}),
+    ...(input.execution.summarySource ? { summarySource: { ...input.execution.summarySource } } : {}) }
   if (input.userId !== execution.lease.userId || (input.agentRunId && input.agentRunId !== execution.lease.runId)) {
     runtimeError('RUNTIME_SCOPE_MISMATCH', '模型调用与执行租约主体不一致。')
   }
@@ -36,10 +39,16 @@ export async function beginDurableChat(input: {
     key: execution.operationKey, action: input.action, request, price: input.price, parentOperationId: execution.parentOperationId,
   }
   if (Boolean(execution.parentOperationId) !== Boolean(execution.auxiliaryStep) || execution.auxiliaryStep && (execution.cursor || execution.attemptKey !== '1')) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '独立模型步骤必须使用唯一尝试，不能伪装主模型或绕过未知结果重试。')
+  if (Boolean(execution.summarySource) !== (input.action === SEMANTIC_ACTION) || execution.summarySource
+    && (execution.cursor || execution.auxiliaryStep || execution.parentOperationId || execution.attemptKey !== '1')) {
+    return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '上下文摘要只能使用原帧的一次独立尝试。')
+  }
   const prepared = execution.cursor ? await prepareModelCursorOperation(execution.lease, execution.cursor, operationInput) : undefined
-  const operation = prepared?.operation ?? (execution.parentOperationId && execution.auxiliaryStep
-    ? await prepareAuxiliaryModelOperation(execution.lease, { ...operationInput, parentOperationId: execution.parentOperationId, step: execution.auxiliaryStep })
-    : await preparePricedProviderOperation(execution.lease, operationInput))
+  const operation = prepared?.operation ?? (execution.summarySource
+    ? await prepareSemanticModelOperation(execution.lease, execution.summarySource, operationInput)
+    : execution.parentOperationId && execution.auxiliaryStep
+      ? await prepareAuxiliaryModelOperation(execution.lease, { ...operationInput, parentOperationId: execution.parentOperationId, step: execution.auxiliaryStep })
+      : await preparePricedProviderOperation(execution.lease, operationInput))
   const attempt = await prepareProviderAttempt(execution.lease, { operationId: operation.id, attemptKey: execution.attemptKey, provider: input.provider, model: input.model, request })
   const pending = prepared?.pending
   const identity = { userId: input.userId, attemptId: attempt.id, requestHash: attempt.requestHash }
@@ -58,7 +67,7 @@ export async function beginDurableChat(input: {
     if (!parsed.success || !attempt.resultHash || runtimeJson(attempt.result).hash !== attempt.resultHash) {
       return runtimeError('RUNTIME_RECEIPT_INVALID', '已完成模型回执不能安全恢复。')
     }
-    if (execution.auxiliaryStep) await withRunLease(execution.lease, async tx => {
+    if (execution.auxiliaryStep || execution.summarySource) await withRunLease(execution.lease, async tx => {
       const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `result:${attempt.id}:${attempt.resultHash}` } })
       if (!event || event.taskRootId !== execution.lease.taskRootId || event.operationId !== operation.id || event.type !== 'provider.result.recorded'
         || runtimeJson(event.payload).hash !== runtimeJson({ attemptId: attempt.id, status: 'succeeded', resultHash: attempt.resultHash }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立模型结果缺少匹配的持久事件。')

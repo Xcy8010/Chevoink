@@ -35,6 +35,17 @@ it('keeps the loaded timeline visible on the first render of a remote activity h
   expect(screen.queryByRole('status', { name: '正在载入对话' })).toBeNull()
   expect(screen.getByText('正在阅读的旧消息').closest('[style*="display: none"]')).toBeNull()
   await waitFor(() => expect(document.querySelector('[data-author-timer]')).toBeTruthy(), { timeout: 3000 })
+  const apply = useAgentStore.getState().applyEvent
+  const ts = new Date().toISOString(), messageId = 'opening'
+  const sample = { type: 'context.usage' as const, seq: 3, ts, estimatedTokens: 205349, contextWindowTokens: 258000, compactAtTokens: 228000 }
+  act(() => apply({ ...sample, runId }))
+  expect(screen.queryByText(/已估算本轮上下文/)).toBeNull()
+  act(() => apply({ type: 'message.start', runId, seq: 4, ts, role: 'assistant', messageId }))
+  act(() => apply({ type: 'reasoning.delta', runId, seq: 5, ts, messageId, delta: 'PRIVATE_REASONING', activity: true }))
+  expect(screen.queryByText(/模型思考中/)).toBeNull()
+  expect(screen.queryByText('PRIVATE_REASONING')).toBeNull()
+  act(() => apply({ type: 'text.delta', runId, seq: 6, ts, messageId, delta: '我先核对细纲。' }))
+  await waitFor(() => expect(screen.getByText('我先核对细纲。')).toBeTruthy())
 })
 
 it('reoffers the current run suggestion after Tab acceptance and clearing the composer', () => {

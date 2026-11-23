@@ -22,6 +22,7 @@ import { executeDurableToolStep } from './runtime-tool-step.js'
 import { hasCancelledDurableQuestion, parkDurableQuestion, validateHistoricalQuestionReceipt } from './runtime-question.js'
 import { assertProviderBudget } from './runtime-budget.js'
 import { advanceDurableCheckpoint, advanceDurableContext } from './runtime-checkpoint-step.js'
+import { callDurableContextSummary } from './runtime-semantic-call.js'
 import { advanceDurableContinuation, advanceDurableCompletionObligations, advanceDurableToolStagnation } from './runtime-continuation.js'
 import { pauseDurableTaskForAttention, finalizeDurableTask } from './runtime-lifecycle.js'
 import { collectDurableCompletionEvidence } from './runtime-completion-evidence.js'
@@ -228,9 +229,11 @@ async function refreshDurableGoalModel(token: RunLeaseToken) {
     if (pendingOperations || pendingAttempts) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '目标仍有未决模型操作，不能切换模型路由。')
     if (state.configuration.model.tier === run.modelTier && state.configuration.model.customModelId === run.customModelId
       && state.configuration.model.reasoningEffort === run.reasoningEffort) return false
-    const { weightedRoute: _oldWeightedRoute, modelConfigId: _oldConfigId, modelConfigRevision: _oldRevision,
+    const { weightedRoute: _oldWeightedRoute, modelConfigId: _oldConfigId, modelConfigRevision: _oldRevision, customModelRevision: _oldCustomRevision,
       tokenPrice: _oldPrice, toolCallingProtocol: _oldProtocol, ...previousModel } = state.configuration.model
     const nextConfiguration = { ...state.configuration, model: { ...previousModel, ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}), ...(runtime.tokenPrice ? { tokenPrice: runtime.tokenPrice } : {}), ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}),
+      ...(runtime.tier === 'custom' && runtime.customModelRevision ? { customModelRevision: runtime.customModelRevision,
+        tokenPrice: { version: 'credits-v1-exact' as const, modelTier: 'custom' as const, multiplierBps: runtime.multiplierBps } } : {}),
       tier: runtime.tier, provider: runtime.provider, modelName, customModelId: runtime.tier === 'custom' ? run.customModelId : null,
       maxOutputTokens: Math.min(env.aiTextMaxOutputTokens, runtime.maxOutputTokens ?? env.aiTextMaxOutputTokens),
       contextWindowTokens: resolveSessionContextWindow(env.agentContextWindowTokens, runtime.contextWindowTokens),
@@ -385,7 +388,13 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   const estimatedTokens = prepared?.admittedContext?.estimatedTokens ?? estimate(frame.state.messages)
   if (!prepared && inputLimit > 0 && estimatedTokens >= compactAtTokens) {
     const compacted = await advanceDurableContext(lease, { contextWindowTokens: window, hardLimit: inputLimit, compactAtTokens, estimate,
-      canReadArchive: tools.some(tool => tool.function.name === 'execution_context_read') })
+      canReadArchive: tools.some(tool => tool.function.name === 'execution_context_read'),
+      ...(configuration.model.tokenPrice ? { summarize: (source, system, content) => {
+        if (source.revision !== frame.revision || source.snapshotHash !== frame.snapshotHash || source.configurationHash !== current.state.head.configurationHash) {
+          return runtimeError('RUNTIME_STATE_CONFLICT', '模型窗口测量已不属于最新执行帧。')
+        }
+        return callDurableContextSummary({ lease, source, system, content, runtime, model: configuration.model, window, maxOutputTokens, signal })
+      } } : {}) })
     if (compacted) return { kind: 'context' as const, frame: compacted }
   }
   const contextUsage = { estimatedTokens, contextWindowTokens: window, compactAtTokens }

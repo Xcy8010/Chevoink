@@ -21,8 +21,8 @@ const message = z.discriminatedUnion('role', [
   z.object({ role: z.literal('user'), content: z.union([z.string(), z.array(z.union([
     z.object({ type: z.literal('text'), text: z.string() }).strict(),
     z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string(), detail: z.enum(['low', 'high', 'auto']).optional() }).strict() }).strict(),
-  ]))]), sessionReadingMaterial: z.literal(true).optional() }).strict(),
-  z.object({ role: z.literal('assistant'), content: z.string().nullable(), reasoning: z.string().optional(), toolCalls: z.array(toolCall).optional(),
+  ]))]), sessionReadingMaterial: z.literal(true).optional(), historySourceId: z.string().max(100).optional() }).strict(),
+  z.object({ role: z.literal('assistant'), content: z.string().nullable(), historySourceId: z.string().max(100).optional(), reasoning: z.string().optional(), toolCalls: z.array(toolCall).optional(),
     localCompletion: z.object({ kind: z.enum(['question_timeout', 'question_cancelled', 'question_unanswered', 'novel_setup', 'novel_setup_blocked']), operationId: id }).strict().optional(),
     responsesContinuation: responsesContinuationSchema.optional(),
     nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).optional(),
@@ -34,6 +34,7 @@ const message = z.discriminatedUnion('role', [
 const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['plan', 'build', 'review']), agentType: z.string().min(1),
   creativeFreedom: z.enum(['stable', 'balanced', 'bold']), qualityMode: z.enum(['balanced', 'premium']),
   model: z.object({ modelConfigId: id.optional(), modelConfigRevision: z.number().int().positive().optional(), tokenPrice: tokenPriceSchema.optional(), weightedRoute: weightedRouteSelectionSchema.optional(), tier: z.string().min(1), provider: z.string().min(1), modelName: z.string().nullable(), customModelId: id.nullable(),
+    customModelRevision: z.number().int().positive().optional(),
     reasoningEffort: z.string().min(1), routeRevision: z.string().regex(/^[a-f0-9]{64}$/),
     toolCallingProtocol: z.enum(['chat', 'responses']).optional(),
     maxOutputTokens: z.number().int().positive().max(4000000).optional(),

@@ -43,7 +43,7 @@ import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
 import { addNextPromptInstruction, allowsModelNextPrompt, allowsNextPrompt, DEFAULT_COMPLETED_NEXT_PROMPT, LIMITED_COMPLETED_NEXT_PROMPT, readTaskResponseNextPrompt, selectInteractiveNextPrompt } from './next-prompt.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { withGoalEffects, withGoalExecutionContext } from './goal-context.js'
-import { readGoalExecution } from './goal-fence.js'
+import { assertGoalFence, readGoalExecution } from './goal-fence.js'
 import { getModelTierRuntime } from '../credits.js'
 import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
 import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, governedPolicyKey, type AgentDefinition } from './agents.js'
@@ -95,6 +95,8 @@ import { runtimeJson } from './runtime-common.js'
 import { readCancelledReviewRetirements } from './cancelled-review-recovery.js'
 import { activeChapterScope } from '../data/internal.js'
 import { createRepeatDetector } from './repeat-detect.js'
+import { fitArchivedHistoryForDispatch, planSemanticCompaction } from './semantic-compaction.js'
+import { isKnownTextRequestBilling } from './text-request-billing.js'
 import {
   savedRunUsageSchema,
   recoverLegacyRunUsage,
@@ -116,9 +118,11 @@ import {
   fitAgentOutputTokens,
   estimateChatMessagesTokens,
   estimateChatMessageTokens,
+  estimateTextTokens,
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
   resolveSessionContextWindow,
+  targetContextTokens,
 } from './context-budget.js'
 
 /**
@@ -173,11 +177,16 @@ export type ExecuteAgentRunParams = {
 }
 
 const emptyUsage = (): AgentTokenUsage => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0 })
+const LEGACY_CONTEXT_COMPACTION = 'agentContextCompaction'
+const LEGACY_COMPACTION_PENDING = '上下文压缩的模型用量待核对，已保留任务进度。'
+const legacyModelSelection = { modelTier: true, customModelId: true, reasoningEffort: true,
+  modelConfigId: true, modelConfigRevision: true } as const
+const legacyModelIdentity = (run: Prisma.AgentRunGetPayload<{ select: typeof legacyModelSelection }>) =>
+  runtimeJson([run.modelTier ?? null, run.customModelId ?? null, run.reasoningEffort ?? null, run.modelConfigId ?? null, run.modelConfigRevision ?? null]).hash
 
 /** One tracker per request: retain reported partial usage on interruption,
  * then include only the remaining delta when the complete result arrives. */
-function trackRequestUsage(total: AgentTokenUsage) {
-  let observed = emptyUsage()
+function trackRequestUsage(total: AgentTokenUsage, observed = emptyUsage()) {
   return (value: { promptTokens: number | null; completionTokens: number | null; totalTokens: number | null }) => {
     const promptTokens = Math.max(observed.promptTokens, value.promptTokens ?? 0)
     const completionTokens = Math.max(observed.completionTokens, value.completionTokens ?? 0)
@@ -186,6 +195,7 @@ function trackRequestUsage(total: AgentTokenUsage) {
     total.completionTokens += completionTokens - observed.completionTokens
     total.totalTokens += totalTokens - observed.totalTokens
     observed = { promptTokens, completionTokens, totalTokens }
+    return observed
   }
 }
 
@@ -778,8 +788,8 @@ async function finalizeLegacyRun(
   const afterTools = terminalNotice?.parts.some(part => part.type === 'tool-call')
   // Failure explanations belong to the existing run-status channel. Publish
   // them atomically with the confirmed failure, never as novel prose.
-  const failureStatus = status === 'failed' && withFailureStatus && errorMessage
-    ? { type: 'error' as const, code: 'run_failed', message: errorMessage, recoverable: false } : undefined
+  const failureStatus = (status === 'failed' || status === 'paused') && withFailureStatus && errorMessage
+    ? { type: 'error' as const, code: `run_${status}`, message: errorMessage, recoverable: status === 'paused' } : undefined
   const writingDisplayText = writingDelivery && ['completed_wrap_up', 'recovered_chapter_only'].includes(writingDelivery.expected.presentationKind)
     ? completedWritingPresentationText(writingDelivery.expected, writingDelivery.displayText ?? '')
     : writingDelivery?.displayText ?? writingDelivery?.expected.text
@@ -1012,8 +1022,37 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   let runTokenBudget = COMPATIBILITY_TOKEN_LIMIT // Storage compatibility only.
   let checkpointRestored = !params.resume
   let historicalReviewHandoffCount = 0
+  let contextCompactionUsage: Record<string, AgentTokenUsage> = {}
+  let contextCompactionPending = false
+  const attemptedContextCompactions = new Set<string>()
+  const contextCompactionUsageScope = { userId: params.userId, novelId: params.novelId,
+    targetType: LEGACY_CONTEXT_COMPACTION, action: LEGACY_CONTEXT_COMPACTION }
+  const readContextCompactionUsage = (agentRunId: string, targetId?: string) => prisma.aiUsageLog.findMany({
+    where: { ...contextCompactionUsageScope, agentRunId, targetId },
+    select: { id: true, targetId: true, requestTokens: true, responseTokens: true, usageSource: true, billingStatus: true, reservedCreditMilli: true },
+  })
+  const reconcileContextCompactionUsage = (total: AgentTokenUsage, observed: Record<string, AgentTokenUsage>,
+    receipts: Awaited<ReturnType<typeof readContextCompactionUsage>>) => {
+    for (const receipt of receipts) {
+      if (receipt.targetId && receipt.billingStatus !== 'not_dispatched') attemptedContextCompactions.add(receipt.targetId)
+      if (receipt.requestTokens !== null || receipt.responseTokens !== null) {
+        observed[receipt.id] = trackRequestUsage(total, observed[receipt.id])({ promptTokens: receipt.requestTokens,
+          completionTokens: receipt.responseTokens, totalTokens: null })
+      }
+    }
+    return receipts.some(receipt => !isKnownTextRequestBilling(receipt))
+  }
   const restoreSavedUsage = async (stored: { usage: unknown; currentTurn: number }, id: string) => {
-    if (stored.usage !== null) return savedRunUsageSchema.safeParse(stored.usage)
+    if (stored.usage !== null) {
+      const saved = savedRunUsageSchema.safeParse(stored.usage)
+      if (saved.success && saved.data.checkpoint) {
+        const observed = saved.data.checkpoint.contextCompactionUsage ?? {}
+        const pending = reconcileContextCompactionUsage(saved.data, observed, await readContextCompactionUsage(id))
+        if (Object.keys(observed).length) saved.data.checkpoint.contextCompactionUsage = observed
+        contextCompactionPending ||= pending
+      }
+      return saved
+    }
     const receipts = await prisma.aiUsageLog.findMany({
       where: { userId: params.userId, targetType: 'agentRun', targetId: id },
       select: { turn: true, requestTokens: true, responseTokens: true },
@@ -1026,10 +1065,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const assertLegacyOwnerReceipt = async (tx: Prisma.TransactionClient, terminal = false) => {
     await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${runId} FOR UPDATE`
     const run = await tx.agentRun.findFirst({ where: { id: runId, userId: params.userId, novelId: params.novelId,
-      runtimeProtocolVersion: 0, taskRootId: null, status: { in: terminal ? ['running', 'awaiting_approval', 'paused'] : ['running', 'awaiting_approval'] } }, select: { id: true } })
+      runtimeProtocolVersion: 0, taskRootId: null, status: { in: terminal ? ['running', 'awaiting_approval', 'paused'] : ['running', 'awaiting_approval'] } },
+      select: { ...legacyModelSelection } })
     const owner = await tx.agentRunEvent.findFirst({ where: { runId, type: 'run.started' }, orderBy: { seq: 'desc' }, select: { seq: true, payload: true } })
     if (!run || !legacyOwnerReceipt || owner?.seq !== legacyOwnerReceipt.seq || runtimeJson(owner.payload).hash !== legacyOwnerReceipt.hash)
       throw new DataAccessError(409, 'RUNTIME_PARENT_LEASE_LOST', '本次原执行 owner 已变化，旧实例未覆盖当前进度或终态。')
+    return run
   }
   const checkpointSnapshot = (): RunCheckpointState => ({
     version: 2, controlPolicy: 'until_completion', origin: checkpointOrigin, stagnantBatches,
@@ -1042,6 +1083,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     ...(pendingReviews.size ? { pendingReviews: [...pendingReviews.values()] } : {}),
     ...(toolRestrictions.length ? { toolRestrictions } : {}),
     ...(inputProtocolRecovery ? { inputProtocolRecovery } : {}),
+    ...(Object.keys(contextCompactionUsage).length ? { contextCompactionUsage } : {}),
     inheritedTokens, inheritedTurns, inheritedExecutionMs, manualResumeCount,
     ...(historicalReviewHandoffCount > 0 ? { reviewHandoffCount: historicalReviewHandoffCount } : {}),
   })
@@ -1149,6 +1191,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       runStartedAt = storedRun.startedAt?.getTime() ?? runStartedAt
       const checkpoint = saved.data.checkpoint
       if (checkpoint) {
+        contextCompactionUsage = checkpoint.contextCompactionUsage ?? {}
         inheritedTokens = checkpoint.inheritedTokens
         inheritedTurns = checkpoint.inheritedTurns
         inheritedExecutionMs = checkpoint.inheritedExecutionMs ?? 0
@@ -1157,9 +1200,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       // Historical runs keep their known consumption, without inventing earned slices.
       checkpointRestored = true
+      if (contextCompactionPending) throw new DataAccessError(409, 'CONTEXT_COMPACTION_USAGE_UNCONFIRMED', LEGACY_COMPACTION_PENDING)
     }
     let modelRuntime = selectWeightedModelRuntime(await getModelTierRuntime(params.modelTier ?? 'speed', params.userId, params.customModelId, params.reasoningEffort,
       { userId: params.userId, runId, modelConfigId: storedRun.modelConfigId, modelConfigRevision: storedRun.modelConfigRevision }))
+    const storedStart = storedRun.startRequest
+    const customAdmission = storedStart && typeof storedStart === 'object' && !Array.isArray(storedStart) ? storedStart.customModelAdmission : null
+    let selectedRunModel = legacyModelIdentity(storedRun)
     let runtimeModelName = modelRuntime.modelName ?? agent.model
     assertTaskAuthorizationRuntimeReady(storedRun.taskSpec, { userId: params.userId, sessionId: params.sessionId, novelId: params.novelId })
     await prisma.agentSession.update({
@@ -1254,15 +1301,21 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (priorCheckpoint) restoreCheckpointLimits(priorCheckpoint)
     }
     if (params.resume && inheritedTurns > 0 && parsedTaskSpec.success) {
-      // Older checkpoints did not store inherited time. Recompute from owned
-      // run intervals; never treat the missing field as a fresh time budget.
+      // Recheck owned predecessors. A summary receipt may have settled after a
+      // linked Continue inherited partial usage and paused for reconciliation.
       const preceding = await prisma.agentRun.findMany({ where: { ...MAIN_RUN_FILTER, userId: params.userId, sessionId: params.sessionId,
         novelId: params.novelId, id: { not: runId }, taskSpec: { path: ['id'], equals: parsedTaskSpec.data.id } },
-        select: { startedAt: true, currentTurn: true, events: { where: { type: { in: ['run.started', 'run.paused', 'run.finished'] } },
+        select: { id: true, usage: true, startedAt: true, currentTurn: true, events: { where: { type: { in: ['run.started', 'run.paused', 'run.finished'] } },
           orderBy: { seq: 'asc' }, select: { type: true, createdAt: true } } } })
       const elapsed = preceding.reduce((total, previous) => total + recoverExecution(previous, executionStartedAt), 0)
       priorExecutionMs += Math.max(0, elapsed - inheritedExecutionMs)
       inheritedExecutionMs = Math.max(elapsed, inheritedExecutionMs)
+      let precedingTokens = 0
+      for (const previous of preceding) {
+        const saved = await restoreSavedUsage(previous, previous.id)
+        if (saved.success) precedingTokens += saved.data.totalTokens
+      }
+      inheritedTokens = Math.max(inheritedTokens, precedingTokens)
     }
     let taskSpec: TaskSpec = parsedTaskSpec.success
       ? { ...parsedTaskSpec.data, runId }
@@ -1303,6 +1356,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
+    if (contextCompactionPending) throw new DataAccessError(409, 'CONTEXT_COMPACTION_USAGE_UNCONFIRMED', LEGACY_COMPACTION_PENDING)
     if (taskSpec.scope.agentWritingProtocol === 1) taskSpec = await prisma.$transaction(tx => effectiveWritingTaskSpec(tx,
       { userId: params.userId, novelId: params.novelId, runId }, taskSpec))
     let resumedWritingTarget: { chapterId: string; orderIndex: number } | undefined
@@ -1717,19 +1771,125 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const publishContextUsage = (estimatedTokens: number) => bus.emit({ type: 'context.usage',
       estimatedTokens, contextWindowTokens: contextBudget.contextWindowTokens, compactAtTokens: contextBudget.compactAtTokens })
 
-    /**
-     * Provider-independent in-run compaction for DeepSeek, GLM and custom
-     * OpenAI-compatible models. It counts tool schemas, tool arguments,
-     * reasoning and multimodal placeholders instead of only visible text.
-     */
     const prepareContextForRequest = async (beforeTokens: number, estimate: (candidate: ChatMessage[]) => number) => {
-      const result = planInRunCompaction(messages, beforeTokens, contextBudget, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS, estimate)
-      if (!result) return { beforeTokens, afterTokens: beforeTokens, fits: beforeTokens <= contextBudget.hardRequestTokens }
-      const { triggerTokens, afterTokens, compactedToolOutputs, collapsedToolRounds } = result
-      const compactionId = randomUUID()
-      publishContextUsage(beforeTokens)
-      bus.emit({ type: 'context.compaction', messageId: compactionId, state: 'running' })
-      messages.splice(0, messages.length, ...result.messages)
+      const triggerTokens = Math.min(contextBudget.compactAtTokens, contextBudget.hardRequestTokens)
+      const requestBudget = (afterTokens: number, configurationChanged = false) => ({ beforeTokens, afterTokens,
+        fits: afterTokens <= contextBudget.hardRequestTokens, configurationChanged })
+      if (beforeTokens < triggerTokens) return requestBudget(beforeTokens)
+
+      const fast = planInRunCompaction(messages, beforeTokens, contextBudget, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS, estimate)
+      const safeMessages = fast?.messages ?? messages
+      const safeTokens = fast?.afterTokens ?? beforeTokens
+      const customId = modelRuntime.tier === 'custom' ? params.customModelId : null
+      const customRevision = modelRuntime.customModelRevision
+      const admittedCustomModel = customId && customId === storedRun.customModelId && customRevision
+        && customAdmission && typeof customAdmission === 'object' && !Array.isArray(customAdmission)
+        && customAdmission.id === customId && customAdmission.revision === customRevision ? { id: customId, revision: customRevision } : null
+      const plan = modelRuntime.tier !== 'custom' || admittedCustomModel
+        ? planSemanticCompaction(safeMessages, targetContextTokens(triggerTokens), estimate) : null
+      let compacted = safeMessages
+      let historyDigest: ReturnType<NonNullable<typeof plan>['receipt']>
+      const messageId = randomUUID()
+      const announceCompaction = () => {
+        publishContextUsage(beforeTokens)
+        bus.emit({ type: 'context.compaction', messageId, state: 'running' })
+      }
+      if (fast) announceCompaction()
+
+      let configurationChanged = false
+      if (plan) {
+        const targetId = runtimeJson([taskSpec.id, plan.sourceHash]).hash
+        const summaryMessages: ChatMessage[] = [{ role: 'system', content: plan.system }, { role: 'user', content: plan.content }]
+        const inputTokens = estimateTextTokens(JSON.stringify(summaryMessages))
+        const maxOutputTokens = fitAgentOutputTokens(contextWindowTokens, Math.min(8_192, modelRuntime.maxOutputTokens ?? 8_192), inputTokens)
+        if (maxOutputTokens > 0 && (params.tokenBudget === undefined || inheritedTokens + usage.totalTokens + inputTokens + maxOutputTokens <= params.tokenBudget)
+          && !attemptedContextCompactions.has(targetId)) {
+          const owner = legacyOwnerReceipt!
+          let usageId: string | undefined
+          const result = await withGoalExecutionContext(ownedGoalExecution, () => chatWithTools({
+            messages: summaryMessages, tools: [], semanticCompaction: true, maxOutputTokens,
+            model: runtimeModelName, provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
+            weightedRoute: modelRuntime.weightedRoute, freePromotion: modelRuntime.freePromotion,
+            physicalRouteId: modelRuntime.physicalRouteId ?? (modelRuntime.weightedRoute?.source === 'candidate' ? modelRuntime.weightedRoute.candidateId : modelRuntime.modelConfigId ?? params.customModelId ?? undefined),
+            reasoningEffort: modelRuntime.reasoningEffort, reasoningEfforts: modelRuntime.reasoningEfforts,
+            reasoningParameterMode: modelRuntime.reasoningParameterMode, thinkingEnabled: modelRuntime.thinkingEnabled,
+            outputTokenParameter: modelRuntime.outputTokenParameter, toolCallingProtocol: modelRuntime.toolCallingProtocol,
+            semanticCompactionEvidence: { modelConfigId: modelRuntime.modelConfigId ?? params.customModelId ?? null,
+              modelConfigRevision: modelRuntime.modelConfigRevision ?? modelRuntime.customModelRevision ?? null, ownerSeq: owner.seq, ownerHash: owner.hash },
+            signal: controller.signal,
+            usageLog: { ...contextCompactionUsageScope, chapterId: params.chapterId, targetId, agentRunId: runId, turn,
+              modelTier: modelRuntime.tier, multiplierBps: modelRuntime.multiplierBps },
+            beforeProviderDispatch: async id => {
+              usageId = id
+              await prisma.$transaction(async tx => {
+                if (ownedGoalExecution) await assertGoalFence(tx, ownedGoalExecution)
+                const current = await assertLegacyOwnerReceipt(tx)
+                controller.signal.throwIfAborted()
+                configurationChanged = legacyModelIdentity(current) !== selectedRunModel
+                if (admittedCustomModel && !await tx.aiModelConfig.findFirst({ where: { ...admittedCustomModel,
+                  ownerUserId: params.userId, enabled: true }, select: { id: true } })) {
+                  throw new DataAccessError(409, 'CONTEXT_COMPACTION_SUPERSEDED', '原自定义模型配置已变化。')
+                }
+                const previous = await tx.aiUsageLog.findMany({ where: { ...contextCompactionUsageScope, agentRunId: runId, targetId,
+                  id: { not: id }, billingStatus: { not: 'not_dispatched' } }, select: { id: true } })
+                if (configurationChanged || previous.length) throw new DataAccessError(409, 'CONTEXT_COMPACTION_SUPERSEDED', '原压缩请求已变化。')
+              })
+            },
+            onUsage: observed => {
+              if (usageId) contextCompactionUsage[usageId] = trackRequestUsage(usage, contextCompactionUsage[usageId])(observed)
+            },
+          })).catch(error => {
+            if (controller.signal.aborted || error instanceof DataAccessError && ['RUNTIME_PARENT_LEASE_LOST', 'GOAL_EXECUTION_FENCED'].includes(error.code)) throw error
+            return null
+          })
+          const receipts = await readContextCompactionUsage(runId, targetId)
+          controller.signal.throwIfAborted()
+          if (reconcileContextCompactionUsage(usage, contextCompactionUsage, receipts) || usageId && !receipts.some(row => row.id === usageId)) {
+            throw new DataAccessError(409, 'CONTEXT_COMPACTION_USAGE_UNCONFIRMED', LEGACY_COMPACTION_PENDING)
+          }
+          if (usageId && result?.finishReason === 'stop' && !result.toolCalls.length) {
+            const applied = plan.apply(result.content)
+            if (applied) {
+              compacted = applied
+              historyDigest = plan.receipt(applied)
+            }
+          }
+          const current = await persistCheckpoint()
+          configurationChanged ||= legacyModelIdentity(current) !== selectedRunModel
+        }
+      }
+
+      let afterTokens = compacted === safeMessages ? safeTokens : estimate(compacted)
+      if (afterTokens > contextBudget.hardRequestTokens) {
+        const archived = fitArchivedHistoryForDispatch(safeMessages, contextBudget.hardRequestTokens, estimate)
+        if (archived) {
+          compacted = archived
+          historyDigest = undefined
+          afterTokens = estimate(archived)
+        }
+      }
+      if (!fast && compacted === messages) return requestBudget(beforeTokens, configurationChanged)
+      const committed = await prisma.$transaction(async tx => {
+        if (ownedGoalExecution) await assertGoalFence(tx, ownedGoalExecution)
+        const current = await assertLegacyOwnerReceipt(tx)
+        controller.signal.throwIfAborted()
+        configurationChanged ||= legacyModelIdentity(current) !== selectedRunModel
+        if (configurationChanged && !fast) return false
+        if (configurationChanged) {
+          compacted = safeMessages
+          afterTokens = safeTokens
+        }
+        const parts = runtimeJson([{ type: 'context-compaction', state: 'completed',
+          ...(!configurationChanged && historyDigest ? { historyDigest } : {}) }]).value
+        await tx.agentMessage.upsert({ where: { id: messageId, runId, sessionId: params.sessionId, role: 'assistant' },
+          create: { id: messageId, runId, sessionId: params.sessionId, role: 'assistant', parts }, update: { parts } })
+        controller.signal.throwIfAborted()
+        return true
+      })
+      if (!committed) return requestBudget(beforeTokens, configurationChanged)
+      if (!fast) announceCompaction()
+      messages.splice(0, messages.length, ...compacted)
+      compactionCount++
       console.info('[agent-loop] 运行中上下文压缩', JSON.stringify({
         runId,
         turn,
@@ -1739,12 +1899,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         triggerTokens,
         beforeTokens,
         afterTokens,
-        compactedToolOutputs,
-        collapsedToolRounds,
+        compactedToolOutputs: fast?.compactedToolOutputs ?? 0,
+        collapsedToolRounds: fast?.collapsedToolRounds ?? 0,
       }))
-      await persistMessage(compactionId, runId, params.sessionId, 'assistant', [{ type: 'context-compaction', state: 'completed' }])
-      bus.emit({ type: 'context.compaction', messageId: compactionId, state: 'completed' })
-      return { beforeTokens, afterTokens, fits: afterTokens <= contextBudget.hardRequestTokens }
+      bus.emit({ type: 'context.compaction', messageId, state: 'completed' })
+      return requestBudget(afterTokens, configurationChanged)
     }
     // plan/18：轮次片/预算片可被检查点续跑刷新，改 let；预算从「只能下调」改为 clamp 到硬顶（默认 500 万）
 
@@ -1791,7 +1950,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       sessionId: params.sessionId,
       runId,
       continuityOwnerSeq: continuityOwner?.seq,
-      assertCurrentExecution: tx => assertLegacyOwnerReceipt(tx),
+      assertCurrentExecution: async tx => { await assertLegacyOwnerReceipt(tx) },
       writingScope: taskSpec.scope,
       protectedChapterIds: protectsEarlierContent ? new Set(taskSpec.scope.chapterIds ?? []) : undefined,
       toolAuthority: snapshotToolAuthority(availableTools, params.mode),
@@ -1996,9 +2155,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (configurationChanges.length) {
         const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
         if (!['running', 'awaiting_approval'].includes(current.status)) throw new DOMException('run stopped', 'AbortError')
-        if (current.modelTier !== modelRuntime.tier || current.customModelId !== (params.customModelId ?? null) || current.reasoningEffort !== modelRuntime.reasoningEffort) {
+        const currentSelection = legacyModelIdentity(current)
+        if (currentSelection !== selectedRunModel || current.modelTier !== modelRuntime.tier || current.customModelId !== (params.customModelId ?? null) || current.reasoningEffort !== modelRuntime.reasoningEffort) {
           modelRuntime = selectWeightedModelRuntime(await getModelTierRuntime(current.modelTier as CreditModelTier, params.userId, current.customModelId,
             current.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort))
+          selectedRunModel = currentSelection
           params.customModelId = current.customModelId
           runtimeModelName = modelRuntime.modelName ?? agent.model
           toolContext.modelRuntime = modelRuntime
@@ -2125,8 +2286,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const estimatedRequestTokens = estimateRequest(messages)
       // 在发往供应商之前执行模型窗口感知的压缩；仍超限则安全收尾，不把必失败请求交给供应商。
       let requestBudget = bootstrapCall
-        ? { beforeTokens: estimatedRequestTokens, afterTokens: estimatedRequestTokens, fits: true }
+        ? { beforeTokens: estimatedRequestTokens, afterTokens: estimatedRequestTokens, fits: true, configurationChanged: false }
         : await prepareContextForRequest(estimatedRequestTokens, estimateRequest)
+      if (requestBudget.configurationChanged) continue
       if (!bootstrapCall && outputRecoveryFrom !== undefined) {
         const fittingOutput = emptyResponseRecoveryOutputTokens(outputRecoveryFrom, modelRuntime.maxOutputTokens, contextWindowTokens, requestBudget.afterTokens)
         if (fittingOutput === null) {
@@ -3222,6 +3384,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       bus.emit({ type: 'error', code: error.code.toLowerCase(), message, recoverable: false })
       await flushLiveTurn()
       await finalizeRun(runId, bus, 'failed', usage, turn, message, message)
+      return
+    }
+    if (error instanceof DataAccessError && error.code === 'CONTEXT_COMPACTION_USAGE_UNCONFIRMED') {
+      await finalizeRun(runId, bus, 'paused', usage, turn, error.message, error.message, false, undefined, undefined, undefined, true,
+        undefined, 'needs_input')
       return
     }
     if (error instanceof DataAccessError && error.code === 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED') {

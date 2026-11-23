@@ -705,6 +705,7 @@ export async function resolveAuxiliaryModelSelection(userId: string) {
 export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userId?: string, customModelId?: string | null, requestedReasoningEffort?: ModelReasoningEffort, retained?: RetainedModelContext, requireSelectable = false): Promise<{
   modelConfigId?: string
   modelConfigRevision?: number
+  customModelRevision?: number
   weightedRoutes?: WeightedRoutesStored
   weightedRoute?: WeightedRouteSelection
   physicalRouteId?: string
@@ -731,12 +732,13 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
     if (!userId || !customModelId) throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请选择一个已配置的自定义模型。')
     const custom = await prisma.aiModelConfig.findFirst({
       where: { id: customModelId, ownerUserId: userId, enabled: true },
-      select: { provider: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, metadata: true },
+      select: { revision: true, provider: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, metadata: true },
     })
     if (!custom || !custom.baseUrl || !custom.apiKeyCiphertext) throw new DataAccessError(404, 'CUSTOM_MODEL_NOT_FOUND', '自定义模型不存在、未启用或配置不完整。')
     const capabilities = parseModelCapabilities(custom.metadata, custom.provider)
     const reasoningEffort = resolveCustomReasoningEffort(requestedReasoningEffort ?? capabilities.defaultReasoningEffort, capabilities.reasoningEfforts)
-    return { tier, multiplierBps: 0, provider: custom.provider, modelName: custom.modelName, baseUrl: custom.baseUrl, apiKey: decryptSecret(custom.apiKeyCiphertext), reasoningEffort, ...capabilities }
+    return { tier, customModelRevision: custom.revision, multiplierBps: 0,
+      provider: custom.provider, modelName: custom.modelName, baseUrl: custom.baseUrl, apiKey: decryptSecret(custom.apiKeyCiphertext), reasoningEffort, ...capabilities }
   }
   if (!isServerModelTier(tier)) throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')
   let config = await prisma.aiModelConfig.findFirst({

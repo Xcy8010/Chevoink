@@ -199,7 +199,7 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
       const capabilities = body.enabled === false ? undefined : await validateModel(userId, res, { provider: target.provider, modelName: target.modelName, baseUrl: target.baseUrl!, apiKey: token })
       const metadata = target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}
       const updated = await prisma.aiModelConfig.updateMany({ where: { id: target.id, ownerUserId: userId, updatedAt: target.updatedAt }, data: {
-        displayName: body.displayName, enabled: body.enabled === false ? false : true,
+        revision: { increment: 1 }, displayName: body.displayName, enabled: body.enabled === false ? false : true,
         metadata: { ...metadata, ...capabilities, contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS },
       } })
       if (updated.count !== 1) throw new DataAccessError(409, 'CUSTOM_MODEL_CHANGED', '校验期间模型已变更，请重新打开配置后保存。')
@@ -216,6 +216,7 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     const updated = await prisma.aiModelConfig.updateMany({
       where: { id: target.id, ownerUserId: userId, updatedAt: target.updatedAt },
       data: {
+        revision: { increment: 1 },
         provider: body.provider,
         displayName: body.displayName,
         modelName: body.modelName,

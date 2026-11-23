@@ -171,10 +171,11 @@ export function childContext(messages: ChildMessages, prompt: string, rolePrompt
  * remain the ceiling; parent model identity and tariff never leak into a child. */
 export function childModelForRuntime(inherited: ChildConfiguration['model'], runtime: NonNullable<ToolContext['modelRuntime']>, customModelId: string | null,
   price: import('../billing/token-price.js').TokenPrice): ChildConfiguration['model'] {
-  const { weightedRoute: _choice, modelConfigId: _id, modelConfigRevision: _revision, tokenPrice: _price,
+  const { weightedRoute: _choice, modelConfigId: _id, modelConfigRevision: _revision, customModelRevision: _customRevision, tokenPrice: _price,
     toolCallingProtocol: _protocol, ...capabilities } = inherited
   const modelName = runtime.modelName ?? env.aiTextModel
   return { ...capabilities, ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}),
+    ...(runtime.tier === 'custom' && runtime.customModelRevision ? { customModelRevision: runtime.customModelRevision } : {}),
     tokenPrice: price, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, provider: runtime.provider,
     modelName, customModelId: runtime.tier === 'custom' ? customModelId : null, reasoningEffort: runtime.reasoningEffort,
     ...(runtime.toolCallingProtocol ? { toolCallingProtocol: runtime.toolCallingProtocol } : {}),

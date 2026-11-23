@@ -532,7 +532,9 @@ export type AgentNextPrompt = { runId: EntityId; text: string }
 export type AgentMessagePart =
   | { type: 'text'; text: string; afterTools?: true }
   | { type: 'activity-title'; title: string }
-  | { type: 'context-compaction'; state: 'running' | 'completed' }
+  | { type: 'context-compaction'; state: 'running' | 'completed'; historyDigest?: {
+    version: 1; sourceIds: string[]; sourceHash: string; notes: Array<{ source: number; quote: string }>
+  } }
   | { type: 'reasoning'; text: string; durationMs?: number; activity?: true }
   | {
       type: 'tool-call'
