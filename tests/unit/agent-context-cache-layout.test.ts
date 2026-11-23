@@ -310,6 +310,22 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     return input
   }
 
+  it('keeps reusable system rules ahead of mode-specific guidance and opening copy', async () => {
+    const input = interpretedInput('核对这份细纲。')
+    const build = String((await assembleContext(input)).messages[0].content)
+    const review = String((await assembleContext({ ...input, mode: 'review' })).messages[0].content)
+    const mode = '当前模式：'
+    const opening = '- 需要工具时，由你根据作者请求选择第一个能推进任务的动作。'
+    const prefix = build.slice(0, build.indexOf(mode))
+    console.info('[synthetic-system-prefix]', { modeChars: prefix.length, openingChars: build.indexOf(opening), totalChars: build.length })
+    expect(prefix).toContain('历史工具记录由系统生成')
+    expect(review.slice(0, review.indexOf(mode))).toBe(prefix)
+    expect(build).toContain(mode + 'build')
+    expect(review).toContain(mode + 'review')
+    expect(build.indexOf(opening)).toBeGreaterThan(build.indexOf(mode))
+    expect(build.split(opening)).toHaveLength(2)
+  })
+
   it.each(['里面其中一个题材写小说推荐哪个？', '如何写一个人物的犹豫？', '只讨论人物设定，不要改正文。'])('does not auto-load manuscript skills for an actual non-greeting discussion: %s', async prompt => {
     const input = interpretedInput(prompt), original = structuredClone(input.taskSpec)
     expect(input.taskSpec.scope.authorEffects?.manuscript).toBe(false)
@@ -616,6 +632,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(history.some(message => message.role === 'assistant' && String(message.content).endsWith(answer))).toBe(true)
     expect(JSON.stringify(history)).not.toContain('历史检索记录')
     expect(JSON.stringify(history)).toContain('消息或回执未完整进入当前窗口')
+    expect(history.at(-1)).toMatchObject({ role: 'system', content: expect.stringContaining('最近发言消息 ID') })
     expect(JSON.stringify(history)).toContain('共 1 组消息或回执')
     expect(JSON.stringify(history)).toContain('session_message_read')
     expect(result.inputEstimates!.history.tokens).toBeLessThan(2000)

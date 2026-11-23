@@ -4,7 +4,7 @@ import { projectAgentAuthorParts } from '../../../../../shared/agent-author-view
 import { combineRunTimings, unknownRunTiming } from '../../../../../shared/agent-timing.js'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
 
-export type MessageBlock = { firstId: string; lastId: string; ops: number; goalId?: string; runIds?: string[]; authorId?: string }
+export type MessageBlock = { firstId: string; lastId: string; ops: number; hasAuthorOutput: boolean; goalId?: string; runIds?: string[]; authorId?: string }
 
 export function projectBlockTimings(messages: readonly AgentUIMessage[], blocks: Map<string, MessageBlock>, activeRunId: string | null) {
   const byRun = new Map<string, AgentRunTiming>()
@@ -45,12 +45,13 @@ export function projectMessages(messages: readonly AgentUIMessage[]) {
   let assistantIds: string[] = []
   let goalId: string | null = null
   let ops = 0
+  let hasAuthorOutput = false
   let runIds = new Set<string>()
   let recentConversationText = ''
   let lastAssistantId: string | undefined
   const flush = () => {
     if (assistantIds.length > 0) {
-      const block: MessageBlock = { firstId: assistantIds[0], lastId: assistantIds[assistantIds.length - 1], ops, runIds: [...runIds], ...(goalId ? { goalId } : {}), ...(authorId ? { authorId } : {}) }
+      const block: MessageBlock = { firstId: assistantIds[0], lastId: assistantIds[assistantIds.length - 1], ops, hasAuthorOutput, runIds: [...runIds], ...(goalId ? { goalId } : {}), ...(authorId ? { authorId } : {}) }
       for (const id of ids) blockInfoById.set(id, block)
       if (authorId) blockByAuthorId.set(authorId, block)
       authorId = undefined
@@ -59,6 +60,7 @@ export function projectMessages(messages: readonly AgentUIMessage[]) {
     assistantIds = []
     goalId = null
     ops = 0
+    hasAuthorOutput = false
     runIds = new Set()
   }
   for (const message of messages) {
@@ -71,7 +73,10 @@ export function projectMessages(messages: readonly AgentUIMessage[]) {
       runIds.add(message.runId)
       assistantIds.push(message.id)
       lastAssistantId = message.id
-      for (const part of projectAgentAuthorParts(message.parts, false, { includePreparing: true })) if (part.type === 'tool-call') ops++
+      for (const part of projectAgentAuthorParts(message.parts, false, { includePreparing: true })) {
+        if (part.type === 'tool-call') ops++
+        if (part.type === 'text' || part.type === 'context-compaction' || (part.type === 'tool-call' && !part.subagentCallId)) hasAuthorOutput = true
+      }
     } else if (message.goalContinuation && message.goalId) {
       if (ids.length > 0 && message.goalId !== goalId) flush()
       goalId = message.goalId

@@ -1219,6 +1219,7 @@ html.dark .studio-workspace .agent-composer-goal { background: #333333; }
   padding-inline: .25rem;
 }
 .agent-activity-detail { margin-inline-start: 1.75rem; }
+[data-author-timer]:not(:has([data-clock-ticking])) + .agent-opening-thinking { display: none; }
 .agent-activity-scroll-frame { position: relative; }
 .agent-activity-scroll {
   overflow-y: auto;

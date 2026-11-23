@@ -31,10 +31,14 @@ it('keeps the loaded timeline visible on the first render of a remote activity h
   render(<QueryClientProvider client={client}><ToastProvider>
     <AgentPanel novelId="book" novelName="合成作品" sessionId={sessionId} ensureSession={async () => sessionId} />
   </ToastProvider></QueryClientProvider>)
-  act(() => restoreActiveRunHistory([...history, row(runId)], runId, sessionId))
+  const requestTiming = { status: 'running' as const, activeSince: new Date().toISOString(), elapsedMs: 0, lastSeq: 0 }
+  act(() => restoreActiveRunHistory([...history, { ...row(runId), requestTiming }], runId, sessionId))
   expect(screen.queryByRole('status', { name: '正在载入对话' })).toBeNull()
   expect(screen.getByText('正在阅读的旧消息').closest('[style*="display: none"]')).toBeNull()
   await waitFor(() => expect(document.querySelector('[data-author-timer]')).toBeTruthy(), { timeout: 3000 })
+  const timer = document.querySelector('[data-author-timer]')!
+  expect(timer.querySelector('[data-clock-ticking]')).toBeTruthy()
+  expect(timer.nextElementSibling).toBe(screen.getByText('正在思考').closest('[role="status"]'))
   const apply = useAgentStore.getState().applyEvent
   const ts = new Date().toISOString(), messageId = 'opening'
   const sample = { type: 'context.usage' as const, seq: 3, ts, estimatedTokens: 205349, contextWindowTokens: 258000, compactAtTokens: 228000 }
@@ -44,7 +48,9 @@ it('keeps the loaded timeline visible on the first render of a remote activity h
   act(() => apply({ type: 'reasoning.delta', runId, seq: 5, ts, messageId, delta: 'PRIVATE_REASONING', activity: true }))
   expect(screen.queryByText(/模型思考中/)).toBeNull()
   expect(screen.queryByText('PRIVATE_REASONING')).toBeNull()
+  expect(screen.getByText('正在思考')).toBeTruthy()
   act(() => apply({ type: 'text.delta', runId, seq: 6, ts, messageId, delta: '我先核对细纲。' }))
+  expect(screen.queryByText('正在思考')).toBeNull()
   await waitFor(() => expect(screen.getByText('我先核对细纲。')).toBeTruthy())
 })
 

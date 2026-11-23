@@ -324,19 +324,21 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, chapte
   </div>
 })
 
-export function AuthorActivitySummary({ timing, active, open, onToggle }: {
-  timing: AgentRunTiming; active: boolean; open: boolean; onToggle?: () => void
+export function AuthorActivitySummary({ timing, active, open, openingPending = false, onToggle }: {
+  timing: AgentRunTiming; active: boolean; open: boolean; openingPending?: boolean; onToggle?: () => void
 }) {
   const label = active || timing.elapsedMs !== null
     ? <ProcessDuration timing={timing} active={active} />
     : <span className="text-sm leading-6 text-[var(--text-secondary)]">查看处理过程</span>
-  return <div className="mb-1 flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-1.5" data-author-timer>
+  return <><div className="mb-1 flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-1.5" data-author-timer>
     {onToggle ? <button type="button" aria-expanded={open} onClick={onToggle}
       className="inline-flex min-h-7 shrink-0 items-center gap-1 text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
       {label}
       <ChevronDown aria-hidden className={cn('h-3.5 w-3.5 shrink-0 motion-safe:transition-transform', !open && '-rotate-90')} />
     </button> : <div className="flex min-h-7 shrink-0 items-center">{label}</div>}
   </div>
+    {active && openingPending && <p role="status" className="agent-opening-thinking agent-processing-shimmer mt-4 w-fit text-sm font-medium leading-7">正在思考</p>}
+  </>
 }
 
 export function AuthorProgressText({ text, className }: { text: string; className?: string }) {

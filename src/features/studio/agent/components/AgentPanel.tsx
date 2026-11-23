@@ -1855,6 +1855,7 @@ export function AgentPanel({
                   </div> : !messageActions && showSummary ? <div aria-hidden className="h-7 mobile:h-10" /> : null}
                   {showSummary ? <div className="agent-reading-column pt-3">
                     <Suspense fallback={null}><AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
+                      openingPending={headerActive && (preparing || working) && !block?.hasAuthorOutput}
                       onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} /></Suspense>
                   </div> : null}
                 </div>
@@ -1910,6 +1911,7 @@ export function AgentPanel({
                 >
                   <Suspense fallback={null}>
                   {showSummary ? <AuthorActivitySummary timing={timing} active={blockRunActive} open={processOpen}
+                    openingPending={blockRunActive && working && !block?.hasAuthorOutput}
                     onToggle={hasProcess && !blockRunActive && !settling ? () => toggleBlock(message.id) : undefined} /> : null}
                   {authorParts}
                   {receipt ? <AuthorProgressText text={receipt} /> : null}
