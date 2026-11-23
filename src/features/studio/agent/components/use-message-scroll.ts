@@ -88,20 +88,21 @@ export function useMessageScroll({
     return true
   }, [])
 
-  // Revealing received text changes the rendered height without another message update.
+  // Delayed timeline chunks, images and streaming text can resize after the follow frames settle.
   useEffect(() => {
     const node = scrollRef.current
     const content = scrollContentRef.current
-    if (!revealingText || conversationLoading || collapsed || !node || !content) return
+    if (conversationLoading || collapsed || !node || !content) return
     const owner = scopeOwner.current
     const observer = new ResizeObserver(() => {
-      if (scopeOwner.current === owner && scrollRef.current === node && pinnedToBottomRef.current) {
+      if (scopeOwner.current === owner && scrollRef.current === node && node.clientHeight > 0 && pinnedToBottomRef.current) {
         followToBottom(node)
       }
     })
     observer.observe(content)
+    observer.observe(node)
     return () => observer.disconnect()
-  }, [revealingText, conversationLoading, collapsed, scopeKey, followToBottom])
+  }, [conversationLoading, collapsed, scopeKey, followToBottom])
 
   // 消息更新自动滚动到底部（仅当用户本就贴底时）。
   // 消息流用 content-visibility 虚拟化，scrollHeight 起初只是估算值：面板新挂载（如进入沉浸层）时

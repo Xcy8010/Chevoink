@@ -24,11 +24,17 @@ const errors = []
 page.on('pageerror', error => errors.push(error.message))
 const types = {html: 'text/html', js: 'text/javascript', css: 'text/css', svg: 'image/svg+xml', webp: 'image/webp', png: 'image/png', json: 'application/json'}
 let hold
+const firstArtifactRead = Promise.withResolvers()
+const artifactPath = '/api/agent/sessions/session-A/history'
 await page.route('**/*', async route => {
   const req = route.request()
   const url = new URL(req.url())
   if (url.origin !== origin || req.method() !== 'GET') return route.abort()
   requests.push({path: url.pathname, document: req.isNavigationRequest()})
+  if (url.pathname === artifactPath && requests.filter(r => r.path === artifactPath).length === 1) {
+    await firstArtifactRead.promise
+    return route.fulfill({status: 503, json: {success: false, error: {code: 'TEMPORARILY_UNAVAILABLE'}}})
+  }
   if (hold?.matches(url.pathname)) {
     hold.started()
     await hold.resume
@@ -86,7 +92,6 @@ try {
   await page.goto(origin + '/studio/novel/novel-0?session=session-A&from=regression')
   await workspace.waitFor()
   await contentVisible('试验任务A合成消息47')
-  await page.waitForURL(u => !u.searchParams.has('session') && u.searchParams.get('from') === 'regression')
   await page.evaluate(() => {
     window.studioFallbackFrames = 0
     window.warmSkillsFallback = null
@@ -109,6 +114,20 @@ try {
   const position = await scroll.evaluate(el => el.scrollTop)
   assert.ok(position > 0 && position < bottom, 'reader must be in the middle of the conversation')
   const initialStudioRequests = requests.filter(r => r.path.endsWith('/studio')).length
+  const messageReads = requests.filter(r => r.path === '/api/agent/sessions/session-A/messages').length
+  firstArtifactRead.resolve()
+  const partialReadFailure = page.getByRole('status').filter({hasText: '任务资料暂未同步'}).filter({visible:true})
+  await partialReadFailure.waitFor()
+  assert.equal(new URL(page.url()).searchParams.get('session'), 'session-A')
+  await assertComposer(editor, position)
+  await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === artifactPath && response.status() === 200),
+    button('重试', partialReadFailure).click(),
+  ])
+  await partialReadFailure.waitFor({state:'hidden'})
+  await page.waitForURL(u => !u.searchParams.has('session') && u.searchParams.get('from') === 'regression')
+  await assertComposer(editor, position)
+  assert.equal(requests.filter(r => r.path === '/api/agent/sessions/session-A/messages').length, messageReads, 'retry reloaded chat messages')
 
   await whilePending(chunk('StudioChapterViewer'), () => inspector.getByText(/甲作品测试章节/).filter({visible:true}).first().click(), async () => {
     await page.getByRole('status', {name: '正在打开章节查看器'}).waitFor()
@@ -184,9 +203,69 @@ try {
   assert.equal(await composer.innerText(), '未发送的虚构草稿 B')
   await assertNoPageFallback()
   assert.deepEqual(errors, [])
+  const navigationCount = requests.filter(r => r.document).length
+  const fallbackFrames = await page.evaluate(() => window.studioFallbackFrames)
+  const listUrl = url => url.pathname === '/api/agent/sessions' && url.searchParams.get('novelId') === 'novel-0'
+  await page.route(listUrl, route => route.fulfill({status: 503, json: {success: false}}))
+  await page.reload()
+  await contentVisible('试验任务B合成消息47')
+  const listReadFailure = page.getByRole('status').filter({hasText: '任务列表暂未同步'}).filter({visible:true})
+  await listReadFailure.waitFor()
+  const cachedEditor = await composer.elementHandle()
+  await page.unroute(listUrl)
+  await button('重试', listReadFailure).click()
+  await listReadFailure.waitFor({state:'hidden'})
+  await contentVisible('试验任务B合成消息47')
+  assert.equal(await composer.evaluate((el, old) => el === old, cachedEditor), true)
+  const snapshot = () => page.evaluate(() => {
+    const {activeTaskId, tasks} = JSON.parse(localStorage.getItem('studio-agent-workspace:novel-0'))
+    return {activeTaskId, taskIds: tasks.map(task => task.id).sort()}
+  })
+  for (const [action, items] of [['new', sessions.slice(0, 2)], ['away-and-back', []]]) {
+    await page.route(listUrl, route => route.fulfill({status: 503, json: {success: false}}))
+    await page.goto(origin + '/studio/novel/novel-0?session=session-B')
+    await listReadFailure.waitFor()
+    const gate = Promise.withResolvers()
+    await page.unroute(listUrl)
+    await page.route(listUrl, async route => {
+      await gate.promise
+      await route.fulfill({json: {success: true, data: {items}}})
+    })
+    try {
+      await Promise.all([page.waitForRequest(req => listUrl(new URL(req.url()))), button('重试', listReadFailure).click()])
+      if (action === 'new') {
+        await button('新对话').click()
+        await page.waitForFunction(() => {
+          const state = JSON.parse(localStorage.getItem('studio-agent-workspace:novel-0'))
+          return state.tasks.some(task => task.id === state.activeTaskId && !task.sessionId)
+        })
+      } else {
+        await selectTask(0)
+        await contentVisible('试验任务A合成消息47')
+        await selectTask(1)
+        await contentVisible('试验任务B合成消息47')
+      }
+      const pendingDraft = '等待任务列表时的草稿 ' + action
+      await composer.fill(pendingDraft)
+      const expected = await snapshot()
+      assert.ok(expected.taskIds.includes('session-A') && expected.taskIds.includes('session-B'))
+      const response = page.waitForResponse(res => listUrl(new URL(res.url())) && res.status() === 200)
+      gate.resolve()
+      await (await response).finished()
+      await settled()
+      assert.deepEqual(await snapshot(), expected, 'late task list overwrote a newer window selection: ' + action)
+      assert.equal(await composer.innerText(), pendingDraft)
+      if (action === 'away-and-back') await contentVisible('试验任务B合成消息47')
+    } finally {
+      gate.resolve()
+      await page.unroute(listUrl)
+    }
+  }
+  assert.deepEqual(errors, [])
   console.log(JSON.stringify({ coldSurfaces: ['章节查看器', '技能', '创作区设置', '任务 B 记忆中心'], warmSkillsFallback: false,
     tasks: ['甲作品 A', '甲作品 B', '甲作品 A', '乙作品 C', '甲作品 B'], scrollTop: position,
-    fullPageFallbacks: await page.evaluate(() => window.studioFallbackFrames), documentRequests: requests.filter(r => r.document).length }))
+    recoveredReads: ['task artifacts', 'session list'], staleListIgnored: ['new draft', 'away and back'],
+    fullPageFallbacks: fallbackFrames, documentRequests: navigationCount }))
 } finally {
   await browser.close()
 }

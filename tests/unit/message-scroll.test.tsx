@@ -148,7 +148,7 @@ it('follows changing layout only while pinned and cancels queued frames on unmou
   expect(cancel).toHaveBeenCalledWith(42)
 })
 
-it('follows rendered reply growth after the receipt, only while the reader is pinned', () => {
+it.each([false, true])('follows delayed layout after history hydration only while pinned (revealing text: %s)', revealingText => {
   let resize!: () => void
   const observe = vi.fn()
   const disconnect = vi.fn()
@@ -158,9 +158,9 @@ it('follows rendered reply growth after the receipt, only while the reader is pi
     disconnect = disconnect
   })
   const messages: AgentUIMessage[] = []
-  const { result, rerender } = renderHook(({ revealingText }) => useMessageScroll({
-    messages, revealingText, conversationLoading: false, pendingApproval: null, pendingQuestion: null, collapsed: false,
-  }), { initialProps: { revealingText: false } })
+  const { result, rerender, unmount } = renderHook(({ loading }) => useMessageScroll({
+    messages, revealingText, conversationLoading: loading, pendingApproval: null, pendingQuestion: null, collapsed: false,
+  }), { initialProps: { loading: true } })
   const node = document.createElement('div')
   const content = node.appendChild(document.createElement('div'))
   let height = 1000
@@ -168,8 +168,9 @@ it('follows rendered reply growth after the receipt, only while the reader is pi
   node.scrollTop = 800
   result.current.scrollRef.current = node
   result.current.scrollContentRef.current = content
-  rerender({ revealingText: true })
+  rerender({ loading: false })
   expect(observe).toHaveBeenCalledWith(content)
+  expect(observe).toHaveBeenCalledWith(node)
 
   height = 1250
   act(() => resize())
@@ -181,7 +182,7 @@ it('follows rendered reply growth after the receipt, only while the reader is pi
   height = 1500
   act(() => resize())
   expect(node.scrollTop).toBe(700)
-  rerender({ revealingText: false })
+  unmount()
   expect(disconnect).toHaveBeenCalledOnce()
 })
 

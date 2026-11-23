@@ -184,6 +184,7 @@ type AgentPanelProps = {
   /** 宿主正在异步解析当前任务窗口的会话（切换作品/首载/快照与服务端合并）：
       期间 sessionId 尚未定案，禁止渲染空态欢迎页，避免欢迎页在中间态显示数百毫秒 */
   sessionResolving?: boolean
+  taskReadNotice?: { message: string; retry: () => void }
   onOpenStudioSettings?: (section: 'general' | 'models' | 'operations' | 'archives') => void
   /** 打开技能区：输入框「+」菜单里发现需要新建/导入/启用技能时直达。 */
   onOpenSkills?: () => void
@@ -243,6 +244,7 @@ export function AgentPanel({
   showCreditWarning = false,
   showEmptySuggestions = true,
   sessionResolving = false,
+  taskReadNotice,
   onOpenStudioSettings,
   onOpenSkills,
   onImportModelSelection,
@@ -510,6 +512,17 @@ export function AgentPanel({
   const [loadingOlder, setLoadingOlder] = useState(false)
   useLayoutEffect(() => { setLoadingOlder(false); setOlderPagination(null) }, [sendScope])
   const [historyErrorSessionId, setHistoryErrorSessionId] = useState<string | null>(null)
+  const [historyReadAttempt, setHistoryReadAttempt] = useState(0)
+  const retryHistorySession = useRef<string | null>(null)
+  const historyReadNotice = sessionId && historyErrorSessionId === sessionId ? {
+    message: '对话记录暂未同步。',
+    retry: () => {
+      retryHistorySession.current = sessionId
+      setHistoryErrorSessionId(null)
+      setHistoryReadAttempt(value => value + 1)
+    },
+  } : null
+  const readNotice = historyReadNotice ?? taskReadNotice
   const conversationReady = messages.length > 0
   const conversationLoading = !conversationReady && (sessionId
     ? storeLoadedSessionId !== sessionId && historyErrorSessionId !== sessionId
@@ -1036,6 +1049,8 @@ export function AgentPanel({
   // 恢复会话历史（切换会话时优先用缓存，无缓存才拉取；懒创建触发的 sessionId 变化跳过）
   // 用 layout effect：会话复位与缓存复原在浏览器绘制前完成，切换只有一次绘制，不会闪旧对话内容
   useLayoutEffect(() => {
+    const retrying = Boolean(sessionId && retryHistorySession.current === sessionId)
+    retryHistorySession.current = null
     if (sessionId && lazySessionRef.current === sessionId) {
       lazySessionRef.current = null
       return
@@ -1051,26 +1066,28 @@ export function AgentPanel({
 
     // Work / IDE 只是同一任务的两种视图。消息已经属于当前会话时直接复用
     // Zustand 中的完整内容，避免重新拉取、闪现 loading，亦避免旧响应覆盖直播收尾。
-    if (live.loadedSessionId === sessionId) {
+    if (live.loadedSessionId === sessionId && !retrying) {
       return
     }
 
     // 切换/重载会话语义上就是「跳到对话最新处」：强制复位贴底跟随。
     // 否则旧对话内容清空/替换时容器高度骤减，浏览器把 scrollTop 钳制回 0 并触发 scroll 事件，
     // 会被误判为用户上滑而关闭自动滚底，导致历史载入后永远停在最顶部
-    pinnedToBottomRef.current = true
-    lastScrollTopRef.current = 0
+    if (!retrying) {
+      pinnedToBottomRef.current = true
+      lastScrollTopRef.current = 0
+      disconnect()
+      useAgentStore.getState().resetRun()
+    }
 
     let cancelled = false
-    disconnect()
-    useAgentStore.getState().resetRun()
 
     if (!sessionId) {
       // 新任务窗口（会话尚未懒创建）：resetRun 已清空，直接展示欢迎页
       return
     }
 
-    const cached = readSessionMessagesCache(sessionId)
+    const cached = retrying ? null : readSessionMessagesCache(sessionId)
     setHistoryErrorSessionId(null)
     // 切到别的会话才丢弃分支信息，回到同一会话时保留，避免提示闪一下再出现
     setForkInfo((current) => (current && current.sessionId === sessionId ? current : null))
@@ -1133,7 +1150,7 @@ export function AgentPanel({
       // 兜底：会话切换/面板卸载时结束水合标记，不让加载态悬挂
       useAgentStore.getState().endSessionHydration(sessionId)
     }
-  }, [sessionId, connect, disconnect, pinnedToBottomRef, lastScrollTopRef])
+  }, [sessionId, connect, disconnect, pinnedToBottomRef, lastScrollTopRef, historyReadAttempt])
 
 
   const handleSend = useCallback(
@@ -1734,7 +1751,11 @@ export function AgentPanel({
       </div> : null}
 
       {/* 消息流 */}
-      <div data-agent-body className="agent-conversation-body">
+      <div data-agent-body className="agent-conversation-body relative">
+      {readNotice && <div role="status" className="absolute inset-x-0 top-2 z-10 mx-auto flex w-fit max-w-full items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--app-bg)] px-3 py-1.5 text-xs text-[var(--text-secondary)]">
+        <span>{readNotice.message}</span>
+        <button type="button" onClick={readNotice.retry} className="shrink-0 underline underline-offset-2">重试</button>
+      </div>}
       <div ref={scrollRef} onScroll={handleMessagesScroll} className="agent-conversation-scroll min-h-0 overflow-y-auto">
       <div ref={scrollContentRef} className="agent-conversation-width">
         {conversationLoading ? (
@@ -1906,7 +1927,7 @@ export function AgentPanel({
               <AgentPermissionCard approval={pendingApproval} onResolve={handleResolveApproval} />
             ) : null}
           </div>
-        ) : (
+        ) : historyReadNotice ? null : (
           <AgentEmptyWelcome
             mobile={mobileIntegratedHeader}
             novelName={novelName}

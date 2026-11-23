@@ -13,17 +13,26 @@ export function useMemoryGraphLayout(topologyKey: string, routeKey: string, dime
   const completedKey = layout?.key
   useEffect(() => {
     if (!enabled || completedKey === key) return
-    const worker = new Worker(new URL('./memory-graph.worker.ts', import.meta.url), { type: 'module' })
+    let worker: Worker | undefined
     let cancelled = false
-    worker.onmessage = ({ data }: MessageEvent<MemoryGraphLayoutResult>) => {
-      if (!cancelled) { cache?.set(dimensions, data); setLayout(data); setFailureKey(null) }
+    const fail = () => { if (!cancelled) setFailureKey(key) }
+    try {
+      worker = new Worker(new URL('./memory-graph.worker.ts', import.meta.url), { type: 'module' })
+      worker.onmessage = ({ data }: MessageEvent<MemoryGraphLayoutResult>) => {
+        if (!cancelled) { cache?.set(dimensions, data); setLayout(data); setFailureKey(null) }
+      }
+      worker.onerror = fail
+      worker.onmessageerror = fail
+      worker.postMessage({ key, topologyKey, routeKey, dimensions } satisfies MemoryGraphLayoutRequest)
+    } catch {
+      fail()
     }
-    worker.onerror = () => { if (!cancelled) setFailureKey(key) }
-    worker.postMessage({ key, topologyKey, routeKey, dimensions } satisfies MemoryGraphLayoutRequest)
     return () => {
       cancelled = true
+      if (!worker) return
       worker.onmessage = null
       worker.onerror = null
+      worker.onmessageerror = null
       worker.terminate()
     }
   }, [key, topologyKey, routeKey, dimensions, enabled, attempt, completedKey, cache])

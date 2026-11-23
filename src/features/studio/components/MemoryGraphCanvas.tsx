@@ -78,8 +78,8 @@ export default function MemoryGraphCanvas({ graph, layoutCache }: { graph: Memor
   const visibleIds = useMemo(() => new Set(graph.nodes.map((node) => node.id)), [graph.nodes])
   const readableEdges = useMemo(() => buildReadableMemoryGraphEdges(graph.edges, visibleIds, graph.nodes.length), [graph.edges, visibleIds, graph.nodes.length])
   // Topology keys remain equal across polling responses with identical entities and links.
-  const topologyKey = memoryGraphTopologyKey(graph.nodes.map((node) => node.id), readableEdges)
-  const routeKey = JSON.stringify(readableEdges.map(({ id, source, target, type }) => ({ id, source, target, type })))
+  const topologyKey = useMemo(() => memoryGraphTopologyKey([...visibleIds], readableEdges), [visibleIds, readableEdges])
+  const routeKey = useMemo(() => JSON.stringify(readableEdges.map(({ id, source, target, type }) => ({ id, source, target, type }))), [readableEdges])
   const mapLayout = useMemoryGraphLayout(topologyKey, routeKey, 2, mode === 'map', layoutCache)
   const galaxyLayout = useMemoryGraphLayout(topologyKey, '', 3, galaxyVisited && mode === 'galaxy', layoutCache)
   const mapPositions = mapLayout.layout?.positions

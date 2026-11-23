@@ -132,6 +132,40 @@ it('observes another device starting the open conversation once and preserves an
   expect(fetch.mock.calls.every(([, options]) => options?.method !== 'POST')).toBe(true)
 })
 
+it.each([false, true])('retries the same message history in place after a failed read (cached=%s)', async cached => {
+  const sessionId = 'retry-history-' + cached
+  const row = { id: 'm1', runId: 'r1', role: 'user' as const, createdAt: '', parts: [{ type: 'text' as const, text: '已保存的对话' }] }
+  if (cached) {
+    useAgentStore.getState().restoreMessages([row], sessionId)
+    useAgentStore.getState().resetRun()
+  }
+  let reads = 0
+  const fetch = vi.fn<typeof globalThis.fetch>(async resource => {
+    if (String(resource).includes('/messages?runLimit=50')) {
+      if (++reads === 1) return new Response(null, { status: 503 })
+      return new Response(JSON.stringify({ success: true, data: { messages: [row], activeRunId: null } }))
+    }
+    return new Response(JSON.stringify({ success: true, data: null }))
+  })
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  vi.stubGlobal('fetch', fetch)
+  const client = new QueryClient({ defaultOptions: { queries: { enabled: false, retry: false } } })
+  render(<QueryClientProvider client={client}><ToastProvider>
+    <AgentPanel novelId="retry-book" novelName="合成作品" sessionId={sessionId} ensureSession={async () => sessionId} />
+  </ToastProvider></QueryClientProvider>)
+  await screen.findByText('对话记录暂未同步。')
+  expect(Boolean(screen.queryByText('已保存的对话'))).toBe(cached)
+  const editor = screen.getByRole('textbox', { name: 'Agent 提示词' })
+  editor.textContent = '保留我的草稿'
+  fireEvent.input(editor)
+  fireEvent.click(screen.getByRole('button', { name: '重试' }))
+  await waitFor(() => expect(screen.queryByText('对话记录暂未同步。')).toBeNull())
+  await screen.findByText('已保存的对话')
+  expect(reads).toBe(2)
+  expect(screen.getByRole('textbox', { name: 'Agent 提示词' })).toBe(editor)
+  expect(editor.textContent).toBe('保留我的草稿')
+})
+
 it.each([
   { cached: false, concurrent: false }, { cached: true, concurrent: false }, { cached: true, concurrent: true },
 ])('coalesces the initial 50-turn history and applies a concurrent revision (cache=$cached, concurrent=$concurrent)', async ({ cached, concurrent }) => {

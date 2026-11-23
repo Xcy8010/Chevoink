@@ -175,8 +175,8 @@ Windows 和 Android 安装包集中在同一个 [GitHub 最新版本](https://gi
 
 | 设备 | 选择哪个安装包 | 如何使用 |
 | --- | --- | --- |
-| Windows x64，已安装 WebView2 或可联网获取运行时 | Windows 1.0.6 普通版，文件名以 `_x64-setup.exe` 结尾 | 下载并运行安装程序。后续桌面客户端版本通过手动安装更新。 |
-| Windows x64，需要离线安装 WebView2 | Windows 1.0.6 内嵌运行时版，文件名含 `webview2-offline` | 安装包自带 WebView2，两种安装包提供相同的创作功能。 |
+| Windows x64，已安装 WebView2 或可联网获取运行时 | Windows 1.0.7 普通版，文件名以 `_x64-setup.exe` 结尾 | 下载并运行安装程序。后续桌面客户端版本通过手动安装更新。 |
+| Windows x64，需要离线安装 WebView2 | Windows 1.0.7 内嵌运行时版，文件名含 `webview2-offline` | 安装包自带 WebView2，两种安装包提供相同的创作功能。 |
 | Android | 已签名的 Android 1.0.18 APK，也可[从官网直接下载](https://chevoink.chevolink.com/download/chevoink.apk) | 安装后可在应用内检查更新，按提示下载并确认安装。 |
 
 当前 Windows 安装包采用未签名的手动分发方式。桌面应用中的外部链接和账号中心由系统默认浏览器打开。网页版和客户端内的创作区均随领取到的网页版本更新。

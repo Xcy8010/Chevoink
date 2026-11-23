@@ -124,7 +124,18 @@ pub fn install(window: &WebviewWindow) -> tauri::Result<()> {
             })), &mut token)?;
             let crashes = Arc::new(AtomicUsize::new(0));
             let crash_window = owned.clone();
-            webview.add_ProcessFailed(&ProcessFailedEventHandler::create(Box::new(move |_, _| {
+            webview.add_ProcessFailed(&ProcessFailedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()); };
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                args.ProcessFailedKind(&mut kind)?;
+                match process_recovery(kind) {
+                    ProcessRecovery::KeepDocument => return Ok(()),
+                    ProcessRecovery::RestartHost => {
+                        crate::window::notice("浏览器内核已退出", "请关闭并重新打开启创墨域，以恢复创作区。已保存的对话仍然保留。");
+                        return Ok(());
+                    }
+                    ProcessRecovery::RecoverDocument => {}
+                }
                 if crashes.fetch_add(1, Ordering::SeqCst) == 0 { let _ = crash_window.reload(); }
                 else {
                     let _ = crash_window.navigate("http://tauri.localhost/#crash".parse().unwrap());
@@ -275,6 +286,23 @@ unsafe fn install_downloads(
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProcessRecovery {
+    KeepDocument,
+    RecoverDocument,
+    RestartHost,
+}
+
+fn process_recovery(kind: COREWEBVIEW2_PROCESS_FAILED_KIND) -> ProcessRecovery {
+    match kind {
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => ProcessRecovery::RecoverDocument,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => ProcessRecovery::RestartHost,
+        // GPU/utility exits recover independently. A busy renderer may repeatedly
+        // report unresponsiveness while the current document is still intact.
+        _ => ProcessRecovery::KeepDocument,
+    }
+}
+
 fn failure_reason(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> Option<&'static str> {
     match status {
         COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED => None,
@@ -292,6 +320,25 @@ fn failure_reason(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> Option<&'static str>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_main_renderer_exit_enters_document_reload_recovery() {
+        for kind in [
+            COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED,
+        ] {
+            assert_eq!(process_recovery(kind), ProcessRecovery::KeepDocument);
+        }
+        assert_eq!(
+            process_recovery(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED),
+            ProcessRecovery::RecoverDocument
+        );
+        assert_eq!(
+            process_recovery(COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED),
+            ProcessRecovery::RestartHost
+        );
+    }
     #[test]
     fn cancellation_is_not_a_startup_failure_and_tls_is_not_a_generic_network_error() {
         assert_eq!(

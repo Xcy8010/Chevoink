@@ -62,14 +62,12 @@ export function solveMemoryGraph(topologyKey: string, dimensions: 2 | 3): Map<st
       for (let b = a + 1; b < count; b += 1) {
         const dx = points[a].x - points[b].x || 0.01
         const dy = points[a].y - points[b].y || 0.01
-        const dz = points[a].z - points[b].z
-        const distance = Math.max(20, Math.hypot(dx, dy, dz))
-        const force = Math.min(14, 14000 / (distance * distance))
-        for (const axis of ['x', 'y', 'z'] as const) {
-          const delta = axis === 'x' ? dx : axis === 'y' ? dy : dz
-          velocity[a][axis] += delta / distance * force
-          velocity[b][axis] -= delta / distance * force
-        }
+        const squared = Math.max(400, dx * dx + dy * dy)
+        const scale = Math.min(14, 14000 / squared) / Math.sqrt(squared)
+        velocity[a].x += dx * scale
+        velocity[b].x -= dx * scale
+        velocity[a].y += dy * scale
+        velocity[b].y -= dy * scale
       }
     }
     for (const [a, b] of springs) {

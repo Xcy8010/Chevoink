@@ -175,8 +175,8 @@ The [latest GitHub release](https://github.com/Xcy8010/Chevoink/releases/latest)
 
 | Device | Download | Installation and updates |
 | --- | --- | --- |
-| Windows x64 with WebView2 installed or internet access to obtain it | Windows 1.0.6 standard installer, ending in `_x64-setup.exe` | Run the installer. Install subsequent desktop client updates manually. |
-| Windows x64 needing an offline WebView2 installation | Windows 1.0.6 installer with `webview2-offline` in its name | The installer includes the runtime. Both packages provide the same Studio features. |
+| Windows x64 with WebView2 installed or internet access to obtain it | Windows 1.0.7 standard installer, ending in `_x64-setup.exe` | Run the installer. Install subsequent desktop client updates manually. |
+| Windows x64 needing an offline WebView2 installation | Windows 1.0.7 installer with `webview2-offline` in its name | The installer includes the runtime. Both packages provide the same Studio features. |
 | Android | Signed Android 1.0.18 APK, also available as a [direct download](https://chevoink.chevolink.com/download/chevoink.apk) | Install the APK. The app checks for updates and prompts you to download and confirm installation. |
 
 The current Windows installers are distributed unsigned for manual installation. External links and the account center open in the system's default browser. Studio on the web and inside the clients follows the web release selected for the account.

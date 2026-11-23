@@ -11,7 +11,7 @@
 | 创作区切换 | 工作区在切换任务、章节和检查面板时保持挂载。已有数据直接显示；等待超过约 200 毫秒时，聊天、模型或当前面板才显示局部骨架。记忆卡片数量按账号与作品缓存，上下文还按会话隔离。写入完成后重读，权限撤回后迟到的压缩响应不能恢复旧快照。[浏览器回归](../tests/ui/studio-loading.browser.mjs) · [记忆交互回归](../tests/unit/memory-cards-interaction.test.tsx) |
 | 文档附件 | TXT/Markdown 复用作品导入的文本解码器，识别 BOM 并检查 UTF-8，无 BOM 的旧中文文本可回退到 GB18030。PDF 扫描页及 DOCX 正文、页眉、页脚中引用的内嵌图片可按页码或图号交给视觉工具。旧版二进制 DOC 依赖已配置的隔离转换器，未启用时提示另存为 DOCX。[文本解码](../api/lib/novel-import/parsers/text.ts) · [附件读取](../api/lib/agent/tools/document-attachment.ts) |
 | 长文续读与封面 | 旧执行路径按原附件地址、已返回区间和下一处偏移量续读。达到阶段或原任务预算上限会报告进度并暂停。手动上传作品封面接受 PNG、JPEG、WebP，单张上限含 10 MiB；聊天图片另有独立限额。[续读回执](../api/lib/agent/legacy-attachment-resume.ts) · [封面校验](../src/features/studio/cover-image.ts) · [聊天附件限额](../shared/contracts/agent-attachments.ts) |
-| 原生客户端 | 双平台下载页提供 Windows 1.0.6 及已签名的 Android 1.0.18 APK。Windows 两个 x64 安装包均为手动安装的未签名预览版，内嵌包额外携带 WebView2 安装器。桌面标题栏与站点导航合并，外部 HTTPS 链接和账户中心交给默认浏览器。[双平台 Release](https://github.com/Xcy8010/Chevoink/releases/tag/clients-2026.11.23) · [桌面源码与构建](../desktop/windows/README.md) |
+| 原生客户端 | 双平台下载页提供 Windows 1.0.7 及已签名的 Android 1.0.18 APK。Windows 两个 x64 安装包均为手动安装的未签名预览版，内嵌包额外携带 WebView2 安装器。桌面标题栏与站点导航合并，外部 HTTPS 链接和账户中心交给默认浏览器。[双平台 Release](https://github.com/Xcy8010/Chevoink/releases/latest) · [桌面源码与构建](../desktop/windows/README.md) |
 
 ## 创作区的记忆、检索与进度
 

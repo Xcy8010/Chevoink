@@ -273,6 +273,7 @@ export default function StudioWorkspace() {
   // 这段中间态禁止 AgentPanel 渲染空态欢迎页（否则欢迎页会显示整个网络请求时长）
   const [agentSessionsResolving, setAgentSessionsResolving] = useState(false)
   const [sessionResolutionError, setSessionResolutionError] = useState<string | null>(null)
+  const [taskReadNotice, setTaskReadNotice] = useState<{ taskId: string; message: string; retry: () => void } | null>(null)
   const [sessionResolutionAttempt, setSessionResolutionAttempt] = useState(0)
   // 任务窗口同样从快照惰性恢复：挂载即落在该作品上次活跃的任务窗口，
   // 避免初始空窗口先触发快照写入效应清掉存档、或界面闪现「新任务」
@@ -557,11 +558,17 @@ export default function StudioWorkspace() {
   const taskSelectionRevision = useRef(0)
   const historyRequestRevision = useRef(0)
 
-  function applyAgentTaskWindowState(taskWindow: AgentTaskWindowState | null) {
+  const activateTaskWindowId = useCallback((id: string | null) => {
+    if (appliedAgentTaskWindowIdRef.current !== id) taskSelectionRevision.current++
+    appliedAgentTaskWindowIdRef.current = id
+    setActiveAgentTaskWindowId(id)
+  }, [])
+
+  const applyAgentTaskWindowState = useCallback((taskWindow: AgentTaskWindowState | null) => {
     setSessionResolutionError(null)
-    appliedAgentTaskWindowIdRef.current = taskWindow?.id ?? null
+    setTaskReadNotice(null)
+    activateTaskWindowId(taskWindow?.id ?? null)
     if (!taskWindow) {
-      setActiveAgentTaskWindowId(null)
       setAgentSessionId(null)
       setAgentPrompt('')
       setAgentArtifacts([])
@@ -572,7 +579,6 @@ export default function StudioWorkspace() {
 
     const latestArtifact = taskWindow.artifacts[0] ?? null
 
-    setActiveAgentTaskWindowId(taskWindow.id)
     setAgentSessionId(taskWindow.sessionId)
     setAgentPrompt(taskWindow.prompt)
     setAgentArtifacts(taskWindow.artifacts)
@@ -594,7 +600,7 @@ export default function StudioWorkspace() {
           }
         : createIdleAgentRunState(),
     )
-  }
+  }, [activateTaskWindowId])
 
   async function hydrateAgentTaskWindow(taskWindow: AgentTaskWindowState) {
     if (!taskWindow.sessionId || taskWindow.loaded) {
@@ -602,7 +608,7 @@ export default function StudioWorkspace() {
     }
 
     const historyItems = await getWritingAgentSessionHistory(taskWindow.sessionId)
-    const restoredArtifacts = buildArtifactsFromHistory(historyItems)
+    const restoredArtifacts = mergeRestoredArtifactsWithSnapshot(buildArtifactsFromHistory(historyItems), taskWindow.artifacts)
 
     return {
       ...taskWindow,
@@ -626,7 +632,10 @@ export default function StudioWorkspace() {
     // 先切后载：立即把会话切过去，切换在同一帧内完成（对话内容由 Agent 面板按会话缓存复原）；
     // 工件历史在后台补齐，避免点击后整屏卡在 getWritingAgentSessionHistory 的网络往返上
     applyAgentTaskWindowState(targetTaskWindow)
+    await loadTaskArtifacts(targetTaskWindow)
+  }
 
+  async function loadTaskArtifacts(targetTaskWindow: AgentTaskWindowState, requestedSessionId: string | null = null) {
     if (!targetTaskWindow.sessionId || targetTaskWindow.loaded) {
       return
     }
@@ -636,9 +645,16 @@ export default function StudioWorkspace() {
     let loadedTaskWindow: AgentTaskWindowState
     try {
       loadedTaskWindow = await hydrateAgentTaskWindow(targetTaskWindow)
-    } catch {
+    } catch (error) {
       if (workspaceOwnerRef.current === owner && revision === historyRequestRevision.current && appliedAgentTaskWindowIdRef.current === targetTaskWindow.id) {
-        toast.error('任务历史暂时无法读取，请重新打开任务。')
+        if (error instanceof ApiClientError && [401, 403, 404].includes(error.status)) {
+          setSessionResolutionError('这个任务已不可访问，请重新读取。')
+        } else {
+          setTaskReadNotice({ taskId: targetTaskWindow.id, message: '任务资料暂未同步，对话记录可继续查看。', retry: () => {
+            setTaskReadNotice(null)
+            void loadTaskArtifacts(targetTaskWindow, requestedSessionId)
+          } })
+        }
       }
       return
     }
@@ -658,6 +674,8 @@ export default function StudioWorkspace() {
     // Only history was fetched; title, composer and run state may have changed while it was in flight.
     setAgentArtifacts(loadedTaskWindow.artifacts)
     setActiveAgentArtifactId(loadedTaskWindow.activeArtifactId)
+    setTaskReadNotice(null)
+    if (requestedSessionId) setSearchParams(current => consumeSessionDeepLink(current, requestedSessionId), { replace: true })
   }
 
   function pruneTemporaryTaskWindows(nextActiveTaskId: string) {
@@ -699,7 +717,7 @@ export default function StudioWorkspace() {
     if (fallbackTaskWindow) {
       applyAgentTaskWindowState(fallbackTaskWindow)
     }
-  }, [activeAgentTaskWindowId, agentTaskWindows, searchParams, agentSessionsResolving, sessionResolutionError, agentStateNovelId, activeNovelId])
+  }, [activeAgentTaskWindowId, agentTaskWindows, searchParams, agentSessionsResolving, sessionResolutionError, agentStateNovelId, activeNovelId, applyAgentTaskWindowState])
 
   useEffect(() => {
     const requestedPanel = searchParams.get('panel')
@@ -808,10 +826,23 @@ export default function StudioWorkspace() {
     let cancelled = false
     let resolvingTaskId = initialTaskWindow?.id ?? null
 
-    void (async () => {
+    const resolveSessions = async () => {
+      const selectionRevision = taskSelectionRevision.current
+      const stillSelected = () => !cancelled && selectionRevision === taskSelectionRevision.current
       try {
-        const sessions = await listWritingAgentSessions(activeNovelId)
-        if (cancelled) {
+        const sessions = await listWritingAgentSessions(activeNovelId).catch((error: unknown) => {
+          const selected = initialTaskWindow
+          if (!selected?.sessionId || error instanceof ApiClientError && [401, 403, 404].includes(error.status)) throw error
+          if (stillSelected() && appliedAgentTaskWindowIdRef.current === selected.id) {
+            setTaskReadNotice({ taskId: selected.id, message: '任务列表暂未同步。', retry: () => {
+              setTaskReadNotice(null)
+              void resolveSessions()
+            } })
+          }
+          return null
+        })
+        // A stale list, including an empty one, must never replace newer windows or drafts.
+        if (!stillSelected() || !sessions) {
           return
         }
 
@@ -875,54 +906,29 @@ export default function StudioWorkspace() {
 
         // 先激活任务窗口：sessionId 立即生效，Agent 面板并行拉取会话消息；
         // 历史工件（计划/大纲等）在后台补载，不再串行阻塞对话上下文首屏
-        applyAgentTaskWindowState(nextTaskWindow)
+        if (appliedAgentTaskWindowIdRef.current !== nextTaskWindow.id || initialTaskWindow?.sessionId !== nextTaskWindow.sessionId) {
+          applyAgentTaskWindowState(nextTaskWindow)
+        }
         resolvingTaskId = nextTaskWindow.id
-        // Keep the deep link until history succeeds so retry resolves the same target.
-        // Consume only the matching parameter, never a newer navigation or panel choice.
-        if (requestNewTask) {
+        // Keep the original target across a retry, even if a server session has since gone away.
+        if (requestedSessionId && (requestNewTask || nextTaskWindow.loaded || !nextTaskWindow.sessionId)) {
           setSearchParams(current => consumeSessionDeepLink(current, requestedSessionId), { replace: true })
         }
-        if (nextTaskWindow.loaded || !nextTaskWindow.sessionId) {
-          if (requestedSessionId && !requestNewTask) setSearchParams(current => consumeSessionDeepLink(current, requestedSessionId), { replace: true })
-          return
-        }
-
-        const historyItems = await getWritingAgentSessionHistory(nextTaskWindow.sessionId)
-        if (cancelled) {
-          return
-        }
-
-        const restoredArtifacts = mergeRestoredArtifactsWithSnapshot(
-          buildArtifactsFromHistory(historyItems),
-          nextTaskWindow.artifacts,
-        )
-        const loadedTaskWindow = {
-          ...nextTaskWindow,
-          artifacts: restoredArtifacts,
-          activeArtifactId: restoredArtifacts[0]?.id ?? null,
-          loaded: true,
-          temporary: false,
-        }
-
-        setAgentTaskWindows((current) =>
-          current.map((taskWindow) => (taskWindow.id === loadedTaskWindow.id ? loadedTaskWindow : taskWindow)),
-        )
-        if (appliedAgentTaskWindowIdRef.current === nextTaskWindow.id) {
-          applyAgentTaskWindowState(loadedTaskWindow)
-          if (requestedSessionId && !requestNewTask) setSearchParams(current => consumeSessionDeepLink(current, requestedSessionId), { replace: true })
-        }
+        void loadTaskArtifacts(nextTaskWindow, requestedSessionId)
       } catch {
-        if (!cancelled && appliedAgentTaskWindowIdRef.current === resolvingTaskId) setSessionResolutionError('任务读取失败，请重试。已保存的对话保留，不会自动创建新任务。')
+        if (stillSelected() && appliedAgentTaskWindowIdRef.current === resolvingTaskId) setSessionResolutionError('任务读取失败，请重试。已保存的对话保留，不会自动创建新任务。')
       } finally {
         // 会话解析结束（命中会话或确认为空）后解除占位，空态欢迎页才能正常出现
         if (!cancelled) {
           setAgentSessionsResolving(false)
         }
       }
-    })()
+    }
+    void resolveSessions()
 
     return () => {
       cancelled = true
+      historyRequestRevision.current = historyRequestRevision.current + 1
       setAgentSessionsResolving(false)
     }
     // 任务深链只在作品切换/首载时消费一次；把 searchParams 加入依赖会在删除
@@ -3927,7 +3933,7 @@ export default function StudioWorkspace() {
     }
     if (taskLocationRef.current.novelId === activeNovelId && taskLocationRef.current.taskId === currentTaskWindow?.id) {
       setAgentSessionId(sessionId)
-      setActiveAgentTaskWindowId(sessionId)
+      activateTaskWindowId(sessionId)
     }
     setAgentTaskWindows((current) => {
       const matched = currentTaskWindow?.id
@@ -3967,7 +3973,7 @@ export default function StudioWorkspace() {
     }
     if (taskLocationRef.current.novelId === activeNovelId && taskLocationRef.current.taskId === currentTaskWindow?.id) {
       setAgentSessionId(createdSession.id)
-      setActiveAgentTaskWindowId(createdSession.id)
+      activateTaskWindowId(createdSession.id)
     }
     setAgentTaskWindows((current) =>
       taskLocationRef.current.novelId !== activeNovelId ? current : current.map((taskWindow) =>
@@ -4003,6 +4009,7 @@ export default function StudioWorkspace() {
           voiceDisabled={studioSettingsOpen || studioQuery.isPlaceholderData}
           sessionId={agentSessionId}
           sessionResolving={agentSessionsResolving}
+          taskReadNotice={taskReadNotice?.taskId === activeAgentTaskWindowId ? taskReadNotice : undefined}
           novelId={activeNovelId}
           coverAssets={studioQuery.data?.novel.id === activeNovelId ? studioQuery.data.coverAssets : undefined}
           questionAuthorId={taskUiUserId}
@@ -4025,7 +4032,7 @@ export default function StudioWorkspace() {
           onRejectAllReviews={handleRequestRejectAllPendingReviews}
           onSelectSession={(nextSessionId) => {
             setAgentSessionId(nextSessionId)
-            setActiveAgentTaskWindowId(nextSessionId)
+            activateTaskWindowId(nextSessionId)
           }}
           onSessionDeleted={(deletedSessionId) => {
             // 删除会话成功后统一走侧栏同一条善后路径：移除任务窗口（避免僵尸 sessionId 写回快照后反复 404），
