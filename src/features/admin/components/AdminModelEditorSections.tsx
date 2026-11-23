@@ -64,7 +64,7 @@ export function AdminModelEditorSections({ editing, form, setForm, section, fiel
     </section>
   </div>
   if (section === 'capability') return <div className="admin-model-fields space-y-4">
-{editingTextModel ? <label className="text-sm sm:col-span-2">上下文窗口（Tokens）<TextInput className="mt-1.5" name={`model-context-window-${editing.id}`} autoComplete="off" type="number" min="16000" max="4000000" step="1000" value={form.contextWindowTokens} onChange={(e) => setForm((v) => ({ ...v, contextWindowTokens: e.target.value }))} /><span className="mt-1.5 block text-[11px] leading-5 text-[var(--text-secondary)]">按供应商文档填写；Agent 自动压缩与输出预留将采用此值。</span></label> : null}      {editing.modelKind === 'image_generation' ? <fieldset className="mt-5 border-y border-[var(--border-subtle)] py-4">
+      {editing.modelKind === 'image_generation' ? <fieldset className="mt-5 border-y border-[var(--border-subtle)] py-4">
         <legend className="text-sm font-medium">图片生成质量</legend>
         <div className="mt-2 flex flex-wrap gap-2">{IMAGE_QUALITY_OPTIONS.map(option => <label key={option.value} className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-2.5 py-1.5 text-sm">
           <input type="checkbox" checked={form.imageQuality?.supportedValues.includes(option.value) ?? false} onChange={event => setImageQualityValues(event.target.checked

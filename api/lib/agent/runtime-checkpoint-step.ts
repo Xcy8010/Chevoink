@@ -2,7 +2,7 @@ import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
 import { readTaskBudgetInTransaction } from './runtime-budget.js'
 import { readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
-import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinitionTokens, hasProactiveCompactionGain, releaseCompletedReasoning } from './context-budget.js'
+import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinitionTokens, hasProactiveCompactionGain, releaseCompletedReasoning, targetContextTokens, toolOutputsToKeep } from './context-budget.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { randomUUID } from 'node:crypto'
@@ -58,15 +58,17 @@ export async function advanceDurableContext(token: RunLeaseToken, budget?: numbe
         { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, snapshot: { ...frame.state, messages } })
     }
     if (budget === 'guidance') return null
-    const beforeBytes = Buffer.byteLength(JSON.stringify(frame.state.messages), 'utf8')
     const estimate = admission?.estimate ?? ((messages: ChatMessage[]) => estimateChatMessagesTokens(messages) + estimateToolDefinitionTokens(configuration.tools))
     const beforeTokens = inputLimit === undefined ? 0 : estimate(frame.state.messages)
     const modelPressure = admission ? beforeTokens >= admission.compactAtTokens : inputLimit !== undefined && beforeTokens > inputLimit
+    if (admission && (!modelPressure || !admission.canReadArchive)) return null
+    const beforeBytes = Buffer.byteLength(JSON.stringify(frame.state.messages), 'utf8')
     if (!modelPressure && (beforeBytes < 256 * 1024 || frame.state.messages.at(-1)?.role !== 'tool')) return null
-    if (admission && !admission.canReadArchive) return null
     // Keep the latest complete tool round: replacing it with an assistant
     // archive note would be mistaken for a final answer by the executor.
-    const archived = archiveEarlyToolRounds(frame.state.messages, { revision: frame.revision, hash: frame.snapshotHash }, modelPressure ? 1 : 8)
+    const keep = admission ? toolOutputsToKeep(frame.state.messages, beforeTokens - targetContextTokens(admission.compactAtTokens), 1)
+      : modelPressure ? 1 : 8
+    const archived = archiveEarlyToolRounds(frame.state.messages, { revision: frame.revision, hash: frame.snapshotHash }, keep)
     const releasedReasoningTokens = modelPressure ? releaseCompletedReasoning(archived.messages) : 0
     const afterBytes = Buffer.byteLength(JSON.stringify(archived.messages), 'utf8')
     if ((!archived.archivedRounds && !releasedReasoningTokens) || afterBytes >= beforeBytes) return null

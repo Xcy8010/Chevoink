@@ -1,3 +1,4 @@
+import { AGENT_CONTEXT_WINDOW_TOKENS } from '../../shared/agent-context-window.js'
 import { modelPublicCopy } from '../../shared/model-public-copy.js'
 import { assertImageActivityConfiguration } from './billing/image-price.js'
 import { assertAppReleaseModelCapabilities } from './app-release-model-capabilities.js'
@@ -309,7 +310,7 @@ export async function getAdminModelManagement(view: 'active' | 'archived' | 'all
       return {
         ...((modelKind === 'web_search' || modelKind === 'web_fetch') && (metadata.webToolProtocol === 'deepseek' || metadata.webToolProtocol === 'bocha') ? { webToolProtocol: metadata.webToolProtocol } : {}),
         ...(modelKind === 'image_generation' && metadata.imageQuality ? { imageQuality: metadata.imageQuality as ImageQualityConfig } : {}),
-        routes: presentModelRoutes(model.metadata),
+        routes: presentModelRoutes(model.metadata).map(route => modelKind === 'text' ? { ...route, contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS } : route),
         weightedRoutes: presentWeightedRoutes(model.metadata),
         pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
         id: model.id, revision: model.revision, archivedAt: model.archivedAt?.toISOString() ?? null, archiveReason: model.archiveReason, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
@@ -329,7 +330,7 @@ export async function getAdminModelManagement(view: 'active' | 'archived' | 'all
         ...(capabilities.thinkingEnabled !== undefined ? { thinkingEnabled: capabilities.thinkingEnabled } : {}),
         reasoningEfforts: capabilities.reasoningEfforts, defaultReasoningEffort: capabilities.defaultReasoningEffort,
         visionEnabled: capabilities.visionEnabled,
-        contextWindowTokens: capabilities.contextWindowTokens,
+        contextWindowTokens: modelKind === 'text' ? AGENT_CONTEXT_WINDOW_TOKENS : null,
         configurationReady,
         updatedAt: model.updatedAt.toISOString(),
       }
@@ -365,7 +366,6 @@ export type UpdateAdminModelInput = {
   reasoningEfforts?: ModelReasoningEffort[]
   defaultReasoningEffort?: ModelReasoningEffort
   visionEnabled?: boolean
-  contextWindowTokens?: number
 }
 
 const DEEPSEEK_REASONING_EFFORTS = new Set<ModelReasoningEffort>(['low', 'high', 'max'])
@@ -403,7 +403,7 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
     const imageModel = adminModelKind(model.metadata) === 'image_generation'
     if (imageModel) assertImageActivityConfiguration(Math.round((input.multiplier ?? model.multiplierBps / 10000) * 10000), input.activities === undefined ? readModelActivities(model.metadata) : input.activities)
     const routes = saveModelRoutes(input.routes ?? presentModelRoutes(model.metadata).map(({ apiKeyConfigured: _configured, ...route }) => route), model.metadata, imageModel ? [] : reasoningEfforts,
-      imageModel ? undefined : { contextWindowTokens: input.contextWindowTokens ?? currentCapabilities.contextWindowTokens, visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled })
+      imageModel ? undefined : { visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled })
     if (routes.length && !imageModel && !isServerModelTier(model.tier)) throw new DataAccessError(400, 'MODEL_ROUTES_INVALID', '仅文本内置模型与图片生成支持供应商线路。')
     assertProviderReasoningEfforts(input.provider ?? model.provider, reasoningEfforts)
     if (!reasoningEfforts.includes(defaultReasoningEffort)) throw new DataAccessError(400, 'VALIDATION_ERROR', '默认推理强度必须包含在模型支持档位中。')
@@ -469,7 +469,7 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
           reasoningEfforts,
           defaultReasoningEffort,
           visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled,
-          contextWindowTokens: input.contextWindowTokens ?? currentCapabilities.contextWindowTokens,
+          contextWindowTokens: adminModelKind(model.metadata) === 'text' ? AGENT_CONTEXT_WINDOW_TOKENS : metadata.contextWindowTokens ?? null,
         },
       },
     })

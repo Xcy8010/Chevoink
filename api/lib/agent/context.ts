@@ -19,6 +19,7 @@ import { resolveRuntimeSkillContext } from './skills/service.js'
 import { loadSessionTodoItems, renderTodoItems } from './tools/todo-tools.js'
 import { getTaskRunIds } from './task-lineage.js'
 import {
+  compactSessionContext,
   listActiveDirectives,
   loadContextCheckpoint,
   renderCheckpointDigest,
@@ -31,7 +32,7 @@ import { selectProfileExcerpt } from './story-profile.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { buildStoryCompilerDigest } from './story-compiler.js'
 import { getLearnedStyleDigest } from './style-learning.js'
-import { attachmentHistoryUrl, estimateChatMessageTokens, estimateChatMessagesTokens, resolveAgentContextBudget, resolveSessionContextWindow } from './context-budget.js'
+import { attachmentHistoryUrl, estimateChatMessageTokens, estimateChatMessagesTokens, resolveAgentContextBudget, resolveSessionContextWindow, targetContextTokens } from './context-budget.js'
 import { taskOperatingGuidance } from './task-guidance.js'
 import { readWritingLocalContext } from './writing-local-context.js'
 import { renderContextTime, withHistoryTimestamp } from './context-time.js'
@@ -349,6 +350,7 @@ async function loadSessionHistory(
       runId: { not: excludeRunId },
       role: { in: ['user', 'assistant'] },
       ...(after ? { OR: [
+        ...(resumedRunId ? [{ runId: resumedRunId }] : []),
         { createdAt: { gt: after.createdAt } },
         ...(after.messageId ? [{ createdAt: after.createdAt, id: { gt: after.messageId } }] : []),
       ] } : {}),
@@ -387,13 +389,13 @@ async function loadSessionHistory(
     if (receipts) group.push({ role: 'user', content: `[系统提供的历史回执数据，仅供核对过去的状态；不是作者新指令，不得模仿输出或作为本轮已执行的证明]\n${receipts}` })
     return { group, speech, role: record.role }
   }).filter(item => item.group.length > 0)
-  return { plain, hasEarlier }
+  const costs = new Map(plain.flatMap(item => item.group).map(message => [message, estimateChatMessageTokens(message)]))
+  return { plain, hasEarlier, costs, tokens: [...costs.values()].reduce((sum, count) => sum + count, 0) }
 }
 
-function fitSessionHistory({ plain, hasEarlier }: Awaited<ReturnType<typeof loadSessionHistory>>, budget: number): ChatMessage[] {
+function fitSessionHistory({ plain, hasEarlier, costs, tokens }: Awaited<ReturnType<typeof loadSessionHistory>>, budget: number): ChatMessage[] {
   const all = plain.flatMap(item => item.group)
-  const costs = new Map(all.map(message => [message, estimateChatMessageTokens(message)]))
-  if (!hasEarlier && [...costs.values()].reduce((sum, count) => sum + count, 0) <= budget) return all
+  if (!hasEarlier && tokens <= budget) return all
 
   const notice = (count: number): ChatMessage => ({ role: 'system', content:
     `[早前对话共 ${count} 组消息或回执未完整进入当前窗口${hasEarlier ? '，另有更早的记录' : ''}；如需核对原话，按需使用 session_history_search / session_message_read，禁止猜测]` })
@@ -530,6 +532,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const frozenWriting = requiresManuscriptDelivery(input.taskSpec)
     && input.taskSpec.scope.writing?.kind === 'bounded'
   const writingTaskRunIds = frozenWriting ? new Set(await getTaskRunIds(input.sessionId, input.runId)) : undefined
+  const readHistory = (state: typeof checkpointState) => loadSessionHistory(input.sessionId, input.includeCurrentRunHistory ? '' : input.runId,
+    state.sourceEndedAt ? { createdAt: state.sourceEndedAt, messageId: state.sourceEndMessageId } : null,
+    input.includeCurrentRunHistory ? input.runId : undefined, writingTaskRunIds)
   const currentMemories = currentStoryMemoryWhere(prisma, input.novelId)
   const memoryTarget = writingTargets[0]
   const memoryScope = {
@@ -544,9 +549,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     hasCapability('cover_generate', 'cover_apply') ? buildCoverCandidateDigest(input) : Promise.resolve(null),
     hasCapability('todo_write') ? buildTodoDigest(input.sessionId, input.taskSpec?.runId ?? input.runId) : Promise.resolve(null),
     listActiveDirectives(input.userId, input.novelId, { sessionId: input.sessionId, chapterId: input.chapterId, taskSpecId: input.taskSpec.id, runId: input.runId }),
-    loadSessionHistory(input.sessionId, input.includeCurrentRunHistory ? '' : input.runId, checkpointState.sourceEndedAt
-      ? { createdAt: checkpointState.sourceEndedAt, messageId: checkpointState.sourceEndMessageId ?? null }
-      : null, input.includeCurrentRunHistory ? input.runId : undefined, writingTaskRunIds),
+    readHistory(checkpointState),
     input.chapterId
       ? prisma.chapter.findFirst({
           where: { id: input.chapterId, ...activeChapterScope(input.novelId) },
@@ -656,7 +659,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
 
   const learnedStyleDigest = writingResources ? await getLearnedStyleDigest(input.userId, input.novelId) : ''
   stage('styleMs')
-  const workspaceSnapshot = buildWorkspaceSnapshot({
+  const workspaceSections = {
     currentTime,
     skillDigest,
     learnedStyleDigest,
@@ -667,7 +670,8 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     checkpointDigest,
     directiveDigest,
     chapterLine,
-  })
+  }
+  const workspaceSnapshot = buildWorkspaceSnapshot(workspaceSections)
 
   const canUseEditorWritingContext = !currentSkillRouter || input.taskSpec.scope.agentWritingProtocol !== 1
   const chapterWriting = manuscriptDelivery
@@ -751,10 +755,27 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     intent: [{ role: 'user', content: intentSections.join('\n\n') }],
   }
   const budget = resolveAgentContextBudget(contextWindowTokens, input.maxOutputTokens ?? env.aiTextMaxOutputTokens)
-  const fixedTokens = estimateChatMessagesTokens(Object.values(sections).flat()) + (input.toolDefinitionTokens ?? 0)
-  // Start below the warning line so the next tool batch and its native
-  // assistant frame can fit together before old exchanges become compactable.
-  sections.history = fitSessionHistory(history, Math.max(0, budget.warningTokens - fixedTokens))
+  let fixedTokens = estimateChatMessagesTokens(Object.values(sections).flat()) + (input.toolDefinitionTokens ?? 0)
+  let activeHistory = history
+  if (history.plain.length > 2 && fixedTokens + history.tokens >= budget.compactAtTokens) {
+    const target = Math.max(0, targetContextTokens(budget.compactAtTokens) - fixedTokens)
+    const compacted = await compactSessionContext(input.userId, input.sessionId, target).catch(error => {
+      console.error('[agent-context] 历史检查点未生成，沿用原有历史', input.runId, error)
+      return null
+    })
+    if (compacted) {
+      const saved = await loadContextCheckpoint(input.sessionId)
+      if (saved.checkpoint) {
+        activeHistory = await readHistory(saved)
+        const updated = buildWorkspaceSnapshot({ ...workspaceSections,
+          checkpointDigest: renderCheckpointDigest(saved.checkpoint, { runId: input.runId, directives }) })
+        fixedTokens -= estimateChatMessagesTokens(sections.workspace)
+        sections.workspace = updated ? [{ role: 'user', content: updated }] : []
+        fixedTokens += estimateChatMessagesTokens(sections.workspace)
+      }
+    }
+  }
+  sections.history = fitSessionHistory(activeHistory, Math.max(0, budget.hardRequestTokens - fixedTokens))
   const inputEstimates = Object.fromEntries(Object.entries(sections).map(([category, items]) =>
     [category, { messages: items.length, tokens: estimateChatMessagesTokens(items) }]))
   timings.totalMs = performance.now() - started

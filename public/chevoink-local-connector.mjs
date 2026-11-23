@@ -30,7 +30,7 @@ export function validateConfig(input) {
   if (server.username || server.password || server.search || server.hash || server.pathname !== '/'
     || server.origin !== 'https://chevoink.chevolink.com' && !(server.protocol === 'http:' && loopback)) throw new Error('Invalid connector server')
   return Object.freeze({ version: 1, server: server.origin, token: input.token, provider: input.provider, model: input.model,
-    baseUrl: normalizeLocalUrl(input.baseUrl), contextWindowTokens: input.contextWindowTokens, apiKey: input.apiKey ?? '' })
+    baseUrl: normalizeLocalUrl(input.baseUrl), contextWindowTokens: 258_000, apiKey: input.apiKey ?? '' })
 }
 export class UnsupportedParameter extends Error {
   constructor(param) { super('Unsupported or invalid requested parameter: ' + param); this.param = param }

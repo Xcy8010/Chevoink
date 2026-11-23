@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { AGENT_CONTEXT_TARGET_TOKENS, AGENT_CONTEXT_USABLE_TOKENS } from '../../../shared/agent-context-window.js'
 import type { Prisma } from '@prisma/client'
 
 import type {
@@ -11,17 +12,15 @@ import type {
   TaskSpec,
   UserDirective,
 } from '../../../shared/contracts/index.js'
-import { env } from '../../config/env.js'
 import { contextUsageSchema } from '../../../shared/contracts/context-compaction-contracts.js'
 import { DataAccessError, prisma } from '../prisma.js'
-import { parseModelCapabilities } from '../credits.js'
-import { attachmentHistoryUrl, CONTEXT_COMPACTION_THRESHOLD, estimateTextTokens, resolveSessionContextWindow } from './context-budget.js'
+import { attachmentHistoryUrl, estimateTextTokens } from './context-budget.js'
 import { extractDirectiveCandidates } from './task-spec.js'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
 
 const WARNING_THRESHOLD = 0.65
 const RECENT_TAIL_MESSAGES = 24
-const compactionJobs = new Map<string, { force: boolean; promise: Promise<ContextCheckpoint | null> }>()
+const compactionJobs = new Map<string, Promise<ContextCheckpoint | null>>()
 
 export type ContextCheckpointBoundary = { createdAt: Date; messageId: string | null }
 
@@ -40,22 +39,6 @@ export function isAfterCheckpointBoundary(record: { id: string; createdAt: Date 
 
 function checkpointBoundary(record: { sourceEndedAt: Date; sourceMessageIds: unknown } | null | undefined): ContextCheckpointBoundary | null {
   return record ? { createdAt: record.sourceEndedAt, messageId: lastSourceMessageId(record.sourceMessageIds) } : null
-}
-
-async function resolveSessionContextWindowTokens(userId: string, sessionId: string): Promise<number> {
-  const latestRun = await prisma.agentRun.findFirst({
-    where: { sessionId, userId, ...MAIN_RUN_FILTER },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    select: { modelTier: true, customModelId: true },
-  })
-  if (!latestRun) return env.agentContextWindowTokens
-  const model = await prisma.aiModelConfig.findFirst({
-    where: latestRun.modelTier === 'custom' && latestRun.customModelId
-      ? { id: latestRun.customModelId, ownerUserId: userId }
-      : { ownerUserId: null, tier: latestRun.modelTier },
-    select: { metadata: true, provider: true },
-  })
-  return resolveSessionContextWindow(env.agentContextWindowTokens, parseModelCapabilities(model?.metadata, model?.provider).contextWindowTokens)
 }
 
 function jsonText(value: unknown): string {
@@ -227,29 +210,42 @@ export function renderCheckpointDigest(checkpoint: ContextCheckpoint, current?: 
   return `[系统] 已验证的历史上下文检查点（checkpointId=${checkpoint.id}）：\n目标：${s.goals.join('；') || '无'}\n约束：${s.constraints.join('；') || '无'}\n决策：${s.decisions.join('；') || '无'}\n已完成：${s.completed.join('；') || '无'}\n待处理：${s.pending.join('；') || '无'}\n工具凭据：${s.toolReceipts.map((item) => `${item.toolName}:${item.summary}${item.artifactId ? `(${item.artifactId})` : ''}`).join('；') || '无'}。如需原文细节请重新调用读取工具，禁止凭摘要补写事实。`
 }
 
-async function compactSessionContextInternal(userId: string, sessionId: string, force: boolean): Promise<ContextCheckpoint | null> {
+async function compactSessionContextInternal(userId: string, sessionId: string, target: true | number): Promise<ContextCheckpoint | null> {
   const session = await prisma.agentSession.findFirst({ where: { id: sessionId, userId }, select: { id: true, novelId: true } })
   if (!session) throw new DataAccessError(404, 'AGENT_SESSION_NOT_FOUND', 'Agent 会话不存在。')
   const previous = await prisma.contextCheckpoint.findFirst({ where: { sessionId }, orderBy: [{ version: 'desc' }, { createdAt: 'desc' }] })
-  const [directives, afterPrevious, contextWindowTokens] = await Promise.all([
+  const window = windowMessagesWhere(sessionId, checkpointBoundary(previous))
+  const [directives, records] = await Promise.all([
     sessionDirectives(userId, session.novelId, sessionId),
     prisma.agentMessage.findMany({
-      where: { ...windowMessagesWhere(sessionId, checkpointBoundary(previous)), run: { ...MAIN_RUN_FILTER, status: { in: ['completed', 'failed', 'cancelled'] } } },
+      where: { ...window, run: MAIN_RUN_FILTER },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      select: { id: true, runId: true, role: true, parts: true, createdAt: true, run: { select: { outputSummary: true } } },
+      select: { id: true, runId: true, role: true, parts: true, createdAt: true, run: { select: { status: true, outputSummary: true } } },
     }),
-    resolveSessionContextWindowTokens(userId, sessionId),
   ])
-  const source = afterPrevious.slice(0, Math.max(0, afterPrevious.length - RECENT_TAIL_MESSAGES))
-  const activeText = afterPrevious.map((item) => messageText(item.parts)).join('\n')
-  const beforeTokens = estimateTextTokens(activeText) + (previous?.summaryTokens ?? 0)
-  if (!force && beforeTokens < Math.floor(contextWindowTokens * CONTEXT_COMPACTION_THRESHOLD)) return null
+  // Keep live work on the readable side of a chronological boundary.
+  // Paused turns have persisted history; resuming reconstructs that run by ID.
+  const firstActive = records.findIndex(item => ['queued', 'running', 'awaiting_approval'].includes(item.run.status))
+  const afterPrevious = firstActive < 0 ? records : records.slice(0, firstActive)
+  const sizes = afterPrevious.map(item => estimateTextTokens(messageText(item.parts)))
+  const beforeTokens = sizes.reduce((sum, count) => sum + count, previous?.summaryTokens ?? 0)
+  const tailBudget = target === true ? AGENT_CONTEXT_TARGET_TOKENS : target
+  let sourceCount = Math.max(0, afterPrevious.length - RECENT_TAIL_MESSAGES)
+  if (target !== true || beforeTokens > tailBudget) {
+    // Keep the newest complete conversation tail and make room for the summary.
+    let retained = previous?.summaryTokens ?? 0
+    sourceCount = afterPrevious.length
+    while (sourceCount > 0 && (sourceCount > afterPrevious.length - 2 || retained + sizes[sourceCount - 1] <= tailBudget)) {
+      retained += sizes[--sourceCount]
+    }
+  }
+  const source = afterPrevious.slice(0, sourceCount)
   // 强制压缩也必须有新的可压缩消息；返回旧检查点会让前端误报“生成了新版本”。
   if (source.length === 0) return null
 
   const priorSummary = previous?.summary as ContextCheckpointSummary | undefined
   const goals = source.filter((item) => item.role === 'user').map((item) => messageText(item.parts).slice(0, 240))
-  const completed = source.filter((item) => item.role === 'assistant').flatMap((item) => item.run.outputSummary ? [item.run.outputSummary] : [])
+  const completed = source.filter((item) => item.role === 'assistant' && item.run.status === 'completed').flatMap((item) => item.run.outputSummary ? [item.run.outputSummary] : [])
   const receipts = source.flatMap((item) => {
     if (!Array.isArray(item.parts)) return []
     return (item.parts as unknown as AgentMessagePart[]).flatMap((part) => part.type === 'tool-call' && part.status === 'success'
@@ -281,10 +277,13 @@ async function compactSessionContextInternal(userId: string, sessionId: string, 
   if (!validation.valid) throw new DataAccessError(409, 'CONTEXT_COMPACTION_VALIDATION_FAILED', '上下文压缩未完整保留硬约束，已拒绝生成检查点。')
   const sourceText = source.map((item) => `${item.id}:${item.role}:${messageText(item.parts)}`).join('\n')
   const sourceHash = createHash('sha256').update(`${previous?.sourceHash ?? ''}\n${sourceText}`).digest('hex')
-  const duplicate = await prisma.contextCheckpoint.findFirst({ where: { sessionId, sourceHash } })
-  if (duplicate) return checkpointRecord(duplicate)
-  try {
-    const created = await prisma.contextCheckpoint.create({
+  return prisma.$transaction(async tx => {
+    // Manual and automatic callers on different workers can choose different
+    // tail sizes. Only append if the checkpoint we built on is still current.
+    await tx.$queryRaw`SELECT id FROM agent_sessions WHERE id = ${sessionId} AND user_id = ${userId} FOR UPDATE`
+    const current = await tx.contextCheckpoint.findFirst({ where: { sessionId }, orderBy: [{ version: 'desc' }, { createdAt: 'desc' }] })
+    if (current && current.id !== previous?.id) return checkpointRecord(current)
+    const created = await tx.contextCheckpoint.create({
       data: {
         sessionId, runId: source.at(-1)?.runId ?? null, sourceMessageCount: source.length,
         sourceMessageIds: source.map((item) => item.id), sourceStartedAt: source[0].createdAt,
@@ -295,84 +294,48 @@ async function compactSessionContextInternal(userId: string, sessionId: string, 
       },
     })
     return checkpointRecord(created)
-  } catch (error) {
-    // 多实例同时压缩同一输入时唯一键只允许一个版本落库；失败实例读取赢家结果。
-    const raced = await prisma.contextCheckpoint.findFirst({ where: { sessionId, sourceHash } })
-    if (raced) return checkpointRecord(raced)
-    throw error
-  }
+  })
 }
 
 /** 同一进程内按会话单飞，避免自动压缩与手动压缩同时生成重复版本。 */
-export async function compactSessionContext(userId: string, sessionId: string, force = false): Promise<ContextCheckpoint | null> {
+export async function compactSessionContext(userId: string, sessionId: string, target: true | number): Promise<ContextCheckpoint | null> {
   const key = `${userId}:${sessionId}`
   const active = compactionJobs.get(key)
-  if (active) {
-    // 手动压缩不能被一个阈值未满足的自动任务“吞掉”；先等它结束，再按强制语义重试。
-    if (force && !active.force) return active.promise.then(() => compactSessionContext(userId, sessionId, true))
-    return active.promise
-  }
-  const job = compactSessionContextInternal(userId, sessionId, force).finally(() => {
-    if (compactionJobs.get(key)?.promise === job) compactionJobs.delete(key)
+  if (active) return active
+  const job = compactSessionContextInternal(userId, sessionId, target).finally(() => {
+    if (compactionJobs.get(key) === job) compactionJobs.delete(key)
   })
-  compactionJobs.set(key, { force, promise: job })
+  compactionJobs.set(key, job)
   return job
 }
 
 export async function getContextState(userId: string, sessionId: string, preferRequest = false): Promise<ContextState> {
   const session = await prisma.agentSession.findFirst({ where: { id: sessionId, userId }, select: { novelId: true } })
   if (!session) throw new DataAccessError(404, 'AGENT_SESSION_NOT_FOUND', 'Agent 会话不存在。')
-  const [checkpoint, directives, latest] = await Promise.all([
+  const [checkpoint, directives, event] = await Promise.all([
     prisma.contextCheckpoint.findFirst({ where: { sessionId }, orderBy: [{ version: 'desc' }, { createdAt: 'desc' }] }),
     sessionDirectives(userId, session.novelId, sessionId),
-    preferRequest ? prisma.agentRun.findFirst({
-      where: { userId, sessionId, ...MAIN_RUN_FILTER, events: { some: { type: 'context.usage' } } },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      select: { id: true, events: { where: { type: 'context.usage' }, orderBy: { seq: 'desc' }, take: 1,
-        select: { seq: true, createdAt: true, payload: true } } },
+    preferRequest ? prisma.agentRunEvent.findFirst({
+      where: { type: 'context.usage', run: { userId, sessionId, ...MAIN_RUN_FILTER } },
+      orderBy: [{ createdAt: 'desc' }, { seq: 'desc' }, { id: 'desc' }],
+      select: { runId: true, seq: true, createdAt: true, payload: true },
     }) : null,
   ])
-  const base = { warningThreshold: WARNING_THRESHOLD, activeDirectiveCount: directives.length,
+  const base = { contextWindowTokens: AGENT_CONTEXT_USABLE_TOKENS, compactionThreshold: 1, warningThreshold: WARNING_THRESHOLD, activeDirectiveCount: directives.length,
     checkpoint: checkpoint ? checkpointRecord(checkpoint) : null }
-  const event = latest?.events[0]
-  if (latest && event && (!checkpoint || event.createdAt > checkpoint.createdAt)) {
+  if (event && (!checkpoint || event.createdAt > checkpoint.createdAt)) {
     const sample = contextUsageSchema.safeParse(event.payload)
     if (sample.success) {
-      const { estimatedTokens, contextWindowTokens, compactAtTokens } = sample.data
-      // Both execution protocols record the post-compaction measurement directly
-      // after completion. Read that exact pair, including for existing sessions.
-      const runScope = { userId, sessionId, ...MAIN_RUN_FILTER }
-      const completion = await prisma.agentRunEvent.findFirst({
-        where: { run: runScope, type: 'context.compaction', payload: { path: ['state'], equals: 'completed' },
-          OR: [{ runId: { not: latest.id } }, { seq: { lt: event.seq } }],
-          createdAt: { ...(checkpoint && { gt: checkpoint.createdAt }), lte: event.createdAt } },
-        orderBy: [{ createdAt: 'desc' }, { seq: 'desc' }], select: { runId: true, seq: true },
-      })
-      const first = completion
-        ? await prisma.agentRunEvent.findUnique({ where: { runId_seq: { runId: completion.runId, seq: completion.seq + 1 }, type: 'context.usage' },
-          select: { type: true, payload: true } })
-        : checkpoint ? await prisma.agentRunEvent.findFirst({ where: { run: runScope, type: 'context.usage',
-          createdAt: { gt: checkpoint.createdAt, lte: event.createdAt } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }],
-          select: { type: true, payload: true } }) : null
-      const retained = first?.type === 'context.usage' ? contextUsageSchema.safeParse(first.payload) : null
-      return { ...base, requestSample: { runId: latest.id, seq: event.seq }, estimatedTokens, contextWindowTokens,
-        ...(retained?.success && { retainedTokens: retained.data.estimatedTokens }),
-        usageRatio: estimatedTokens / contextWindowTokens, compactionThreshold: compactAtTokens / contextWindowTokens }
+      const { estimatedTokens } = sample.data
+      return { ...base, requestSample: { runId: event.runId, seq: event.seq, sampledAt: event.createdAt.toISOString() },
+        estimatedTokens, usageRatio: estimatedTokens / AGENT_CONTEXT_USABLE_TOKENS }
     }
   }
   // Historical clients and sessions without a measured request use saved history.
-  const [recent, contextWindowTokens] = await Promise.all([
-    prisma.agentMessage.findMany({ where: windowMessagesWhere(sessionId, checkpointBoundary(checkpoint)),
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true, createdAt: true } }),
-    resolveSessionContextWindowTokens(userId, sessionId),
-  ])
+  const recent = await prisma.agentMessage.findMany({ where: windowMessagesWhere(sessionId, checkpointBoundary(checkpoint)),
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true } })
   const estimatedTokens = estimateTextTokens(recent.map((item) => messageText(item.parts)).join('\n')) + (checkpoint?.summaryTokens ?? 0)
-  return {
-    ...base, estimatedTokens, contextWindowTokens,
-    ...(preferRequest && checkpoint && { retainedTokens: checkpoint.summaryTokens + estimateTextTokens(
-      recent.filter(item => item.createdAt <= checkpoint.createdAt).map(item => messageText(item.parts)).join('\n')) }),
-    usageRatio: estimatedTokens / contextWindowTokens, compactionThreshold: CONTEXT_COMPACTION_THRESHOLD,
-  }
+  return { ...base, estimatedTokens, usageRatio: estimatedTokens / AGENT_CONTEXT_USABLE_TOKENS }
 }
 
 export async function loadContextCheckpoint(sessionId: string): Promise<{ checkpoint: ContextCheckpoint | null; sourceEndedAt: Date | null; sourceEndMessageId: string | null }> {

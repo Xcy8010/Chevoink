@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { AiModelConfig, Prisma } from '@prisma/client'
 import { presentModelRoutes } from './model-route-pool.js'
 import { presentWeightedRoutes } from './model-weighted-config.js'
-import { parseModelCapabilities } from './credits.js'
+import { readStoredModelCapabilities } from './credits.js'
 import { readModelPromotion } from '../../shared/model-promotion.js'
 import { imageQualityConfigSchema } from '../../shared/contracts/image-model.js'
 
@@ -14,7 +14,7 @@ function endpoint(value: string | null): Prisma.InputJsonValue | null {
   } catch { return { invalid: true } }
 }
 function snapshot(model: AiModelConfig): Record<string, Prisma.InputJsonValue | null> {
-  const capabilities = parseModelCapabilities(model.metadata,model.provider)
+  const capabilities = readStoredModelCapabilities(model.metadata,model.provider)
   const weighted = presentWeightedRoutes(model.metadata)
   const metadata = model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata : {}
   const imageQuality = imageQualityConfigSchema.safeParse(metadata.imageQuality)

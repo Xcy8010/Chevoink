@@ -494,6 +494,32 @@ describe.runIf(available)('durable service dispatch', () => {
 })
 
 describe.runIf(available)('durable context archive', () => {
+  it('resumes a prepared 258k request on a task created with a 128k window', async () => {
+    await fixture(async f => {
+      const lease = await claim(f)
+      const route = { provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1/chat/completions', reasoningEffort: 'high' }
+      const messages = [{ role: 'user' as const, content: '文'.repeat(150000) }]
+      const { frame } = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator',
+        creativeFreedom: 'balanced', qualityMode: 'premium', tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [],
+        model: { tier: 'speed', provider: route.provider, modelName: route.model, customModelId: null, reasoningEffort: route.reasoningEffort,
+          routeRevision: modelRouteRevision(route), contextWindowTokens: 128000 } },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null, messages, successfulToolSignatures: [] } })
+      const request = { endpoint: route.endpoint, body: { model: route.model, messages, stream: true, max_tokens: 8192 } }
+      await prepareModelCursorOperation(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+        contextUsage: { estimatedTokens: estimateChatMessagesTokens(messages), contextWindowTokens: 258000, compactAtTokens: 228000 } },
+      { key: 'exec:0', action: 'workspaceAgent', request, price: { version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 0 } })
+      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 0, provider: route.provider, modelName: route.model,
+        baseUrl: 'https://provider.invalid/v1', apiKey: 'not-real', reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: 258000 })
+      const fetchMock = vi.fn(async (_url: string, options: RequestInit) => {
+        expect(JSON.parse(String(options.body))).toEqual(request.body)
+        return new Response('data: {"choices":[{"delta":{"content":"完成"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}\n\ndata: [DONE]\n\n')
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      expect((await executeDurableStep(lease, new AbortController().signal)).kind).toBe('model')
+      expect(fetchMock).toHaveBeenCalledOnce()
+    })
+  })
+
   it('rejects an oversized original request before creating a paid attempt and preserves its text', async () => {
     await fixture(async f => {
       const lease = await claim(f)

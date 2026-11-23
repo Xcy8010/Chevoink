@@ -11,8 +11,7 @@ import type { AgentStreamEvent } from '../../shared/contracts/agent-events'
 
 const store = vi.hoisted(() => ({ addComposerReference: vi.fn(), requestToolNavigation: vi.fn(), composerDraft: '',
   activeSessionId: null as string | null, runId: null as string | null, phase: 'idle',
-  requestContext: null as Extract<AgentStreamEvent, { type: 'context.usage' }> | null,
-  requestCompaction: null as { runId: string; seq: number; retainedTokens: number | null } | null,
+  requestContext: null as (Extract<AgentStreamEvent, { type: 'context.usage' }> & { sessionId: string }) | null,
   memorySpotlight: null as null | { nonce: number; memoryType: string; title: string; memoryId?: string } }))
 vi.mock('../../src/features/studio/agent/agentStore', async importOriginal => ({
   ...await importOriginal<typeof import('../../src/features/studio/agent/agentStore')>(),
@@ -256,8 +255,8 @@ it('opens the saved card by ID even when the current name has changed', async ()
   expect(fetchStoryMemories).toHaveBeenCalledWith('n', { memoryType: 'worldbuilding', memoryId: firstCard.id, page: 1, pageSize: 2 })
 })
 
-const contextA = { usageRatio: 0.42, estimatedTokens: 4200, contextWindowTokens: 10_000,
-  compactionThreshold: 0.85, warningThreshold: 0.75, activeDirectiveCount: 3, checkpoint: null }
+const contextA = { usageRatio: 0.42, estimatedTokens: 95_760, contextWindowTokens: 228_000,
+  compactionThreshold: 1, warningThreshold: 0.75, activeDirectiveCount: 3, checkpoint: null }
 
 it('displays a newer live model estimate only for the owning task and rejects an older replay', async () => {
   const sample = { ...contextA, requestSample: { runId: 'r', seq: 7 } }
@@ -265,19 +264,19 @@ it('displays a newer live model estimate only for the owning task and rejects an
   store.activeSessionId = 'a'
   store.runId = 'r'
   store.phase = 'running'
-  store.requestContext = { type: 'context.usage', estimatedTokens: 99840, compactAtTokens: 99840, contextWindowTokens: 128000,
+  store.requestContext = { type: 'context.usage', sessionId: 'a', estimatedTokens: 228000, compactAtTokens: 228000, contextWindowTokens: 258000,
     runId: 'r', seq: 8, ts: new Date().toISOString() }
   try {
     const panel = render(<AgentMemoryCenter sessionId="a" novelId="n" />)
     await screen.findByText('最近一次模型输入估算')
-    expect(screen.getAllByText('78%')).toHaveLength(2)
+    expect(screen.getAllByText('100%')).toHaveLength(2)
     store.requestContext = { ...store.requestContext, seq: 6 }
     panel.rerender(<AgentMemoryCenter sessionId="a" novelId="n" />)
     expect(screen.getByText('42%')).toBeTruthy()
     store.requestContext = { ...store.requestContext, seq: 9 }
     panel.rerender(<AgentMemoryCenter sessionId="b" novelId="n" />)
     await screen.findByText('42%')
-    expect(screen.queryByText('78%')).toBeNull()
+    expect(screen.getAllByText('100%')).toHaveLength(1)
   } finally {
     store.requestContext = null
     store.activeSessionId = null
@@ -286,38 +285,38 @@ it('displays a newer live model estimate only for the owning task and rejects an
   }
 })
 
-it('resets growth on completion, counts only new input, and restores the same values after remount', async () => {
-  const limits = { contextWindowTokens: 128000, compactAtTokens: 99840 }
-  const sample = { ...contextA, ...limits, estimatedTokens: 115391, usageRatio: 115391 / 128000,
-    compactionThreshold: 0.78, requestSample: { runId: 'r', seq: 7 } }
+it('keeps the last full measurement across prompts and uses the next actual sample on refresh', async () => {
+  const historicalLimits = { contextWindowTokens: 128000, compactAtTokens: 99840 }
+  const sample = { ...contextA, estimatedTokens: 0, usageRatio: 0 }
   vi.mocked(fetchAgentContextState).mockResolvedValue(sample)
   store.activeSessionId = 'a'
   store.runId = 'r'
   store.phase = 'running'
-  store.requestContext = { type: 'context.usage', ...limits, estimatedTokens: 91570, seq: 9, runId: 'r', ts: new Date().toISOString() }
-  store.requestCompaction = { runId: 'r', seq: 8, retainedTokens: 91570 }
+  store.requestContext = { type: 'context.usage', sessionId: 'a', ...historicalLimits, estimatedTokens: 85819,
+    seq: 9, runId: 'r', ts: '2026-11-23T00:00:00.000Z' }
   try {
     const ui = () => <AgentMemoryCenter sessionId="a" novelId="n" />
     const panel = render(ui())
-    await screen.findByText('0%')
-    expect(screen.getByText('最近一次模型输入估算 72%')).toBeTruthy()
-    store.requestContext = { ...store.requestContext, seq: 10, estimatedTokens: 103082 }
+    await screen.findByText('38%')
+    expect(screen.getByText('85.8k / 228k')).toBeTruthy()
+    expect(screen.getByTitle('总窗口 258k，预留 30k，可用 228k')).toBeTruthy()
+    store.runId = 'next'
     panel.rerender(ui())
-    expect(screen.getByText('9%')).toBeTruthy()
-    expect(screen.getByText('最近一次模型输入估算 81%')).toBeTruthy()
-    panel.unmount()
-    store.requestContext = null
-    store.requestCompaction = null
-    store.phase = 'idle'
-    queryClient.clear()
-    vi.mocked(fetchAgentContextState).mockResolvedValue({ ...sample, estimatedTokens: 103082, usageRatio: 103082 / 128000,
-      retainedTokens: 91570, requestSample: { runId: 'r', seq: 10 } })
-    render(ui())
-    await screen.findByText('9%')
-    expect(screen.getByText('最近一次模型输入估算 81%')).toBeTruthy()
+    expect(screen.getByText('38%')).toBeTruthy()
+    expect(screen.queryByText('0%')).toBeNull()
+    store.requestContext = { ...store.requestContext, runId: 'next', seq: 1, estimatedTokens: 227999 }
+    panel.rerender(ui())
+    expect(screen.getByText('99%')).toBeTruthy()
+    store.requestContext = { ...store.requestContext, seq: 2, estimatedTokens: 228000 }
+    panel.rerender(ui())
+    expect(screen.getAllByText('100%')).toHaveLength(2)
+    vi.mocked(fetchAgentContextState).mockResolvedValue({ ...sample, estimatedTokens: 102600, usageRatio: 0.45,
+      requestSample: { runId: 'next', seq: 3, sampledAt: '2026-11-23T00:01:00.000Z' } })
+    fireEvent.click(screen.getByRole('button', { name: '刷新上下文状态' }))
+    await screen.findByText('45%')
+    expect(screen.getByText('102.6k / 228k')).toBeTruthy()
   } finally {
     store.requestContext = null
-    store.requestCompaction = null
     store.activeSessionId = null
     store.runId = null
     store.phase = 'idle'
@@ -373,7 +372,7 @@ it('discards an inaccessible snapshot even if the next retry fails, and isolates
   expect(screen.queryByText('42%')).toBeNull()
   await act(async () => response.resolve({ state: contextA, checkpoint: null }))
   expect(screen.queryByText('当前有效对话较短，暂时无需压缩。')).toBeNull()
-  await act(async () => pending.resolve({ ...contextA, usageRatio: 0.25 }))
+  await act(async () => pending.resolve({ ...contextA, estimatedTokens: 57000, usageRatio: 0.25 }))
   await screen.findByText('25%')
   vi.mocked(fetchAgentContextState).mockRejectedValueOnce(new AgentApiError('无权访问', 403, null))
   fireEvent.click(screen.getByRole('button', { name: '刷新上下文状态' }))

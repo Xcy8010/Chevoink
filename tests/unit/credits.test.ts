@@ -12,7 +12,7 @@ import {
 describe('custom model verified capabilities', () => {
   it('reads declared output capacity without writing or confusing it with the request allowance', () => {
     const metadata = { max_output_tokens: 393216, contextWindowTokens: 128000 }, before = structuredClone(metadata)
-    expect(parseModelCapabilities(metadata, 'deepseek')).toMatchObject({ maxOutputTokens: 393216, contextWindowTokens: 128000 })
+    expect(parseModelCapabilities(metadata, 'deepseek')).toMatchObject({ maxOutputTokens: 393216, contextWindowTokens: 258000 })
     expect(parseModelCapabilities({ maxOutputTokens: 16384 })).toMatchObject({ maxOutputTokens: 16384 })
     expect(metadata).toEqual(before)
     for (const value of [null, 0, -1, 8192.5, '393216', Number.MAX_SAFE_INTEGER + 1])
@@ -85,15 +85,15 @@ describe('Credits activity model privacy', () => {
 })
 
 describe('模型上下文窗口能力', () => {
-  it('从模型 metadata 读取合法窗口，DeepSeek 与 GLM 共用同一能力契约', () => {
-    expect(parseModelCapabilities({ contextWindowTokens: 128_000 }, 'deepseek').contextWindowTokens).toBe(128_000)
-    expect(parseModelCapabilities({ contextWindowTokens: 200_000 }, 'zhipu').contextWindowTokens).toBe(200_000)
+  it('旧内置和自定义模型使用统一窗口', () => {
+    expect(parseModelCapabilities({ contextWindowTokens: 128_000 }, 'deepseek').contextWindowTokens).toBe(258_000)
+    expect(parseModelCapabilities({ contextWindowTokens: 200_000 }, 'zhipu').contextWindowTokens).toBe(258_000)
   })
 
-  it('拒绝不可信窗口值并回退服务端默认配置', () => {
-    expect(parseModelCapabilities({ contextWindowTokens: 8_000 }, 'zhipu').contextWindowTokens).toBeNull()
-    expect(parseModelCapabilities({ contextWindowTokens: 128_000.5 }, 'deepseek').contextWindowTokens).toBeNull()
-    expect(parseModelCapabilities({ contextWindowTokens: '128000' }, 'deepseek').contextWindowTokens).toBeNull()
+  it('旧记录中的无效窗口同样采用统一配置', () => {
+    expect(parseModelCapabilities({ contextWindowTokens: 8_000 }, 'zhipu').contextWindowTokens).toBe(258_000)
+    expect(parseModelCapabilities({ contextWindowTokens: 128_000.5 }, 'deepseek').contextWindowTokens).toBe(258_000)
+    expect(parseModelCapabilities({ contextWindowTokens: '128000' }, 'deepseek').contextWindowTokens).toBe(258_000)
   })
 })
 

@@ -47,7 +47,7 @@ describe('standalone local connector trust boundary', () => {
     expect(() => validateConfig({ ...setup, server: 'https://other.example' })).toThrow()
     expect(() => validateConfig({ ...setup, apiKey: 'x\r\na:b' })).toThrow()
     expect(() => validateConfig({ ...setup, contextWindowTokens: 0 })).toThrow()
-    for (const body of [{ model: 'another' }, { baseUrl: 'http://10.1.1.1' }, { headers: { Authorization: 'cloud-key' } }, { max_tokens: 16001 }]) {
+    for (const body of [{ model: 'another' }, { baseUrl: 'http://10.1.1.1' }, { headers: { Authorization: 'cloud-key' } }, { max_tokens: 258001 }]) {
       expect(() => parseJob(job(body), config)).toThrow()
     }
     expect(() => parseJob({ id: 'job-1', body: ' '.repeat(LIMITS.request + 1) }, config)).toThrow()
@@ -184,7 +184,7 @@ describe('native Ollama translation', () => {
   const native = validateConfig({ ...setup, provider: 'local-ollama', baseUrl: 'http://localhost:11434/v1' })
   it('pins context/output bounds and translates tool history without ignoring unsupported knobs', () => {
     const body = parseJob(job({ max_tokens: 42, tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }] }), native)
-    expect(ollamaRequest(body, native)).toMatchObject({ options: { num_ctx: 16000, num_predict: 42 }, stream: false })
+    expect(ollamaRequest(body, native)).toMatchObject({ options: { num_ctx: 258000, num_predict: 42 }, stream: false })
     for (const value of [{ tool_choice: 'required' }, { response_format: { type: 'json_schema' } }, { reasoning_effort: 'high' }]) {
       expect(() => ollamaRequest({ ...body, ...value }, native)).toThrow()
     }
@@ -201,7 +201,7 @@ describe('native Ollama translation', () => {
     const h = harness(() => new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes.subarray(0, 31)); controller.enqueue(bytes.subarray(31, 98)); controller.enqueue(bytes.subarray(98)); controller.close() } })))
     await runJob(native, job({ stream: true }), { fetch: h.fetcher })
     expect(h.calls[0].url).toBe('http://127.0.0.1:11434/api/chat')
-    expect(JSON.parse(String(h.calls[0].init.body)).options).toEqual({ num_ctx: 16000, num_predict: 4096 })
+    expect(JSON.parse(String(h.calls[0].init.body)).options).toEqual({ num_ctx: 258000, num_predict: 4096 })
     const values = h.text().split('\n\n').filter(Boolean).map(line => line.slice(6))
     expect(values.at(-1)).toBe('[DONE]')
     const chunks = values.slice(0, -1).map(value => JSON.parse(value))

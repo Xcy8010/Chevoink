@@ -1,3 +1,4 @@
+import { AGENT_CONTEXT_WINDOW_TOKENS } from '../../../../shared/agent-context-window'
 import { modelActivitiesSchema, type ModelActivities } from '../../../../shared/model-activity'
 import { isBuiltInModelTier } from '../../../../shared/contracts/model-tier'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -42,7 +43,7 @@ const emptyForm = {
     reasoningParameterMode: '' as '' | 'native' | 'omit',
     outputTokenParameter: '' as '' | 'max_tokens' | 'max_completion_tokens',
     thinkingEnabled: '' as '' | 'enabled' | 'disabled',
-    visionEnabled: false, contextWindowTokens: '128000',
+    visionEnabled: false,
     routes: [] as ModelRouteInput[],
     weightedRoutes: { primaryWeight: 100, candidates: [] } as WeightedRoutesInput,
     limitedFree: false, freeUntil: '', afterMultiplier: '1.5',
@@ -95,7 +96,7 @@ export default function AdminModelsPage() {
       reasoningParameterMode: editing.reasoningParameterMode ?? '',
       outputTokenParameter: editing.outputTokenParameter ?? '',
       thinkingEnabled: editing.thinkingEnabled === undefined ? '' : editing.thinkingEnabled ? 'enabled' : 'disabled',
-      visionEnabled: editing.visionEnabled, contextWindowTokens: String(editing.contextWindowTokens ?? 128000),
+      visionEnabled: editing.visionEnabled,
       routes: (editing.routes ?? []).map(({ apiKeyConfigured: _configured, ...route }) => route),
       weightedRoutes: editing.weightedRoutes ? { primaryWeight: editing.weightedRoutes.primaryWeight,
         candidates: editing.weightedRoutes.candidates.map(({ apiKeyConfigured: _configured, ...route }) => route) } : { primaryWeight: 100, candidates: [] },
@@ -133,7 +134,7 @@ export default function AdminModelsPage() {
       const expires = Date.parse(form.freeUntil)
       if (limitedFree && (!Number.isFinite(expires) || expires <= Date.now())) throw new Error('请选择未来的截止时间')
       const { limitedFree: _limited, freeUntil: _until, afterMultiplier: _after, imageQualityCustomValues: _customQuality, ...fields } = form
-      const payload = { ...fields, testerSelectable: editingKind === 'text' && form.enabled && !form.selectable && form.testerSelectable, selectable: editingKind === 'text' ? form.selectable : false, isDefault: editingKind === 'text' ? form.isDefault : false, visionEnabled: editingKind === 'vision' ? true : form.visionEnabled, expectedRevision: editing.id ? editing.revision : undefined, webToolProtocol: (editingKind === 'web_search' || editingKind === 'web_fetch') && form.webToolProtocol ? form.webToolProtocol : undefined, publicFeatures: form.publicFeatures.map(value => value.trim()).filter(Boolean), activities: (editingKind === 'text' || editingKind === 'image_generation') && (editing.activities || form.activities.rules.length) ? form.activities : undefined, weightedRoutes: (editingKind === 'text' || editingKind === 'image_generation') && (editing.weightedRoutes || form.weightedRoutes.candidates.length) ? form.weightedRoutes : undefined, imageQuality: editingKind === 'image_generation' ? form.imageQuality : undefined, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editingKind === 'text' ? Number(form.contextWindowTokens) : undefined,
+      const payload = { ...fields, testerSelectable: editingKind === 'text' && form.enabled && !form.selectable && form.testerSelectable, selectable: editingKind === 'text' ? form.selectable : false, isDefault: editingKind === 'text' ? form.isDefault : false, visionEnabled: editingKind === 'vision' ? true : form.visionEnabled, expectedRevision: editing.id ? editing.revision : undefined, webToolProtocol: (editingKind === 'web_search' || editingKind === 'web_fetch') && form.webToolProtocol ? form.webToolProtocol : undefined, publicFeatures: form.publicFeatures.map(value => value.trim()).filter(Boolean), activities: (editingKind === 'text' || editingKind === 'image_generation') && (editing.activities || form.activities.rules.length) ? form.activities : undefined, weightedRoutes: (editingKind === 'text' || editingKind === 'image_generation') && (editing.weightedRoutes || form.weightedRoutes.candidates.length) ? form.weightedRoutes : undefined, imageQuality: editingKind === 'image_generation' ? form.imageQuality : undefined, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier),
         reasoningParameterMode: editingKind === 'text' ? form.reasoningParameterMode || null : undefined,
         outputTokenParameter: editingKind === 'text' ? form.outputTokenParameter || null : undefined,
         thinkingEnabled: editingKind === 'text' ? form.thinkingEnabled === '' ? null : form.thinkingEnabled === 'enabled' : undefined,
@@ -171,7 +172,7 @@ export default function AdminModelsPage() {
     mutation.reset()
     setEditing({ id: '', revision: 1, archivedAt: null, archiveReason: null, tier: null, modelKind: 'text', sortOrder: 0, provider: 'openai', displayName: '', modelName: '', baseUrl: null, multiplier: 1,
       enabled: true, selectable: true, isDefault: false, apiKeyConfigured: false, requestCount: 0, requestTokens: 0, responseTokens: 0,
-      reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false, contextWindowTokens: 128000, configurationReady: false, updatedAt: '' })
+      reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false, contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS, configurationReady: false, updatedAt: '' })
   }
   const dirty = editing !== null && savedForm.current !== '' && savedForm.current !== JSON.stringify(form)
   useEffect(() => {
@@ -208,7 +209,7 @@ export default function AdminModelsPage() {
   useEffect(() => {
     const id = params.get('model')
     if (!id) { if (editing) setEditing(null); return }
-    if (id === 'new') { if (!editing) setEditing({ id: '', revision: 1, archivedAt: null, archiveReason: null, tier: null, modelKind: 'text', sortOrder: 0, provider: 'openai', displayName: '', modelName: '', baseUrl: null, multiplier: 1, enabled: true, selectable: true, isDefault: false, apiKeyConfigured: false, requestCount: 0, requestTokens: 0, responseTokens: 0, reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false, contextWindowTokens: 128000, configurationReady: false, updatedAt: '' }); return }
+    if (id === 'new') { if (!editing) setEditing({ id: '', revision: 1, archivedAt: null, archiveReason: null, tier: null, modelKind: 'text', sortOrder: 0, provider: 'openai', displayName: '', modelName: '', baseUrl: null, multiplier: 1, enabled: true, selectable: true, isDefault: false, apiKeyConfigured: false, requestCount: 0, requestTokens: 0, responseTokens: 0, reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false, contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS, configurationReady: false, updatedAt: '' }); return }
     if (editing?.id === id || !query.data) return
     const model = query.data.models.find(row => row.id === id)
     if (model) setEditing(model)

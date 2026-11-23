@@ -29,8 +29,8 @@ describe('built-in route pools', () => {
     const route = { id, label: '线路', provider: 'deepseek', modelName: 'm', baseUrl: 'https://example.test', enabled: true }
     expect(() => saveModelRoutes([route], {}, ['low'])).toThrow()
     expect(() => saveModelRoutes([route], { routes }, ['xhigh'])).toThrow()
-    expect(() => saveModelRoutes([{ ...route, provider: 'openai', contextWindowTokens: 16000 }], { routes }, ['low'], { contextWindowTokens: 128000, visionEnabled: false })).toThrow()
-    expect(() => saveModelRoutes([{ ...route, provider: 'openai', visionEnabled: false }], { routes }, ['low'], { contextWindowTokens: 128000, visionEnabled: true })).toThrow()
+    expect(saveModelRoutes([{ ...route, provider: 'openai', contextWindowTokens: 16000 }], { routes }, ['low'], { visionEnabled: false })[0].contextWindowTokens).toBe(258000)
+    expect(() => saveModelRoutes([{ ...route, provider: 'openai', visionEnabled: false }], { routes }, ['low'], { visionEnabled: true })).toThrow()
   })
   it('does not replay paid or partly observed failures', () => {
     expect(routeRejectionMayRetry(404, undefined, undefined, id)).toBe(true)

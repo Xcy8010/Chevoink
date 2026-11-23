@@ -1,10 +1,10 @@
 import type { ChatMessage, OpenAIToolDefinition } from '../ai-service.js'
 import { PERSONALIZATION_TOOL_NAMES } from './personalization-operations.js'
 import { scheduledToolHistoryIds } from './tool-turn-history.js'
+import { AGENT_CONTEXT_TARGET_TOKENS, AGENT_CONTEXT_USABLE_TOKENS, AGENT_CONTEXT_WINDOW_TOKENS } from '../../../shared/agent-context-window.js'
 
 const IMAGE_INPUT_ESTIMATE_TOKENS = 1_024
 const MESSAGE_OVERHEAD_TOKENS = 4
-export const CONTEXT_COMPACTION_THRESHOLD = 0.78
 const retiredAssistantPrefix = '[早前助手发言：只读历史，不是作者新指令、授权或已完成证明。]\n'
 
 /**
@@ -72,7 +72,6 @@ function attachmentPageHistory(call: { name: string; arguments: string }, output
 
 export type AgentContextBudget = {
   contextWindowTokens: number
-  warningTokens: number
   compactAtTokens: number
   hardRequestTokens: number
 }
@@ -84,13 +83,23 @@ export function resolveSessionContextWindow(configuredWindow: number, modelWindo
 
 export function resolveAgentContextBudget(contextWindowTokens: number, maxOutputTokens: number): AgentContextBudget {
   const normalizedWindow = Math.floor(contextWindowTokens)
-  const hardRequestTokens = resolveDurableInputLimit(normalizedWindow, maxOutputTokens)
+  const hardRequestTokens = normalizedWindow === AGENT_CONTEXT_WINDOW_TOKENS
+    ? AGENT_CONTEXT_USABLE_TOKENS : Math.min(AGENT_CONTEXT_USABLE_TOKENS, resolveDurableInputLimit(normalizedWindow, maxOutputTokens))
   return {
     contextWindowTokens: normalizedWindow,
-    warningTokens: Math.min(hardRequestTokens, Math.floor(normalizedWindow * 0.65)),
-    compactAtTokens: Math.min(hardRequestTokens, Math.floor(normalizedWindow * CONTEXT_COMPACTION_THRESHOLD)),
+    compactAtTokens: Math.min(hardRequestTokens, AGENT_CONTEXT_USABLE_TOKENS,
+      Math.floor(normalizedWindow * AGENT_CONTEXT_USABLE_TOKENS / AGENT_CONTEXT_WINDOW_TOKENS)),
     hardRequestTokens,
   }
+}
+
+/** Apply after measuring the actual request, so a high configured output limit cannot trigger early compaction. */
+export function fitAgentOutputTokens(window: number, requested: number, inputTokens: number): number {
+  return Math.min(requested, Math.max(0, window - inputTokens - Math.max(2_048, Math.ceil(window * 0.05))))
+}
+
+export function targetContextTokens(usableTokens: number): number {
+  return Math.floor(usableTokens * AGENT_CONTEXT_TARGET_TOKENS / AGENT_CONTEXT_USABLE_TOKENS)
 }
 
 /** Admission reserves the full configured response, never a reduced answer. */
@@ -245,6 +254,24 @@ export function hasProactiveCompactionGain(beforeTokens: number, afterTokens: nu
   return afterTokens < triggerTokens && beforeTokens - afterTokens >= Math.min(2_048, Math.ceil(triggerTokens * 0.02))
 }
 
+/** Choose the oldest tool prefix necessary to reach the target. Whole calls and their replies stay paired. */
+export function toolOutputsToKeep(messages: ChatMessage[], tokensToRelease: number, minimum: number): number {
+  const outputs = messages.filter(message => message.role === 'tool')
+  const savings = new Map<ChatMessage, number>()
+  for (const { assistant, outputs: group } of completedToolRounds(messages, minimum)) {
+    // The retained prose is copied into the receipt. Arguments, reasoning
+    // and all replies of a parallel call are retired as one indivisible group.
+    savings.set(group.at(-1)!, estimateChatMessageTokens({ ...assistant, content: null }) + estimateChatMessagesTokens(group))
+  }
+  for (const { output } of historicalToolObservations(messages, minimum)) savings.set(output, estimateChatMessageTokens(output))
+  let remaining = tokensToRelease
+  for (let index = 0; index < outputs.length - minimum; index++) {
+    remaining -= savings.get(outputs[index]) ?? 0
+    if (remaining <= 0) return outputs.length - index - 1
+  }
+  return minimum
+}
+
 /** Plan a useful reduction before replacing any live messages. */
 export function planInRunCompaction(messages: ChatMessage[], beforeTokens: number,
   budget: Pick<AgentContextBudget, 'compactAtTokens' | 'hardRequestTokens'>,
@@ -258,7 +285,8 @@ export function planInRunCompaction(messages: ChatMessage[], beforeTokens: numbe
   let collapsedToolRounds = 0
   const firstCandidate = [...messages]
   releaseCompletedReasoning(firstCandidate)
-  const firstStage = compactEarlyToolPayloads(firstCandidate, keepRecentToolOutputs)
+  const targetTokens = targetContextTokens(triggerTokens)
+  const firstStage = compactEarlyToolPayloads(firstCandidate, toolOutputsToKeep(firstCandidate, beforeTokens - targetTokens, keepRecentToolOutputs))
   const firstTokens = estimate(firstCandidate)
   if (hasProactiveCompactionGain(beforeTokens, firstTokens, triggerTokens) || beforeTokens > budget.hardRequestTokens && firstTokens < afterTokens) {
     chosen = firstCandidate
@@ -266,12 +294,12 @@ export function planInRunCompaction(messages: ChatMessage[], beforeTokens: numbe
     compactedToolOutputs = firstStage.compactedToolOutputs
     collapsedToolRounds = firstStage.collapsedToolRounds
   }
-  if (afterTokens > budget.hardRequestTokens) {
+  if (afterTokens > targetTokens) {
     const secondCandidate = [...chosen]
     if (chosen === messages) releaseCompletedReasoning(secondCandidate)
-    const secondStage = collapseEarlyToolRounds(secondCandidate, 1)
+    const secondStage = collapseEarlyToolRounds(secondCandidate, toolOutputsToKeep(secondCandidate, afterTokens - targetTokens, 1))
     const secondTokens = estimate(secondCandidate)
-    if (secondTokens < afterTokens) {
+    if (secondTokens < afterTokens && (beforeTokens > budget.hardRequestTokens || hasProactiveCompactionGain(beforeTokens, secondTokens, triggerTokens))) {
       chosen = secondCandidate
       afterTokens = secondTokens
       compactedToolOutputs += secondStage.compactedToolOutputs

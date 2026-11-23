@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import type { AdminDiagnosticCheck, AdminDiagnosticStage, AdminModelDiagnosticRequest, AdminModelDiagnosticResult } from '../../shared/contracts/admin-model-diagnostics.js'
 import { imageQualityConfigSchema } from '../../shared/contracts/image-model.js'
-import { parseModelCapabilities } from './credits.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { parsePublicHttpUrl } from './public-http.js'
 import { webToolEndpoint } from './web-tool-provider.js'
@@ -61,17 +60,15 @@ export function checkAdminModelConfiguration(model: DiagnosticModelSnapshot): Ad
         ...(metadata.webToolProtocol !== undefined ? { webToolProtocol: metadata.webToolProtocol as WebToolProtocol } : {}) }, model.modelKind === 'web_search' ? 'search' : 'fetch')
     } catch { protocolValid = false }
   }
-  const capabilities = parseModelCapabilities(model.metadata, model.provider)
   const imageQuality = metadata.imageQuality === undefined ? null : imageQualityConfigSchema.safeParse(metadata.imageQuality)
-  const capabilitiesValid = (metadata.contextWindowTokens == null || capabilities.contextWindowTokens !== null)
-    && (!imageQuality || (imageQuality.success && (imageQuality.data.defaultValue === null || imageQuality.data.supportedValues.includes(imageQuality.data.defaultValue))))
+  const capabilitiesValid = !imageQuality || (imageQuality.success && (imageQuality.data.defaultValue === null || imageQuality.data.supportedValues.includes(imageQuality.data.defaultValue)))
   return [
     { field: 'lifecycle', passed: !model.archived, message: model.archived ? '此模型已归档，不能发起新的诊断。' : '活动目录中的配置。' },
     { field: 'modelName', passed: Boolean(model.modelName.trim() && model.modelName !== 'unconfigured'), message: '模型 ID 必须已填写。' },
     { field: 'baseUrl', passed: urlValid, message: '地址需通过现有公共 HTTPS URL 静态校验；尚未解析 DNS。' },
     { field: 'apiKey', passed: model.apiKeyConfigured, message: '仅检查密钥配置状态，不解密或验证鉴权。' },
     { field: 'protocol', passed: protocolValid, message: 'Search / Fetch 使用独立协议和完整工具端点校验，不转成聊天请求。' },
-    { field: 'capabilities', passed: capabilitiesValid, message: '上下文与图片参数按现有能力配置规则检查。' },
+    { field: 'capabilities', passed: capabilitiesValid, message: '已检查图片质量参数。文本模型使用统一的上下文窗口。' },
   ]
 }
 

@@ -55,9 +55,7 @@ export const contextUsageSchema = z.object({
 export type ContextUsage = z.infer<typeof contextUsageSchema>
 
 export const contextStateSchema = z.object({
-  requestSample: z.object({ runId: z.string(), seq: z.number().int().positive() }).optional(),
-  /** Occupied immediately after the latest completed compaction, in the same units as estimatedTokens. */
-  retainedTokens: z.number().int().nonnegative().optional(),
+  requestSample: z.object({ runId: z.string(), seq: z.number().int().positive(), sampledAt: z.string().datetime().optional() }).optional(),
   estimatedTokens: z.number().int().nonnegative(),
   contextWindowTokens: z.number().int().positive(),
   usageRatio: z.number().min(0),

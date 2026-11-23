@@ -244,8 +244,7 @@ type AgentStoreState = {
   /** 各会话未读状态信号（绿/黄/红点）；激活该会话时由宿主 dismiss 清除 */
   sessionSignals: Record<string, SessionSignal>
   usage: AgentTokenUsage
-  requestContext: Extract<AgentStreamEvent, { type: 'context.usage' }> | null
-  requestCompaction: { runId: string; seq: number; retainedTokens: number | null } | null
+  requestContext: (Extract<AgentStreamEvent, { type: 'context.usage' }> & { sessionId: string | null }) | null
   currentTurn: number
   lastSeq: number
   lastVisibleOutput: { runId: string; at: number } | null
@@ -670,7 +669,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   sessionSignals: {},
   usage: emptyUsage,
   requestContext: null,
-  requestCompaction: null,
   currentTurn: 0,
   lastSeq: 0,
   lastVisibleOutput: null,
@@ -1351,16 +1349,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           return base
         case 'context.usage':
           if (event.runId !== state.runId) return {}
-          return { ...base, requestContext: event,
-            ...(state.requestCompaction?.runId === event.runId && state.requestCompaction.seq + 1 === event.seq
-              ? { requestCompaction: { ...state.requestCompaction, retainedTokens: event.estimatedTokens } } : {}) }
+          return { ...base, requestContext: { ...event, sessionId: state.activeSessionId } }
 
         case 'context.compaction': {
           if (event.runId !== state.runId) return {}
           const owned = ensureAssistantMessage(state.messages, event, state.runGoalId)
           if (!owned) return {}
           return { ...base,
-            ...(event.state === 'completed' && { requestCompaction: { runId: event.runId, seq: event.seq, retainedTokens: null } }),
             messages: updateMessageParts(owned, event.messageId, parts => {
               const previous = parts.find(part => part.type === 'context-compaction')
               if (previous?.state === 'completed' || previous?.state === event.state) return parts

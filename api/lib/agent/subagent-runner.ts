@@ -18,6 +18,7 @@ import { intersectToolAuthority, snapshotToolAuthority } from './tool-authority.
 import { toolTurnHistory } from './tool-turn-history.js'
 import {
   planInRunCompaction,
+  fitAgentOutputTokens,
   estimateChatMessagesTokens,
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
@@ -198,7 +199,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         toolCallingProtocol: modelRuntime.toolCallingProtocol,
         thinkingEnabled: modelRuntime.thinkingEnabled,
         outputTokenParameter: modelRuntime.outputTokenParameter,
-        maxOutputTokens,
+        maxOutputTokens: fitAgentOutputTokens(budget.contextWindowTokens, maxOutputTokens, compacted?.afterTokens ?? inputTokens),
         temperature: 0.6,
         signal: params.toolContextBase.signal,
         usageLog: {

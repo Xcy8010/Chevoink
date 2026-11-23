@@ -41,6 +41,7 @@ vi.mock('../../api/lib/agent/context-engine.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/lib/agent/context-engine.js')>()
   return {
     ...actual,
+    compactSessionContext: vi.fn(async () => null),
     loadContextCheckpoint: vi.fn(async () => ({ checkpoint: null, sourceEndedAt: null, sourceEndMessageId: null })),
     listActiveDirectives: vi.fn(async () => [
       { id: 'directive-1', kind: 'writing', scope: 'global', text: '每天至少更新一章', status: 'active', createdAt: new Date('2026-09-01T00:00:00.000Z') },
@@ -69,6 +70,7 @@ const { prisma } = await import('../../api/lib/prisma.js')
 const { searchStoryMemory } = await import('../../api/lib/agent/story-memory.js')
 const { assembleContext, insertSubagentCatalog } = await import('../../api/lib/agent/context.js')
 const { estimateChatMessagesTokens } = await import('../../api/lib/agent/context-budget.js')
+const { compactSessionContext, loadContextCheckpoint } = await import('../../api/lib/agent/context-engine.js')
 const { getLearnedStyleDigest } = await import('../../api/lib/agent/style-learning.js')
 const { readChapterWritingBackground, readWritingPresentation } = await import('../../api/lib/agent/writing-request-context.js')
 const { buildStoryCompilerDigest } = await import('../../api/lib/agent/story-compiler.js')
@@ -606,24 +608,34 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(estimateChatMessagesTokens(result.messages) + input.toolDefinitionTokens).toBeLessThanOrEqual(99840)
     expect(JSON.stringify(result.messages)).not.toContain('巨巨')
     expect(JSON.stringify(result.messages)).toContain('共 1 组消息或回执')
-    const tight = await assembleContext({ ...input, toolDefinitionTokens: 65000 })
+    const tight = await assembleContext({ ...input, toolDefinitionTokens: 90000 })
     expect(tight.messages.map(message => message.content)).toEqual(expect.arrayContaining([originalRequest, recentRequest]))
     expect(tight.messages.map(message => message.content)).not.toContain(previousAnswer)
   })
 
-  it('leaves room for a fresh parallel chapter-read round even with a full session history', async () => {
-    const input = { ...buildInput(), contextWindowTokens: 128000, maxOutputTokens: 8192, toolDefinitionTokens: 5000 }
-    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(Array.from({ length: 110 }, (_, index) => ({
+  it('reads a checkpoint tail only when a full session reaches the threshold, preserving room for the next parallel read', async () => {
+    const input = { ...buildInput(), contextWindowTokens: 258000, maxOutputTokens: 8192, toolDefinitionTokens: 5000 }
+    const rows = Array.from({ length: 240 }, (_, index) => ({
       id: String(index), role: 'user', parts: [{ type: 'text', text: `历史${index}：${'章'.repeat(1000)}` }],
-    })) as never)
+    }))
+    const checkpoint = { id: 'compact', runId: 'old', summary: { goals: [], pending: [], constraints: [], completed: [], decisions: [], toolReceipts: [] } }
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValueOnce(rows.slice(0, 70) as never)
+    expect((await assembleContext(input)).inputEstimates!.history.messages).toBe(70)
+    expect(compactSessionContext).not.toHaveBeenCalled()
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValueOnce(rows as never).mockResolvedValueOnce(rows.slice(0, 90) as never)
+    vi.mocked(compactSessionContext).mockResolvedValueOnce(checkpoint as never)
+    vi.mocked(loadContextCheckpoint).mockResolvedValueOnce({ checkpoint: null, sourceEndedAt: null, sourceEndMessageId: null })
+      .mockResolvedValueOnce({ checkpoint: checkpoint as never, sourceEndedAt: new Date(), sourceEndMessageId: 'end' })
     const result = await assembleContext(input)
+    expect(compactSessionContext).toHaveBeenCalledTimes(1)
+    expect(estimateChatMessagesTokens(result.messages) + input.toolDefinitionTokens).toBeLessThanOrEqual(114000)
     const nextRound = [
       { role: 'assistant' as const, content: null, toolCalls: ['first', 'second'].map(id => ({
         id, name: 'chapter_read', arguments: JSON.stringify({ chapterId: id, limit: 12000 }) })) },
       ...['first', 'second'].map(id => ({ role: 'tool' as const, toolCallId: id, content: '章'.repeat(12000) })),
     ]
     expect(result.inputEstimates!.history.tokens).toBeGreaterThan(20000)
-    expect(estimateChatMessagesTokens([...result.messages, ...nextRound]) + input.toolDefinitionTokens).toBeLessThanOrEqual(113408)
+    expect(estimateChatMessagesTokens([...result.messages, ...nextRound]) + input.toolDefinitionTokens).toBeLessThan(228000)
   })
 
   it('indicates earlier history is available when the database read limit is reached even if all 500 returned messages fit', async () => {

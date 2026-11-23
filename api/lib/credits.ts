@@ -1,3 +1,4 @@
+import { AGENT_CONTEXT_WINDOW_TOKENS } from '../../shared/agent-context-window.js'
 import { modelPublicCopy } from '../../shared/model-public-copy.js'
 import { applyTesterCreditFloor, isEffectiveTester, TESTER_CREDIT_RULE } from './tester-entitlement.js'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
@@ -86,7 +87,7 @@ export type ModelCapabilities = {
   contextWindowTokens: number | null
 }
 
-export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undefined, provider = ''): ModelCapabilities {
+export function readStoredModelCapabilities(metadata: Prisma.JsonValue | null | undefined, provider = ''): ModelCapabilities {
   const record = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
     ? metadata as Record<string, unknown>
     : {}
@@ -123,6 +124,11 @@ export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undef
       ? record.contextWindowTokens
       : null,
   }
+}
+
+// Model metadata may still contain the window from an older configuration form.
+export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undefined, provider = ''): ModelCapabilities {
+  return { ...readStoredModelCapabilities(metadata, provider), contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS }
 }
 
 /** Preserve exact native choices; map unavailable UI strengths to the nearest supported level. */
@@ -759,7 +765,7 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
   }
   if (!config) {
     const configuredModels = await prisma.aiModelConfig.count({ where: { ownerUserId: null } })
-    if (tier === 'speed' && configuredModels === 0) return { tier, multiplierBps: 10000, provider: 'deepseek', modelName: null, baseUrl: null, apiKey: null, reasoningEffort: requestedReasoningEffort ?? 'high', reasoningEfforts: ['low', 'high', 'max'], visionEnabled: false, contextWindowTokens: null }
+    if (tier === 'speed' && configuredModels === 0) return { tier, multiplierBps: 10000, provider: 'deepseek', modelName: null, baseUrl: null, apiKey: null, reasoningEffort: requestedReasoningEffort ?? 'high', reasoningEfforts: ['low', 'high', 'max'], visionEnabled: false, contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS }
     // 基础模型档未建行/未启用时回退极速档：后台轻任务（关系网/导出建议）不因可选配置缺失而整体失败
     if (tier === 'basic') return getModelTierRuntime('speed', userId, customModelId, requestedReasoningEffort ?? 'low')
     throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')

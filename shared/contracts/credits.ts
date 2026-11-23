@@ -172,7 +172,6 @@ export type SaveCustomModelRequest = {
   reasoningEfforts?: ModelReasoningEffort[]
   defaultReasoningEffort?: ModelReasoningEffort
   visionEnabled?: boolean
-  contextWindowTokens?: number
 }
 
 /** Public policy only: no account, catalog or administrator information. */

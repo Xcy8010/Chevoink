@@ -1,5 +1,6 @@
 import { selectWeightedModelRuntime, resolveWeightedModelRuntime } from '../model-weighted-routing.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { contextUsageSchema } from '../../../shared/contracts/context-compaction-contracts.js'
 import { currentNativeToolViews, readFrozenModelToolViews, readPreparedModelRequest } from './runtime-tool-view.js'
 import { resolveResponsesEndpoint } from '../ai-responses-route.js'
 import { readEffectiveNativeTooling } from './native-tool-policy.js'
@@ -27,7 +28,7 @@ import { collectDurableCompletionEvidence } from './runtime-completion-evidence.
 import { advanceDurableWritingDelivery } from './runtime-writing-delivery.js'
 import { CHAPTER_MEMORY_MARKER, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { advanceDurableMemory } from './runtime-memory.js'
-import { CONTEXT_COMPACTION_THRESHOLD, estimateChatMessageTokens, estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurableInputLimit, resolveSessionContextWindow } from './context-budget.js'
+import { estimateChatMessageTokens, estimateChatMessagesTokens, estimateToolDefinitionTokens, fitAgentOutputTokens, resolveAgentContextBudget, resolveDurableInputLimit, resolveSessionContextWindow } from './context-budget.js'
 import { readDurableImportBoundary, waitForDurableImport } from './runtime-import.js'
 import { modelRouteRevision, recordRequestContext } from './runtime-model-cursor.js'
 import { consumeDurableGoalConsent } from './goal-consent.js'
@@ -304,8 +305,14 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
       || runtimeJson(state.frame.state.messages).hash !== runtimeJson(source.state.messages).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '未派发模型请求缺少原准入位置。')
     await assertProviderBudget(tx, lease.taskRootId)
     if (runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原模型请求输入损坏。')
+    const measurement = await tx.agentExecutionOutbox.findUnique({
+      where: { eventKey: `context-usage:${operation.id}` },
+      select: { taskRootId: true, operationId: true, type: true, payload: true },
+    })
+    const usage = measurement?.operationId === operation.id && measurement.taskRootId === lease.taskRootId
+      && measurement.type === 'execution.context.measured' ? contextUsageSchema.safeParse(measurement.payload) : undefined
     return { state: { ...state, frame: source }, preparedTools: readFrozenModelToolViews(operation.inputSnapshot),
-      request: readPreparedModelRequest(operation.inputSnapshot) }
+      request: readPreparedModelRequest(operation.inputSnapshot), admittedContext: usage?.data }
   })
   if (prepared && 'refreshed' in prepared) return { kind: 'context' as const, frame: prepared.refreshed! }
   if (prepared && 'publicWeb' in prepared) return executeDurablePublicWeb(lease, prepared.publicWeb!, signal)
@@ -346,13 +353,18 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     { userId: lease.userId, runId: lease.runId, modelConfigId: configuration.model.modelConfigId, modelConfigRevision: configuration.model.modelConfigRevision, provider: configuration.model.provider, modelName: configuration.model.modelName }), configuration.model.weightedRoute)
   if (runtime.tier !== tier.data) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原模型档位不可用，不能静默回退。')
   const currentWindow = runtime.contextWindowTokens ?? env.agentContextWindowTokens
-  const routeWindow = Math.min(configuration.model.contextWindowTokens ?? currentWindow, currentWindow)
-  const window = prepared ? routeWindow : resolveSessionContextWindow(env.agentContextWindowTokens, routeWindow)
+  const routeWindow = Math.min(prepared?.admittedContext?.contextWindowTokens ?? configuration.model.contextWindowTokens ?? currentWindow, currentWindow)
+  const window = prepared ? routeWindow : resolveSessionContextWindow(env.agentContextWindowTokens, currentWindow)
   const configuredOutput = configuration.model.maxOutputTokens ?? env.aiTextMaxOutputTokens
-  const maxOutputTokens = prepared ? configuredOutput : Math.min(configuredOutput, runtime.maxOutputTokens ?? configuredOutput)
-  // Reserve the actual requested output, even when it exceeds the legacy
-  // estimator's quarter-window allowance. Never shorten the requested answer.
-  const inputLimit = resolveDurableInputLimit(window, maxOutputTokens)
+  const body = prepared?.request.body
+  const frozenOutput = body?.max_output_tokens ?? body?.max_completion_tokens ?? body?.max_tokens
+  const maxOutputTokens = prepared ? (typeof frozenOutput === 'number' ? frozenOutput : configuredOutput)
+    : Math.min(configuredOutput, runtime.maxOutputTokens ?? configuredOutput)
+  // Prepared requests retain their exact output setting. A new request fits
+  // its output allowance after measuring the input that will actually be sent.
+  const budget = resolveAgentContextBudget(window, maxOutputTokens)
+  const { compactAtTokens } = budget
+  const inputLimit = prepared ? resolveDurableInputLimit(window, maxOutputTokens) : budget.hardRequestTokens
   const originalSpec = taskSpecSchema.parse(current.state.originalSpec)
   const textOnlyModel = isTextOnlyModel(runtime)
   if (inputLimit > 0 && !prepared && !lease.parent && textOnlyModel && originalSpec.publicWebQuestion) {
@@ -370,13 +382,12 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   const requestOverhead = estimateToolDefinitionTokens(tools) + (textOnlyWebQuestionRequired
     ? estimateChatMessageTokens({ role: 'system', content: textOnlyWebQuestionGuidance }) : 0)
   const estimate = (messages: ChatMessage[]) => requestOverhead + estimateChatMessagesTokens(prepared ? messages : projectPersonalizedMessages(messages, personalization))
-  const compactAtTokens = Math.min(Math.floor(window * CONTEXT_COMPACTION_THRESHOLD), inputLimit)
-  if (!prepared && inputLimit > 0) {
+  const estimatedTokens = prepared?.admittedContext?.estimatedTokens ?? estimate(frame.state.messages)
+  if (!prepared && inputLimit > 0 && estimatedTokens >= compactAtTokens) {
     const compacted = await advanceDurableContext(lease, { contextWindowTokens: window, hardLimit: inputLimit, compactAtTokens, estimate,
       canReadArchive: tools.some(tool => tool.function.name === 'execution_context_read') })
     if (compacted) return { kind: 'context' as const, frame: compacted }
   }
-  const estimatedTokens = estimate(frame.state.messages)
   const contextUsage = { estimatedTokens, contextWindowTokens: window, compactAtTokens }
   if (inputLimit < 1 || estimatedTokens > inputLimit) {
     if (!lease.parent && !prepared) await withRunLease(lease, async tx => {
@@ -400,13 +411,13 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     personalization,
     nextPromptMarker: configuration.nextPromptMarker,
     weightedRoute: runtime.weightedRoute, provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, providerBaseUrl: runtime.baseUrl,
-    providerApiKey: runtime.apiKey, reasoningEffort: effort.data, maxOutputTokens, signal,
+    providerApiKey: runtime.apiKey, reasoningEffort: effort.data, maxOutputTokens: prepared ? maxOutputTokens : fitAgentOutputTokens(window, maxOutputTokens, estimatedTokens), signal,
     toolCallingProtocol: configuration.model.toolCallingProtocol,
     ...(resolveResponsesEndpoint({ model: runtime.modelName ?? env.aiTextModel, baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl,
       reasoningEffort: effort.data, reasoningParameterMode: runtime.reasoningParameterMode, toolCallingProtocol: configuration.model.toolCallingProtocol })
       && runtime.reasoningParameterMode === 'omit' ? { reasoningParameterMode: runtime.reasoningParameterMode } : {}),
     durableExecution: { lease, operationKey, attemptKey: '1', price, cursor: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
-      ...(!lease.parent && !prepared ? { contextUsage } : {}) } },
+      ...(!prepared ? { contextUsage } : {}) } },
     usageLog: { userId: lease.userId, agentRunId: lease.runId, action: 'workspaceAgent', modelTier: tier.data, multiplierBps: price.multiplierBps, turn: frame.state.turn + 1 },
   }).then(result => ({ kind: 'model' as const, result }), async error => {
     if (!(error instanceof DataAccessError) || error.code !== STALE_PERSONALIZATION_REQUEST) throw error

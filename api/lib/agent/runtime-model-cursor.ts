@@ -99,7 +99,7 @@ export async function prepareModelCursorOperation(token: RunLeaseToken, cursor: 
     const operation = await preparePricedProviderOperationInTransaction(tx, token, input)
     const pending = await saveExecutionStateInTransaction(tx, token, { ...cursor, snapshot: { ...frame.state, phase: 'awaiting_operation', pendingOperationId: operation.id,
       turn: frame.state.turn + 1, nextOperationSequence: frame.state.nextOperationSequence + 1 } })
-    if (cursor.contextUsage && !token.parent) await recordRequestContext(tx, token, cursor.contextUsage, { operationId: operation.id })
+    if (cursor.contextUsage) await recordRequestContext(tx, token, cursor.contextUsage, { operationId: operation.id })
     return { operation, pending }
   })
 }

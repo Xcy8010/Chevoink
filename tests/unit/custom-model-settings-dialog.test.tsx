@@ -65,6 +65,7 @@ it('hides manually configured capabilities and sends only model identity setting
   expect(screen.queryByRole('combobox', { name: '工具调用协议' })).toBeNull()
   expect(screen.queryByText('支持的推理强度')).toBeNull()
   expect(screen.queryByText('默认强度')).toBeNull()
+  expect(screen.queryByRole('spinbutton', { name: /上下文窗口/ })).toBeNull()
   expect(screen.queryByText('模型支持图片输入')).toBeNull()
   expect(screen.queryByText(/保存时自动检测模型能力/)).toBeNull()
 
@@ -77,7 +78,6 @@ it('hides manually configured capabilities and sends only model identity setting
     displayName: '我的模型',
     modelName: 'fixture-model',
     baseUrl: 'https://api.deepseek.com',
-    contextWindowTokens: 128000,
     enabled: true,
     apiKey: 'fixture-key',
   })

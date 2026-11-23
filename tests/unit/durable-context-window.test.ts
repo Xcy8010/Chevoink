@@ -48,3 +48,16 @@ it('keeps an intact frame below the trigger, without a reader, or for a negligib
   expect(db.save).not.toHaveBeenCalled()
   expect(db.archive).not.toHaveBeenCalled()
 })
+
+it('does not archive a model request merely because its stored frame exceeds the byte-level maintenance watermark', async () => {
+  const large = Array.from({ length: 12 }, (_, index): ChatMessage[] => [
+    { role: 'assistant', content: '', toolCalls: [{ id: String(index), name: 'chapter_read', arguments: '{}' }] },
+    { role: 'tool', toolCallId: String(index), content: 'x'.repeat(24_000) },
+  ]).flat()
+  const fixture = await db.read()
+  db.read.mockResolvedValue({ ...fixture, frame: { ...fixture.frame, state: { phase: 'idle', messages: large } } })
+  expect(Buffer.byteLength(JSON.stringify(large))).toBeGreaterThan(256 * 1024)
+  expect(estimateChatMessagesTokens(large)).toBeLessThan(228_000)
+  expect(await advanceDurableContext(token, { ...budget, contextWindowTokens: 258000, compactAtTokens: 228000, hardLimit: 228000 })).toBeNull()
+  expect(db.archive).not.toHaveBeenCalled()
+})

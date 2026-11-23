@@ -46,7 +46,7 @@ describe('custom model routes capability validation', () => {
     mocks.validate.mockResolvedValue(verifiedResponses)
     await request(app).post('/credits/models').send({ ...body, toolCallingProtocol: 'chat' }).expect(201)
     expect(mocks.validate.mock.calls[0][0]).not.toHaveProperty('toolCallingProtocol')
-    expect(mocks.create).toHaveBeenCalledWith({ data: expect.objectContaining({ metadata: verifiedResponses }) })
+    expect(mocks.create).toHaveBeenCalledWith({ data: expect.objectContaining({ metadata: { ...verifiedResponses, contextWindowTokens: 258000 } }) })
     mocks.findMany.mockResolvedValue([{ ...target, displayName: 'Saved', createdAt: target.updatedAt, enabled: true,
       metadata: verifiedResponses }])
     const response = await request(app).get('/credits/models').expect(200)
@@ -89,9 +89,9 @@ describe('custom model routes capability validation', () => {
   })
   it('validates the existing bound local profile before activation and blocks a route change', async () => {
     mocks.findFirst.mockResolvedValue({ ...target, provider: 'local-openai', baseUrl: 'http://127.0.0.1:7863/v1' })
-    await request(app).patch('/credits/models/model-id').send({ enabled: true }).expect(200)
+    await request(app).patch('/credits/models/model-id').send({ enabled: true, contextWindowTokens: 16000 }).expect(200)
     expect(mocks.validate).toHaveBeenCalledWith(expect.objectContaining({ provider: 'local-openai', userId: 'owner', apiKey: 'stored-test-key' }))
-    expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'model-id', ownerUserId: 'owner', updatedAt: target.updatedAt }, data: expect.objectContaining({ enabled: true }) }))
+    expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'model-id', ownerUserId: 'owner', updatedAt: target.updatedAt }, data: expect.objectContaining({ enabled: true, metadata: expect.objectContaining({ contextWindowTokens: 258000 }) }) }))
     mocks.validate.mockClear(); mocks.updateMany.mockClear()
     await request(app).patch('/credits/models/model-id').send({ modelName: 'new-model', enabled: true }).expect(409)
     expect(mocks.validate).not.toHaveBeenCalled(); expect(mocks.updateMany).not.toHaveBeenCalled()
@@ -101,7 +101,7 @@ describe('custom model routes capability validation', () => {
       reasoningParameterMode: 'native', capabilities: { visionEnabled: true }, capabilityValidation: { text: 'verified' }, contextWindowTokens: 64000 }).expect(201)
     expect(response.body.data).toEqual({ id: 'created' })
     expect(mocks.create).toHaveBeenCalledWith({ data: expect.objectContaining({ ownerUserId: 'owner', baseUrl: 'https://provider.example/v1',
-      apiKeyCiphertext: 'encrypted:fixture-test-key', metadata: { ...verified, contextWindowTokens: 64000 } }) })
+      apiKeyCiphertext: 'encrypted:fixture-test-key', metadata: { ...verified, contextWindowTokens: 258000 } }) })
     expect(response.text).not.toContain('fixture-test-key')
     expect(mocks.validate.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal)
   })
@@ -126,7 +126,7 @@ describe('custom model routes capability validation', () => {
     await request(app).patch('/credits/models/model-id').send({ displayName: 'renamed', visionEnabled: true, reasoningEfforts: ['max'] }).expect(200)
     expect(mocks.validate).toHaveBeenCalledWith(expect.objectContaining({ provider: 'custom', modelName: 'old-model', baseUrl: target.baseUrl, apiKey: 'stored-test-key' }))
     expect(mocks.updateMany).toHaveBeenCalledWith({ where: { id: target.id, ownerUserId: 'owner', updatedAt: target.updatedAt },
-      data: expect.objectContaining({ displayName: 'renamed', apiKeyCiphertext: undefined, metadata: { ...target.metadata, ...verified } }) })
+      data: expect.objectContaining({ displayName: 'renamed', apiKeyCiphertext: undefined, metadata: { ...target.metadata, ...verified, contextWindowTokens: 258000 } }) })
   })
   it('reports a concurrent edit conflict rather than applying a slow probe over newer configuration', async () => {
     mocks.updateMany.mockResolvedValue({ count: 0 })

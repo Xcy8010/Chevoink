@@ -1,3 +1,4 @@
+import { AGENT_CONTEXT_WINDOW_TOKENS } from '../../shared/agent-context-window.js'
 import { getPublicCreditPolicy } from '../lib/credit-policy.js'
 import { randomUUID } from 'node:crypto'
 
@@ -31,7 +32,6 @@ const customModelCreateSchema = z.object({
   reasoningEfforts: z.array(modelReasoningEffortSchema).min(1).max(7).optional(),
   defaultReasoningEffort: modelReasoningEffortSchema.optional(),
   visionEnabled: z.boolean().optional(),
-  contextWindowTokens: z.number().int().min(16_000).max(4_000_000).optional(),
 })
 const customModelUpdateSchema = customModelCreateSchema.partial()
 const validatingUsers = new Set<string>()
@@ -153,8 +153,8 @@ router.post('/models', async (req: Request, res: Response): Promise<void> => {
       await prisma.aiModelConfig.create({ data: { id, key: `user:${userId}:${id}`, ownerUserId: userId, provider: body.provider,
         displayName: body.displayName, modelName: body.modelName, baseUrl, apiKeyCiphertext: encryptSecret(token), tier: null, multiplierBps: 0,
         enabled: false, selectable: true, metadata: { connectorOwnerTokenVersion: owner.tokenVersion, reasoningEfforts: ['none'], defaultReasoningEffort: 'none', visionEnabled: false,
-          contextWindowTokens: body.contextWindowTokens ?? 128000 } } })
-      res.status(201).json(buildSuccess(requestId, { id, connectorSetup: { version: 1, server: env.webUrl, token, provider: body.provider, model: body.modelName, baseUrl, contextWindowTokens: body.contextWindowTokens ?? 128000 } }))
+          contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS } } })
+      res.status(201).json(buildSuccess(requestId, { id, connectorSetup: { version: 1, server: env.webUrl, token, provider: body.provider, model: body.modelName, baseUrl, contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS } }))
       return
     }
     if (!body.apiKey || body.apiKey.length < 8) throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请填写有效的 API Key。')
@@ -174,7 +174,7 @@ router.post('/models', async (req: Request, res: Response): Promise<void> => {
         selectable: true,
         metadata: {
           ...capabilities,
-          ...(body.contextWindowTokens ? { contextWindowTokens: body.contextWindowTokens } : {}),
+          contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS,
         },
       },
     })
@@ -192,9 +192,7 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     const target = await prisma.aiModelConfig.findFirst({ where: { id: req.params.modelId, ownerUserId: userId } })
     if (!target) throw new DataAccessError(404, 'CUSTOM_MODEL_NOT_FOUND', '自定义模型不存在。')
     if (isLocalModelProvider(target.provider)) {
-      const localMetadata = target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}
-      if (body.apiKey || body.provider && body.provider !== target.provider || body.baseUrl && normalizeLocalModelUrl(body.baseUrl) !== target.baseUrl || body.modelName && body.modelName !== target.modelName
-        || body.contextWindowTokens && body.contextWindowTokens !== localMetadata.contextWindowTokens) {
+      if (body.apiKey || body.provider && body.provider !== target.provider || body.baseUrl && normalizeLocalModelUrl(body.baseUrl) !== target.baseUrl || body.modelName && body.modelName !== target.modelName) {
         throw new DataAccessError(409, 'LOCAL_MODEL_RECREATE_REQUIRED', '修改本地服务或重新配对时，请添加新的本地模型配置；原任务仍保留原模型身份。')
       }
       const token = decryptSecret(target.apiKeyCiphertext!)
@@ -202,14 +200,13 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
       const metadata = target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}
       const updated = await prisma.aiModelConfig.updateMany({ where: { id: target.id, ownerUserId: userId, updatedAt: target.updatedAt }, data: {
         displayName: body.displayName, enabled: body.enabled === false ? false : true,
-        metadata: { ...metadata, ...capabilities, ...(body.contextWindowTokens ? { contextWindowTokens: body.contextWindowTokens } : {}) },
+        metadata: { ...metadata, ...capabilities, contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS },
       } })
       if (updated.count !== 1) throw new DataAccessError(409, 'CUSTOM_MODEL_CHANGED', '校验期间模型已变更，请重新打开配置后保存。')
       if (body.enabled === false) localModelBroker.revoke(connectorKey(token))
       res.json(buildSuccess(requestId, { ok: true })); return
     }
     if (body.provider && isLocalModelProvider(body.provider)) throw new DataAccessError(409, 'LOCAL_MODEL_RECREATE_REQUIRED', '请添加新的本地模型配置。')
-    const currentCapabilities = parseModelCapabilities(target.metadata, target.provider)
     const apiKey = body.apiKey ?? (target.apiKeyCiphertext ? decryptSecret(target.apiKeyCiphertext) : null)
     if (!apiKey || !(body.baseUrl ?? target.baseUrl)) throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请填写模型地址和 API Key。')
     const capabilities = await validateModel(userId, res, {
@@ -228,7 +225,7 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
         metadata: {
           ...(target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}),
           ...capabilities,
-          contextWindowTokens: body.contextWindowTokens ?? currentCapabilities.contextWindowTokens,
+          contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS,
         },
       },
     })

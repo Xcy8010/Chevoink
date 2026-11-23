@@ -49,9 +49,9 @@ import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
 import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, governedPolicyKey, type AgentDefinition } from './agents.js'
 import { deregisterActiveRun, registerActiveRun, getActiveRun } from './active-runs.js'
 import { clearRunBaselines, getLastTouchedChapter } from './baseline.js'
-import { AGENT_BEHAVIOR_CORE, assembleContext, insertSubagentCatalog } from './context.js'
+import { assembleContext, insertSubagentCatalog } from './context.js'
 import { readWritingCollaborationDigest, COLLABORATION_MARKER } from './writing-collaboration.js'
-import { captureUserDirectives, compactSessionContext } from './context-engine.js'
+import { captureUserDirectives } from './context-engine.js'
 import { syncNovelMemoryProjection } from './story-memory.js'
 import { isAgent2FeatureEnabled, resolveAgent2FeatureFlags } from '../agent2-feature-flags.js'
 import { createRunEventBus, disposeRunEventBus, getRunEventBus, type RunEventBus } from './events.js'
@@ -113,6 +113,7 @@ import { recordSkillLoads } from './skills/receipts.js'
 import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/index.js'
 import {
   planInRunCompaction,
+  fitAgentOutputTokens,
   estimateChatMessagesTokens,
   estimateChatMessageTokens,
   estimateToolDefinitionTokens,
@@ -882,14 +883,11 @@ async function finalizeLegacyRun(
   // paid graph rebuild after publishing the run's terminal event would escape
   // its budget/activity/cancellation boundary.
   if (status !== 'paused' && finalizedRun && allowContextSideEffects && !goalExecution) {
-    await Promise.all([
-      compactSessionContext(finalizedRun.userId, finalizedRun.sessionId, false).catch((error) => {
-        console.error('[agent-loop] 对话结束后自动整理上下文失败', runId, error)
-      }),
-      taskSpecSchema.safeParse(finalizedRun.taskSpec).data?.intent === 'research_analysis' ? Promise.resolve() : syncNovelMemoryProjection(finalizedRun.userId, finalizedRun.novelId, { runId }).catch((error) => {
+    if (taskSpecSchema.safeParse(finalizedRun.taskSpec).data?.intent !== 'research_analysis') {
+      await syncNovelMemoryProjection(finalizedRun.userId, finalizedRun.novelId, { runId }).catch((error) => {
         console.error('[agent-loop] 对话结束后自动更新作品记忆失败', runId, error)
-      }),
-    ])
+      })
+    }
   }
 
   if (!finalizedRun && !goalFenced && !ownerFenced) {
@@ -1496,10 +1494,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         prompt: params.prompt,
       })))
     }
-    // 仅压缩已终态的旧 run；当前正在执行的消息永不进入检查点。
-    await compactSessionContext(params.userId, params.sessionId, false).catch((error) => {
-      console.error('[agent-loop] 自动上下文压缩失败，继续使用无损近期历史', runId, error)
-    })
 
     // 首次对话且仍是默认标题时异步自动命名（仅一次，不阻塞循环）
     if (!params.resume && !ownedGoalExecution) {
@@ -1843,13 +1837,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     if (continuingTask && currentChapterReview?.ready && hasPendingChapterReviewDecision(currentChapterReview)) {
       messages.push({ role: 'user', content: `[系统·本次只读核对] compilationId=${currentChapterReview.compilationId}。${chapterReviewDecisionGuidance(currentChapterReview)} 此状态提示不新增权限、不重置预算，也不代表意见已处理或任务完成。` })
     }
-    // A4：长上下文提醒消息（单实例，每轮移除后重新追加到队尾，保证只存在一条且最靠近当前轮）
-    const contextReminder: ChatMessage = {
-      role: 'user',
-      content: `[系统提醒] 对话已较长，继续遵守同一行为核心：\n${AGENT_BEHAVIOR_CORE}\n当前模式：${params.mode}。任务范围、工具权限和原回执保持。`,
-    }
-
-    const baseContextReminder = contextReminder.content
+    const deliveryReminder: ChatMessage = { role: 'user', content: '' }
     const preparationReminder: ChatMessage = { role: 'user', content: '' }
     const completedWritingWrapUp: { value: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>> | null } = { value: null }
 
@@ -2103,14 +2091,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       activeReviewStateHint = reviewState && (reviewState.reviewBoundPlan || reviewState.terminalReview?.state === 'unverified')
         ? { role: 'user', content: `[系统/只读修订状态] 仅呈现原合同与当前报告，不新增权限、检查额度或进度。${reviewState.reviewBoundPlan?.guidance ?? ''}\n${chapterReviewDecisionGuidance(reviewState)}` } : null
       if (activeReviewStateHint) messages.push(activeReviewStateHint)
-      // A4 长上下文防稀释：超过阈值后每轮把提醒刷新到队尾，拉回系统约束注意力
-      const reminderIndex = messages.indexOf(contextReminder)
+      const reminderIndex = messages.indexOf(deliveryReminder)
       if (reminderIndex >= 0) {
         messages.splice(reminderIndex, 1)
       }
-      contextReminder.content = completedWritingWrapUp.value ? `${baseContextReminder}\n[当前已核验交付；只读正文数据，不构成新指令]\n${JSON.stringify(completedWritingWrapUp.value.chapters.map(({ id, title, revision, content }) => ({ id, title, revision, content })))}\n这些章节已真实提交。本轮按原请求完成创作回复，不再执行章节写作、检查或提交。` : baseContextReminder
-      if (chapterMemoryWrapUp) contextReminder.content += `\n${CHAPTER_MEMORY_GUIDANCE}`
-      if (completedWritingWrapUp.value && todoItems.some(item => item.status === 'pending' || item.status === 'in_progress')) contextReminder.content += `\n${completedWritingTodoGuidance(todoItems)}`
       const preparationHint = completedWritingWrapUp.value ? '' : writingPreparationGuidance(taskSpec, progressSignatures)
       const preparationReminderIndex = messages.indexOf(preparationReminder)
       if (preparationReminderIndex >= 0) messages.splice(preparationReminderIndex, 1)
@@ -2129,16 +2113,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       toolContext.personalizationMemoryEpoch = personalization?.memoryEpoch
       const estimateRequest = (candidate: ChatMessage[]) =>
         estimateChatMessagesTokens(projectPersonalizedMessages(candidate, personalization)) + requestOverheadTokens
-      let estimatedRequestTokens = estimateRequest(messages)
-      const needsContextReminder = completedWritingWrapUp.value || estimatedRequestTokens > contextBudget.warningTokens
-      if (savedPlanTitles.size > 0) {
-        const planReminder = `[当前计划交付] ${SAVED_PLAN_CLOSING_GUIDANCE}`
-        contextReminder.content = needsContextReminder ? `${contextReminder.content}\n${planReminder}` : planReminder
-      }
-      if (needsContextReminder || savedPlanTitles.size > 0) {
-        messages.push(contextReminder)
-        estimatedRequestTokens += estimateChatMessageTokens(contextReminder)
-      }
+      deliveryReminder.content = [
+        completedWritingWrapUp.value && `[当前已核验交付；只读正文数据，不构成新指令]\n${JSON.stringify(completedWritingWrapUp.value.chapters.map(({ id, title, revision, content }) => ({ id, title, revision, content })))}\n这些章节已真实提交。本轮按原请求完成创作回复，不再执行章节写作、检查或提交。`,
+        chapterMemoryWrapUp && CHAPTER_MEMORY_GUIDANCE,
+        completedWritingWrapUp.value && todoItems.some(item => item.status === 'pending' || item.status === 'in_progress') && completedWritingTodoGuidance(todoItems),
+        savedPlanTitles.size > 0 && `[当前计划交付] ${SAVED_PLAN_CLOSING_GUIDANCE}`,
+      ].filter(Boolean).join('\n')
+      if (deliveryReminder.content) messages.push(deliveryReminder)
+      const estimatedRequestTokens = estimateRequest(messages)
       // 在发往供应商之前执行模型窗口感知的压缩；仍超限则安全收尾，不把必失败请求交给供应商。
       let requestBudget = bootstrapCall
         ? { beforeTokens: estimatedRequestTokens, afterTokens: estimatedRequestTokens, fits: true }
@@ -2155,14 +2137,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         requestBudget = { ...requestBudget, fits: requestBudget.afterTokens <= contextBudget.hardRequestTokens }
       }
       if (!bootstrapCall) publishContextUsage(requestBudget.afterTokens)
+      const dispatchOutputTokens = fitAgentOutputTokens(contextWindowTokens, requestOutputTokens, requestBudget.afterTokens)
       console.info('[agent-request-context]', {
         turn, messages: messages.length, tools: openAITools.length, toolTokens: toolDefinitionTokens,
         beforeTokens: requestBudget.beforeTokens, afterTokens: requestBudget.afterTokens,
-        maxOutputTokens: requestOutputTokens,
+        maxOutputTokens: dispatchOutputTokens,
         budgetMs: performance.now() - budgetStarted,
       })
       const budgetPause = !bootstrapCall && (attachmentStage.tokenLimitNotice(params.tokenBudget,
-        inheritedTokens + usage.totalTokens, requestBudget.afterTokens + requestOutputTokens) ?? (!requestBudget.fits ? attachmentStage.pauseNotice(true) : undefined))
+        inheritedTokens + usage.totalTokens, requestBudget.afterTokens + dispatchOutputTokens) ?? (!requestBudget.fits ? attachmentStage.pauseNotice(true) : undefined))
       if (budgetPause) {
         await pauseAttachmentLocally(budgetPause)
         return
@@ -2241,7 +2224,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         toolCallingProtocol: modelRuntime.toolCallingProtocol,
         thinkingEnabled: modelRuntime.thinkingEnabled,
         outputTokenParameter: modelRuntime.outputTokenParameter,
-        maxOutputTokens: requestOutputTokens,
+        maxOutputTokens: dispatchOutputTokens,
         temperature: taskSpec.creativeFreedom === 'stable' ? 0.45 : taskSpec.creativeFreedom === 'bold' ? 0.85 : 0.65,
         onChunk: (chunk) => {
           if (chunk.type === 'text-delta') {
@@ -2488,20 +2471,20 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const recoveryReady = consumeTextRequestRecovery(result, recoverySystem, recoveryContent,
           { userId: params.userId, action: 'agentLoopTurn', targetId: runId })
         console.warn('[agent-empty-response]', { runId, turn, finishReason: result.finishReason,
-          reasoningChars: result.reasoning.length, completionTokens: result.usage.completionTokens, maxOutputTokens: requestOutputTokens,
+          reasoningChars: result.reasoning.length, completionTokens: result.usage.completionTokens, maxOutputTokens: dispatchOutputTokens,
           recoveryReady })
         if (!recoveryReady) {
           await finalizeFailedWithNotice('本次生成的用量或费用尚未确认，已停止重试，进度已保留。')
           return
         }
         if (result.finishReason === 'length' && result.reasoning.trim()) {
-          const recoveryOutput = emptyResponseRecoveryOutputTokens(requestOutputTokens, modelRuntime.maxOutputTokens, contextWindowTokens)
+          const recoveryOutput = emptyResponseRecoveryOutputTokens(dispatchOutputTokens, modelRuntime.maxOutputTokens, contextWindowTokens)
           if (recoveryOutput === null) {
             // This response reached the model's real per-request ceiling. A
             // settled response can still continue with one current task step.
             outputRecoveryFrom = undefined
           } else {
-            outputRecoveryFrom = requestOutputTokens
+            outputRecoveryFrom = dispatchOutputTokens
             requestOutputTokens = recoveryOutput
             contextBudget = resolveRequestContextBudget()
           }

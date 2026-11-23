@@ -1,3 +1,4 @@
+import { AGENT_CONTEXT_WINDOW_TOKENS } from '../../shared/agent-context-window.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { modelRoutesInputSchema, type ModelRouteInput } from '../../shared/contracts/model-routes.js'
 import type { WeightedRouteSelection } from '../../shared/contracts/model-weighted-routes.js'
@@ -12,7 +13,7 @@ export { readModelRoutes } from './model-route-config.js'
 export function presentModelRoutes(metadata: unknown) {
   return readModelRoutes(metadata).map(({ apiKeyCiphertext, ...route }) => ({ ...route, apiKeyConfigured: Boolean(apiKeyCiphertext) }))
 }
-export function saveModelRoutes(input: ModelRouteInput[], metadata: unknown, efforts: string[], capabilities?: { contextWindowTokens: number | null; visionEnabled: boolean }) {
+export function saveModelRoutes(input: ModelRouteInput[], metadata: unknown, efforts: string[], capabilities?: { visionEnabled: boolean }) {
   const previous = new Map(readModelRoutes(metadata).map(route => [route.id, route]))
   const routes = modelRoutesInputSchema.parse(input)
   const ids = routes.flatMap(route => route.id ? [route.id] : [])
@@ -22,14 +23,13 @@ export function saveModelRoutes(input: ModelRouteInput[], metadata: unknown, eff
     const deepseek = route.provider.toLowerCase() === 'deepseek' || /deepseek/i.test(route.modelName) || /(^|\.)deepseek\.com$/i.test(new URL(route.baseUrl).hostname)
     if (route.enabled && deepseek && efforts.some(effort => !['low', 'high', 'max'].includes(effort))) throw new DataAccessError(400, 'REASONING_EFFORT_UNSUPPORTED', '线路必须支持此内置模型的全部推理强度。')
     if (route.enabled && ((route.reasoningEfforts && efforts.some(effort => !route.reasoningEfforts!.some(value => value === effort)))
-      || capabilities?.visionEnabled && route.visionEnabled === false
-      || route.contextWindowTokens && capabilities?.contextWindowTokens && route.contextWindowTokens < capabilities.contextWindowTokens)) {
-      throw new DataAccessError(400, 'MODEL_ROUTE_CAPABILITIES', '启用线路的推理强度、上下文窗口及图片能力必须覆盖内置模型声明的能力。')
+      || capabilities?.visionEnabled && route.visionEnabled === false)) {
+      throw new DataAccessError(400, 'MODEL_ROUTE_CAPABILITIES', '启用线路的推理强度及图片能力必须覆盖内置模型声明的能力。')
     }
     const apiKeyCiphertext = route.apiKey ? encryptSecret(route.apiKey) : route.id ? previous.get(route.id)?.apiKeyCiphertext : undefined
     if (!apiKeyCiphertext) throw new DataAccessError(400, 'MODEL_CONFIG_INCOMPLETE', '新增线路必须填写 API Key。')
     const { apiKey: _secret, ...fields } = route
-    return { ...fields, id: route.id ?? randomUUID(), apiKeyCiphertext }
+    return { ...fields, ...(capabilities && { contextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS }), id: route.id ?? randomUUID(), apiKeyCiphertext }
   })
 }
 

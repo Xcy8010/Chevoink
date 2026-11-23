@@ -6538,12 +6538,25 @@ it.each(['paid', 'cache', 'cache-unknown'] as const)('feeds a real successful ha
     expect(await actualReader.readCompletedReviewRequestRecovery(db as never, context(), [pending])).toEqual(scenario === 'cache-unknown' ? [] : [pending])
   } finally { spies.forEach(spy => spy.mockRestore()) }
 })
+it('does not add a length reminder or compact when normal requests exceed the old warning level', async () => {
+  const { assembleContext } = await import('../../api/lib/agent/context.js')
+  mocks.modelRuntime.mockResolvedValue({ ...await mocks.modelRuntime(), contextWindowTokens: 258000 })
+  vi.mocked(assembleContext).mockResolvedValueOnce({ messages: [{ role: 'user', content: '文'.repeat(180000) }],
+    skillRoute: null, availableSkillVersions: [], timings: {} })
+  queue(response('收到。'))
+  await run()
+  expect(mocks.chat).toHaveBeenCalledOnce()
+  const [request] = mocks.chat.mock.calls[0]
+  expect(request.messages.some(message => typeof message.content === 'string' && message.content.includes('对话已较长'))).toBe(false)
+  expect(events().filter(event => event.type === 'context.compaction')).toHaveLength(0)
+})
+
 it('holds one weighted supplier across real Agent tool roundtrips until its final reply', async () => {
   const secret = await import('../../api/lib/secret-box.js')
   const decrypt = vi.spyOn(secret, 'decryptSecret').mockReturnValue('weighted-loop-key')
   const draw = vi.spyOn(Math, 'random').mockReturnValue(0.8)
   try {
-    mocks.modelRuntime.mockResolvedValue({ ...await mocks.modelRuntime(), apiKey: 'primary-key', baseUrl: 'https://primary.invalid/v1', reasoningEffort: 'high', contextWindowTokens: 256000,
+    mocks.modelRuntime.mockResolvedValue({ ...await mocks.modelRuntime(), apiKey: 'primary-key', baseUrl: 'https://primary.invalid/v1', reasoningEffort: 'high', contextWindowTokens: 258000,
       weightedRoutes: { primaryWeight: 0, candidates: [{ id: 'loop-relay', label: 'relay', weight: 100, provider: 'relay-provider', modelName: 'arbitrary-loop-alias',
         baseUrl: 'https://loop.invalid/v1', apiKeyCiphertext: 'encrypted' }] } } as Awaited<ReturnType<typeof import('../../api/lib/credits.js').getModelTierRuntime>>)
     queue(response('', [call('weighted-read')]), response('当前章节已读取。'))
@@ -6552,11 +6565,28 @@ it('holds one weighted supplier across real Agent tool roundtrips until its fina
     expect(mocks.chat).toHaveBeenCalledTimes(2)
     const samples = mocks.runEvents.map(event => event.payload).filter(event => event.type === 'context.usage')
     expect(samples).toHaveLength(2)
-    expect(samples).toEqual(Array(2).fill(expect.objectContaining({ contextWindowTokens: 128000, compactAtTokens: 99840 })))
+    expect(samples).toEqual(Array(2).fill(expect.objectContaining({ contextWindowTokens: 258000, compactAtTokens: 228000 })))
     expect(samples[1].estimatedTokens).toBeGreaterThan(samples[0].estimatedTokens)
     expect(draw).toHaveBeenCalledOnce()
     for (const [request] of mocks.chat.mock.calls) expect(request).toMatchObject({ provider: 'relay-provider', model: 'arbitrary-loop-alias',
       providerBaseUrl: 'https://loop.invalid/v1', providerApiKey: 'weighted-loop-key', weightedRoute: { source: 'candidate', candidateId: 'loop-relay' },
       usageLog: { modelTier: 'speed', multiplierBps: 12000 } })
   } finally { draw.mockRestore(); decrypt.mockRestore() }
+})
+
+it.each([32768, 65536])('sends an output allowance that fits the measured input without lowering the 228k trigger (configured %i)', async output => {
+  const previous = env.aiTextMaxOutputTokens
+  env.aiTextMaxOutputTokens = output
+  try {
+    mocks.modelRuntime.mockResolvedValue({ ...await mocks.modelRuntime(), contextWindowTokens: 258000, maxOutputTokens: output })
+    vi.mocked(assembleContext).mockResolvedValueOnce({ messages: [{ role: 'user', content: '文'.repeat(220000) }],
+      skillRoute: null, availableSkillVersions: [], timings: {} })
+    queue(response('收到。'))
+    await run()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    const sample = events().find(event => event.type === 'context.usage')
+    expect(sample).toMatchObject({ contextWindowTokens: 258000, compactAtTokens: 228000 })
+    expect(mocks.chat.mock.calls[0][0].maxOutputTokens).toBe(258000 - 12900 - sample!.estimatedTokens)
+    expect(events().some(event => event.type === 'context.compaction')).toBe(false)
+  } finally { env.aiTextMaxOutputTokens = previous }
 })

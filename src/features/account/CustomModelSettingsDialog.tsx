@@ -34,8 +34,8 @@ const PROVIDERS: ProviderOption[] = [
   { id: 'custom', label: '其他 OpenAI 兼容服务', baseUrl: '', apiUrl: '', billing: '视服务商而定：接入前自行确认计费方式', editableBaseUrl: true },
 ]
 
-type FormState = { provider: string; displayName: string; modelName: string; baseUrl: string; apiKey: string; enabled: boolean; contextWindowTokens: string }
-const EMPTY_FORM: FormState = { provider: 'deepseek', displayName: '', modelName: '', baseUrl: 'https://api.deepseek.com', apiKey: '', enabled: true, contextWindowTokens: '128000' }
+type FormState = { provider: string; displayName: string; modelName: string; baseUrl: string; apiKey: string; enabled: boolean }
+const EMPTY_FORM: FormState = { provider: 'deepseek', displayName: '', modelName: '', baseUrl: 'https://api.deepseek.com', apiKey: '', enabled: true }
 
 function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (checked: boolean) => void; label: string; disabled?: boolean }) {
   return <label className={cn('relative inline-flex h-7 w-12 shrink-0 items-center rounded-full focus-within:ring-2 focus-within:ring-[var(--focus-ring)]', disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer')}><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} className="peer sr-only" aria-label={label} /><span aria-hidden className={cn('absolute inset-[2px] rounded-full border transition-[background-color,border-color] duration-200 ease-out', checked ? 'border-[#71857c] bg-[#71857c] dark:border-[#8fa198] dark:bg-[#8fa198]' : 'border-[var(--border-strong)] bg-[var(--surface-muted)]')} /><span aria-hidden className={cn('absolute left-[5px] top-[6px] h-4 w-4 rounded-full bg-white shadow-[0_1px_3px_rgba(15,23,42,.18)] transition-transform duration-200 ease-[cubic-bezier(.22,1,.36,1)]', checked ? 'translate-x-[22px]' : 'translate-x-0')} /></label>
@@ -59,7 +59,7 @@ export function CustomModelSettingsContent({ active = true }: { active?: boolean
   function beginEdit(model: CustomModelView | 'new') {
     editEpochRef.current += 1
     setEditing(model); setError('')
-    setForm(model === 'new' ? EMPTY_FORM : { provider: model.provider, displayName: model.displayName, modelName: model.modelName, baseUrl: model.baseUrl ?? '', apiKey: '', enabled: model.enabled, contextWindowTokens: String(model.contextWindowTokens ?? 128000) })
+    setForm(model === 'new' ? EMPTY_FORM : { provider: model.provider, displayName: model.displayName, modelName: model.modelName, baseUrl: model.baseUrl ?? '', apiKey: '', enabled: model.enabled })
   }
 
   type SaveAttempt = { epoch: number; target: CustomModelView | 'new'; form: FormState }
@@ -69,9 +69,7 @@ export function CustomModelSettingsContent({ active = true }: { active?: boolean
       const baseUrl = attemptForm.provider === 'custom' || provider.editableBaseUrl ? attemptForm.baseUrl.trim() : provider.baseUrl
       if (!attemptForm.displayName.trim() || !attemptForm.modelName.trim() || !baseUrl) throw new Error('请完整填写名称、模型 ID 与服务地址。')
       if (target === 'new' && !isLocalModelProvider(attemptForm.provider) && !attemptForm.apiKey.trim()) throw new Error('新建配置必须填写 API Key。')
-      const contextWindowTokens = Number(attemptForm.contextWindowTokens)
-      if (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 16_000 || contextWindowTokens > 4_000_000) throw new Error('上下文窗口必须是 16,000–4,000,000 之间的整数。')
-      const payload = { provider: attemptForm.provider, displayName: attemptForm.displayName.trim(), modelName: attemptForm.modelName.trim(), baseUrl, contextWindowTokens, enabled: attemptForm.enabled, apiKey: isLocalModelProvider(attemptForm.provider) ? undefined : attemptForm.apiKey.trim() || undefined }
+      const payload = { provider: attemptForm.provider, displayName: attemptForm.displayName.trim(), modelName: attemptForm.modelName.trim(), baseUrl, enabled: attemptForm.enabled, apiKey: isLocalModelProvider(attemptForm.provider) ? undefined : attemptForm.apiKey.trim() || undefined }
       return target === 'new' ? createCustomModel(payload) : updateCustomModel(target.id, payload)
     },
     onSuccess: async (result, attempt) => { if (attempt.epoch !== editEpochRef.current) return; if ('connectorSetup' in result && result.connectorSetup) setConnectorSetup(result.connectorSetup); setEditing(null); await queryClient.invalidateQueries({ queryKey: ['credits', 'custom-models'] }) },
@@ -112,7 +110,6 @@ export function CustomModelSettingsContent({ active = true }: { active?: boolean
       <label className="text-xs">供应商<select disabled={isSaving} value={form.provider} onChange={(event) => { const provider = PROVIDERS.find((item) => item.id === event.target.value)!; setForm((value) => ({ ...value, provider: provider.id, baseUrl: provider.baseUrl })) }} className="mt-1.5 h-11 w-full rounded-[12px] border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-50">{PROVIDERS.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}</select></label>
       <label className="text-xs">显示名称<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-display" autoComplete="off" value={form.displayName} onChange={(event) => setForm((value) => ({ ...value, displayName: event.target.value }))} placeholder="例如：我的高速模型" /></label>
       <label className="text-xs sm:col-span-2">模型 ID<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-id" autoComplete="off" value={form.modelName} onChange={(event) => setForm((value) => ({ ...value, modelName: event.target.value }))} placeholder="由供应商提供的 model 名称" /></label>
-      <label className="text-xs sm:col-span-2">上下文窗口（Tokens）<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-context-window" autoComplete="off" type="number" min="16000" max="4000000" step="1000" value={form.contextWindowTokens} onChange={(event) => setForm((value) => ({ ...value, contextWindowTokens: event.target.value }))} placeholder="例如：128000" /><span className="mt-1.5 block text-[11px] leading-5 text-[var(--text-secondary)]">请按供应商模型文档填写。Agent 会据此提前压缩并为输出预留空间；填大可能触发供应商上下文错误。</span></label>
       {form.provider === 'custom' || selectedProvider.editableBaseUrl ? <label className="text-xs sm:col-span-2">Base URL<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-endpoint" autoComplete="off" inputMode="url" data-lpignore="true" data-1p-ignore="true" value={form.baseUrl} onChange={(event) => setForm((value) => ({ ...value, baseUrl: event.target.value }))} placeholder="https://api.example.com/v1" /></label> : null}
       {local ? <p className="text-xs leading-5 sm:col-span-2">本地模型 API Key 填写在下载的连接配置中，不上传到云端。首次保存会生成连接配置，暂不调用模型；连接后再启用并校验。</p> : <label className="text-xs sm:col-span-2">API Key<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-secret" type="password" autoComplete="new-password" data-lpignore="true" data-1p-ignore="true" value={form.apiKey} onChange={(event) => setForm((value) => ({ ...value, apiKey: event.target.value }))} placeholder={editing === 'new' ? '填写 API Key' : '已配置；留空保持不变'} /></label>}
     </div>

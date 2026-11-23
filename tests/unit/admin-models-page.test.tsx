@@ -102,6 +102,7 @@ it('restores and saves builtin protocol declarations without replacing unknown c
   mount(); await screen.findByText('极速')
   fireEvent.click(screen.getByRole('button', { name: /^编辑 / }))
   fireEvent.click(screen.getByRole('button', { name: '能力与参数' }))
+  expect(screen.queryByRole('spinbutton', { name: /上下文窗口/ })).toBeNull()
   expect((screen.getByRole('combobox', { name: '推理参数协议' }) as HTMLSelectElement).value).toBe('native')
   expect((screen.getByRole('combobox', { name: '输出上限参数' }) as HTMLSelectElement).value).toBe('max_completion_tokens')
   expect((screen.getByRole('combobox', { name: 'thinking 参数' }) as HTMLSelectElement).value).toBe('disabled')

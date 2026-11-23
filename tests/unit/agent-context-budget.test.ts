@@ -11,6 +11,7 @@ import {
   estimateChatMessagesTokens,
   estimateTextTokens,
   estimateToolDefinitionTokens,
+  fitAgentOutputTokens,
   resolveAgentContextBudget,
   resolveDurableInputLimit,
   resolveSessionContextWindow,
@@ -21,7 +22,7 @@ describe('durable input admission', () => {
   it('uses the shared session window on model changes and respects a smaller model and its output reservation', () => {
     const windows = [undefined, null, 128000, 256000, 32000].map(modelWindow => resolveSessionContextWindow(128000, modelWindow))
     expect(windows).toEqual([128000, 128000, 128000, 128000, 32000])
-    expect(windows.slice(0, 4).map(window => resolveAgentContextBudget(window, 8192).compactAtTokens)).toEqual(Array(4).fill(99840))
+    expect(windows.slice(0, 4).map(window => resolveAgentContextBudget(window, 8192).compactAtTokens)).toEqual(Array(4).fill(113116))
     const small = resolveAgentContextBudget(windows[4], 14000)
     expect(small.compactAtTokens).toBe(small.hardRequestTokens)
     expect(small.hardRequestTokens).toBe(15952)
@@ -31,6 +32,11 @@ describe('durable input admission', () => {
     expect(resolveDurableInputLimit(16000, 8192)).toBe(5760)
     expect(resolveDurableInputLimit(16000, 16000)).toBe(0)
     expect(resolveDurableInputLimit(128000, 8192)).toBe(113408)
+  })
+  it.each([32768, 65536])('retains a 228k trigger with a requested %i-token output and fits the dispatched answer to the actual input', output => {
+    expect(resolveAgentContextBudget(258000, output).compactAtTokens).toBe(228000)
+    expect(fitAgentOutputTokens(258000, output, 102600)).toBe(output)
+    expect(fitAgentOutputTokens(258000, output, 228000)).toBe(17100)
   })
   it.each([NaN, Infinity, -1, 0, 1.5])('rejects invalid window/output values: %s', value => {
     expect(resolveDurableInputLimit(value, 8192)).toBe(0)
@@ -264,11 +270,9 @@ describe('Agent 运行中上下文预算与压缩', () => {
   })
 
   it('为模型输出和误差预留安全空间', () => {
-    const budget = resolveAgentContextBudget(128_000, 8_192)
-    expect(budget.warningTokens).toBe(83_200)
-    expect(budget.compactAtTokens).toBe(99_840)
-    expect(budget.hardRequestTokens).toBeLessThan(128_000)
-    expect(budget.hardRequestTokens).toBeGreaterThan(budget.compactAtTokens)
+    const budget = resolveAgentContextBudget(258_000, 8_192)
+    expect(budget.compactAtTokens).toBe(228_000)
+    expect(budget.hardRequestTokens).toBe(228_000)
   })
 
   it('折叠工具轮保留Agent已经说明的决策和后续工作，不把片段说成成功', () => {
@@ -339,7 +343,7 @@ it('leaves below-threshold requests and small reductions that do not clear the t
 it('reuses the reduced context across turns while preserving the author request and latest tool exchange', () => {
   const current = buildToolRound('recent', '当前修订', '当前回执')
   const messages: ChatMessage[] = [{ role: 'system', content: '约束' }, { role: 'user', content: '只修订第九章' },
-    ...buildToolRound('old', '甲'.repeat(52000), '乙'.repeat(52000)), ...current]
+    ...buildToolRound('old', '甲'.repeat(58000), '乙'.repeat(58000)), ...current]
   const budget = resolveAgentContextBudget(128000, 8192)
   const estimate = (value: ChatMessage[]) => estimateChatMessagesTokens(value) + 340
   const planned = planInRunCompaction(messages, estimate(messages), budget, 1, estimate)!
@@ -348,4 +352,18 @@ it('reuses the reduced context across turns while preserving the author request 
   expect(planned.messages.slice(-2)).toEqual(current)
   expect(estimate(planned.messages)).toBe(planned.afterTokens)
   expect(planInRunCompaction(planned.messages, planned.afterTokens, budget, 1, estimate)).toBeNull()
+})
+
+it('at 228k keeps useful recent rounds close to 45% and reports the measured result', () => {
+  const budget = resolveAgentContextBudget(258_000, 8192)
+  const messages: ChatMessage[] = [{ role: 'system', content: '保留当前要求' },
+    ...Array.from({ length: 32 }, (_, index) => buildToolRound(String(index), '{}', '字'.repeat(7000))).flat()]
+  const overhead = 228_000 - estimateChatMessagesTokens(messages)
+  const estimate = (items: ChatMessage[]) => estimateChatMessagesTokens(items) + overhead
+  expect(planInRunCompaction(messages, 227_999, budget, 8, estimate)).toBeNull()
+  const plan = planInRunCompaction(messages, estimate(messages), budget, 8, estimate)!
+  expect(plan.afterTokens).toBe(estimate(plan.messages))
+  expect(plan.afterTokens).toBeGreaterThanOrEqual(228_000 * 0.4)
+  expect(plan.afterTokens).toBeLessThanOrEqual(228_000 * 0.5)
+  expect(plan.messages.at(-1)).toEqual(messages.at(-1))
 })

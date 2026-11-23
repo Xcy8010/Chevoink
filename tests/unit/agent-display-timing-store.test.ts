@@ -13,7 +13,7 @@ beforeEach(() => {
   useAgentStore.setState({ runId: 'r', activeSessionId: 's', loadedSessionId: 's', phase: 'starting', messages: [{ ...user }], lastSeq: 0, workspaceActivities: [] })
 })
 const current = () => useAgentStore.getState().messages[0].runTiming!
-it('anchors each compression cycle to its own first measurement through remote event replay', () => {
+it('preserves the full latest measurement through repeated compaction events and run changes', () => {
   const { applyEvent } = useAgentStore.getState()
   const measure = (seq: number, estimatedTokens: number) => applyEvent({ type: 'context.usage', runId: 'r', seq,
     ts: ts(seq), estimatedTokens, contextWindowTokens: 128000, compactAtTokens: 99840 })
@@ -24,10 +24,11 @@ it('anchors each compression cycle to its own first measurement through remote e
   measure(3, 91570)
   measure(4, 103082)
   complete(2)
-  expect(useAgentStore.getState().requestCompaction).toEqual({ runId: 'r', seq: 2, retainedTokens: 91570 })
+  expect(useAgentStore.getState().requestContext).toMatchObject({ sessionId: 's', runId: 'r', seq: 4, estimatedTokens: 103082 })
   complete(5)
   measure(6, 70400)
-  expect(useAgentStore.getState().requestCompaction).toEqual({ runId: 'r', seq: 5, retainedTokens: 70400 })
+  useAgentStore.setState({ runId: 'next', phase: 'starting' })
+  expect(useAgentStore.getState().requestContext).toMatchObject({ sessionId: 's', runId: 'r', seq: 6, estimatedTokens: 70400 })
 })
 it.each(['succeeded', 'failed', 'cancelled'] as const)('freezes %s runs using their terminal event', status => {
   useAgentStore.getState().applyEvent(start(1, 0))

@@ -229,7 +229,6 @@ const adminModelUpdateSchema = z.object({
   reasoningEfforts: z.array(modelReasoningEffortSchema).min(1).max(7).optional(),
   defaultReasoningEffort: modelReasoningEffortSchema.optional(),
   visionEnabled: z.boolean().optional(),
-  contextWindowTokens: z.number().int().min(16_000).max(4_000_000).optional(),
 })
 
 function requireSuperAdmin(admin: { isSuperAdmin: boolean }): void {

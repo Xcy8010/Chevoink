@@ -1,3 +1,4 @@
+import { AGENT_CONTEXT_WINDOW_TOKENS } from '../../shared/agent-context-window.js'
 import dotenv from 'dotenv'
 
 // DOTENV_PATH：测试等场景指向独立 env 文件，
@@ -138,7 +139,7 @@ export const env = {
   // plan/18 P1 信道重复检测两阶段：observe=只记日志零干预，enforce=提醒→再命中终止
   agentRepeatGuardMode: process.env.AGENT_REPEAT_GUARD_MODE === 'enforce' ? 'enforce' : 'observe',
   // Agent 2.0 上下文检查点：65% 提醒、78% 自动压缩；按实际模型窗口可覆盖。
-  agentContextWindowTokens: parsePositiveNumber(process.env.AGENT_CONTEXT_WINDOW_TOKENS, 128000),
+  agentContextWindowTokens: AGENT_CONTEXT_WINDOW_TOKENS,
   // Agent 增量能力可独立回退；灰度名单非空时，仅名单用户启用这些能力。
   featureVolumeEnabled: parseBoolean(process.env.FEATURE_VOLUME_ENABLED, true),
   featureChangeSetEnabled: parseBoolean(process.env.FEATURE_CHANGESET_ENABLED, true),
