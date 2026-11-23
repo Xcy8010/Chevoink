@@ -63,6 +63,25 @@ it('does not query content for unavailable reads, failed calls, child calls or a
   expect(prisma.agentArtifact.findMany).not.toHaveBeenCalled()
 })
 
+it('recovers only an explicitly named, unambiguous document with the same name and revision', async () => {
+  const named = { ...scope, titles: new Set(['雨声']), parts: [chapter(0, 2)] }
+  const plan = receipt('plan_save', { kind: 'planFile', artifactId: 'p', title: '雨声', content: '同名计划' })
+  expect(await readSessionReadingMaterial({ ...named, parts: [...named.parts, plan] })).toEqual([])
+  expect(await readSessionReadingMaterial({ ...named, titles: new Set(['其他章节']) })).toEqual([])
+  expect(prisma.chapter.findMany).not.toHaveBeenCalled()
+  expect(prisma.agentArtifact.findMany).not.toHaveBeenCalled()
+  const matches = [{ id: 'c', title: '雨声' }] as never
+  vi.mocked(prisma.agentArtifact.findMany).mockResolvedValueOnce([{ id: 'another', title: '雨声' }] as never).mockResolvedValue([])
+  vi.mocked(prisma.chapter.findMany).mockResolvedValueOnce(matches)
+    .mockResolvedValueOnce(matches).mockResolvedValueOnce([{ id: 'c', title: '已改名', revision: 4, content: '旧章' }] as never)
+    .mockResolvedValueOnce(matches).mockResolvedValueOnce([{ id: 'c', title: '雨声', revision: 5, content: '新版' }] as never)
+    .mockResolvedValueOnce(matches).mockResolvedValueOnce([{ id: 'c', title: '雨声', revision: 4, content: '旧章' }] as never)
+  expect(await readSessionReadingMaterial(named)).toEqual([])
+  expect(await readSessionReadingMaterial(named)).toEqual([])
+  expect(await readSessionReadingMaterial(named)).toEqual([])
+  expect((await readSessionReadingMaterial(named))[0].content).toContain('旧章')
+})
+
 it('retains a prefix of material under the actual remaining token budget including message overhead', async () => {
   const content = 'a字🌲'.repeat(1000)
   vi.mocked(prisma.chapter.findMany).mockResolvedValue([{ id: 'c', title: '合成章节', revision: 4, content }] as never)

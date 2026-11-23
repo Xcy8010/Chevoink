@@ -1,5 +1,5 @@
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE } from './tool-execution-guidance.js'
-import { fitArchivedHistoryForDispatch, restoreSemanticHistory } from './semantic-compaction.js'
+import { restoreSemanticHistory } from './semantic-compaction.js'
 import { createHash } from 'node:crypto'
 import { planLinkFields } from './novel-plan-contract.js'
 import type { AgentExecutionMode, CreditModelTier } from '../../../shared/contracts/index.js'
@@ -38,8 +38,7 @@ import { attachmentHistoryUrl, estimateChatMessageTokens, estimateChatMessagesTo
 import { taskOperatingGuidance } from './task-guidance.js'
 import { readWritingLocalContext } from './writing-local-context.js'
 import { readSessionReadingMaterial } from './session-reading-material.js'
-import { contextUsageSchema } from '../../../shared/contracts/context-compaction-contracts.js'
-import { MAIN_RUN_FILTER } from './runtime-child.js'
+import type { ContextCheckpoint } from '../../../shared/contracts/context-compaction-contracts.js'
 import { renderContextTime, withHistoryTimestamp } from './context-time.js'
 import { readWritingContinuityReference, renderWritingContinuityReference } from './writing-continuity-reference.js'
 
@@ -440,7 +439,7 @@ async function loadSessionHistory(
     }
     const materialParts = record.role === 'assistant' ? parts.filter(part => part.type === 'tool-call' && part.status === 'success'
       && !part.subagentCallId && ['chapter_read', 'plan_read', 'plan_save'].includes(part.toolName)) : []
-    return { group, speech, role: record.role, receipt, materialParts }
+    return { group, speech, role: record.role, id: record.id, receipt, materialParts, pinned: pinnedReceipts.has(record) }
   }).filter(item => item.group.length > 0)
   for (const digest of digests) {
     const original = plain.flatMap(item => item.group)
@@ -461,17 +460,39 @@ async function loadSessionHistory(
     }
   }
   const costs = new Map(plain.flatMap(item => item.group).map(message => [message, estimateChatMessageTokens(message)]))
-  return { plain, latestRunId: records[0]?.runId, hasEarlier, costs, tokens: [...costs.values()].reduce((sum, count) => sum + count, 0) }
+  return { plain, hasEarlier, costs, tokens: [...costs.values()].reduce((sum, count) => sum + count, 0) }
 }
 
-function fitSessionHistory({ plain, hasEarlier, costs, tokens }: Awaited<ReturnType<typeof loadSessionHistory>>, budget: number): ChatMessage[] {
+function priorCheckpointHistory(checkpoint: ContextCheckpoint, budget: number): ChatMessage[] {
+  const header = `[早前会话检查点 checkpointId=${checkpoint.id}，仅供参考。需要原话时按可用权限使用 session_history_search / session_message_read；缺少读取能力时请作者提供原文。]`
+  const message: ChatMessage = { role: 'user', content: header }
+  if (estimateChatMessageTokens(message) > budget) return []
+  const { completed, toolReceipts } = checkpoint.summary
+  const entries = [...toolReceipts.map(item => `${item.toolName}：${item.summary}${item.artifactId ? ' (' + item.artifactId + ')' : ''}`),
+    ...completed.map(text => '历史交付：' + text)]
+  const kept: string[] = []
+  for (const line of entries.reverse()) {
+    const proposed = [header, line, ...kept].join('\n')
+    if (estimateChatMessageTokens({ role: 'user', content: proposed }) <= budget) {
+      kept.unshift(line)
+      message.content = proposed
+    }
+  }
+  return [message]
+}
+
+function fitSessionHistory({ plain, hasEarlier, costs, tokens }: Awaited<ReturnType<typeof loadSessionHistory>>, budget: number, fresh: boolean): ChatMessage[] {
   const all = plain.flatMap(item => item.group)
   if (!hasEarlier && tokens <= budget) return all
 
+  const newestFirst = [...plain].reverse()
+  const exchange = ['user', 'assistant'].map(role => newestFirst.find(item => item.role === role && item.speech))
+  const refs = fresh ? exchange.flatMap(item => item?.id ? [item.id] : []).join('、') : ''
   const notice = (count: number): ChatMessage => ({ role: 'system', content:
-    `[早前对话共 ${count} 组消息或回执未完整进入当前窗口${hasEarlier ? '，另有更早的记录' : ''}；如需核对原话，按需使用 session_history_search / session_message_read，禁止猜测]` })
+    `[早前对话共 ${count} 组消息或回执未完整进入当前窗口${hasEarlier ? '，另有更早的记录' : ''}；如需核对原话，按可用权限使用 session_history_search / session_message_read，缺少读取能力时请作者提供原文，禁止猜测${refs ? '。最近发言消息 ID：' + refs : ''}]` })
   let remaining = budget - estimateChatMessageTokens(notice(plain.length))
   const selected = new Set<ChatMessage>()
+  const excerpts = new Map<ChatMessage, ChatMessage>()
   const include = (message: ChatMessage) => {
     const cost = costs.get(message)!
     if (!selected.has(message) && cost <= remaining) {
@@ -481,14 +502,24 @@ function fitSessionHistory({ plain, hasEarlier, costs, tokens }: Awaited<ReturnT
   }
   // Keep the last author instruction and reply independently. A very large
   // reply or receipt must not evict smaller, still applicable instructions.
-  const newestFirst = [...plain].reverse()
-  for (const role of ['user', 'assistant']) {
-    const speech = newestFirst.find(item => item.role === role && item.speech)?.speech
-    if (speech) include(speech)
+  for (const item of exchange) {
+    const message = item?.speech
+    if (!message) continue
+    include(message)
+    if (!fresh || !item.id || selected.has(message) || typeof message.content !== 'string') continue
+    const preview: ChatMessage = { role: 'user', content:
+      `[早前${item.role === 'user' ? '作者' : '助手'}发言首尾节选，省略部分可用 session_message_read 核对，消息 ID：${item.id}]\n`
+      + message.content.slice(0, 360) + '\n[…]\n' + message.content.slice(-360) }
+    const cost = estimateChatMessageTokens(preview)
+    if (cost <= remaining) {
+      excerpts.set(message, preview)
+      remaining -= cost
+    }
   }
+  if (fresh) for (const item of newestFirst) if (item.pinned && item.receipt && item.group.includes(item.receipt)) include(item.receipt)
   for (const { group } of newestFirst) for (const message of group) include(message)
   const omitted = plain.filter(item => item.group.some(message => !selected.has(message))).length
-  const result = all.filter(message => selected.has(message))
+  const result = all.flatMap(message => selected.has(message) ? [message] : excerpts.get(message) ?? [])
   if (remaining >= 0) result.unshift(notice(omitted))
   return result
 }
@@ -701,7 +732,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
       })
     : 'Skill OS 当前未对该账号启用；直接遵从作者目标，不得自行套用未知写作模板。'
   stage('skillsMs')
-  const checkpointDigest = checkpointState.checkpoint ? renderCheckpointDigest(checkpointState.checkpoint, { runId: input.runId, directives }) : null
+  const fresh = !input.includeCurrentRunHistory
+  const priorCheckpoint = fresh && checkpointState.checkpoint?.runId !== input.runId ? checkpointState.checkpoint : null
+  const checkpointDigest = checkpointState.checkpoint && !priorCheckpoint ? renderCheckpointDigest(checkpointState.checkpoint, { runId: input.runId, directives }) : null
   const directiveDigest = renderDirectiveDigest(directives)
 
   const dynamicModel = input.modelTier.startsWith('builtin_') ? await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier: input.modelTier, enabled: true }, select: { displayName: true } }) : null
@@ -783,12 +816,14 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const presentationSummary = chapterWriting ? renderWritingPresentation(presentation, !input.taskSpec.scope.writing?.titleAndBodyOnly) : null
   if (presentationSummary) intentSections.push(presentationSummary)
 
+  let selectionIndex = -1
   if (input.selection?.text?.trim()) {
     const range =
       input.selection.start !== undefined && input.selection.end !== undefined
         ? `（位于正文第 ${input.selection.start}-${input.selection.end} 字符）`
         : ''
-    intentSections.push(`我选中了下面这段文本${range}：\n"""\n${clip(input.selection.text, 4000)}\n"""`)
+    selectionIndex = intentSections.length
+    intentSections.push(`我选中了下面这段文本${range}：\n"""\n${fresh ? input.selection.text : clip(input.selection.text, 4000)}\n"""`)
   }
 
   // 附件清单：视觉主模型直接接收像素；纯文本主模型继续走安全的 view_image 旁路。
@@ -830,19 +865,16 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   }
   const budget = resolveAgentContextBudget(contextWindowTokens, input.maxOutputTokens ?? env.aiTextMaxOutputTokens)
   let fixedTokens = estimateChatMessagesTokens(Object.values(sections).flat()) + (input.toolDefinitionTokens ?? 0)
+  if (fresh && selectionIndex >= 0 && input.selection && fixedTokens > budget.hardRequestTokens && input.selection.text.length > 4000) {
+    const original = intentSections[selectionIndex]
+    intentSections[selectionIndex] = original.replace(input.selection.text, () => clip(input.selection!.text, 4000) + '\n[选区超过当前请求的可用空间，以上仅为开头节选。]')
+    fixedTokens -= estimateChatMessagesTokens(sections.intent)
+    sections.intent = [{ role: 'user', content: intentSections.join('\n\n') }]
+    fixedTokens += estimateChatMessagesTokens(sections.intent)
+  }
   let activeHistory = history
   const fullHistoryAtThreshold = fixedTokens + history.tokens >= budget.compactAtTokens
-  // A chronological checkpoint would remove the evidence before the admitted
-  // model can summarize it. Stage a bounded frame for the dispatch-time gate.
-  // That gate measures the full request again before sending anything upstream.
-  const archivableTokens = fullHistoryAtThreshold && !input.includeCurrentRunHistory
-    ? [...history.costs].reduce((sum, [m, count]) => sum + ('historySourceId' in m && m.historySourceId ? count : 0), 0) : 0
-  const stageForSummary = archivableTokens >= 8_000 && archivableTokens < budget.hardRequestTokens * 0.93
-    && fixedTokens + history.tokens - archivableTokens < budget.hardRequestTokens
-    && (fixedTokens + history.tokens <= budget.hardRequestTokens
-      || !!fitArchivedHistoryForDispatch(history.plain.flatMap(item => item.group), budget.hardRequestTokens,
-        items => fixedTokens + estimateChatMessagesTokens(items)))
-  if (!stageForSummary && history.plain.length > 2 && fullHistoryAtThreshold) {
+  if (input.includeCurrentRunHistory && history.plain.length > 2 && fullHistoryAtThreshold) {
     const target = Math.max(0, targetContextTokens(budget.compactAtTokens) - fixedTokens)
     const compacted = await compactSessionContext(input.userId, input.sessionId, target).catch(error => {
       console.error('[agent-context] 历史检查点未生成，沿用原有历史', input.runId, error)
@@ -860,31 +892,20 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
       }
     }
   }
-  sections.history = fitSessionHistory(activeHistory, stageForSummary ? history.tokens + 1024 : Math.max(0, budget.hardRequestTokens - fixedTokens))
-  if (input.sessionMaterialReads && !input.includeCurrentRunHistory) {
-    const retained = new Set(sections.history)
-    const parts = activeHistory.plain.flatMap(item => item.receipt && retained.has(item.receipt) ? item.materialParts : [])
-    const inputTarget = activeHistory === history ? budget.hardRequestTokens : targetContextTokens(budget.compactAtTokens)
-    const baseTokens = fixedTokens + estimateChatMessagesTokens(sections.history)
-    if (parts.length && inputTarget > baseTokens) {
-      const [allowedReads, previous] = await Promise.all([
-        input.sessionMaterialReads(),
-        activeHistory.latestRunId ? prisma.agentRunEvent.findFirst({
-          where: { runId: activeHistory.latestRunId, type: 'context.usage', run: { ...MAIN_RUN_FILTER,
-            userId: input.userId, novelId: input.novelId, sessionId: input.sessionId } },
-          orderBy: { seq: 'desc' }, select: { payload: true },
-        }) : null,
-      ])
-      const sample = contextUsageSchema.safeParse(previous?.payload)
-      // Carry forward optional excerpts within the preceding measured input plus the new request.
-      // Author text, selected history and required workspace context have already been admitted.
-      const carryLimit = sample.success
-        ? Math.min(inputTarget, sample.data.estimatedTokens + estimateChatMessagesTokens(sections.task) + estimateChatMessagesTokens(sections.intent))
-        : inputTarget
-      sections.readingMaterial = await readSessionReadingMaterial({ parts, tokenBudget: carryLimit - baseTokens,
-        userId: input.userId, novelId: input.novelId, allowedReads })
-    }
+  const room = Math.max(0, budget.hardRequestTokens - fixedTokens)
+  const historyBudget = fresh ? Math.min(room, 20_000, Math.floor(contextWindowTokens * 0.18)) : room
+  // Only explicit document mentions can carry previous read excerpts across a
+  // turn. Ordinary references can be resolved through the existing read tools.
+  const titles = new Set(Array.from(input.prompt.matchAll(/《([^《》\r\n]{1,240})》/g), match => match[1]))
+  if (fresh && titles.size && input.sessionMaterialReads && historyBudget > 0) {
+    const parts = activeHistory.plain.flatMap(item => item.materialParts)
+    if (parts.length) sections.readingMaterial = await readSessionReadingMaterial({ parts, titles,
+      tokenBudget: Math.min(8_000, Math.floor(historyBudget / 2)), userId: input.userId, novelId: input.novelId,
+      allowedReads: await input.sessionMaterialReads() })
   }
+  const checkpoint = priorCheckpoint ? priorCheckpointHistory(priorCheckpoint, Math.min(2000, Math.floor(historyBudget / 5))) : []
+  const remaining = historyBudget - estimateChatMessagesTokens(sections.readingMaterial) - estimateChatMessagesTokens(checkpoint)
+  sections.history = [...checkpoint, ...fitSessionHistory(activeHistory, remaining, fresh)]
   const inputEstimates = Object.fromEntries(Object.entries(sections).map(([category, items]) =>
     [category, { messages: items.length, tokens: estimateChatMessagesTokens(items) }]))
   timings.totalMs = performance.now() - started

@@ -70,7 +70,7 @@ vi.mock('../../api/lib/agent/tools/todo-tools.js', async (importOriginal) => {
 const { prisma } = await import('../../api/lib/prisma.js')
 const { searchStoryMemory } = await import('../../api/lib/agent/story-memory.js')
 const { assembleContext, insertSubagentCatalog } = await import('../../api/lib/agent/context.js')
-const { estimateChatMessagesTokens } = await import('../../api/lib/agent/context-budget.js')
+const { estimateChatMessagesTokens, resolveAgentContextBudget } = await import('../../api/lib/agent/context-budget.js')
 const { compactSessionContext, loadContextCheckpoint } = await import('../../api/lib/agent/context-engine.js')
 const { getLearnedStyleDigest } = await import('../../api/lib/agent/style-learning.js')
 const { readChapterWritingBackground, readWritingPresentation } = await import('../../api/lib/agent/writing-request-context.js')
@@ -82,6 +82,7 @@ const { frozenV400BuiltinCatalog, skillCatalog, SKILL_ROUTER_VERSION } = await i
 const { buildTaskSpec } = await import('../../api/lib/agent/task-spec.js')
 const { freezeTaskCapabilities } = await import('../../api/lib/agent/task-capabilities.js')
 const { enableAgentWritingScope } = await import('../../api/lib/agent/agent-writing-scope.js')
+const { chapterReadTool, planReadTool } = await import('../../api/lib/agent/tools/read-tools.js')
 const { LOCAL_FICTION_REVIEW_GUIDANCE, MANUSCRIPT_WRITING_CORE } = await import('../../api/lib/agent/knowledge/writing.js')
 
 type AssembleInput = Parameters<typeof assembleContext>[0]
@@ -617,7 +618,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(result.inputEstimates!.history.tokens).toBeLessThan(2000)
   })
 
-  it('keeps more than 20k of shared history when it fits, then skips an oversized recent reply without losing author text', async () => {
+  it('caps fresh history at 20k and honors a smaller physical input budget', async () => {
     const input = { ...buildInput(), contextWindowTokens: 128000, maxOutputTokens: 8192, toolDefinitionTokens: 3200 }
     const originalRequest = '第一章保留原名。'
     const previousAnswer = '这段背景'.repeat(6500)
@@ -630,18 +631,25 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     ]
     vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(records as never)
     const result = await assembleContext(input)
-    expect(result.messages.map(message => message.content)).toEqual(expect.arrayContaining([originalRequest, previousAnswer, recentRequest]))
-    expect(result.inputEstimates!.history.tokens).toBeGreaterThan(20000)
-    expect(estimateChatMessagesTokens(result.messages) + input.toolDefinitionTokens).toBeLessThanOrEqual(99840)
-    expect(JSON.stringify(result.messages)).not.toContain('巨巨')
-    expect(JSON.stringify(result.messages)).toContain('共 1 组消息或回执')
-    const tight = await assembleContext({ ...input, toolDefinitionTokens: 90000 })
+    expect(result.messages.map(message => message.content)).toEqual(expect.arrayContaining([originalRequest, recentRequest]))
+    expect(historyAndMaterialTokens(result)).toBeLessThanOrEqual(20_000)
+    expect(result.messages.map(message => message.content)).not.toContain(previousAnswer)
+    expect(result.messages.some(message => /session_message_read[^\]]*\blong\b/.test(String(message.content)))).toBe(true)
+
+    const hardLimit = resolveAgentContextBudget(input.contextWindowTokens, input.maxOutputTokens).hardRequestTokens
+    const fixedTokens = estimateChatMessagesTokens(result.messages) - historyAndMaterialTokens(result)
+    const tightToolTokens = hardLimit - fixedTokens - 350
+    const tight = await assembleContext({ ...input, toolDefinitionTokens: tightToolTokens })
     expect(tight.messages.map(message => message.content)).toEqual(expect.arrayContaining([originalRequest, recentRequest]))
-    expect(tight.messages.map(message => message.content)).not.toContain(previousAnswer)
+    expect(historyAndMaterialTokens(tight)).toBeLessThanOrEqual(350)
+    expect(estimateChatMessagesTokens(tight.messages) + tightToolTokens).toBeLessThanOrEqual(hardLimit)
   })
 
-  it('continues a 67% session from the same chapter and plan material across a short follow-up', async () => {
-    const { chapterReadTool, planReadTool } = await import('../../api/lib/agent/tools/read-tools.js')
+  function historyAndMaterialTokens(result: Awaited<ReturnType<typeof assembleContext>>) {
+    return result.inputEstimates!.history.tokens + result.inputEstimates!.readingMaterial.tokens
+  }
+
+  async function previousReadingFixture() {
     const input = { ...buildInput(), attachments: [], contextWindowTokens: 258000, toolDefinitionTokens: 3000 }
     const scope = { novelId: input.novelId, userId: input.userId, runId: input.runId, chapterId: input.chapterId,
       transaction: prisma } as unknown as Parameters<typeof chapterReadTool.execute>[0]
@@ -650,55 +658,103 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     vi.mocked(prisma.chapter.findMany).mockResolvedValue([chapter] as never)
     vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue(plan as never)
     vi.mocked(prisma.agentArtifact.findMany).mockResolvedValue([plan] as never)
-    const original = { id: 'author', runId: 'earlier', role: 'user', parts: [{ type: 'text', text: '保留人物动机和叙事视角。' }] }
-    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([original] as never)
-    const baseline = await assembleContext(input)
-    original.parts[0].text += '景'.repeat(Math.max(0, Math.round(228000 * 0.58) - estimateChatMessagesTokens(baseline.messages) - input.toolDefinitionTokens))
-    const first = await assembleContext(input)
+    // Fixed at the exact author's message length in the 55fd5c70 comparison fixture.
+    const original = { id: 'author', runId: 'earlier', role: 'user', parts: [
+      { type: 'text', text: '保留人物动机和叙事视角。'.padEnd(117_036, '景') },
+    ] }
     const reads = await Promise.all([chapterReadTool.execute(scope, { chapterId: chapter.id, limit: 12000 }),
       planReadTool.execute(scope, { planId: plan.id, limit: 8000 })])
-    const previousTotal = input.toolDefinitionTokens + estimateChatMessagesTokens([...first.messages,
-      ...reads.map((result, i) => ({ role: 'tool' as const, toolCallId: String(i), content: result.output }))])
     const report = { id: 'report', runId: input.runId, role: 'assistant', parts: reads.map((result, i) => ({
       type: 'tool-call', status: 'success', callId: String(i), toolName: i ? 'plan_read' : 'chapter_read', display: result.display, summary: result.summary,
     })) }
+    return { input, chapter, plan, report, original }
+  }
+
+  it('keeps a short follow-up lean without reconstructing previous reads or borrowing old context usage', async () => {
+    const { input, chapter, plan, report, original } = await previousReadingFixture()
     vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([report, original] as never)
     const next = { ...input, runId: 'next', prompt: '第三处转折再收紧一点。' }
+    vi.mocked(prisma.agentArtifact.findMany).mockClear()
     const asReceipts = await assembleContext(next)
+    const workspacePlanQueries = vi.mocked(prisma.agentArtifact.findMany).mock.calls.slice()
     const allowed = vi.fn(async () => ['chapter_read', 'plan_read'])
+    vi.mocked(prisma.chapter.findMany).mockClear()
+    vi.mocked(prisma.agentArtifact.findMany).mockClear()
     const continued = await assembleContext({ ...next, sessionMaterialReads: allowed })
-    const percent = (n: number) => Math.round(n * 100 / 228000)
     const nextTotal = input.toolDefinitionTokens + estimateChatMessagesTokens(continued.messages)
-    expect([previousTotal, input.toolDefinitionTokens + estimateChatMessagesTokens(asReceipts.messages), nextTotal].map(percent)).toEqual([67, 58, 67])
-    expect(continued.messages.some(message => String(message.content).includes(chapter.content))).toBe(true)
-    expect(continued.messages.some(message => String(message.content).includes(plan.content))).toBe(true)
-    expect(continued.messages.some(message => String(message.content).includes('保留人物动机和叙事视角。'))).toBe(true)
-    expect(continued.inputEstimates!.readingMaterial.tokens).toBeGreaterThanOrEqual(20000)
+    expect(continued.messages).toEqual(asReceipts.messages)
+    expect(historyAndMaterialTokens(continued)).toBeLessThanOrEqual(20_000)
+    expect(continued.inputEstimates!.readingMaterial.tokens).toBe(0)
+    const text = continued.messages.map(message => message.content).join('\n')
+    expect(text).not.toContain(chapter.content)
+    expect(text).not.toContain(plan.content)
+    expect(text).toContain('"revision":6')
+    expect(text).toContain('保留人物动机和叙事视角。')
+    expect(text).toContain('每天至少更新一章')
+    expect(continued.messages.at(-1)?.content).toContain(next.prompt)
+    expect(allowed).not.toHaveBeenCalled()
+    expect(prisma.chapter.findMany).not.toHaveBeenCalled()
+    expect(vi.mocked(prisma.agentArtifact.findMany).mock.calls).toEqual(workspacePlanQueries)
+    expect(prisma.agentRunEvent.findFirst).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ type: 'context.usage' }) }))
     expect(compactSessionContext).not.toHaveBeenCalled()
-    console.info('[synthetic-context-continuity]', { previousTotal, nextTotal, materials: continued.inputEstimates!.readingMaterial.tokens })
-    // Older receipts can also describe entire chapters. Their availability alone must not inflate the next request.
-    const oldChapter = { ...chapter, id: 'older-chapter', content: '远'.repeat(53000) }
-    const oldRead = { ...report, id: 'older-reading', runId: 'older-run', parts: [{ ...report.parts[0], display: {
-      kind: 'chapterRef', chapterId: oldChapter.id, revision: oldChapter.revision, range: { start: 0, end: oldChapter.content.length },
-    } }] }
-    vi.mocked(prisma.chapter.findMany).mockResolvedValue([chapter, oldChapter] as never)
-    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([report, original, oldRead] as never)
-    const measured = { estimatedTokens: previousTotal, contextWindowTokens: 258000, compactAtTokens: 228000 }
-    vi.mocked(prisma.agentRunEvent.findFirst).mockResolvedValueOnce({ payload: measured } as never)
-    const bounded = await assembleContext({ ...next, sessionMaterialReads: allowed })
-    expect(bounded.messages.some(message => String(message.content).includes(plan.content))).toBe(true)
-    expect(bounded.messages.some(message => String(message.content).includes(oldChapter.content))).toBe(false)
-    expect(bounded.messages.at(-1)!.content).toBe(asReceipts.messages.at(-1)!.content)
-    const measuredStart = input.toolDefinitionTokens + estimateChatMessagesTokens(bounded.messages)
-    expect(measuredStart).toBeLessThanOrEqual(previousTotal + bounded.inputEstimates!.task.tokens + bounded.inputEstimates!.intent.tokens)
-    const unbounded = await assembleContext({ ...next, sessionMaterialReads: allowed })
-    expect(estimateChatMessagesTokens(unbounded.messages) - estimateChatMessagesTokens(bounded.messages)).toBeGreaterThan(50000)
-    await assembleContext({ ...next, includeCurrentRunHistory: true, sessionMaterialReads: allowed })
-    expect(allowed).toHaveBeenCalledTimes(3)
+    console.info('[synthetic-context-continuity]', { nextTotal, authorLength: original.parts[0].text.length,
+      tools: input.toolDefinitionTokens, sections: Object.fromEntries(Object.entries(continued.inputEstimates!).map(([name, value]) => [name, value.tokens])) })
+  })
+
+  it('shares the fresh history ceiling with explicitly named, permitted, revision-matched excerpts', async () => {
+    const { input, chapter, plan, report, original } = await previousReadingFixture()
+    const authorText = '保留人物动机和叙事视角。'
+    const delivered = '已交付三处转折的修订说明。'
+    const records = [
+      { id: 'last-assistant', runId: report.runId, role: 'assistant', parts: [{ type: 'text', text: delivered }] },
+      { id: 'last-author', runId: report.runId, role: 'user', parts: [{ type: 'text', text: authorText }] },
+      report,
+      ...Array.from({ length: 40 }, (_, index) => ({ id: `older-${index}`, runId: 'older', role: 'assistant',
+        parts: [{ type: 'text', text: `早前讨论${index}。${'过往'.repeat(350)}` }] })),
+      original,
+    ]
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(records as never)
+    const selectionText = '选'.repeat(5_000) + '这段选择的末尾仍须原样保留。'
+    const selection = { text: selectionText, start: 12, end: 12 + selectionText.length }
+    const next = { ...input, runId: 'next', selection, maxOutputTokens: 8192,
+      prompt: `请核对《${chapter.title}》已读片段，第三处转折再收紧一点。` }
+    const allowed = vi.fn(async () => ['chapter_read', 'plan_read'])
+    const result = await assembleContext({ ...next, sessionMaterialReads: allowed })
+    const material = result.messages.filter(message => 'sessionReadingMaterial' in message && message.sessionReadingMaterial)
+    expect(material).toHaveLength(1)
+    expect(String(material[0].content)).toContain(chapter.content.slice(0, 100))
+    expect(String(material[0].content)).not.toContain(plan.content.slice(0, 100))
+    expect(historyAndMaterialTokens(result)).toBeLessThanOrEqual(20_000)
+    expect(result.messages.map(message => message.content)).toEqual(expect.arrayContaining([authorText, delivered]))
+    expect(String(result.messages.at(-1)?.content)).toContain(next.prompt)
+    expect(String(result.messages.at(-1)?.content)).toContain(selection.text)
+
+    const hardLimit = resolveAgentContextBudget(next.contextWindowTokens, next.maxOutputTokens).hardRequestTokens
+    const fixedTokens = estimateChatMessagesTokens(result.messages) - historyAndMaterialTokens(result)
+    const tightToolTokens = hardLimit - fixedTokens - 4000
+    const tight = await assembleContext({ ...next, toolDefinitionTokens: tightToolTokens, sessionMaterialReads: allowed })
+    expect(tight.inputEstimates!.readingMaterial.tokens).toBeGreaterThan(0)
+    expect(historyAndMaterialTokens(tight)).toBeLessThanOrEqual(4000)
+    expect(estimateChatMessagesTokens(tight.messages) + tightToolTokens).toBeLessThanOrEqual(hardLimit)
+
+    const denied = await assembleContext({ ...next, sessionMaterialReads: async () => ['plan_read'] })
+    expect(denied.inputEstimates!.readingMaterial.tokens).toBe(0)
+    vi.mocked(prisma.chapter.findMany).mockResolvedValue([{ ...chapter, revision: 7 }] as never)
+    const stale = await assembleContext({ ...next, sessionMaterialReads: allowed })
+    expect(stale.inputEstimates!.readingMaterial.tokens).toBe(0)
+    const receiptText = stale.messages.map(message => message.content).join('\n')
+    expect(receiptText).toContain('"chapterId":"chapter-1"')
+    expect(receiptText).toContain('"revision":6')
+
+    const planPrompt = { ...next, prompt: `请按《${plan.title}》核对第三处转折。`, sessionMaterialReads: allowed }
+    const matchedPlan = await assembleContext(planPrompt)
+    expect(matchedPlan.messages.some(message => 'sessionReadingMaterial' in message && String(message.content).includes(plan.content.slice(0, 100)))).toBe(true)
+    vi.mocked(prisma.agentArtifact.findMany).mockResolvedValue([{ ...plan, content: '已更换的细纲。' }] as never)
+    const stalePlan = await assembleContext(planPrompt)
+    expect(stalePlan.inputEstimates!.readingMaterial.tokens).toBe(0)
   })
 
   it('omits an archived durable read range when the long tool output may have reached the model only as a reference', async () => {
-    const { chapterReadTool, planReadTool } = await import('../../api/lib/agent/tools/read-tools.js')
     const scope = { novelId: 'novel-1', userId: 'user-1', runId: 'prior', transaction: prisma } as unknown as Parameters<typeof planReadTool.execute>[0]
     const content = '长材料'.repeat(10000)
     vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue({ id: 'p', title: '细纲', content, metadata: { savedAsPlan: true }, updatedAt: new Date() } as never)
@@ -710,8 +766,8 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     if (plan.display?.kind === 'readSources') expect(plan.display.items[0].readingRange).toBeNull()
   })
 
-  it('reads a checkpoint tail only when a full session reaches the threshold, preserving room for the next parallel read', async () => {
-    const input = { ...buildInput(), contextWindowTokens: 258000, maxOutputTokens: 8192, toolDefinitionTokens: 5000 }
+  it('retains the same-task recovery checkpoint path and room for a subsequent parallel read', async () => {
+    const input = { ...buildInput(), includeCurrentRunHistory: true, contextWindowTokens: 258000, maxOutputTokens: 8192, toolDefinitionTokens: 5000 }
     const rows = Array.from({ length: 240 }, (_, index) => ({
       id: String(index), role: 'user', parts: [{ type: 'text', text: `历史${index}：${'章'.repeat(1000)}` }],
     }))
@@ -734,18 +790,57 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(result.inputEstimates!.history.tokens).toBeGreaterThan(20000)
     expect(estimateChatMessagesTokens([...result.messages, ...nextRound]) + input.toolDefinitionTokens).toBeLessThan(228000)
   })
-  it('hands above-threshold archived prose and the full author instruction to the admitted model gate before a chronological checkpoint', async () => {
+  it('caps above-threshold archived prose before the first request while preserving author text and the latest delivery', async () => {
     const original = '作者要求。'.repeat(500) + '结尾人物动机必须保留。'
-    const rows = [{ id: 'last', role: 'assistant', parts: [{ type: 'text', text: '已保存，等待校对。' }] },
-      { id: 'source', role: 'assistant', parts: [{ type: 'text', text: '旧笔记。'.repeat(26000) }] },
+    const lastDelivery = '已保存，等待校对。'
+    const archivedProse = '旧笔记。'.repeat(26000)
+    const rows = [{ id: 'last', role: 'assistant', parts: [{ type: 'text', text: lastDelivery }] },
+      { id: 'source', role: 'assistant', parts: [{ type: 'text', text: archivedProse }] },
       { id: 'author', role: 'user', parts: [{ type: 'text', text: original }] }]
     vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(rows.map(r => ({ ...r, runId: 'archived-run' })) as never)
     const input = { ...buildInput(), contextWindowTokens: 258000, toolDefinitionTokens: 127000 }
     const result = await assembleContext(input)
-    expect(estimateChatMessagesTokens(result.messages) + input.toolDefinitionTokens).toBeGreaterThanOrEqual(228000)
-    expect(result.messages.some(m => 'historySourceId' in m && m.historySourceId === 'source:text')).toBe(true)
-    expect(result.messages.some(m => typeof m.content === 'string' && m.content.includes(original))).toBe(true)
+    expect(historyAndMaterialTokens(result)).toBeLessThanOrEqual(20_000)
+    expect(estimateChatMessagesTokens(result.messages) + input.toolDefinitionTokens).toBeLessThan(228_000)
+    expect(result.messages.map(message => message.content)).toEqual(expect.arrayContaining([original, lastDelivery]))
+    expect(result.messages.map(message => message.content)).not.toContain(archivedProse)
+    expect(loadContextCheckpoint).toHaveBeenCalledOnce()
     expect(compactSessionContext).not.toHaveBeenCalled()
+  })
+
+  it('counts a prior checkpoint and a filled history in the same fresh budget while retaining the checkpoint recovery identity', async () => {
+    const input = { ...buildInput(), contextWindowTokens: 258_000, maxOutputTokens: 8192 }
+    const latestAuthor = '今后保留母舰的旧名。'
+    const latestDelivery = '已交付整理后的航线建议。'
+    const completed = '已保存月历大纲。'
+    const longEntry = '过往修订记录'.repeat(8_000)
+    const checkpoint = { id: 'older-checkpoint', runId: 'prior', summary: {
+      goals: ['旧任务目标'], pending: ['不要把旧待办当作本次目标'], constraints: [], decisions: [],
+      completed: [longEntry, completed], toolReceipts: [{ toolName: 'plan_save', summary: completed, artifactId: 'month-plan' }],
+    } }
+    const loaded = { checkpoint: checkpoint as never, sourceEndedAt: new Date('2026-11-01'), sourceEndMessageId: 'source-end' }
+    vi.mocked(loadContextCheckpoint).mockResolvedValueOnce(loaded).mockResolvedValueOnce(loaded)
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([
+      { id: 'delivered', runId: 'prior', role: 'assistant', parts: [{ type: 'text', text: latestDelivery }] },
+      { id: 'latest-user', runId: 'prior', role: 'user', parts: [{ type: 'text', text: latestAuthor }] },
+      ...Array.from({ length: 40 }, (_, index) => ({ id: `history-${index}`, runId: 'prior', role: 'user',
+        parts: [{ type: 'text', text: `旧史${index}。${'旧'.repeat(800)}` }] })),
+    ] as never)
+    const fresh = await assembleContext(input)
+    const contents = fresh.messages.map(message => String(message.content))
+    const workspace = contents.find(content => content.startsWith('[当前作品上下文快照]'))
+    expect(workspace).toBeDefined()
+    expect(workspace).not.toContain(checkpoint.id)
+    expect(contents.join('\n')).toContain(`checkpointId=${checkpoint.id}`)
+    expect(contents.join('\n')).toContain(completed)
+    expect(contents.join('\n')).not.toContain(longEntry)
+    expect(contents).toEqual(expect.arrayContaining([latestAuthor, latestDelivery]))
+    expect(historyAndMaterialTokens(fresh)).toBeLessThanOrEqual(20_000)
+    expect(compactSessionContext).not.toHaveBeenCalled()
+
+    const resumed = await assembleContext({ ...input, includeCurrentRunHistory: true })
+    const resumedWorkspace = resumed.messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))
+    expect(String(resumedWorkspace?.content)).toContain(longEntry)
   })
 
   it('indicates earlier history is available when the database read limit is reached even if all 500 returned messages fit', async () => {
