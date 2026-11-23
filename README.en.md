@@ -25,7 +25,7 @@
   <a href="#product-preview">Preview</a> ·
   <a href="#feature-overview">Features</a> ·
   <a href="#quick-start">Quick Start</a> ·
-  <a href="https://github.com/Xcy8010/chevoink/releases">Download</a> ·
+  <a href="https://github.com/Xcy8010/Chevoink/releases/latest">Download</a> ·
   <a href="#community">Community</a>
 </p>
 
@@ -151,13 +151,15 @@ Tasks retain project context and creative material. Use Continue to return to a 
 
 Studio settings let you assign built-in or custom models and reasoning efforts to different kinds of work, globally or per novel. You can also request a model or writing-mode change in chat. Model usage and tool charges are available on the account usage page.
 
+When you switch tasks, cached conversations appear immediately. If a chapter, model setting or side panel takes longer to load, only that area shows a placeholder. Reopening Memory shows the last known progress and card counts while updated values arrive.
+
 ## Quick Navigation
 
 | What you want | Where to go |
 | --- | --- |
 | Try the product now | [Live site](https://chevoink.chevolink.com) (web, no install needed) |
-| Install the Android app | [Download & install guide](#download--install-android-app) · [Releases page](https://github.com/Xcy8010/chevoink/releases) |
-| Windows client | [Build instructions](desktop/windows/README.md) · [Acceptance status](docs/WINDOWS_DESKTOP.md). An unsigned, manually installed preview is available. |
+| Install the Android app | [Download & install guide](#download-and-install) · [Releases page](https://github.com/Xcy8010/chevoink/releases) |
+| Install the Windows client | [Choose a Windows installer](#download-and-install) · [Windows client guide](desktop/windows/README.md) |
 | Learn how to use it | [User guide](#user-guide) |
 | Explore features | [Feature overview](#feature-overview) |
 | Understand Agent 4.0 | [Runtime flow](#runtime-flow) · [System architecture](#system-architecture) |
@@ -167,18 +169,17 @@ Studio settings let you assign built-in or custom models and reasoning efforts t
 | Deploy to production | [Deployment & releases](#deployment--releases) · [Environment variables](#environment-variables) |
 | Chat with us | [QQ group 158443235](#community) |
 
-## Download & Install (Android App)
+## Download and install
 
-Pick either channel:
+The [latest GitHub release](https://github.com/Xcy8010/Chevoink/releases/latest) includes the Windows installers, Android APK, release notes and SHA-256 checksums.
 
-1. **GitHub Releases (recommended)**
-   - Open the [Releases page](https://github.com/Xcy8010/chevoink/releases) and select an Android release with an APK;
-   - Download the APK from the Assets section;
-   - Tap to install. If the system warns about "unknown sources", allow "install anyway" in the dialog (the APK is signed with the release key).
-2. **Direct download from the official site**
-   - Visit <https://chevoink.chevolink.com/download/chevoink.apk> in a mobile browser and install directly.
+| Device | Download | Installation and updates |
+| --- | --- | --- |
+| Windows x64 with WebView2 installed or internet access to obtain it | Windows 1.0.6 standard installer, ending in `_x64-setup.exe` | Run the installer. Install subsequent desktop client updates manually. |
+| Windows x64 needing an offline WebView2 installation | Windows 1.0.6 installer with `webview2-offline` in its name | The installer includes the runtime. Both packages provide the same Studio features. |
+| Android | Signed Android 1.0.18 APK, also available as a [direct download](https://chevoink.chevolink.com/download/chevoink.apk) | Install the APK. The app checks for updates and prompts you to download and confirm installation. |
 
-No manual upgrades needed afterwards: the app checks for new versions on launch, and the in-app banner / settings page will prompt and guide the update. The website loads the stable release by default. Accounts assigned to the test channel receive its selected release.
+The current Windows installers are distributed unsigned for manual installation. External links and the account center open in the system's default browser. Studio on the web and inside the clients follows the web release selected for the account.
 
 ## User Guide
 
@@ -195,8 +196,8 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 1. Verify your phone to enter **Studio**, then create a novel or describe your writing idea to the Agent.
 2. Write in the chapter editor or ask **Chevoink Agent 4.0** to help with research, settings, outlines, chapter drafts and revisions.
 3. Browse built-in skills and manage personal skills in **Work Skills**.
-4. Attach **images (up to 6) and files (up to 3, pdf/docx/txt/md)** to a prompt and view attachments in the conversation.
-5. Create cover art with **AI cover generation**, or ask the Agent to view your current cover.
+4. Attach up to 6 images and 3 files per message. The Agent can read Chinese TXT, Markdown, PDF and DOCX in sections, and inspect scanned PDF pages and embedded DOCX images when needed. Legacy DOC requires the document converter, or you can save it as DOCX. ZIP files are used for project import.
+5. Generate a cover with AI or upload your own PNG, JPEG or WebP image, up to 10 MiB per cover.
 6. **Export your work** from the toolbar or More menu, choosing plans, contents, chapters and work information.
 7. Search, pin or archive tasks and manage work versions and creative records in the **Agent Operations Center**.
 8. Publish chapters or schedule updates through chapter management.
@@ -277,7 +278,7 @@ Common scripts:
 
 ## Deployment & Releases
 
-- **Web/API** releases from `main`. An authorized deployment uses the entrypoint above with the full live SHA and the candidate SHA's original successful full GitHub CI run. See [engineering](docs/ENGINEERING.en.md) and [cloud development](docs/CLOUD-DEVELOPMENT.md).
+- Web and API source live on `main`. A frontend-only release promotes an immutable build through the [web release channels](docs/APP-RELEASES.md) after full CI passes for the same commit. API deployments use the PowerShell entrypoint above and the observed live SHA.
 - **Android** builds the Capacitor shell from `android/` on the `android-shell` branch of this repository. APKs are distributed through [Releases](https://github.com/Xcy8010/chevoink/releases).
 - **Windows** source lives in `desktop/windows/` on `main`. The `chevoink-windows` branch is historical. See the [Windows client guide](desktop/windows/README.md).
 
@@ -290,6 +291,22 @@ All secrets are injected via `.env` (database, session signing, Tencent Cloud SM
 Join the **Chevoink community group** (QQ group: `158443235`) to discuss the experience, report issues or contribute:
 
 [Join the QQ group](https://qun.qq.com/universal-share/share?ac=1&authKey=O%2Bhtn0O51Qt5fW67Pj%2BSV7v0QI1%2FESTce7xHduNryLjTadVyekW9TMJcs0Wd5Qap&busi_data=eyJncm91cENvZGUiOiIxNTg0NDMyMzUiLCJ0b2tlbiI6ImdkU3I4ckRWR1M1L3hjTklTTGxHUnVYdVJ6bFNJeXN0c2ozbk1qd0pEeXpZb0JrdkZsbVNyUGtXY3lHZUFGYXQiLCJ1aW4iOiIyNDQ5MTI5ODYyIn0%3D&data=ys8RFeB2nMSORLKaLMkGLLRE8N8WU2t9WCjktU9Dg5YogAZktMZLLLMTj5t2KvcXA8K4p4J2NLPUEV0FO9OpRw&svctype=4&tempid=h5_group_info)
+
+## Contributors and team
+
+<p>
+  <a href="https://github.com/Xcy8010"><img align="left" src="docs/assets/xcy-avatar.jpg" width="52" height="52" alt="XCY's GitHub avatar"></a>
+  <strong><a href="https://github.com/Xcy8010">XCY</a></strong> · Project contributor<br>
+  Contributes to all development and maintenance work on Chevoink, and shares source code and releases on GitHub.
+</p>
+<br clear="left">
+
+<p>
+  <a href="https://chevolink.com"><img align="left" src="docs/assets/chevolink-studio.jpg" width="52" height="52" alt="Chevolink logo"></a>
+  <strong><a href="https://chevolink.com">Chevolink · 启创联科网络科技工作室</a></strong> · Development team<br>
+  The studio behind Chevoink, developing the tools authors use to write and readers use to enjoy their stories.
+</p>
+<br clear="left">
 
 ## License
 

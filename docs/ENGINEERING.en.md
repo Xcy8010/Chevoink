@@ -2,15 +2,29 @@
 
 English | [简体中文](./ENGINEERING.md) · [Development standards](./DEVELOPMENT-STANDARDS.en.md)
 
+## Maintenance baseline (2026-11-23)
+
+Stable web channel r64 serves `main` commit `b70fd86b`. All 22 jobs passed on the first CI run for that commit. The server selects the verified, immutable frontend artifact assigned to each channel. Shared API deployments and changes to channel assignments have separate records. [Original CI run](https://github.com/Xcy8010/Chevoink/actions/runs/45091472219) · [Web releases and channel operations](./APP-RELEASES.md)
+
+| Area | Current behavior and verification |
+| --- | --- |
+| Studio navigation | The workspace stays mounted when switching tasks, chapters or inspector panels. Cached content appears immediately. After about 200 ms, a pending chat, model selector or panel shows its own skeleton. Memory counts are scoped to the account and novel, and context snapshots also include the session. A completed write triggers a fresh read. A late compaction response cannot restore a snapshot after access is revoked. [Browser regression](../tests/ui/studio-loading.browser.mjs) · [Memory interaction tests](../tests/unit/memory-cards-interaction.test.tsx) |
+| Document attachments | TXT and Markdown share the novel import decoder. It recognizes byte order marks, checks UTF-8 and can fall back to GB18030 for older Chinese files without a mark. The vision tool can inspect a scanned PDF page by number or an embedded image referenced in a DOCX body, header or footer by index. Legacy binary DOC requires the configured isolated converter. When it is unavailable, the user is prompted to save as DOCX. [Text decoder](../api/lib/novel-import/parsers/text.ts) · [Attachment reader](../api/lib/agent/tools/document-attachment.ts) |
+| Long documents and covers | The legacy execution path resumes reads using the original attachment URL, returned ranges and next unread offset. It reports progress and pauses when a stage limit or the original task budget is reached. Manual cover uploads accept PNG, JPEG and WebP up to and including 10 MiB per image. Chat images have their own limit. [Read receipts](../api/lib/agent/legacy-attachment-resume.ts) · [Cover validation](../src/features/studio/cover-image.ts) · [Chat attachment limits](../shared/contracts/agent-attachments.ts) |
+| Native clients | The combined download release includes Windows 1.0.6 and the signed Android 1.0.18 APK. Both x64 Windows installers are unsigned previews for manual installation. The bundled package also includes the WebView2 installer. The desktop title bar integrates site navigation, and external HTTPS links and the account center open in the system browser. [Combined release](https://github.com/Xcy8010/Chevoink/releases/tag/clients-2026.11.23) · [Desktop source and build](../desktop/windows/README.md) |
+
 ## Story memory, research and progress in Studio
 
 - **Conversations across devices.** When a phone and a desktop open the same conversation, the receiving client learns about new turns through the session event stream. It fetches messages as needed and subscribes to the running turn. Reconnecting restores server state. Each client keeps its own unsent draft.
 
 - **Chapter memory.** When memory is enabled, a continuation can create cards for new characters, items and plot threads. To update an existing card, `memory_save` targets its ID and edits the specified section. Omitting the title or passing the section heading as the title preserves the name on the card, graph and receipt. An intentional rename uses `renameTo`. See the [parameter contract](../api/lib/agent/memory-tool-parameters.ts) and [memory write regressions](../tests/integration/agent2-story-memory.test.ts).
 - **Search and source reading.** `web_search` returns candidate sources. Page selection considers relevance and source authority. Source records keep a short extract, a longer summary when available, and the publication date when supplied. `web_read` records what was actually read. When an author explicitly requests web research with a text-only model, the platform can gather material for that model using the task’s existing permissions for automatic search and reading. Resumed tasks reuse recorded sources and receipts. See the [search result schema](../api/lib/web-search-result.ts), [source records](../api/lib/agent/research-sources.ts) and [platform verification](../api/lib/agent/public-web-verification.ts).
+- **Book lookups.** When a request identifies a single title, search preserves the full title and evaluates candidates against title matches, author information and page type. It distinguishes book pages and chapters from platform homepages and secondary coverage. Read receipts record which source text was available. [Candidate evaluation](../api/lib/research-search-quality.ts) · [Book search regressions](../tests/unit/research-search-quality.test.ts)
 - **Author-visible progress.** The Agent names the action and its target. The interface groups calls for the same goal and uses their receipts to update the activity status. Authors can expand the group to inspect individual calls. Activity titles are parsed separately so refresh, replay and final replies show reader-facing text. See [activity grouping](../src/features/studio/agent/lib/activity-groups.ts) and the [title parsing regressions](../tests/unit/agent-activity-title.test.ts).
 
 ## Dated engineering notes
+
+Each entry describes its commit at delivery. The maintenance baseline above lists the current client downloads, web channel and Studio behavior.
 
 2026-11-05 Studio response timing: sending a prompt immediately shows a preparation indicator. The visible timer starts with the first observed text, reasoning or tool-argument output for the current task, pauses while the task is paused and retains its value on completion. Historical tasks without a local first-output observation use the recorded server timing. Billing and server execution time are tracked separately.
 
@@ -28,7 +42,7 @@ This version sync sets the Studio label to 4.0 and the new-task built-in pack/ro
 
 2026-10-23 database CI timing: the fresh native writer, v9-format-full-chain and existing multi-step compiler dispatch matrix explicitly use a 15-second lifecycle budget for real PG setup, multiple transactions and cleanup. The previous five seconds came from Vitest defaults, not a product performance SLO; the existing single runtime transaction limit remains ten seconds. On their original isolated PG shards, the identical business, billing and protection assertions run once without coverage as a paired control, followed by the unchanged complete V8 coverage shard and merge gates. Ordinary check annotations retain control duration and existing phase/CPU observations; failed, missing or skipped selected controls fail closed. Other test defaults, serial files, real PG, all assertions and global coverage thresholds remain unchanged. Query-count and predecessor-verification regressions continue to constrain repeated work. These checks do not certify user-scene or literary acceptance.
 
-The parent owns real streaming UI, original chapter-six recovery, three distinct new chapters, a single five-chapter goal, chat/research/revision and Search/Fetch acceptance. An authorized readable full-body source for the same fetched work, P5 literary quality/cost/efficiency comparisons, native-device acceptance and application rollback exercises remain open. 116/116 counts adapter registrations, not complete business acceptance. Dated paragraphs below are historical snapshots; this section and exact-SHA receipts define the current state.
+The parent owns real streaming UI, original chapter-six recovery, three distinct new chapters, a single five-chapter goal, chat/research/revision and Search/Fetch acceptance. An authorized readable full-body source for the same fetched work, P5 literary quality/cost/efficiency comparisons, native-device acceptance and application rollback exercises remain open. 116/116 counts adapter registrations, not complete business acceptance. This entry records the acceptance boundary for the October 23 commit.
 
 2026-10-20 contextual prose review: new tasks use built-in resources 3.6.0 and router identity 3.7.0 (unchanged ranking/triggers). Router 3.6 tasks retain the complete frozen 3.5.0 pack across phases. Base drafting and independent critics distinguish inferable emotion, necessary new facts and expression burden; evidence must contain the actual proposed edit target. Existing repair authority, exact ranges, advisory status and final verification boundaries remain. New quality work v10 uses humanity-context.v3; frozen v9 retains its prompt, v2 protocol and original cache identity. Synthetic PG cases cover exact crisis-fact-preserving patches and v9 completion followed by a fresh v3 check. Four paid same-model critic calls on seven synthetic micro-scenes (two repetitions per variant) found both positives with valid anchors in both variants; one old-prompt repetition falsely flagged five legitimate quotations, while neither new-prompt repetition did. Total usage was 10,526 input / 1,347 output tokens and 1.641 Credits. This small comparison does not establish general literary improvement; writer comparison, full-text continuity and three-chapter browser acceptance remain separate. Release gates and deployed identity require exact-SHA receipts.
 
@@ -127,19 +141,19 @@ Verified on 2026-09-08 against code and production revision `71f7adc`; [CI passe
 
 ## 1. Architecture and entry points
 
-React SPA + Express + PostgreSQL monolith for writing, reading, community and administration; Android uses a Capacitor shell. Production runs one PM2 instance. Independent workers and multi-instance disaster recovery are **not fully delivered**.
+The React SPA, Express API and PostgreSQL provide writing, reading, community and administration. PM2 runs the API, and the Android client uses Capacitor. Document import can use a separate isolated conversion service. Multi-instance disaster recovery still requires an exercise. [Document conversion service](../workers/document-import/README.md)
 
-The candidate Windows shell in `desktop/windows/` loads the same-origin website using Tauri/WebView2, without duplicating business logic or running a local backend. Signing and real-device release acceptance are incomplete; see [Windows acceptance status](WINDOWS_DESKTOP.md). Its Node/Rust toolchain must not become a production API installation or deployment dependency.
+The Windows client in `desktop/windows/` loads the same-origin website in Tauri/WebView2 and uses the hosted API. The desktop Node/Rust toolchain builds the client. See [Windows acceptance status](WINDOWS_DESKTOP.md) for device coverage by version and formal signing requirements.
 
 Web/API and current Windows source live on `main`. The `chevoink-windows` branch is historical. The Android native project lives in `android/` on the `android-shell` branch of the same repository and uses its own build and signing process. See [GIT-SYNC.md](GIT-SYNC.md).
 
 ### Windows change boundaries
 
 - Platform identifiers select compatibility paths, not authorization. Windows changes must preserve Android UA detection, APK updates and voice-plugin paths.
-- Keep native capabilities in the host. The remote page uses narrow commands for version reporting, the save handshake, and allowlisted settings actions. Review origin, ACL, payloads, and negative tests for any added command.
+- The main window on the official site can request version information, acknowledge saves, invoke allowlisted settings actions and operate the window caption. Review the origin, ACL, payloads and denial paths for any new command. [Main-window permissions](../desktop/windows/src-tauri/capabilities/main.json)
 - Normal close/update must await the existing save pipeline. Unknown or failed saves and active recording/downloads keep the window open by default. Never auto-resolve reviews, resend tasks or settle charges.
 - Record web gates and Windows fmt/clippy/test/packaging separately against a specific commit. DOM tests cannot replace real WebView2, installation, updates, permissions or DPI acceptance.
-- Apply Authenticode before updater signing and hashes. Platform releases must not claim the repository-wide Latest flag. Do not advertise unverified stable downloads or present internal packages as stable releases.
+- Production assets for automatic Windows updates require Authenticode and updater signatures and their digests. The repository Latest release provides manual downloads for both platforms. A separate manifest controls automatic Windows updates.
 - The enhanced offline package only embeds the WebView2 installer; retain the ordinary package's version, appId and business code. It does not enable offline writing. Upgrades must preserve cookies, drafts, layouts and pending reviews.
 
 | Layer | Entry points and responsibility |
@@ -152,7 +166,7 @@ Web/API and current Windows source live on `main`. The `chevoink-windows` branch
 | Research | `research-sources.ts`, `research-ranges.ts`, search/read tools: source versions, cursors, attempts and task budgets |
 | Billing | `ai-service.ts`, `credits.ts`, `billing/`: usage, wallets, frozen prices, reservations, calculations and replay |
 | Data | Prisma 6.12.0, with models in `prisma/schema.prisma` and migrations in `prisma/migrations/` |
-| Release | `scripts/deploy-production.ps1`, `deploy/deploy-production.sh`, nginx and PM2 |
+| Release | [Web artifacts and channel operations](./APP-RELEASES.md). The API deployment uses `scripts/deploy-production.ps1` and `deploy/deploy-production.sh`, with nginx and PM2 serving the application. |
 
 Node **22.23.2** and npm **10.9.8** are pinned in the runtime/manifest/lock contract. Production checks the actual API process binary, not only the build shell.
 
@@ -322,7 +336,7 @@ Use forward-compatible migrations; code rollback must not down-migrate away comm
 - Authorized whole-book manifest, per-chapter analysis receipts, missing-chapter recovery and report completion; read ranges are insufficient.
 - Phase authorization for research-then-write, full research budgets and complete cost attribution.
 - Automated unknown-provider-usage reconciliation, complete billing recovery/reconciliation evidence and further grouped V2 observations. The explicitly approved 25% cache discount with the V1 ceiling is active; the seven-day wait was waived, not completed. Other price changes retain their original approval gates.
-- Independent security review, database restore, cross-version rollback, immutable application releases, real performance and literary non-inferiority.
+- Independent security review, database restore, cross-version rollback exercises, real performance and literary non-inferiority.
 - Product blind reviews, retention and complete paid/payment flows; describe the product as beta, not a verified commercial release.
 
 Historical plans remain unchanged. Documentation edits and green CI do not automatically complete these items.

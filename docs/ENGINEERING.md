@@ -2,15 +2,29 @@
 
 简体中文 | [English](./ENGINEERING.en.md) · [开发规范](./DEVELOPMENT-STANDARDS.md)
 
+## 维护基线（2026-11-23）
+
+稳定 Web 通道 r64 对应 `main` 的 `b70fd86b`。该提交的原始 CI 首次运行通过全部 22 个作业。发布前端时，服务端按通道选择同一份已核验的不可变产物；共享 API 的部署与通道切换分别记录。[原始 CI](https://github.com/Xcy8010/Chevoink/actions/runs/45091472219) · [应用版本与通道维护](./APP-RELEASES.md)
+
+| 维护对象 | 当前行为与验证入口 |
+| --- | --- |
+| 创作区切换 | 工作区在切换任务、章节和检查面板时保持挂载。已有数据直接显示；等待超过约 200 毫秒时，聊天、模型或当前面板才显示局部骨架。记忆卡片数量按账号与作品缓存，上下文还按会话隔离。写入完成后重读，权限撤回后迟到的压缩响应不能恢复旧快照。[浏览器回归](../tests/ui/studio-loading.browser.mjs) · [记忆交互回归](../tests/unit/memory-cards-interaction.test.tsx) |
+| 文档附件 | TXT/Markdown 复用作品导入的文本解码器，识别 BOM 并检查 UTF-8，无 BOM 的旧中文文本可回退到 GB18030。PDF 扫描页及 DOCX 正文、页眉、页脚中引用的内嵌图片可按页码或图号交给视觉工具。旧版二进制 DOC 依赖已配置的隔离转换器，未启用时提示另存为 DOCX。[文本解码](../api/lib/novel-import/parsers/text.ts) · [附件读取](../api/lib/agent/tools/document-attachment.ts) |
+| 长文续读与封面 | 旧执行路径按原附件地址、已返回区间和下一处偏移量续读。达到阶段或原任务预算上限会报告进度并暂停。手动上传作品封面接受 PNG、JPEG、WebP，单张上限含 10 MiB；聊天图片另有独立限额。[续读回执](../api/lib/agent/legacy-attachment-resume.ts) · [封面校验](../src/features/studio/cover-image.ts) · [聊天附件限额](../shared/contracts/agent-attachments.ts) |
+| 原生客户端 | 双平台下载页提供 Windows 1.0.6 及已签名的 Android 1.0.18 APK。Windows 两个 x64 安装包均为手动安装的未签名预览版，内嵌包额外携带 WebView2 安装器。桌面标题栏与站点导航合并，外部 HTTPS 链接和账户中心交给默认浏览器。[双平台 Release](https://github.com/Xcy8010/Chevoink/releases/tag/clients-2026.11.23) · [桌面源码与构建](../desktop/windows/README.md) |
+
 ## 创作区的记忆、检索与进度
 
 - **跨设备对话。** 手机和桌面打开同一对话时，接收端通过会话事件流得知新一轮任务，按需读取消息并订阅该次运行的输出。重新连接从服务端恢复。每台设备保留自己的输入草稿。
 
 - **按章更新记忆。** 启用创作记忆后，续写任务可为新出现的人物、物品或故事线建卡。更新已有卡片时，`memory_save` 用卡片 ID 定位并只改指定小节。即使省略标题或把小节名填作标题，卡片、关系网和回执都沿用原名。显式改名走 `renameTo`。参见[参数约定](../api/lib/agent/memory-tool-parameters.ts)和[记忆写入回归](../tests/integration/agent2-story-memory.test.ts)。
 - **检索与读取原文。** `web_search` 返回候选来源，选页时参考相关性与来源权威度。来源记录保留短摘录、可用的详细摘要及发布日期。`web_read` 单独记录实际读到的内容。仅文本模型在作者明确请求联网、且相应操作已有自动执行权限时，可使用平台取得的材料；恢复任务时沿用已记录的来源与回执。参见[搜索结果结构](../api/lib/web-search-result.ts)、[来源记录](../api/lib/agent/research-sources.ts)和[平台查证](../api/lib/agent/public-web-verification.ts)。
+- **按书名找书。** 目标能唯一定位时，搜索保留完整书名，并结合书名匹配、作者信息和页面类型筛选候选。书籍详情、章节、平台首页和二手资料分别处理，原文可读范围仍以读取回执为准。[候选评估](../api/lib/research-search-quality.ts) · [书名搜索回归](../tests/unit/research-search-quality.test.ts)
 - **作者看到的进度。** Agent 概括动作与对象，界面将同一目标的多个工具合并展示，并依据回执切换进行态与完成态。展开可查看各次调用。活动标题单独解析，刷新、回放和最终答复使用作者可读的文本。参见[活动分组](../src/features/studio/agent/lib/activity-groups.ts)和[标题解析回归](../tests/unit/agent-activity-title.test.ts)。
 
 ## 工程变更记录
+
+以下条目记录各提交交付时的状态。当前下载、发布通道和创作区交互以文首维护基线为准。
 
 2026-11-05 创作区响应计时：本地发送立即显示“正在准备中...”光泽动画，配置、会话和准入等待不计入响应时长；当前任务首次正文、思考或工具参数输出后开始逐秒更新。后续增量和服务端历史时间不替换已经建立的本地响应时钟，暂停不累计，完成保留读数。该时钟只用于界面，不修改服务端执行时间、用量或账务；缺少本地响应观测的既有历史继续使用已有服务端时间证据，不推算首个响应时间。DOM与离线流式回归不代表真实浏览器、设备或付费模型验收。
 
@@ -28,7 +42,7 @@
 
 2026-10-23 数据库 CI 计时口径：fresh native writer、v9-format-full-chain 及既有多步骤 compiler dispatch 场景矩阵显式使用 15 秒生命周期预算，包含真实 PG 准备、多次事务和清理；原 5 秒是 Vitest 默认值，不是产品性能 SLO。单次运行事务仍沿用原 10 秒上限。所选全链场景在各自原隔离 PG 分片先以相同业务、费用和保护断言执行一次无覆盖率对照，再执行原始全量 V8 覆盖率分片及合并门禁。普通检查注释分别保留对照耗时与原阶段/CPU记录；失败、缺失或跳过的选定对照会拒绝通过。其余测试默认时限、文件串行、真实PG、全部断言和全局覆盖率门槛不变。查询次数与前置证明复用回归继续约束重复工作；这些工程检查不代表用户场景或文学验收通过。
 
-真实流式界面、原第6章恢复、三个不同新章、单次五章目标、聊天/研究/修改与 Search/Fetch 的产品验收仍由父级统一执行。Fetch 同作品完整正文的授权可读来源、P5文学质量/成本/效率对照、原生设备与应用回退演练仍未闭合；116/116只说明适配登记，不能当作全部业务通过。以下带日期段落为历史快照，当前状态以本段和对应精确 SHA 证据为准。
+真实流式界面、原第6章恢复、三个不同新章、单次五章目标、聊天/研究/修改与 Search/Fetch 的产品验收仍由父级统一执行。Fetch 同作品完整正文的授权可读来源、P5文学质量/成本/效率对照、原生设备与应用回退演练仍未闭合；116/116只说明适配登记，不能当作全部业务通过。此处记录 2026-10-23 对应提交的验收边界。
 
 2026-10-20 人类感语境审校：新任务使用内置资源 3.6.0、路由身份 3.7.0（排名与触发不变）；router 3.6 任务跨阶段继续使用完整冻结的 3.5.0 资源。基础起草和独立 critic 区分可推知情绪、必要新事实与表达负担；证据必须包含实际拟修改对象。既有修订授权、精确范围、advisory 状态与最终核验边界保持。新质量 work v10 使用 humanity-context.v3，冻结 v9 保持原提示、v2 协议及原缓存身份。合成 PostgreSQL 回归覆盖危机事实保留的精确局改，以及 v9 完成后新 v3 检查不得命中旧缓存。同模型七个合成短景、每版两次，共四次收费 critic：两版均识别两个正例且锚定对象；旧版一轮误报五处合法引号，新版两轮均未出现。共 10,526 输入 / 1,347 输出 tokens、1.641 Credits。小样本不能证明普遍文质改善；起草对比、全文连续性与连续三章浏览器验收另记。发布门禁和生产身份以精确 SHA 回执为准。
 
@@ -133,19 +147,19 @@ Ant Ling 官方 `Ling-3.0-flash` 使用 `thinking.type` 开关：配置 `none` �
 
 ## 1. 架构与入口
 
-Chevoink 是 React SPA + Express + PostgreSQL 的单体应用，包含小说创作、阅读、社区与管理后台；Android 使用 Capacitor 壳。当前生产为 PM2 单实例，**不是已完成独立 worker / 多实例容灾的系统**。
+Chevoink 由 React SPA、Express API 和 PostgreSQL 提供创作、阅读、社区与管理功能。API 由 PM2 运行，Android 使用 Capacitor。文档导入可连接独立的隔离转换服务，多实例容灾仍待演练。[文档转换服务](../workers/document-import/README.zh-CN.md)
 
-Windows 候选壳位于 `desktop/windows/`，使用 Tauri/WebView2 加载同源网站，不复制业务、不启动本地后端。尚未完成签名和真机发布验收，见 [Windows 验收状态](WINDOWS_DESKTOP.md)。此目录的 Node/Rust 工具链不进入生产 API 安装或部署依赖。
+Windows 客户端位于 `desktop/windows/`，用 Tauri/WebView2 加载同源网站，复用线上业务 API。Node/Rust 桌面工具链用于客户端构建。各版本的实机验证与正式签名要求见 [Windows 验收状态](WINDOWS_DESKTOP.md)。
 
 Web/API 与 Windows 当前源码均在 `main`；`chevoink-windows` 是历史分支。Android 原生工程在同仓库 `android-shell` 分支的 `android/`，构建与签名走 Android 自身流程。同步规则见 [GIT-SYNC.md](GIT-SYNC.md)。
 
 ### Windows 改动边界
 
 - 平台标识只作兼容分流，不是授权凭证；Windows 适配不能改写 Android 的 UA、APK 更新或语音插件路径。
-- 原生能力集中在宿主，远程页只保留版本、保存握手、固定设置动作三条窄命令；新增命令必须同时审查来源、ACL、载荷与负面测试，禁止通用 shell/文件路径桥接。
+- 来自官网的主窗口可调用版本信息、保存握手、固定设置动作和窗口标题栏命令。新增命令须审查来源、ACL、载荷与拒绝路径。[主窗口权限清单](../desktop/windows/src-tauri/capabilities/main.json)
 - 正常退出/更新须等待原保存链路；未知、失败、录音/下载未结束时默认留在窗口。不得自动处理审查、重发任务或结算。
 - 网页四闸与 Windows fmt/clippy/test/打包分别取证，均对应具体提交；DOM 测试不能替代真实 WebView2、安装、更新、权限和 DPI 验收。
-- 正式包先 Authenticode，再 updater 签名和摘要；平台 Release 不占全仓 Latest。没有验证过的稳定资产，不开放虚假下载入口；内部包不得冒充稳定发行版。
+- Windows 自动更新的正式资产需要 Authenticode 签名、updater 签名及摘要。仓库 Latest 指向双平台手动下载 Release，Windows 自动更新通过独立清单控制。
 - 离线增强包仅内嵌 WebView2 安装器，与普通包保持相同版本、appId 和业务代码，不宣称离线创作。升级不得清 Cookie、草稿、布局或待审查数据。
 
 | 层 | 入口与职责 |
@@ -158,7 +172,7 @@ Web/API 与 Windows 当前源码均在 `main`；`chevoink-windows` 是历史分�
 | 研究 | `research-sources.ts`、`research-ranges.ts`、搜索/读取工具：来源版本、分页、失败尝试、任务范围预算 |
 | 计费 | `ai-service.ts` 用量与调用；`credits.ts` 钱包；`billing/` 价格、快照、预留、分项计算与回放 |
 | 数据 | Prisma 6.12.0，模型在 `prisma/schema.prisma`，迁移在 `prisma/migrations/` |
-| 发布 | `scripts/deploy-production.ps1` + `deploy/deploy-production.sh`；nginx 与 PM2 |
+| 发布 | [Web 产物准备与通道](./APP-RELEASES.md)；API 部署入口为 `scripts/deploy-production.ps1` 与 `deploy/deploy-production.sh`，由 nginx 与 PM2 提供服务 |
 
 固定运行时：Node **22.23.2**、npm **10.9.8**，以 `.node-version`、package engines、锁文件和 `runtime:verify` 一致性检查为准。生产实际 API 进程也校验 Node，而非只检查构建 shell。
 
@@ -332,7 +346,7 @@ BYOK Agent 的质量检查、连续性检查、修订、研究合成和会话命
 - 完整授权小说的章节清单、每章分析回执、缺章恢复与全书报告端到端；“已读范围”不能代替此项。
 - “先研究再写作”的阶段授权、研究总预算策略与完整成本归属。
 - 未知供应商用量自动核对、全部计费并发/恢复/对账场景，以及 V2 后续分组观测。25%缓存折扣加V1封顶已获明确批准并启用，7天等待被豁免，不记作已完成影子验证；其他改价仍遵循原审批门。
-- 独立安全评审、数据库还原、跨版本回退、不可变应用发布、真实性能与文学质量非劣验收。
+- 独立安全评审、数据库还原、跨版本回退演练、真实性能与文学质量非劣验收。
 - 产品盲评、留存、付费/支付完整商业链路；仍应按公测而非已验证商业正式版描述。
 
 本页只更新真实现状，不改写历史方案。后续按[开发规范](./DEVELOPMENT-STANDARDS.md)维护证据，未完成项不得因文档更新或 CI 变绿而自动勾选。

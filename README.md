@@ -25,7 +25,7 @@
   <a href="#产品预览">产品预览</a> ·
   <a href="#功能一览">核心能力</a> ·
   <a href="#快速开始">快速开始</a> ·
-  <a href="https://github.com/Xcy8010/chevoink/releases">客户端下载</a> ·
+  <a href="https://github.com/Xcy8010/Chevoink/releases/latest">客户端下载</a> ·
   <a href="#交流群">社区交流</a>
 </p>
 
@@ -151,13 +151,15 @@ flowchart LR
 
 在创作区设置的「模型分工」中，为不同工作选择内置或自定义模型及推理强度；设置可应用于全局或当前作品。也可以直接在对话中要求切换模型或创作模式。模型用量和工具费用可在账户用量页查看。
 
+切换任务时，已加载的对话会直接显示。章节、模型或右侧面板需要较长时间读取时，仅对应区域显示骨架。再次打开记忆面板会先显示已读取的进度和卡片数，再更新变化的数据。
+
 ## 快速导航
 
 | 想做什么 | 去哪里 |
 | --- | --- |
 | 直接体验产品 | [线上地址](https://chevoink.chevolink.com)（网页端，无需安装） |
-| 安装安卓 APP | [下载与安装教程](#下载与安装安卓-app) · [Releases 页面](https://github.com/Xcy8010/chevoink/releases) |
-| Windows 客户端 | [构建说明](desktop/windows/README.md) · [验收状态](docs/WINDOWS_DESKTOP.md)，目前提供未签名的手动安装预览版 |
+| 安装安卓 APP | [下载与安装教程](#下载与安装) · [Releases 页面](https://github.com/Xcy8010/chevoink/releases) |
+| 安装 Windows 客户端 | [选择适合的 Windows 安装包](#下载与安装) · [Windows 客户端说明](desktop/windows/README.md) |
 | 了解怎么用 | [使用教程](#使用教程) |
 | 了解功能 | [功能一览](#功能一览) |
 | 了解 Agent 4.0 | [运行流程](#运行流程) · [系统架构](#系统架构) |
@@ -167,18 +169,17 @@ flowchart LR
 | 部署上线 | [部署与发布](#部署与发布) · [环境变量](#环境变量) |
 | 交流讨论 | [QQ 交流群 158443235](#交流群) |
 
-## 下载与安装（安卓 APP）
+## 下载与安装
 
-两种方式任选其一：
+Windows 和 Android 安装包集中在同一个 [GitHub 最新版本](https://github.com/Xcy8010/Chevoink/releases/latest)，页面附有更新说明和 SHA-256 校验值。
 
-1. **GitHub Releases（推荐）**
-   - 打开 [Releases 页面](https://github.com/Xcy8010/chevoink/releases)，选择附有 APK 的 Android 版本；
-   - 在 Assets 中下载 APK 到手机；
-   - 点击安装。系统若提示「未知来源应用」，在弹窗中允许「本次安装」即可（APK 已使用发布密钥签名）。
-2. **官网直装**
-   - 手机浏览器访问 <https://chevoink.chevolink.com/download/chevoink.apk> 直接下载安装。
+| 设备 | 选择哪个安装包 | 如何使用 |
+| --- | --- | --- |
+| Windows x64，已安装 WebView2 或可联网获取运行时 | Windows 1.0.6 普通版，文件名以 `_x64-setup.exe` 结尾 | 下载并运行安装程序。后续桌面客户端版本通过手动安装更新。 |
+| Windows x64，需要离线安装 WebView2 | Windows 1.0.6 内嵌运行时版，文件名含 `webview2-offline` | 安装包自带 WebView2，两种安装包提供相同的创作功能。 |
+| Android | 已签名的 Android 1.0.18 APK，也可[从官网直接下载](https://chevoink.chevolink.com/download/chevoink.apk) | 安装后可在应用内检查更新，按提示下载并确认安装。 |
 
-安装后无需手动升级：APP 启动时会自动检测新版本，站内条幅 / 设置页会提示更新并引导下载。网页版打开时加载稳定版，获分配测试版的账号加载对应测试版本。
+当前 Windows 安装包采用未签名的手动分发方式。桌面应用中的外部链接和账号中心由系统默认浏览器打开。网页版和客户端内的创作区均随领取到的网页版本更新。
 
 ## 使用教程
 
@@ -195,8 +196,8 @@ flowchart LR
 1. 验证手机号后进入**创作区**，创建作品或直接向 Agent 描述你的创作想法。
 2. 在章节编辑器写作，或让 **Chevoink Agent 4.0** 协助资料研究、设定、大纲、章节起草与修订。
 3. 在**作品技能**区查看内置技能、管理个人技能，选择适合当前作品的写作方式。
-4. 随提示词附加**图片（≤6 张）与文件（≤3 个，pdf/docx/txt/md）**，在对话中查看附件内容。
-5. 使用 **AI 封面生成**制作封面，也可以让 Agent 查看当前封面。
+4. 每条消息最多附加 6 张图片和 3 个文件。Agent 能逐段读取中文 TXT、Markdown、PDF 和 DOCX，也能按需查看 PDF 扫描页和 DOCX 内嵌图。旧版 DOC 需要文档转换服务，也可另存为 DOCX 上传。ZIP 用于作品导入。
+5. 用 AI 生成作品封面，或上传自己的 PNG、JPEG 或 WebP 图片，单张上限为 10 MiB。
 6. 从工具栏或「更多」菜单**导出作品**，按需选择规划、目录、章节和作品信息。
 7. 在 **Agent 操作中心**搜索、置顶或归档任务，管理作品版本与创作记录。
 8. 通过章节管理发布作品，或设置定时更新。
@@ -277,7 +278,7 @@ npm run dev
 
 ## 部署与发布
 
-- **Web/API** 从 `main` 发布。授权部署使用上方入口，指定当前线上完整 SHA 和候选 SHA 的 GitHub CI 首跑编号。该首跑必须完整通过。见[工程文档](docs/ENGINEERING.md)与[云端开发说明](docs/CLOUD-DEVELOPMENT.md)。
+- Web 和 API 源码都在 `main`。单独发布前端时，使用通过同一提交完整 CI 的不可变产物，通过[版本通道](docs/APP-RELEASES.md)发布。API 部署使用上方 PowerShell 入口和实测线上 SHA。
 - **Android** 从同仓库的 `android-shell` 分支构建 Capacitor 壳，原生项目位于该分支的 `android/`。APK 通过 [Releases](https://github.com/Xcy8010/chevoink/releases) 分发。
 - **Windows** 当前源码在 `main` 的 `desktop/windows/`。`chevoink-windows` 是历史分支。见[Windows 客户端说明](desktop/windows/README.md)。
 
@@ -290,6 +291,22 @@ npm run dev
 欢迎加入 **启创墨域交流群**（QQ 群号：`158443235`），讨论使用体验、反馈问题或参与共建：
 
 [点击加入 QQ 交流群](https://qun.qq.com/universal-share/share?ac=1&authKey=O%2Bhtn0O51Qt5fW67Pj%2BSV7v0QI1%2FESTce7xHduNryLjTadVyekW9TMJcs0Wd5Qap&busi_data=eyJncm91cENvZGUiOiIxNTg0NDMyMzUiLCJ0b2tlbiI6ImdkU3I4ckRWR1M1L3hjTklTTGxHUnVYdVJ6bFNJeXN0c2ozbk1qd0pEeXpZb0JrdkZsbVNyUGtXY3lHZUFGYXQiLCJ1aW4iOiIyNDQ5MTI5ODYyIn0%3D&data=ys8RFeB2nMSORLKaLMkGLLRE8N8WU2t9WCjktU9Dg5YogAZktMZLLLMTj5t2KvcXA8K4p4J2NLPUEV0FO9OpRw&svctype=4&tempid=h5_group_info)
+
+## 贡献者与团队
+
+<p>
+  <a href="https://github.com/Xcy8010"><img align="left" src="docs/assets/xcy-avatar.jpg" width="52" height="52" alt="XCY 的 GitHub 头像"></a>
+  <strong><a href="https://github.com/Xcy8010">XCY</a></strong> · 项目贡献者<br>
+  参与启创墨域的所有开发与维护，在 GitHub 上分享项目源码和版本更新。
+</p>
+<br clear="left">
+
+<p>
+  <a href="https://chevolink.com"><img align="left" src="docs/assets/chevolink-studio.jpg" width="52" height="52" alt="启创联科标志"></a>
+  <strong><a href="https://chevolink.com">启创联科网络科技工作室</a></strong> · 开发团队<br>
+  启创墨域背后的工作室，围绕作者创作和读者阅读体验持续完善产品。
+</p>
+<br clear="left">
 
 ## License
 
