@@ -669,6 +669,48 @@ it('animates new receipts only in their own message even when a replayed receipt
   expect(view.container.querySelector('.agent-tool-enter')).toBeNull()
 })
 
+it('reveals an answer after an untitled tool settles, including a terminal history refresh during the reveal', () => {
+  vi.useFakeTimers()
+  const store = useAgentStore.getState()
+  store.resetRun()
+  store.beginRun('r', '核对章节', 'session')
+  const base = { runId: 'r', ts: '2026-11-24T00:00:00.000Z' }
+  const report = '上一章的线索已经核对。'.repeat(48)
+  function LiveTranscript() {
+    const state = useAgentStore()
+    return <Transcript messages={state.messages.filter(item => item.role === 'assistant')} active={isRunActive(state.phase) ? 'r' : undefined}
+      textRevealTargets={state.textRevealTargets} finishTextReveal={state.finishTextReveal} />
+  }
+  try {
+    const view = render(<LiveTranscript />)
+    act(() => {
+      store.applyEvent({ ...base, seq: 1, messageId: 'read', type: 'tool.call', callId: 'c', toolName: 'chapter_read', title: '读前文', args: {} })
+      store.applyEvent({ ...base, seq: 2, messageId: 'read', type: 'tool.result', callId: 'c', toolName: 'chapter_read', ok: true, summary: '已读' })
+      store.applyEvent({ ...base, seq: 3, messageId: 'answer', type: 'text.delta', delta: report.slice(0, 100) })
+    })
+    const row = screen.getByRole('button', { name: '已核对前文' })
+    act(() => vi.advanceTimersByTime(48))
+    const first = view.container.querySelector('p')!.textContent!
+    expect(first.length).toBeGreaterThan(0)
+    expect(report.startsWith(first)).toBe(true)
+    act(() => {
+      const history = useAgentStore.getState().messages.map(item => item.id === 'answer' ? message('answer', [{ type: 'text', text: report }]) : item)
+      store.restoreMessages(history, 'session', null, undefined, 'r')
+    })
+    expect(view.container.querySelector('p')!.textContent).toBe(first)
+    act(() => vi.advanceTimersByTime(160))
+    const next = view.container.querySelector('p')!.textContent!
+    expect(next.length).toBeGreaterThan(first.length)
+    expect(next.length).toBeLessThan(report.length / 2)
+    act(() => vi.advanceTimersByTime(2000))
+    expect(screen.getByText(report)).toBeTruthy()
+    expect(useAgentStore.getState().textRevealTargets).toEqual({})
+    expect(screen.getByRole('button', { name: '已核对前文' })).toBe(row)
+  } finally {
+    act(() => store.resetRun())
+  }
+})
+
 it('animates a held handoff as soon as the next real stage makes it visible', () => {
   vi.useFakeTimers()
   const read = message('read', [activity, call('read', 'chapter_read')])

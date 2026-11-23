@@ -21,6 +21,11 @@ export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec, mode?: A
   return tools
 }
 
+export function allowedSessionMaterialReads(tools: AgentTool[], mode: AgentExecutionMode): string[] {
+  return tools.filter(tool => (tool.name === 'chapter_read' || tool.name === 'plan_read')
+    && tool.permission[mode] === 'allow' && !tool.alwaysConfirm).map(tool => tool.name)
+}
+
 export function snapshotToolAuthority(tools: AgentTool[], mode: AgentExecutionMode): ToolAuthority {
   const authority = new Map<string, { permission: AgentWorkspaceToolPermission; alwaysConfirm: boolean; dangerous: boolean }>()
   for (const tool of tools) {

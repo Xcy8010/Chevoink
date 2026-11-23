@@ -117,7 +117,7 @@ export default function AgentContextPanel({ userId, novelId, sessionId, active =
             </div>
           </>}
         </div>
-        <div className="mt-2 flex justify-between text-[9px] text-[var(--text-tertiary)]"><span>{hasRequest ? '最近一次模型输入估算' : '已保存的会话历史估算'}</span><span>自动压缩阈值 <Metric value={state && '100%'} refreshing={refreshing} /></span></div>
+        <div className="mt-2 flex justify-between text-[9px] text-[var(--text-tertiary)]"><span title={hasRequest ? '发送时沿用上次读数，本轮模型输入组装后更新；带入的资料有增减，占用也会变化。' : '按最近的检查点和已保存的对话估算。'}>{hasRequest ? '最近一次模型输入估算' : '已保存的会话历史估算'}</span><span>自动压缩阈值 <Metric value={state && '100%'} refreshing={refreshing} /></span></div>
       </section>
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">

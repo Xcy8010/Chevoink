@@ -485,7 +485,7 @@ export type ChatImageContentPart = { type: 'image_url'; image_url: { url: string
 export type ChatTextContentPart = { type: 'text'; text: string }
 export type ChatMessage =
   | { role: 'system'; content: string }
-  | { role: 'user'; content: string | Array<ChatTextContentPart | ChatImageContentPart> }
+  | { role: 'user'; content: string | Array<ChatTextContentPart | ChatImageContentPart>; sessionReadingMaterial?: true }
   | { role: 'assistant'; content: string | null; reasoning?: string; toolCalls?: ToolCallRequest[]; responsesContinuation?: ResponsesContinuation }
   | { role: 'tool'; toolCallId: string; content: string }
 

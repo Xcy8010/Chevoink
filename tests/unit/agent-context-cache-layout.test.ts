@@ -16,9 +16,9 @@ vi.mock('../../api/lib/prisma.js', () => ({
     novel: { findUnique: vi.fn(), findFirst: vi.fn() },
     projectMemoryEntry: { findMany: vi.fn() },
     agentMessage: { findMany: vi.fn() },
-    agentArtifact: { findMany: vi.fn() },
+    agentArtifact: { findMany: vi.fn(), findFirst: vi.fn() },
     coverAsset: { findMany: vi.fn() },
-    chapter: { findFirst: vi.fn() },
+    chapter: { findFirst: vi.fn(), findMany: vi.fn() },
   },
 }))
 
@@ -255,7 +255,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const input = buildInput()
     const result = await assembleContext(input)
     const estimates = result.inputEstimates!
-    expect(Object.keys(estimates)).toEqual(['system', 'goal', 'history', 'workspace', 'todo', 'task', 'intent'])
+    expect(Object.keys(estimates)).toEqual(['system', 'goal', 'history', 'readingMaterial', 'workspace', 'todo', 'task', 'intent'])
     expect(Object.values(estimates).reduce((sum, item) => sum + item.messages, 0)).toBe(result.messages.length)
     expect(Object.values(estimates).reduce((sum, item) => sum + item.tokens, 0)).toBe(estimateChatMessagesTokens(result.messages))
     expect(JSON.stringify(estimates)).not.toMatch(/星海余烬|chapter-1|把第三章/)
@@ -611,6 +611,59 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const tight = await assembleContext({ ...input, toolDefinitionTokens: 90000 })
     expect(tight.messages.map(message => message.content)).toEqual(expect.arrayContaining([originalRequest, recentRequest]))
     expect(tight.messages.map(message => message.content)).not.toContain(previousAnswer)
+  })
+
+  it('continues a 67% session from the same chapter and plan material across a short follow-up', async () => {
+    const { chapterReadTool, planReadTool } = await import('../../api/lib/agent/tools/read-tools.js')
+    const input = { ...buildInput(), attachments: [], contextWindowTokens: 258000, toolDefinitionTokens: 3000 }
+    const scope = { novelId: input.novelId, userId: input.userId, runId: input.runId, chapterId: input.chapterId,
+      transaction: prisma } as unknown as Parameters<typeof chapterReadTool.execute>[0]
+    const chapter = { ...baseChapter, revision: 6, content: '章节细节'.repeat(3000), summary: '' }
+    const plan = { id: 'plan-1', title: '本章细纲', content: '第三处转折'.repeat(1600), updatedAt: new Date(), metadata: { savedAsPlan: true } }
+    vi.mocked(prisma.chapter.findMany).mockResolvedValue([chapter] as never)
+    vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue(plan as never)
+    vi.mocked(prisma.agentArtifact.findMany).mockResolvedValue([plan] as never)
+    const original = { id: 'author', runId: 'earlier', role: 'user', parts: [{ type: 'text', text: '保留人物动机和叙事视角。' }] }
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([original] as never)
+    const baseline = await assembleContext(input)
+    original.parts[0].text += '景'.repeat(Math.max(0, Math.round(228000 * 0.58) - estimateChatMessagesTokens(baseline.messages) - input.toolDefinitionTokens))
+    const first = await assembleContext(input)
+    const reads = await Promise.all([chapterReadTool.execute(scope, { chapterId: chapter.id, limit: 12000 }),
+      planReadTool.execute(scope, { planId: plan.id, limit: 8000 })])
+    const previousTotal = input.toolDefinitionTokens + estimateChatMessagesTokens([...first.messages,
+      ...reads.map((result, i) => ({ role: 'tool' as const, toolCallId: String(i), content: result.output }))])
+    const report = { id: 'report', runId: input.runId, role: 'assistant', parts: reads.map((result, i) => ({
+      type: 'tool-call', status: 'success', callId: String(i), toolName: i ? 'plan_read' : 'chapter_read', display: result.display, summary: result.summary,
+    })) }
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([report, original] as never)
+    const next = { ...input, runId: 'next', prompt: '第三处转折再收紧一点。' }
+    const asReceipts = await assembleContext(next)
+    const allowed = vi.fn(async () => ['chapter_read', 'plan_read'])
+    const continued = await assembleContext({ ...next, sessionMaterialReads: allowed })
+    const percent = (n: number) => Math.round(n * 100 / 228000)
+    const nextTotal = input.toolDefinitionTokens + estimateChatMessagesTokens(continued.messages)
+    expect([previousTotal, input.toolDefinitionTokens + estimateChatMessagesTokens(asReceipts.messages), nextTotal].map(percent)).toEqual([67, 58, 67])
+    expect(continued.messages.some(message => String(message.content).includes(chapter.content))).toBe(true)
+    expect(continued.messages.some(message => String(message.content).includes(plan.content))).toBe(true)
+    expect(continued.messages.some(message => String(message.content).includes('保留人物动机和叙事视角。'))).toBe(true)
+    expect(continued.inputEstimates!.readingMaterial.tokens).toBeGreaterThanOrEqual(20000)
+    expect(compactSessionContext).not.toHaveBeenCalled()
+    console.info('[synthetic-context-continuity]', { previousTotal, nextTotal, materials: continued.inputEstimates!.readingMaterial.tokens })
+    await assembleContext({ ...next, includeCurrentRunHistory: true, sessionMaterialReads: allowed })
+    expect(allowed).toHaveBeenCalledTimes(1)
+  })
+
+  it('omits an archived durable read range when the long tool output may have reached the model only as a reference', async () => {
+    const { chapterReadTool, planReadTool } = await import('../../api/lib/agent/tools/read-tools.js')
+    const scope = { novelId: 'novel-1', userId: 'user-1', runId: 'prior', transaction: prisma } as unknown as Parameters<typeof planReadTool.execute>[0]
+    const content = '长材料'.repeat(10000)
+    vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue({ id: 'p', title: '细纲', content, metadata: { savedAsPlan: true }, updatedAt: new Date() } as never)
+    vi.mocked(prisma.chapter.findMany).mockResolvedValue([{ ...baseChapter, content: '已见', summary: content, revision: 4 }] as never)
+    const chapter = await chapterReadTool.execute(scope, { chapterId: baseChapter.id })
+    const plan = await planReadTool.execute(scope, { planId: 'p' })
+    expect(chapter.display).toMatchObject({ kind: 'chapterRef', archiveOnly: true })
+    expect(plan.display?.kind).toBe('readSources')
+    if (plan.display?.kind === 'readSources') expect(plan.display.items[0].readingRange).toBeNull()
   })
 
   it('reads a checkpoint tail only when a full session reaches the threshold, preserving room for the next parallel read', async () => {

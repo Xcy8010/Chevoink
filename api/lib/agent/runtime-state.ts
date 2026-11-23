@@ -21,7 +21,7 @@ const message = z.discriminatedUnion('role', [
   z.object({ role: z.literal('user'), content: z.union([z.string(), z.array(z.union([
     z.object({ type: z.literal('text'), text: z.string() }).strict(),
     z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string(), detail: z.enum(['low', 'high', 'auto']).optional() }).strict() }).strict(),
-  ]))]) }).strict(),
+  ]))]), sessionReadingMaterial: z.literal(true).optional() }).strict(),
   z.object({ role: z.literal('assistant'), content: z.string().nullable(), reasoning: z.string().optional(), toolCalls: z.array(toolCall).optional(),
     localCompletion: z.object({ kind: z.enum(['question_timeout', 'question_cancelled', 'question_unanswered', 'novel_setup', 'novel_setup_blocked']), operationId: id }).strict().optional(),
     responsesContinuation: responsesContinuationSchema.optional(),

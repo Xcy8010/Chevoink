@@ -28,6 +28,26 @@ beforeEach(() => {
   db.save.mockImplementation((_tx, _lease, input) => ({ revision: 3, snapshotHash: 'e'.repeat(64), state: input.snapshot }))
 })
 
+it('can release optional reading material without an archive reader, but never changes a prepared request', async () => {
+  const content = '〔材料标题相同的作者原话〕' + '文'.repeat(600)
+  const author = { role: 'user' as const, content }
+  const optional = { ...author, sessionReadingMaterial: true as const }
+  const fixture = { frame: { revision: 2, snapshotHash: 'f'.repeat(64), state: { phase: 'awaiting_operation', messages: [optional, author] } },
+    configuration: { tools: [], toolAuthority: [] } }
+  db.read.mockResolvedValue(fixture)
+  const actualBudget = { ...budget, hardLimit: 1500, compactAtTokens: 1500, canReadArchive: false,
+    estimate: (items: ChatMessage[]) => estimateChatMessagesTokens(items) + 300 }
+  expect(await advanceDurableContext(token, actualBudget)).toBeNull()
+  expect(db.save).not.toHaveBeenCalled()
+  db.read.mockResolvedValue({ ...fixture, frame: { ...fixture.frame, state: { ...fixture.frame.state, phase: 'idle' } } })
+  const next = await advanceDurableContext(token, actualBudget)
+  expect(next?.state.messages).toEqual([author])
+  expect(fixture.frame.state.messages).toEqual([optional, author])
+  expect(db.archive).toHaveBeenCalledWith({ data: expect.objectContaining({ payload: expect.objectContaining({
+    beforeTokens: actualBudget.estimate([optional, author]), afterTokens: actualBudget.estimate([author]), releasedReadingMaterials: 1,
+  }) }) })
+})
+
 it('compacts the projected request once and retains the author and latest tool result', async () => {
   const next = await advanceDurableContext(token, budget)
   expect(next?.state.messages[0]).toEqual(messages[0])

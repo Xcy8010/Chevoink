@@ -9,6 +9,7 @@ import { prisma } from '../../prisma.js'
 import { activeChapterScope, activeVolumeWhere } from '../../data/internal.js'
 import { searchStoryMemory } from '../story-memory.js'
 import { recordChapterBaseline } from '../baseline.js'
+import { TOOL_OBSERVATION_INLINE_BYTES } from '../runtime-common.js'
 import { defineTool, type ToolResult } from './types.js'
 import { executeDurableRead } from './durable-read.js'
 import { planTargetHash } from './durable-plan.js'
@@ -201,7 +202,8 @@ export const chapterReadTool = defineTool({
     return {
       output,
       summary: `读取《${chapter.title}》 ${offset}-${offset + slice.length} 字`,
-      display: { kind: 'chapterRef', chapterId: chapter.id, title: chapter.title, wordCount: chapter.wordCount, range, revision: chapter.revision },
+      display: { kind: 'chapterRef', chapterId: chapter.id, title: chapter.title, wordCount: chapter.wordCount, range, revision: chapter.revision,
+        ...(ctx.transaction && Buffer.byteLength(output, 'utf8') > TOOL_OBSERVATION_INLINE_BYTES ? { archiveOnly: true as const } : {}) },
       observedState: { kind: 'chapter', id: chapter.id, revision: chapter.revision },
       observedChapterRange: { targetId: chapter.id, contentHash: createHash('sha256').update(chapter.content).digest('hex'),
         ...range },
@@ -368,11 +370,16 @@ export const planReadTool = defineTool({
     // which verifies page coverage before granting a write baseline.
     const defaultLimit = ctx.transaction && args.offset === undefined && args.limit === undefined ? plan.content.length : 8000
     const end = Math.min(offset + (args.limit ?? defaultLimit), plan.content.length)
-    recordPlanContentHash(ctx, plan.id, createHash('sha256').update(plan.content).digest('hex'), links.planHash)
+    const contentHash = createHash('sha256').update(plan.content).digest('hex')
+    recordPlanContentHash(ctx, plan.id, contentHash, links.planHash)
+    const output = `计划属性：${JSON.stringify(links)}\n《${plan.title}》（planId=${plan.id}，contentHash=${contentHash}，${plan.content.length} 字，本次${offset}–${end}）：\n${plan.content.slice(offset, end)}${end < plan.content.length ? `\n[尚有后文；使用plan_read、同一planId和offset=${end}继续读取，不能把本段当全文]` : ''}`
+    // A large durable observation can reach the model as an archive reference only.
+    const inline = !ctx.transaction || Buffer.byteLength(output, 'utf8') <= TOOL_OBSERVATION_INLINE_BYTES
     return {
-      output: `计划属性：${JSON.stringify(links)}\n《${plan.title}》（planId=${plan.id}，contentHash=${createHash('sha256').update(plan.content).digest('hex')}，${plan.content.length} 字，本次${offset}–${end}）：\n${plan.content.slice(offset, end)}${end < plan.content.length ? `\n[尚有后文；使用plan_read、同一planId和offset=${end}继续读取，不能把本段当全文]` : ''}`,
+      output,
       summary: `读取计划《${plan.title}》`,
-      display: { kind: 'readSources', items: [{ title: plan.title, preview: clip(plan.content.slice(offset, end), 120), target: { kind: 'plan', id: plan.id } }] },
+      display: { kind: 'readSources', items: [{ title: plan.title, preview: clip(plan.content.slice(offset, end), 120),
+        target: { kind: 'plan', id: plan.id }, readingRange: inline ? { start: offset, end, contentHash } : null }] },
       ...(offset === 0 && end === plan.content.length ? { observedState: { kind: 'plan' as const, id: plan.id, hash: planTargetHash(plan) } } : {}),
     }
   },

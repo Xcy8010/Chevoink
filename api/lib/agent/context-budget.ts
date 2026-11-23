@@ -272,6 +272,20 @@ export function toolOutputsToKeep(messages: ChatMessage[], tokensToRelease: numb
   return minimum
 }
 
+/** Under pressure, omit the oldest optional excerpts before compacting real conversation items.
+ * The server creates the marker only for reconstructed material. Author text has no such field.
+ * Callers measure the resulting request including their current tools and personalization. */
+export function releaseSessionReadingMaterial<T extends ChatMessage>(messages: T[], beforeTokens: number, triggerTokens: number): T[] | null {
+  if (beforeTokens < triggerTokens) return null
+  let toRelease = beforeTokens - targetContextTokens(triggerTokens)
+  const retained = messages.filter(message => {
+    if (toRelease <= 0 || message.role !== 'user' || !message.sessionReadingMaterial) return true
+    toRelease -= estimateChatMessageTokens(message)
+    return false
+  })
+  return retained.length === messages.length ? null : retained
+}
+
 /** Plan a useful reduction before replacing any live messages. */
 export function planInRunCompaction(messages: ChatMessage[], beforeTokens: number,
   budget: Pick<AgentContextBudget, 'compactAtTokens' | 'hardRequestTokens'>,
@@ -279,16 +293,18 @@ export function planInRunCompaction(messages: ChatMessage[], beforeTokens: numbe
   const triggerTokens = Math.min(budget.compactAtTokens, budget.hardRequestTokens)
   if (beforeTokens < triggerTokens) return null
 
-  let chosen = messages
-  let afterTokens = beforeTokens
+  const retained = releaseSessionReadingMaterial(messages, beforeTokens, triggerTokens)
+  let chosen = retained ?? messages
+  let afterTokens = retained ? estimate(retained) : beforeTokens
+  if (retained && afterTokens < triggerTokens) return { messages: retained, triggerTokens, afterTokens, compactedToolOutputs: 0, collapsedToolRounds: 0 }
   let compactedToolOutputs = 0
   let collapsedToolRounds = 0
-  const firstCandidate = [...messages]
+  const firstCandidate = [...chosen]
   releaseCompletedReasoning(firstCandidate)
   const targetTokens = targetContextTokens(triggerTokens)
   const firstStage = compactEarlyToolPayloads(firstCandidate, toolOutputsToKeep(firstCandidate, beforeTokens - targetTokens, keepRecentToolOutputs))
   const firstTokens = estimate(firstCandidate)
-  if (hasProactiveCompactionGain(beforeTokens, firstTokens, triggerTokens) || beforeTokens > budget.hardRequestTokens && firstTokens < afterTokens) {
+  if (firstTokens < afterTokens && (hasProactiveCompactionGain(beforeTokens, firstTokens, triggerTokens) || beforeTokens > budget.hardRequestTokens)) {
     chosen = firstCandidate
     afterTokens = firstTokens
     compactedToolOutputs = firstStage.compactedToolOutputs

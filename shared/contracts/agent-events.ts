@@ -119,8 +119,15 @@ export type AgentToolDisplayPayload =
       description: string
     }
   | { kind: 'markdown'; markdown: string }
-  | { kind: 'readSources'; items: Array<{ title: string; preview?: string; memoryType?: StoryMemoryCard['memoryType']; target?: { kind: 'chapter' | 'plan'; id: EntityId } }> }
-  | { kind: 'chapterRef'; chapterId: EntityId; title: string; wordCount: number; range?: { start: number; end: number }; revision?: number }
+  | { kind: 'readSources'; items: Array<{
+      title: string
+      preview?: string
+      memoryType?: StoryMemoryCard['memoryType']
+      target?: { kind: 'chapter' | 'plan'; id: EntityId }
+      /** Null when the durable result can be delivered as an archive reference. Older receipts omit this field. */
+      readingRange?: { start: number; end: number; contentHash: string } | null
+    }> }
+  | { kind: 'chapterRef'; chapterId: EntityId; title: string; wordCount: number; range?: { start: number; end: number }; revision?: number; archiveOnly?: true }
   | { kind: 'memoryCard'; memoryId: EntityId; memoryType: StoryMemoryCard['memoryType']; title: string }
   | { kind: 'sessionRename'; sessionId: EntityId; title: string }
   | { kind: 'plan'; summary: string; steps: Array<{ title: string; detail?: string }> }

@@ -519,7 +519,8 @@ export function AgentPanel({
         restoreActiveRunHistory(history, payload.activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId, payload.activeRunLastSeq)
         connect(payload.activeRunId, cursor)
       } else {
-        now.restoreMessages(history, sessionId, payload.todoSnapshot, payload.nextPrompt)
+        now.restoreMessages(history, sessionId, payload.todoSnapshot, payload.nextPrompt,
+          head.latestRunStatus === 'completed' ? latestId : undefined)
         now.setAuthorEnded(payload.authorEnded ?? null)
         now.setRunOutcome(payload.outcome ?? null)
         now.noteResumeableRun(payload.resumeRunId ?? null)

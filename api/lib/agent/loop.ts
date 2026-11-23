@@ -63,7 +63,7 @@ import {
   waitForApproval,
 } from './permissions.js'
 import { toOpenAITools } from './tools/registry.js'
-import { intersectToolAuthority, snapshotToolAuthority, restrictToolsToTask } from './tool-authority.js'
+import { allowedSessionMaterialReads, intersectToolAuthority, snapshotToolAuthority, restrictToolsToTask } from './tool-authority.js'
 import { assertTaskAuthorizationRuntimeReady } from './task-authorization.js'
 import { assertLegacyRuntimeCompatible, startLegacyRuntimeRun } from './runtime-identity.js'
 import { normalizeToolInput, validateToolInput } from './tools/input-validation.js'
@@ -1561,6 +1561,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       contextWindowTokens,
       maxOutputTokens: requestOutputTokens,
       toolDefinitionTokens: estimateToolDefinitionTokens(isTextOnlyModel(modelRuntime) ? [] : availableDefinitions),
+      sessionMaterialReads: async () => allowedSessionMaterialReads(applyPersonalizationToolRules(availableTools, params.mode,
+        await readPersonalizationRules(params.userId), ceiling ? undefined : tool => hasPersonalizationSessionOverride(sessionPolicy?.toolPolicy, governedPolicyKey(tool))), params.mode),
       pinnedSkillIds: params.pinnedSkillIds ?? [],
     })
     console.info('[agent-context-timing]', { runId, ...assembledContext.timings })

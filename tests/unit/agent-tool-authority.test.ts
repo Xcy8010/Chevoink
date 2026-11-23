@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { AgentWorkspaceToolPermission } from '../../shared/contracts/index.js'
 import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent } from '../../api/lib/agent/agents.js'
-import { snapshotToolAuthority, intersectToolAuthority, restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
+import { allowedSessionMaterialReads, snapshotToolAuthority, intersectToolAuthority, restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
 import type { AgentTool } from '../../api/lib/agent/tools/types.js'
@@ -44,6 +44,16 @@ describe('server tool authority intersection', () => {
     })
     expect(child.permission.review).toBe('allow')
     expect(child.dangerous).toBeUndefined()
+  })
+
+  it('inherits reading material only from reads that this mode can perform without approval', () => {
+    const tools = [{ ...candidate(), name: 'chapter_read' }, { ...candidate(), name: 'plan_read' }, candidate()]
+    expect(allowedSessionMaterialReads(tools, 'build')).toEqual(['chapter_read', 'plan_read'])
+    const restricted = intersectToolAuthority(tools, 'build', snapshotToolAuthority([
+      { ...candidate('ask'), name: 'chapter_read' }, { ...candidate(), name: 'plan_read', alwaysConfirm: true },
+    ], 'review'))
+    expect(allowedSessionMaterialReads(restricted, 'build')).toEqual([])
+    expect(allowedSessionMaterialReads([{ ...candidate('deny'), name: 'chapter_read' }], 'review')).toEqual([])
   })
 
   it('takes a value snapshot, not mutable registry permissions', () => {

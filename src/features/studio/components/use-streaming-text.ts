@@ -46,7 +46,10 @@ export function useStreamingTextState(text: string, streaming: boolean, identity
       const length = current.current.text.length
       const frameMs = Math.max(8, Math.min(32, now - lastFrame))
       lastFrame = now
-      let end = Math.min(target.text.length, length + Math.max(1, Math.ceil((target.text.length - length) * frameMs / 180)))
+      const remaining = target.text.length - length
+      // Pace a complete chat reply across frames even when the server delivers it in one event.
+      const step = animateInitial ? Math.min(remaining / 180, Math.max(0.25, target.text.length / 1000)) : remaining / 180
+      let end = Math.min(target.text.length, length + Math.max(1, Math.ceil(step * frameMs)))
       // Do not split an astral Unicode character between animation frames.
       if (end < target.text.length && /[\uD800-\uDBFF]/.test(target.text[end - 1])) end++
       current.current = { text: target.text.slice(0, end), identity: target.identity }

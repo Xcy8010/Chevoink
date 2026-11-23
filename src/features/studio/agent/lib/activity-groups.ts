@@ -80,7 +80,7 @@ export function activityReportVisibility(reports: ReadonlyMap<number, ActivityRe
     const waitingForAuthor = group.calls.some(call => call.status === 'running' && !call.preparing
       && (call.toolName === 'ask_user' || call.callId === awaitingApprovalCallId || call.importWaiting))
     const pending = report.terminal ? report.waitForTools
-      : group.calls.some(call => !call.preparing && call.status === 'running') || !group.closed && !group.completed
+      : group.calls.some(call => !call.preparing && call.status === 'running') || Boolean(group.title && !group.closed && !group.completed)
     if (!waitingForAuthor && pending) {
       hidden.add(index)
       deferred = true

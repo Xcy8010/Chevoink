@@ -61,6 +61,14 @@ it('keeps the chosen text-only route, offers the conditional public-query prompt
   expect(messages).toHaveLength(4)
 })
 
+it('passes reconstructed reading text to the model without its server-only eviction marker', async () => {
+  stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+  await chatWithTools({ messages: [{ role: 'user', content: '原始提示' }, { role: 'user', content: '核对过的材料', sessionReadingMaterial: true }],
+    tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+  const sent = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string)
+  expect(sent.messages).toEqual([{ role: 'user', content: '原始提示' }, { role: 'user', content: '核对过的材料' }])
+})
+
 describe('personalization in actual model requests', () => {
   const messages: ChatMessage[] = [{ role: 'system', content: 'Known author context' }, { role: 'user', content: '请给我三个提纲。' }]
   const options = { messages, tools: [], providerApiKey: 'fake-test-key',

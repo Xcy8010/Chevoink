@@ -314,7 +314,7 @@ type AgentStoreState = {
   /** 刷新历史或终态事件提供作者结束事实，并优先采用其最终待办快照。 */
   setAuthorEnded: (value: AgentAuthorEnded | null) => void
   setRunOutcome: (value: AgentRunOutcome | null) => void
-  restoreMessages: (messages: AgentUIMessage[], sessionId?: string | null, snapshot?: AgentTodoSnapshot | null, nextPrompt?: AgentNextPrompt) => void
+  restoreMessages: (messages: AgentUIMessage[], sessionId?: string | null, snapshot?: AgentTodoSnapshot | null, nextPrompt?: AgentNextPrompt, observedCompletedRunId?: string | null) => void
   reconcileTodoSnapshot: (snapshot: AgentTodoSnapshot, sessionId: string, runId: string, expectedVersion: number) => void
   /** 加载更早对话：把更早轮次前插合并（按 id 去重），不触碰进行中的 run */
   prependMessages: (messages: AgentUIMessage[]) => void
@@ -844,16 +844,29 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // Persisted tool history is authoritative; replay only reconciles later witnesses.
     }) }),
 
-  restoreMessages: (messages, sessionId = null, snapshot, nextPrompt) => {
+  restoreMessages: (messages, sessionId = null, snapshot, nextPrompt, observedCompletedRunId) => {
     authorTextStreams.clear()
     restoredMessageReplay.clear()
     const restored = decorateAcceptedMessages(messages.map(projectStoredMessage))
     const derived = deriveSessionStateFromMessages(restored)
     const cached = sessionId ? sessionMessagesCache.get(sessionId) : undefined
     const todos = snapshot !== undefined ? snapshot?.items ?? [] : cached?.messages === messages ? cached.todos : derived.todos
+    const stateBeforeRestore = get()
+    const textRevealTargets: Record<string, string> = {}
+    if (observedCompletedRunId && observedCompletedRunId === stateBeforeRestore.runId
+      && sessionId === stateBeforeRestore.activeSessionId && stateBeforeRestore.motionAfterSeq !== null) {
+      // A terminal poll may beat the final SSE frame or arrive while its text is still being revealed.
+      const reply = [...restored].reverse().find(message => message.role === 'assistant' && (message.runTiming?.sourceRunId ?? message.runId) === observedCompletedRunId)
+      if (reply) {
+        const text = reply.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('')
+        const previous = stateBeforeRestore.messages.find(message => message.id === reply.id)
+        const previousText = previous?.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('') ?? ''
+        if (text && (text !== previousText || reply.id in stateBeforeRestore.textRevealTargets)) textRevealTargets[reply.id] = text
+      }
+    }
     writeSessionMessagesCache(sessionId, restored, todos)
     set((state) => ({
-      textRevealTargets: {},
+      textRevealTargets,
       motionAfterSeq: null,
       trackLocalRequestTiming: false,
       liveToolCallIds: new Set<string>(),

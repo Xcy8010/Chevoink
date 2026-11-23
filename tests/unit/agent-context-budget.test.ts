@@ -18,6 +18,22 @@ import {
   releaseCompletedReasoning,
 } from '../../api/lib/agent/context-budget.js'
 
+it('admits a follow-up by releasing only reconstructed material under actual tool and personalization overhead', () => {
+  const content = '[会话已核对的章节节选] ' + '章'.repeat(80)
+  const optional = { role: 'user' as const, content, sessionReadingMaterial: true as const }
+  const author = { role: 'user' as const, content }
+  const messages = [optional, author]
+  const fixed = { compactAtTokens: 300, hardRequestTokens: 300 }
+  const estimate = (request: ChatMessage[]) => estimateChatMessagesTokens(request) + 100
+  expect(planInRunCompaction(messages, estimate(messages), fixed, 1, estimate)).toBeNull()
+  const increased = (request: ChatMessage[]) => estimateChatMessagesTokens(request) + 150
+  const result = planInRunCompaction(messages, increased(messages), fixed, 1, increased)
+  expect(result?.messages).toEqual([author])
+  expect(result?.afterTokens).toBe(increased([author]))
+  expect(result!.afterTokens).toBeLessThan(fixed.hardRequestTokens)
+  expect(messages).toEqual([optional, author])
+})
+
 describe('durable input admission', () => {
   it('uses the shared session window on model changes and respects a smaller model and its output reservation', () => {
     const windows = [undefined, null, 128000, 256000, 32000].map(modelWindow => resolveSessionContextWindow(128000, modelWindow))

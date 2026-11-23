@@ -2,7 +2,7 @@ import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
 import { readTaskBudgetInTransaction } from './runtime-budget.js'
 import { readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
-import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinitionTokens, hasProactiveCompactionGain, releaseCompletedReasoning, targetContextTokens, toolOutputsToKeep } from './context-budget.js'
+import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinitionTokens, hasProactiveCompactionGain, releaseCompletedReasoning, releaseSessionReadingMaterial, targetContextTokens, toolOutputsToKeep } from './context-budget.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { randomUUID } from 'node:crypto'
@@ -61,25 +61,26 @@ export async function advanceDurableContext(token: RunLeaseToken, budget?: numbe
     const estimate = admission?.estimate ?? ((messages: ChatMessage[]) => estimateChatMessagesTokens(messages) + estimateToolDefinitionTokens(configuration.tools))
     const beforeTokens = inputLimit === undefined ? 0 : estimate(frame.state.messages)
     const modelPressure = admission ? beforeTokens >= admission.compactAtTokens : inputLimit !== undefined && beforeTokens > inputLimit
-    if (admission && (!modelPressure || !admission.canReadArchive)) return null
+    const retained = admission && modelPressure ? releaseSessionReadingMaterial(frame.state.messages, beforeTokens, admission.compactAtTokens) : null
+    if (admission && (!modelPressure || !retained && !admission.canReadArchive)) return null
     const beforeBytes = Buffer.byteLength(JSON.stringify(frame.state.messages), 'utf8')
     if (!modelPressure && (beforeBytes < 256 * 1024 || frame.state.messages.at(-1)?.role !== 'tool')) return null
     // Keep the latest complete tool round: replacing it with an assistant
     // archive note would be mistaken for a final answer by the executor.
-    const keep = admission ? toolOutputsToKeep(frame.state.messages, beforeTokens - targetContextTokens(admission.compactAtTokens), 1)
-      : modelPressure ? 1 : 8
-    const archived = archiveEarlyToolRounds(frame.state.messages, { revision: frame.revision, hash: frame.snapshotHash }, keep)
-    const releasedReasoningTokens = modelPressure ? releaseCompletedReasoning(archived.messages) : 0
+    const archived = retained ? { messages: retained, archivedRounds: 0 }
+      : archiveEarlyToolRounds(frame.state.messages, { revision: frame.revision, hash: frame.snapshotHash },
+        admission ? toolOutputsToKeep(frame.state.messages, beforeTokens - targetContextTokens(admission.compactAtTokens), 1) : modelPressure ? 1 : 8)
+    const releasedReasoningTokens = modelPressure && !retained ? releaseCompletedReasoning(archived.messages) : 0
     const afterBytes = Buffer.byteLength(JSON.stringify(archived.messages), 'utf8')
-    if ((!archived.archivedRounds && !releasedReasoningTokens) || afterBytes >= beforeBytes) return null
+    if ((!retained && !archived.archivedRounds && !releasedReasoningTokens) || afterBytes >= beforeBytes) return null
     const afterTokens = admission && modelPressure ? estimate(archived.messages) : null
     if (admission && afterTokens !== null) {
-      if (afterTokens >= beforeTokens || beforeTokens <= admission.hardLimit && !hasProactiveCompactionGain(beforeTokens, afterTokens, admission.compactAtTokens)) return null
+      if (afterTokens >= beforeTokens || !retained && beforeTokens <= admission.hardLimit && !hasProactiveCompactionGain(beforeTokens, afterTokens, admission.compactAtTokens)) return null
     }
     const tool = configuration.tools.find(item => item.function.name === executionContextReadTool.name)
     const grant = configuration.toolAuthority.find(item => item.name === executionContextReadTool.name)
-    if (!tool || !grant || grant.permission !== 'allow' || grant.alwaysConfirm
-      || runtimeJson(tool.function.parameters).hash !== runtimeJson(toOpenAIParameters(executionContextReadTool.parameters)).hash) {
+    if (!retained && (!tool || !grant || grant.permission !== 'allow' || grant.alwaysConfirm
+      || runtimeJson(tool.function.parameters).hash !== runtimeJson(toOpenAIParameters(executionContextReadTool.parameters)).hash)) {
       if (admission) return null
       return runtimeError('RUNTIME_CONTEXT_READER_REQUIRED', '压缩前必须提供本任务原文回读能力，不能留下无法读取的摘要。')
     }
@@ -90,6 +91,7 @@ export async function advanceDurableContext(token: RunLeaseToken, budget?: numbe
       payload: { version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash, revision: next.revision,
         snapshotHash: next.snapshotHash, archivedRounds: archived.archivedRounds, releasedReasoningTokens, beforeBytes, afterBytes,
         reason: modelPressure ? 'window' : 'storage',
+        ...(retained ? { releasedReadingMaterials: frame.state.messages.length - retained.length } : {}),
         ...(admission && afterTokens !== null && !lease.parent ? {
           contextWindowTokens: admission.contextWindowTokens, compactAtTokens: admission.compactAtTokens,
           beforeTokens, afterTokens,

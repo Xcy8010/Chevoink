@@ -153,7 +153,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const { assembleContext, insertSubagentCatalog } = await import('./context.js')
   const { estimateToolDefinitionTokens } = await import('./context-budget.js')
   const { isTextOnlyModel } = await import('./public-web-verification.js')
-  const { snapshotToolAuthority, intersectToolAuthority, restrictToolsToTask } = await import('./tool-authority.js')
+  const { allowedSessionMaterialReads, snapshotToolAuthority, intersectToolAuthority, restrictToolsToTask } = await import('./tool-authority.js')
   const { toOpenAITools } = await import('./tools/registry.js')
   const { executionContextReadTool } = await import('./tools/task-context-tools.js')
   const { ORCHESTRATION_TOOL_NAMES } = await import('./tools/task-orchestration-tools.js')
@@ -229,8 +229,10 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const assembled = await assembleContext({ agent, mode: input.mode, userId, sessionId: run.sessionId, runId, novelId: run.novelId, chapterId: run.chapterId,
     prompt: input.prompt, selection: input.selection, attachments: input.attachments, visionEnabled: runtime.visionEnabled, taskSpec: spec,
     modelTier: runtime.tier, modelName: runtime.modelName, contextWindowTokens: runtime.contextWindowTokens,
+    sessionMaterialReads: async () => allowedSessionMaterialReads(tools, input.mode),
     maxOutputTokens, toolDefinitionTokens: estimateToolDefinitionTokens(isTextOnlyModel(runtime) ? [] : toolDefinitions), pinnedSkillIds: input.pinnedSkillIds })
   console.info('[agent-context-timing]', { runId, ...assembled.timings })
+  console.info('[agent-context-input]', assembled.inputEstimates ?? {})
   if (agent.type === 'orchestrator') {
     const catalog = await (await import('./productivity.js')).renderSubagentCatalog(userId, run.novelId, input.pinnedSubagentId)
     insertSubagentCatalog(assembled.messages, catalog, 'system')
