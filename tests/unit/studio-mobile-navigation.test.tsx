@@ -93,6 +93,24 @@ function openNavigation() {
 }
 
 describe('controlled mobile workspace navigation', () => {
+  it('pins the shell and drawer at the search focus height and unlocks on close', () => {
+    const root = document.documentElement
+    render(<div data-app-shell><Harness /></div>)
+    openNavigation()
+    const shell = document.querySelector('[data-app-shell]')!
+    const drawer = screen.getByRole('dialog', { name: '创作区导航' })
+    vi.spyOn(shell, 'getBoundingClientRect').mockReturnValue({ height: 720 } as DOMRect)
+    vi.spyOn(drawer, 'getBoundingClientRect').mockReturnValue({ height: 700 } as DOMRect)
+    act(() => screen.getByRole('searchbox').focus())
+    expect(root.style.getPropertyValue('--studio-search-shell-height')).toBe('720px')
+    expect(root.style.getPropertyValue('--studio-search-drawer-height')).toBe('700px')
+    expect(screen.getByRole('searchbox').getAttribute('data-kb-reveal')).toBe('off')
+    expect(drawer.querySelector('[data-studio-mobile-navigation-scroll]')?.classList).toContain('scrollbar-none')
+    fireEvent.click(screen.getByRole('button', { name: '关闭导航遮罩' }))
+    expect(root.style.getPropertyValue('--studio-search-shell-height')).toBe('')
+    expect(root.style.getPropertyValue('--studio-search-drawer-height')).toBe('')
+  })
+
   it('keeps account, borderless announcement bell and settings in the fixed footer and closes the inbox first', ({ onTestFinished }) => {
     const restore = mockNativeDialog()
     onTestFinished(() => { cleanup(); restore() })

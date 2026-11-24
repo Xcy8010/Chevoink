@@ -241,8 +241,10 @@ type AgentStoreState = {
   pendingQuestion: PendingQuestion | null
   /** 本页面内发起过且尚未收到终态的会话：切走窗口后 SSE 已断，侧栏先按运行中展示，轮询纠正 */
   runningSessionIds: Set<string>
-  /** 各会话未读状态信号（绿/黄/红点）；激活该会话时由宿主 dismiss 清除 */
+  /** 各会话状态信号（绿/黄/红点）；进入会话时消除未读完成提示 */
   sessionSignals: Record<string, SessionSignal>
+  viewedSessionId: string | null
+  sessionTerminals: Record<string, { runId: string; at: number }>
   usage: AgentTokenUsage
   requestContext: (Extract<AgentStreamEvent, { type: 'context.usage' }> & { sessionId: string | null }) | null
   currentTurn: number
@@ -325,8 +327,8 @@ type AgentStoreState = {
   setGoalMode: (value: boolean) => void
   resetRun: () => void
   clearError: () => void
-  /** 作者回到该任务窗口：清除完成/待确认未读信号与运行中登记（异常中止的红点持久保留） */
-  dismissSessionSignal: (sessionId: string) => void
+  /** 记录当前查看的会话，并消除该会话的未读完成提示 */
+  dismissSessionSignal: (sessionId: string | null) => void
   /** 侧栏轮询兑底：同步服务端 run 状态，维护运行中登记并产出完成/失败未读信号 */
   syncRemoteRunStatuses: (statuses: Record<string, AgentSessionRunStatus | null>) => void
   setComposerDraft: (value: string) => void
@@ -667,6 +669,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   pendingQuestion: null,
   runningSessionIds: new Set<string>(),
   sessionSignals: {},
+  viewedSessionId: null,
+  sessionTerminals: {},
   usage: emptyUsage,
   requestContext: null,
   currentTurn: 0,
@@ -1002,22 +1006,18 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   dismissSessionSignal: (sessionId) =>
     set((state) => {
-      const signal = state.sessionSignals[sessionId]
-      // 异常中止（红点）是必须被处理的事实，进入任务窗口不算已消费：
-      // 红点持续显示到作者发出新提示词（beginRun）或任务恢复运行（resumeRun / 轮询到 running）为止
-      const dropSignal = Boolean(signal) && signal.kind !== 'failed'
-      const isRunning = state.runningSessionIds.has(sessionId)
-      if (!dropSignal && !isRunning) return state
+      if (!sessionId || state.sessionSignals[sessionId]?.kind !== 'done') {
+        return state.viewedSessionId === sessionId ? state : { viewedSessionId: sessionId }
+      }
       const signals = { ...state.sessionSignals }
-      if (dropSignal) delete signals[sessionId]
-      const running = new Set(state.runningSessionIds)
-      running.delete(sessionId)
-      return { sessionSignals: signals, runningSessionIds: running }
+      delete signals[sessionId]
+      return { viewedSessionId: sessionId, sessionSignals: signals }
     }),
   syncRemoteRunStatuses: (statuses) =>
     set((state) => {
       const running = new Set(state.runningSessionIds)
       const signals = { ...state.sessionSignals }
+      const terminals = { ...state.sessionTerminals }
       let outcome = state.outcome
       let authorEnded = state.authorEnded
       let authorEndedTodos: AgentTodoItem[] | undefined
@@ -1036,6 +1036,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         if (!entry) continue
         const remoteAuthorEnded = (entry as AgentSessionRunStatus & { authorEnded?: AgentAuthorEnded }).authorEnded
         const isActiveSession = sessionId === state.activeSessionId
+        const isViewed = sessionId === (state.viewedSessionId ?? state.activeSessionId ?? state.loadedSessionId)
+        const isRemoteActive = entry.status === 'running' || entry.status === 'queued' || entry.status === 'awaiting_approval'
+        const observedAt = timestamp(entry.updatedAt) ?? timestamp(entry.finishedAt)
+        const terminal = terminals[sessionId]
+        if (terminal && (observedAt !== null && observedAt < terminal.at
+          || isRemoteActive && terminal.runId === entry.runId && (observedAt ?? -Infinity) <= terminal.at)) continue
         if (isActiveSession && isRunActive(state.phase) && state.runId && state.runId !== entry.runId) continue
         // A slow poll can return the previous pause after another device has
         // resumed this same run. Compare server timestamps, never handset time.
@@ -1067,7 +1073,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           delete signals[sessionId]
           changed = true
         }
-        if (entry.status === 'running' || entry.status === 'queued' || entry.status === 'awaiting_approval') {
+        if (isRemoteActive) {
           if (isActiveSession && outcome && runId !== entry.runId) { outcome = null; changed = true }
           const sameAuthorEndedRun = isActiveSession && Boolean(authorEnded) && runId === entry.runId
           if (isActiveSession && authorEnded && !sameAuthorEndedRun) {
@@ -1079,7 +1085,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           if (!running.has(sessionId)) { running.add(sessionId); changed = true }
           if (entry.status === 'awaiting_approval') {
             // 挂起持续提示：兜底刷新或跨窗口期间丢失的本地黄点
-            if (signals[sessionId]?.kind !== 'attention') {
+            if (signals[sessionId]?.kind !== 'attention' || signals[sessionId]?.runId !== entry.runId) {
               signals[sessionId] = { runId: entry.runId, kind: 'attention', at: Date.now() }
               changed = true
             }
@@ -1089,6 +1095,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             changed = true
           }
           continue
+        }
+        if (observedAt !== null && (terminal?.runId !== entry.runId || observedAt > terminal.at)) {
+          terminals[sessionId] = { runId: entry.runId, at: observedAt }
+          changed = true
         }
         // 终态：仅此前已登记运行中的会话才产出一次性信号（历史终态不回传，避免误报未读）；
         // paused 为作者主动停止，只撤登记不提示
@@ -1128,12 +1138,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           : entry.status === 'completed' ? 'done' : entry.status === 'failed' || entry.status === 'cancelled' ? 'failed' : null
         if (!kind) continue
         // 已完成（绿）不打扰正在查看该任务的作者；异常中止（红）当前窗口内同样要显示
-        if (kind === 'done' && sessionId === state.activeSessionId) continue
+        if (kind === 'done' && isViewed) continue
         signals[sessionId] = { runId: entry.runId, kind, at: Date.now() }
       }
       return changed ? {
         runningSessionIds: running,
         sessionSignals: signals,
+        sessionTerminals: terminals,
         phase,
         runId,
         runGoalId,
@@ -1691,6 +1702,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             messages: settleRunningToolParts(timedMessages, '已停止'),
             workspaceActivities: settleRunningActivities(state.workspaceActivities),
             ...withoutRunningSession(state),
+            ...(state.activeSessionId && { sessionTerminals: { ...state.sessionTerminals, [state.activeSessionId]: { runId: event.runId, at: Date.parse(event.ts) } } }),
           }
 
         case 'run.finished':
@@ -1714,6 +1726,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             workspaceActivities: settleRunningActivities(state.workspaceActivities),
             ...(event.authorEnded?.todoItems ? { todos: event.authorEnded.todoItems, todosVersion: state.todosVersion + 1 } : {}),
             ...withoutRunningSession(state),
+            ...(state.activeSessionId && { sessionTerminals: { ...state.sessionTerminals, [state.activeSessionId]: { runId: event.runId, at: Date.parse(event.ts) } } }),
             ...(event.status === 'succeeded' || event.authorEnded ? withoutActiveSessionSignal(state) : noteSessionSignal(state, 'failed')),
           }
 

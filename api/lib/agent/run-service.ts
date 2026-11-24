@@ -2477,7 +2477,7 @@ export async function listSessionRunStatuses(userId: string, sessionIds: string[
     },
     orderBy: { createdAt: 'desc' },
     take: 500,
-    select: { id: true, sessionId: true, status: true, finishedAt: true, usage: true, goalExecution: { select: { goalId: true } } },
+    select: { id: true, sessionId: true, status: true, finishedAt: true, updatedAt: true, usage: true, goalExecution: { select: { goalId: true } } },
   })
 
   const statuses: AgentSessionRunStatusPayload['statuses'] = {}
@@ -2489,6 +2489,7 @@ export async function listSessionRunStatuses(userId: string, sessionIds: string[
       runGoalId: run.goalExecution?.goalId ?? null,
       status: run.status as AgentRunStatus,
       finishedAt: run.finishedAt?.toISOString() ?? null,
+      updatedAt: run.updatedAt?.toISOString(),
       ...readAuthorEnded(run.usage),
       ...readRunOutcome(run.usage),
     }

@@ -1184,18 +1184,15 @@ export function AgentComposer({
           data-disabled={editorLocked}
         />
         {offeredNextPrompt ? (
-          <button
-            type="button"
+          <div
             id={nextPromptId}
-            aria-label={'补全建议：' + offeredNextPrompt}
             title={offeredNextPrompt}
-            onMouseDown={event => event.preventDefault()}
-            onClick={acceptNextPrompt}
-            className="pointer-events-none absolute left-1.5 top-1 inline-flex min-h-7 max-w-[calc(100%-0.75rem)] items-center gap-2 rounded text-left text-sm leading-7 text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 [@media(pointer:coarse)]:pointer-events-auto"
+            className="pointer-events-none absolute left-1.5 top-1 inline-flex min-h-7 max-w-[calc(100%-0.75rem)] items-center gap-2 text-sm leading-7 text-[var(--text-tertiary)]"
           >
             <span className="truncate">{offeredNextPrompt}</span>
-            <kbd aria-hidden="true" className="pointer-events-auto shrink-0 rounded border border-[var(--border-strong)] px-1.5 font-sans text-[10px] leading-4">Tab</kbd>
-          </button>
+            <button type="button" aria-label={'补全建议：' + offeredNextPrompt} onMouseDown={event => event.preventDefault()} onClick={acceptNextPrompt}
+              className="pointer-events-auto shrink-0 rounded border border-[var(--border-strong)] px-1.5 font-sans text-[10px] leading-4 hover:text-[var(--text-secondary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2">Tab</button>
+          </div>
         ) : null}
       </div>
       {pendingVoice?.scope === scope ? <div className="px-1.5 py-2 text-xs text-[var(--text-secondary)]" role="status">草稿已变化，转写文字尚未插入。<div className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap">{pendingVoice.text}</div><button type="button" disabled={disabled || running || sending || voiceActive} className="mr-3 min-h-11 underline disabled:opacity-50" onClick={() => { if (!disabled && !running && !sending && !voiceActive) applyVoiceText(pendingVoice.text) }}>插入到末尾</button><button type="button" className="min-h-11" onClick={() => setPendingVoice(null)}>放弃</button></div> : null}

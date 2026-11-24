@@ -526,6 +526,8 @@ export type AgentSessionRunStatus = {
   runGoalId: string | null
   status: AgentRunStatus
   finishedAt: string | null
+  /** Last server state update, used to reject stale sidebar polls. */
+  updatedAt?: string
 }
 
 export type AgentSessionRunStatusPayload = {

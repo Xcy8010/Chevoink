@@ -763,6 +763,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     focused ? '操作对象以本任务冻结目标及真实工具回执为准；编辑器当前章节只是界面位置，不能替代目标。'
       : '作者当前编辑的章节以尾部快照为准；未指明章节时优先针对该章节操作，但“写下一章”要求准备新章，不能默认操作编辑器中的旧章。',
     OPENING_GUIDANCE,
+    '给作者的回复和汇报用作品、章节或计划的实际名称，引用原文时可指出章节和段落。工具参数、对象编号、字符偏移（content@、@数字）、内容哈希和 revision 只供工具核对。已有标题时用《标题》，缺少标题时用「该章节」或「该计划」，不要猜测名称。',
   ]
     .filter(Boolean)
     .join('\n\n')

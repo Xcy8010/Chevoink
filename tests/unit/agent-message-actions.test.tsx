@@ -5,7 +5,11 @@ import { MessageTime, UserMessageActions } from '../../src/features/studio/agent
 import { useAgentStore, readSessionMessagesCache } from '../../src/features/studio/agent/agentStore'
 import type { AgentTodoItem, AgentUIMessage } from '../../shared/contracts/index.js'
 
-afterEach(() => { cleanup(); vi.useRealTimers() })
+afterEach(() => {
+  cleanup()
+  useAgentStore.setState({ sessionTerminals: {}, viewedSessionId: null })
+  vi.useRealTimers()
+})
 
 it('权威待办覆盖旧消息，分页和会话缓存不会回退状态', () => {
   const old: AgentTodoItem[] = [{ id: 'a', content: '写章节', status: 'in_progress' }, { id: 'b', content: '重复工作', status: 'pending' }]
@@ -124,6 +128,37 @@ it('treats a trusted author-ended terminal event as cancelled work, not a failed
   expect(state.todos).toEqual([{ id: 'todo-1', content: '未执行项', status: 'cancelled', reason: 'author_ended' }])
   expect(state.runningSessionIds.has('s')).toBe(false)
   expect(state.sessionSignals).toEqual({})
+})
+
+it('consumes completion in the viewed task and rejects stale polls after switching away', () => {
+  const state = useAgentStore.getState()
+  const run = (runId: string, status: 'running' | 'completed' | 'awaiting_approval' | 'failed', second: number) => ({
+    runId, runGoalId: null, status, updatedAt: new Date(Date.UTC(2026, 10, 24, 0, 0, second)).toISOString(),
+    finishedAt: status === 'completed' || status === 'failed' ? new Date(Date.UTC(2026, 10, 24, 0, 0, second)).toISOString() : null,
+  })
+  useAgentStore.setState({ runningSessionIds: new Set(), sessionSignals: {}, sessionTerminals: {}, viewedSessionId: null })
+  try {
+    state.dismissSessionSignal('viewed')
+    state.syncRemoteRunStatuses({ viewed: run('r1', 'running', 2), background: run('r2', 'running', 2) })
+    state.syncRemoteRunStatuses({ viewed: run('r1', 'completed', 4), background: run('r2', 'completed', 4) })
+    state.dismissSessionSignal('elsewhere')
+    state.syncRemoteRunStatuses({ viewed: run('r1', 'running', 2) })
+    state.syncRemoteRunStatuses({ viewed: run('r1', 'completed', 4) })
+    expect(useAgentStore.getState().sessionSignals).toMatchObject({ background: { kind: 'done' } })
+    expect(useAgentStore.getState().sessionSignals.viewed).toBeUndefined()
+    expect(useAgentStore.getState().runningSessionIds.has('viewed')).toBe(false)
+    state.dismissSessionSignal('background')
+    state.syncRemoteRunStatuses({ background: run('r3', 'awaiting_approval', 6) })
+    state.dismissSessionSignal('background')
+    expect(useAgentStore.getState().sessionSignals.background?.kind).toBe('attention')
+    state.syncRemoteRunStatuses({ background: run('r3', 'failed', 8) })
+    state.dismissSessionSignal('background')
+    expect(useAgentStore.getState().sessionSignals.background?.kind).toBe('failed')
+    state.syncRemoteRunStatuses({ background: run('r3', 'running', 9) })
+    expect(useAgentStore.getState().sessionSignals.background).toBeUndefined()
+  } finally {
+    useAgentStore.setState({ runningSessionIds: new Set(), sessionSignals: {}, sessionTerminals: {}, viewedSessionId: null })
+  }
 })
 
 it('reconciles an author-ended terminal poll even when the local run was already removed', () => {

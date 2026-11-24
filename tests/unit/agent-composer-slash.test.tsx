@@ -565,7 +565,10 @@ describe('composer next-prompt completion', () => {
   it('keeps the preview out of the draft and accepts only a plain focused Tab', async () => {
     const input = { ...props(), nextPrompt: suggestion }
     const view = render(<AgentComposer {...input} />)
-    expect(offer()?.textContent).toBe(suggestion + 'Tab')
+    expect(offer()?.textContent).toBe('Tab')
+    const preview = screen.getByText(suggestion)
+    expect(preview.closest('button')).toBeNull()
+    fireEvent.click(preview)
     expect(editor().textContent).toBe('')
     expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(true)
 

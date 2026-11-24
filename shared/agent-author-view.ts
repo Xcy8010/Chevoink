@@ -14,6 +14,12 @@ const operationalCue = /^\s*(?:(?:现在|接下来|正在|已经|然后|我(?:�
 const protocolAssignment = /^\s*(?:[a-z][\w]*Id|arguments|toolName|function_call|tool_call)\s*[=:：]/
 const protocolJson = /[[{]\s*"(?:tool|name|arguments|chapterId|compilationId|model|reasoningEffort|thinkingEnabled|provider|apiKey)"\s*:/
 const opaqueId = /\b(?:c[a-z0-9]{20,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\b/gi
+const authorObjectField = 'planId|chapterId|artifactId|compilationId|sceneTaskId|reportId|findingId|changeSetId|sessionId|taskId|runId|novelId'
+const authorObjectValue = 'c[a-z0-9]{20,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}'
+const authorMetadataStart = new RegExp(`\\b(?:${authorObjectField}|contentHash|planHash)\\s*[=：:]|\\bcontent@`, 'i')
+const authorObjectAssignment = new RegExp(`[ \\t]*\\b(${authorObjectField})\\s*[=：:]\\s*(?:${authorObjectValue})\\b`, 'gi')
+const titleMetadata = new RegExp(`(《[^《》\\r\\n]+》)[ \\t]*[（(](?:${authorObjectField})\\s*[=：:]\\s*(?:${authorObjectValue})(?:[，,、]\\s*(?:revision|rev)\\s*[=:：]?\\s*\\d+)?[）)]`, 'gi')
+const sourceOffsets = /[ \t]*\bcontent@\d+(?:\s*[、,，]\s*@\d+)*(?:\s*[,，、]?\s*\brev\s*\d+)?/gi
 const scopeFailureLabels: Record<string, string> = {
   AUTHOR_CHAPTER_SCOPE: '章节修改范围不匹配',
   AUTHOR_SELECTION_STALE: '所选正文已经变化',
@@ -94,7 +100,16 @@ export function projectAgentAuthorText(text: string): string {
   return normalizeAgentCitationLinks(mapAgentVisibleProse(clean, prose => prose
     .split(/(\n\s*\n)/).map(paragraph => {
       if (!isOperational(paragraph)) {
-        return protocolJson.test(paragraph) && /^\s*[[{]/.test(paragraph) ? '' : paragraph
+        if (protocolJson.test(paragraph) && /^\s*[[{]/.test(paragraph)) return ''
+        return paragraph.replace(sourceOffsets, '').replace(titleMetadata, '$1')
+          .replace(/(?:[，,、][ \t]*|[ \t]*)\b(?:contentHash|planHash)\s*[=：:]\s*[0-9a-f]{64}\b/gi, '')
+          .replace(authorObjectAssignment, (_, field: string) => {
+          switch (field.toLowerCase()) {
+            case 'planid': return '该计划'
+            case 'chapterid': return '该章节'
+            default: return '对应记录'
+          }
+        })
       }
       // Parameter clauses are operational input, even after translation. Hold
       // unsafe progress and rely on actual tool stages; never infer success.
@@ -126,7 +141,8 @@ export function createAgentAuthorTextStream(options?: { filterLegacyActivityHead
     if (!remainder || introductions.some(prefix => prefix.startsWith(remainder)) || isOperational(pending)
       || /^(?:I|We)\b/.test(start) || /[`~<>[\]{}"“”「」『』‘’\n]/.test(pending)) return ''
     // A trailing ASCII token may still become a tool name or identifier.
-    const stable = pending.replace(/[A-Za-z0-9_]+$/, '').trimEnd()
+    const metadata = pending.search(authorMetadataStart)
+    const stable = (metadata < 0 ? pending : pending.slice(0, metadata)).replace(/[A-Za-z0-9_]+$/, '').trimEnd()
     const visible = projectAgentAuthorText(stable)
     const increment = visible.slice(published)
     published = visible.length

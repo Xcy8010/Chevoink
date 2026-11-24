@@ -41,6 +41,15 @@ const history: AgentUIMessage = { id: 'a', runId: 'r', role: 'assistant', create
   { type: 'reasoning', text: '先核对人物动机。\n\n调用 chapter_write，chapterId=cmttleebg03h9wqox9lieracs。' },
   { type: 'text', text: raw }, { type: 'text', text: manuscript },
 ] }
+
+it('keeps readable plan and chapter titles while removing their internal references', () => {
+  const raw = '《第十四章细纲》已存进「计划」文件夹，内容已写入 planId=cmttleebg03h9wqox9lieracs。\n\n> 「等了三天。」\n> ——《那张纸上的名字》 content@0、@1040、@774, rev 16'
+  expect(projectAgentAuthorText(raw)).toBe('《第十四章细纲》已存进「计划」文件夹，内容已写入该计划。\n\n> 「等了三天。」\n> ——《那张纸上的名字》')
+  const quotation = '原文：“那台机器只显示 content@0 和 planId=cmttleebg03h9wqox9lieracs。”'
+  expect(projectAgentAuthorText(quotation)).toBe(quotation)
+  expect(projectAgentAuthorText('《那张纸上的名字》（chapterId=cmttleebg03h9wqox9lieracs，revision=16）承接上一章。'))
+    .toBe('《那张纸上的名字》承接上一章。')
+})
 function apply(event: Record<string, unknown>, seq: number) {
   useAgentStore.getState().applyEvent({ runId: 'r', ts: '2026-10-11T00:00:00Z', seq, ...event } as AgentStreamEvent)
 }

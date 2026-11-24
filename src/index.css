@@ -1051,6 +1051,17 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 }
 
 .studio-mobile-drawer-search { background: var(--surface-muted); }
+@media (width < 1024px) {
+  :root:has(#studio-mobile-navigation [data-kb-reveal='off']:focus) [data-app-shell] {
+    height: var(--studio-search-shell-height, calc(100dvh - var(--keyboard-inset, 0px)));
+  }
+  .studio-mobile-navigation:has([data-kb-reveal='off']:focus) {
+    height: var(--studio-search-drawer-height, 100%);
+  }
+  #studio-mobile-navigation:has([data-kb-reveal='off']:focus) [data-studio-mobile-navigation-scroll] {
+    padding-bottom: max(0px, calc(var(--studio-search-drawer-height, 100dvh) - 100dvh + var(--keyboard-inset, 0px)));
+  }
+}
 .studio-mobile-sheet {
   position: fixed;
   inset: auto 0 var(--keyboard-inset, 0px);

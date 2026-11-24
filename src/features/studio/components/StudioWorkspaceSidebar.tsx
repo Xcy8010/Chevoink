@@ -283,6 +283,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
   const sessionSignals = useAgentStore((state) => state.sessionSignals)
   const runningSessionIds = useAgentStore((state) => state.runningSessionIds)
   const agentPhase = useAgentStore((state) => state.phase)
+  const authorEnded = useAgentStore((state) => state.authorEnded)
   const agentRunId = useAgentStore((state) => state.runId)
   const agentRunGoalId = useAgentStore((state) => state.runGoalId)
   const agentGoal = useAgentStore((state) => state.goal)
@@ -301,7 +302,6 @@ export default function StudioWorkspaceSidebar(props: Props) {
     staleTime: 5_000,
     enabled: sidebarSessionIds.length > 0,
   })
-  const remoteRunStatuses = useMemo(() => runStatusQuery.data?.statuses ?? {}, [runStatusQuery.data])
   useEffect(() => {
     const statuses = runStatusQuery.data?.statuses
     if (!statuses) return
@@ -452,7 +452,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
   function requestArchive(target: ContextTargetInput) {
     setContext(null)
     if ('temporary' in target && target.temporary) return
-    const remoteStatus = remoteRunStatuses[target.id]?.status
+    const remoteStatus = runStatusQuery.data?.statuses[target.id]?.status
     const taskBusy =
       target.kind === 'task' &&
       (runningSessionIds.has(target.id) ||
@@ -598,7 +598,6 @@ export default function StudioWorkspaceSidebar(props: Props) {
     const active = isActiveTask(task)
     const selected = active && (location === 'project' ? projectHasActiveTask : !projectHasActiveTask && (location === 'recent' || !recentHasActiveTask))
     const signal = sessionSignals[task.id]
-    const remoteStatus = remoteRunStatuses[task.id]?.status
     // 正在直播的任务窗口以本地 phase 为唯一真相：run-status 轮询最多滞后 10s，
     // 作者答完选择后不能再残留黄点，必须立即回到转圈
     const livePhase = active && livePhaseSessionId === task.id ? agentPhase : null
@@ -607,14 +606,14 @@ export default function StudioWorkspaceSidebar(props: Props) {
       : null
     const awaiting = livePhase
       ? goalView?.goal ? goalView.waiting : livePhase === 'awaiting_approval' || livePhase === 'awaiting_input'
-      : signal?.kind === 'attention' || remoteStatus === 'awaiting_approval'
+      : signal?.kind === 'attention'
     const spinning = livePhase
       ? goalView?.goal
         ? selectAgentActivityRunActive(goalView, livePhase)
         : livePhase === 'starting' || livePhase === 'running'
-      : runningSessionIds.has(task.id) || remoteStatus === 'running' || remoteStatus === 'queued'
+      : runningSessionIds.has(task.id)
     // 异常中止持续显示（含当前任务窗口内），直到作者发新提示词或任务恢复运行
-    const aborted = signal?.kind === 'failed' || livePhase === 'failed' || livePhase === 'cancelled'
+    const aborted = signal?.kind === 'failed' || livePhase === 'failed' || livePhase === 'cancelled' && !authorEnded
     // 状态指示器优先级：待作者选择（黄）> 运行中（转圈）> 异常中止（红）> 已完成（绿，仅未读且不在该窗口内）
     const indicator = awaiting
       ? <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />

@@ -38,6 +38,17 @@ export default function StudioMobileNavigation({ open, push = false, dragging = 
     node?.toggleAttribute('inert', !open)
   }, [open])
   const panelRef = useRef<HTMLDivElement>(null)
+  // Capture both boxes before the soft keyboard resizes the layout viewport.
+  // The search's own scroll area still responds to the keyboard.
+  const lockSearchLayout = () => {
+    const root = document.documentElement
+    if (root.style.getPropertyValue('--studio-search-shell-height')) return
+    const shell = document.querySelector<HTMLElement>('[data-app-shell]')
+    const shellHeight = shell?.getBoundingClientRect().height || window.innerHeight
+    const drawerHeight = panelRef.current?.getBoundingClientRect().height || shellHeight
+    root.style.setProperty('--studio-search-shell-height', `${shellHeight}px`)
+    root.style.setProperty('--studio-search-drawer-height', `${drawerHeight}px`)
+  }
   const closeRef = useRef(onClose)
   closeRef.current = onClose
   useEffect(() => {
@@ -98,6 +109,8 @@ export default function StudioMobileNavigation({ open, push = false, dragging = 
       document.removeEventListener('focusin', focusInside)
       document.removeEventListener('keydown', keydown)
       window.removeEventListener('resize', resize)
+      document.documentElement.style.removeProperty('--studio-search-shell-height')
+      document.documentElement.style.removeProperty('--studio-search-drawer-height')
       if (!push) document.body.style.overflow = previousOverflow
       const returnFocus = previousFocus?.isConnected ? previousFocus : document.querySelector<HTMLElement>('[data-studio-mobile-primary-control]')
       returnFocus?.focus({ preventScroll: true })
@@ -116,6 +129,8 @@ export default function StudioMobileNavigation({ open, push = false, dragging = 
             <input
               ref={searchRef}
               type="search"
+              data-kb-reveal="off"
+              onFocus={lockSearchLayout}
               aria-label="搜索作品、对话和功能"
               placeholder="搜索"
               autoComplete="off"
@@ -137,7 +152,7 @@ export default function StudioMobileNavigation({ open, push = false, dragging = 
             <CirclePlus aria-hidden="true" className="h-[25px] w-[25px]" />
           </button>
         </header>
-        <div data-studio-mobile-navigation-scroll className="min-h-0 flex-1 overflow-y-auto overscroll-contain [&_button]:min-h-11">
+        <div data-studio-mobile-navigation-scroll className="scrollbar-none min-h-0 flex-1 overflow-y-auto overscroll-contain [&_button]:min-h-11">
           {!search.trim() && novelSwitcher ? <div className="px-3 pb-3">{novelSwitcher}</div> : null}
           {children(composing ? '' : search.trim())}
         </div>
