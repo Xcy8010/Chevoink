@@ -18,11 +18,12 @@ function renderLayout(initialEntries = ['/admin'], title = '示例') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={initialEntries}><AdminLayout><h1>{title}</h1></AdminLayout></MemoryRouter></QueryClientProvider>)
 }
-it('maps eighteen management routes with tester identity inside users and searches only page/action definitions', () => {
-  expect(adminPages).toHaveLength(18)
-  expect(new Set(adminPages.map(page => page.to)).size).toBe(18)
+it('maps management routes and searches only page/action definitions', () => {
+  expect(adminPages).toHaveLength(19)
+  expect(new Set(adminPages.map(page => page.to)).size).toBe(adminPages.length)
   expect(adminPages.some(page => page.to === '/admin/testers')).toBe(false)
   expect(searchAdminPages('测试员').map(page => page.to)).toContain('/admin/users')
+  expect(searchAdminPages('投递').map(page => page.to)).toContain('/admin/email')
   expect(searchAdminPages('协议').map(page => page.to)).toEqual(['/admin/content', '/admin/models'])
   expect(searchAdminPages('用户正文')).toEqual([])
 })
