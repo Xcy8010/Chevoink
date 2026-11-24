@@ -6,8 +6,8 @@ import { randomUUID, randomInt } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ADMIN_EMAIL_PURPOSE, ADMIN_RETURN_EMAIL_PURPOSE, ADMIN_CUSTOM_EMAIL_PURPOSE } from '../../shared/contracts/admin-email.js'
-import { cancelEmailBatch, confirmEmailBatch, createEmailPreview, getEmailBatch } from '../../api/lib/admin-email-batches.js'
-import { mockAdminEmailDelivery, mockAdminEmailProvider } from '../../api/lib/admin-email-provider.js'
+import { cancelEmailBatch, confirmEmailBatch, createEmailPreview, getEmailBatch, listEmailCandidates } from '../../api/lib/admin-email-batches.js'
+import { mockAdminEmailDelivery, mockAdminEmailProvider, type AdminEmailDelivery } from '../../api/lib/admin-email-provider.js'
 import { createTencentAdminEmailDelivery } from '../../api/lib/admin-email-tencent.js'
 import { processAdminEmailQueue } from '../../api/lib/admin-email-queue.js'
 import { prisma } from '../../api/lib/prisma.js'
@@ -274,6 +274,57 @@ describe.skipIf(!dbAvailable)('directed email persistence with mock SES (isolate
     })
     expect(originalAttempt).toMatchObject({ state: 'unknown', reason: 'provider_unknown', providerMessageId: null, attemptedAt: claimedAt })
     expect(originalAttempt.attemptId).toBeTruthy()
+  })
+
+  it('limits the return pilot to one verified allowlisted account and honors a later opt-out', async () => {
+    const now = new Date()
+    const pilot = await createRecipient('指定试收账号', now)
+    const other = await createRecipient('非指定账号', now)
+    const provider = { ...mockAdminEmailProvider, send: vi.fn(mockAdminEmailProvider.send) }
+    const returnPilot = { recipient: pilot.email!, expiresAt: now.getTime() + 60_000 }
+    const delivery: AdminEmailDelivery = { ...mockAdminEmailDelivery, provider, mode: 'tencent',
+      allowedRecipients: new Set([pilot.email!]), returnPilot, tencentPurposes: [ADMIN_RETURN_EMAIL_PURPOSE] }
+    const campaign = { maxCredits: 200, deadline: { mode: 'relative' as const, days: 7 }, workspacePath: 'studio' }
+    const selection = { mode: 'emails' as const, emails: [pilot.email!, other.email!] }
+    const candidates = await listEmailCandidates(pilot.id, 1, delivery, ADMIN_RETURN_EMAIL_PURPOSE)
+    expect(candidates.items).toMatchObject([{ id: pilot.id, exclusion: null }])
+    expect((await createEmailPreview(adminId, selection, {
+      now, campaign, delivery: { ...delivery, returnPilot: undefined },
+    })).exclusions).toEqual({ no_permission: 2 })
+    expect((await createEmailPreview(adminId, selection, {
+      now, campaign, delivery: { ...delivery, allowedRecipients: new Set(selection.emails) },
+    })).exclusions).toEqual({ no_permission: 2 })
+
+    await prisma.user.update({ where: { id: pilot.id }, data: { emailVerifiedAt: null } })
+    expect((await createEmailPreview(adminId, selection, { now, campaign, delivery })).exclusions)
+      .toEqual({ unverified_email: 1, no_permission: 1 })
+    await prisma.user.update({ where: { id: pilot.id }, data: { emailVerifiedAt: now } })
+    const preview = await createEmailPreview(adminId, selection, { now, campaign, delivery })
+    expect(preview).toMatchObject({ recipientCount: 1, exclusions: { no_permission: 1 } })
+    const key = { purpose: ADMIN_RETURN_EMAIL_PURPOSE, email: pilot.email! }
+    await prisma.adminEmailPermission.create({ data: { ...key, suppression: 'unsubscribed' } })
+    await expect(confirmEmailBatch(adminId, preview.id, preview.previewHash, null, now, delivery)).rejects.toMatchObject({ status: 409 })
+    await prisma.adminEmailPermission.delete({ where: { purpose_email: key } })
+    await confirmEmailBatch(adminId, preview.id, preview.previewHash, null, now, delivery)
+    await prisma.adminEmailPermission.create({ data: { ...key, suppression: 'unsubscribed' } })
+    await processAdminEmailQueue(delivery, () => now)
+    expect(provider.send).not.toHaveBeenCalled()
+    expect((await getEmailBatch(adminId, preview.id, 'tencent')).recipients[0]).toMatchObject({ state: 'skipped', reason: 'unsubscribed' })
+    await prisma.adminEmailPermission.delete({ where: { purpose_email: key } })
+    const permitted = await createEmailPreview(adminId, selection, { now, campaign, delivery })
+    await confirmEmailBatch(adminId, permitted.id, permitted.previewHash, null, now, delivery)
+    await processAdminEmailQueue(delivery, () => now)
+    expect(provider.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ to: pilot.email, providerTemplateId: 237702 }))
+    expect(await prisma.adminEmailPermission.findUnique({ where: { purpose_email: key } })).toBeNull()
+    const pastDeadline = await createEmailPreview(adminId, selection, { now, campaign, delivery })
+    await confirmEmailBatch(adminId, pastDeadline.id, pastDeadline.previewHash, null, now, delivery)
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(returnPilot.expiresAt)
+    try {
+      await processAdminEmailQueue(delivery)
+      expect(provider.send).toHaveBeenCalledTimes(1)
+      expect((await getEmailBatch(adminId, pastDeadline.id, 'tencent')).recipients[0]).toMatchObject({ state: 'skipped', reason: 'no_permission' })
+    } finally { vi.useRealTimers() }
   })
 
   it('continues healthy Tencent batches through a template outage and never sends changed return terms', async () => {

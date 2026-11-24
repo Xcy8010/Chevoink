@@ -62,11 +62,23 @@ describe('directed Tencent SES adapter with mock HTTP transport', () => {
     const values = { appEnv: 'production', adminEmailMockEnabled: false, adminEmailTencentEnabled: true,
       adminEmailTencentSecretId: 'local-fixture', adminEmailTencentSecretKey: 'local-fixture',
       adminEmailTencentFrom: sender, adminEmailTencentReplyTo: config.replyTo, adminEmailTencentTemplateId: 0,
-      adminEmailTencentReturnTemplateId: 237702, adminEmailTencentRecipients: [recipient], adminEmailTencentRecipientScope: 'allowlist' }
+      adminEmailTencentReturnTemplateId: 237702, adminEmailTencentRecipients: [recipient], adminEmailTencentRecipientScope: 'allowlist',
+      adminEmailTencentReturnPilotRecipient: '', adminEmailTencentReturnPilotUntil: '' }
     const previous = Object.fromEntries((Object.keys(values) as Array<keyof typeof values>).map(key => [key, env[key]]))
     try {
       Object.assign(env, values)
       expect(configuredAdminEmailDelivery()).toMatchObject({ mode: 'tencent', tencentPurposes: ['creator_return'], allowedRecipients: new Set([recipient]) })
+      expect(configuredAdminEmailDelivery().returnPilot).toBeUndefined()
+      env.adminEmailTencentReturnPilotRecipient = recipient
+      env.adminEmailTencentReturnPilotUntil = new Date(Date.now() + 60_000).toISOString()
+      expect(configuredAdminEmailDelivery().returnPilot).toEqual({ recipient, expiresAt: Date.parse(env.adminEmailTencentReturnPilotUntil) })
+      env.adminEmailTencentReturnPilotRecipient = 'different@chevoink.invalid'
+      expect(configuredAdminEmailDelivery).toThrow()
+      env.adminEmailTencentReturnPilotRecipient = recipient
+      env.adminEmailTencentReturnPilotUntil = attemptedAt.toISOString()
+      expect(configuredAdminEmailDelivery().returnPilot).toBeUndefined()
+      env.adminEmailTencentReturnPilotRecipient = ''
+      env.adminEmailTencentReturnPilotUntil = ''
       env.adminEmailTencentRecipients = []
       expect(configuredAdminEmailDelivery).toThrow()
       env.adminEmailTencentRecipientScope = 'consented'

@@ -84,7 +84,7 @@ export async function listEmailCandidates(search: string, page: number, delivery
   const candidates = users.slice(0, pageSize)
   const permissions = await permissionsFor(prisma, candidates, purpose)
   const items = candidates.map(candidate => {
-    const view = presentCandidate(candidate, permissions)
+    const view = presentCandidate(candidate, permissions, delivery, purpose)
     if (!view.exclusion && delivery.allowedRecipients && !delivery.allowedRecipients.has(normalizedEmail(candidate.email) ?? '')) {
       view.exclusion = 'outside_send_scope'
     }
@@ -138,7 +138,7 @@ export async function createEmailPreview(
     const seenEmail = new Set<string>()
     const eligible = candidateIds.flatMap(id => {
       const user = userById.get(id)
-      const exclusion = excludeCandidate(user, permissions)
+      const exclusion = excludeCandidate(user, permissions, delivery, purpose)
       if (exclusion) exclude(exclusion)
       if (!user || exclusion) return []
       const email = normalizedEmail(user.email)
@@ -252,7 +252,7 @@ export async function confirmEmailBatch(
         continue
       }
       const user = userById.get(recipient.userId)
-      if (!user || normalizedEmail(user.email) !== recipient.email || excludeCandidate(user, permissions)
+      if (!user || normalizedEmail(user.email) !== recipient.email || excludeCandidate(user, permissions, delivery, batch.purpose)
         || (delivery.allowedRecipients && !delivery.allowedRecipients.has(recipient.email))) throw previewChanged()
     }
 

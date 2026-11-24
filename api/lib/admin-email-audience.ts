@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto'
 import { Prisma } from '@prisma/client'
-import { ADMIN_EMAIL_PURPOSE, type AdminEmailCandidate, type AdminEmailExclusion, type AdminEmailSelection } from '../../shared/contracts/admin-email.js'
+import { ADMIN_EMAIL_PURPOSE, ADMIN_RETURN_EMAIL_PURPOSE, type AdminEmailCandidate, type AdminEmailExclusion, type AdminEmailSelection } from '../../shared/contracts/admin-email.js'
+import type { AdminEmailDelivery } from './admin-email-provider.js'
 import { effectiveTesterWhere } from './tester-entitlement.js'
 
 const day = 24 * 60 * 60 * 1000
@@ -92,23 +93,32 @@ export async function permissionsFor(db: Prisma.TransactionClient, candidates: E
   return new Map(permissions.map(permission => [permission.email, permission]))
 }
 
-export function excludeCandidate(candidate: EmailCandidate | undefined, permissions: Map<string, EmailPermission>): AdminEmailExclusion | null {
+export function excludeCandidate(
+  candidate: EmailCandidate | undefined, permissions: Map<string, EmailPermission>, delivery: AdminEmailDelivery, purpose: string,
+): AdminEmailExclusion | null {
   if (!candidate) return 'missing_user'
   if (candidate.bannedAt) return 'banned'
   const email = normalizedEmail(candidate.email)
   if (!candidate.emailVerifiedAt || !email || !/^[^\s<>@,]+@[^\s<>@,]+\.[^\s<>@,]+$/.test(email)) return 'unverified_email'
   const permission = permissions.get(email)
   if (permission?.suppression) return permission.suppression
+  // A single explicitly configured recipient can receive a return pilot without creating a subscription.
+  const allowlist = delivery.allowedRecipients
+  if (!permission && purpose === ADMIN_RETURN_EMAIL_PURPOSE && delivery.mode === 'tencent'
+    && delivery.returnPilot?.recipient === email && delivery.returnPilot.expiresAt > Date.now()
+    && allowlist?.size === 1 && allowlist.has(email)) return null
   if (!permission?.consentedAt || !permission.source || permission.userId !== candidate.id || permission.consentedAt < candidate.emailVerifiedAt) {
     return 'no_permission'
   }
   return null
 }
 
-export function presentCandidate(candidate: EmailCandidate, permissions: Map<string, EmailPermission>): AdminEmailCandidate {
+export function presentCandidate(
+  candidate: EmailCandidate, permissions: Map<string, EmailPermission>, delivery: AdminEmailDelivery, purpose: string,
+): AdminEmailCandidate {
   return {
     id: candidate.id, nickname: candidate.nickname, maskedEmail: maskedEmail(normalizedEmail(candidate.email)),
-    exclusion: excludeCandidate(candidate, permissions),
+    exclusion: excludeCandidate(candidate, permissions, delivery, purpose),
   }
 }
 

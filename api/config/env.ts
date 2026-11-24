@@ -75,6 +75,8 @@ export const env = {
   adminEmailTencentReturnTemplateId: Number(process.env.ADMIN_EMAIL_TENCENT_RETURN_TEMPLATE_ID ?? ''),
   adminEmailTencentRecipientScope: process.env.ADMIN_EMAIL_TENCENT_RECIPIENT_SCOPE?.trim() || 'allowlist',
   adminEmailTencentRecipients: parseCsv(process.env.ADMIN_EMAIL_TENCENT_ALLOWED_RECIPIENTS).map(email => email.toLowerCase()),
+  adminEmailTencentReturnPilotRecipient: process.env.ADMIN_EMAIL_TENCENT_RETURN_PILOT_RECIPIENT?.trim().toLowerCase() || '',
+  adminEmailTencentReturnPilotUntil: process.env.ADMIN_EMAIL_TENCENT_RETURN_PILOT_UNTIL?.trim() || '',
   accountEmailAuthTestRecipient: process.env.ACCOUNT_EMAIL_AUTH_TEST_RECIPIENT?.trim().toLowerCase() ?? '',
   emailTencentSecretId: process.env.EMAIL_TENCENT_SECRET_ID ?? '',
   emailTencentSecretKey: process.env.EMAIL_TENCENT_SECRET_KEY ?? '',

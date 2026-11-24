@@ -39,6 +39,17 @@ export function configuredAdminEmailDelivery() {
     throw invalid()
   }
   const { recipients, recipientScope, ...config } = parsed.data
+  const pilotRecipient = env.adminEmailTencentReturnPilotRecipient
+  const pilotUntil = env.adminEmailTencentReturnPilotUntil
+  const pilotDeadline = Date.parse(pilotUntil)
+  if ((pilotRecipient || pilotUntil) && (
+    env.appEnv !== 'production' || recipientScope !== 'allowlist' || !config.returnTemplateId
+    || recipients.length !== 1 || recipients[0] !== pilotRecipient
+    || !Number.isFinite(pilotDeadline) || new Date(pilotDeadline).toISOString() !== pilotUntil
+  )) throw invalid()
   const scope = recipientScope === 'consented' ? { recipientScope } as const : { allowedRecipients: new Set(recipients) }
-  return createTencentAdminEmailDelivery({ ...config, ...scope, region: 'ap-hongkong' })
+  const delivery = createTencentAdminEmailDelivery({ ...config, ...scope, region: 'ap-hongkong' })
+  return pilotRecipient && pilotDeadline > Date.now()
+    ? { ...delivery, returnPilot: { recipient: pilotRecipient, expiresAt: pilotDeadline } }
+    : delivery
 }
