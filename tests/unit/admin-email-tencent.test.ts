@@ -32,10 +32,15 @@ describe('directed Tencent SES adapter with mock HTTP transport', () => {
 
   it('retains the approved 237702 wording and sends its existing CTA to the authenticated claim ingress', async () => {
     const original = readFileSync(new URL('../fixtures/admin-email-return-237702.html', import.meta.url), 'utf8')
-    const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(approved(original)).mockResolvedValueOnce(success({ MessageId: 'fixture-original' }))
+    const summary = '邀请一段时间未使用创作功能的启创墨域用户回来与创作 Agent 小墨交流，并说明创作额度福利及适用条件。'
+    const originalReply = (text: string) => success({
+      TemplateStatus: 0,
+      TemplateContent: { Html: Buffer.from(original).toString('base64'), Text: Buffer.from(text).toString('base64') },
+    })
+    const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(originalReply(summary)).mockResolvedValueOnce(success({ MessageId: 'fixture-original' }))
     const delivery = createTencentAdminEmailDelivery({ ...config, returnTemplateId: 237702 }, transport)
     const template = await delivery.loadTemplate(campaign)
-    expect(template.body).toBe(original)
+    expect(template).toMatchObject({ body: original, alternativeText: summary })
     const link = createRewardLink('tencent')
     const variables = { ...emailTemplateVariables(template, '', attemptedAt), workspace_path: link.workspacePath }
     expect(await delivery.provider.send({ ...attempt, providerTemplateId: 237702, variables })).toMatchObject({ state: 'accepted' })
@@ -46,6 +51,8 @@ describe('directed Tencent SES adapter with mock HTTP transport', () => {
       transport.mockResolvedValueOnce(approved(rejected))
       await expect(delivery.loadTemplate(campaign)).rejects.toMatchObject({ status: 409 })
     }
+    transport.mockResolvedValueOnce(originalReply(summary + ' 请使用其他地址。'))
+    await expect(delivery.loadTemplate(campaign)).rejects.toMatchObject({ status: 409 })
     const differentId = createTencentAdminEmailDelivery({ ...config, returnTemplateId: 237703 }, transport)
     transport.mockResolvedValueOnce(approved(original))
     await expect(differentId.loadTemplate(campaign)).rejects.toMatchObject({ status: 409 })
@@ -206,8 +213,8 @@ describe('directed Tencent SES adapter with mock HTTP transport', () => {
     expect(await provider.status(lookup)).toEqual({ state: 'bounced', reason: 'provider_bounced' })
     expect(await provider.status(lookup)).toEqual({ state: 'rejected', reason: 'unsubscribed', suppression: 'unsubscribed' })
     expect(transport.mock.calls.slice(0, 2).map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
-      { RequestDate: '2026-11-25', MessageId: lookup.messageId, ToEmailAddress: recipient, Limit: 10 },
-      { RequestDate: '2026-11-24', MessageId: lookup.messageId, ToEmailAddress: recipient, Limit: 10 },
+      { RequestDate: '2026-11-25', MessageId: lookup.messageId, ToEmailAddress: recipient, Offset: 0, Limit: 10 },
+      { RequestDate: '2026-11-24', MessageId: lookup.messageId, ToEmailAddress: recipient, Offset: 0, Limit: 10 },
     ])
   })
 

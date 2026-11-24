@@ -70,6 +70,8 @@ function decodeTemplate(value: string | null | undefined) {
 // Reviewed copy from the approved 237702 submission. Ignore presentation and
 // whitespace, but preserve every word, amount and deadline placeholder.
 const approved237702TextHash = 'e455751f8c2fb0001e49b3bbfe7ffb78ee59960e61a097db566b052d851e2b1d'
+// Tencent returns this review summary in Text alongside the approved HTML body.
+const approved237702Summary = '邀请一段时间未使用创作功能的启创墨域用户回来与创作 Agent 小墨交流，并说明创作额度福利及适用条件。'
 
 function checkReturnContent(content: string, html: boolean, templateId: number) {
   if (/\{\{|\}\}/.test(content.replace(returnVariable, ''))) throw templateUnavailable()
@@ -122,7 +124,9 @@ export function createTencentAdminEmailDelivery(config: DirectedSesConfig, fetch
           const body = decodeTemplate(Html)
           checkReturnContent(body, true, templateId)
           const alternativeText = Text ? decodeTemplate(Text) : undefined
-          if (alternativeText) checkReturnContent(alternativeText, false, templateId)
+          if (alternativeText && !(templateId === 237702 && alternativeText === approved237702Summary)) {
+            checkReturnContent(alternativeText, false, templateId)
+          }
           return { ...returnEmailTemplate(campaign), providerTemplateId: templateId, from: config.from, replyTo: config.replyTo,
             body, ...(alternativeText && { alternativeText }) }
         }
@@ -180,7 +184,7 @@ export function createTencentAdminEmailDelivery(config: DirectedSesConfig, fetch
         ])
         for (const RequestDate of dates) {
           const response = await request('GetSendEmailStatus', {
-            RequestDate, MessageId: message.messageId, ToEmailAddress: message.to, Limit: 10,
+            RequestDate, MessageId: message.messageId, ToEmailAddress: message.to, Offset: 0, Limit: 10,
           })
           const reply = apiReply.safeParse(response.reply)
           const statuses = statusReply.safeParse(response.reply)
