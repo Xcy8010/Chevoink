@@ -5,12 +5,12 @@ import type { UserIdentityUpdate, TesterIdentity, UserIdentityUpdateResult } fro
 import { creditTransaction } from './credit-policy.js'
 
 export const TESTER_CREDIT_RULE = { version: 'tester-floor-20-target-450-v1', thresholdMilli: 20000, targetMilli: 450000, balanceBasis: 'ledger' } as const
-const effectiveWhere = (now: Date): Prisma.UserWhereInput => ({ bannedAt: null, OR: [{ role: 'admin', isSuperAdmin: true }, { testerEntitlement: { is: { enabled: true, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] } } }] })
+export const effectiveTesterWhere = (now: Date): Prisma.UserWhereInput => ({ bannedAt: null, OR: [{ role: 'admin', isSuperAdmin: true }, { testerEntitlement: { is: { enabled: true, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] } } }] })
 export async function isEffectiveTester(db: Prisma.TransactionClient, userId: string, now = new Date()): Promise<boolean> {
-  return Boolean(await db.user.findFirst({ where: { id: userId, ...effectiveWhere(now) }, select: { id: true } }))
+  return Boolean(await db.user.findFirst({ where: { id: userId, ...effectiveTesterWhere(now) }, select: { id: true } }))
 }
 export async function effectiveTesterIds(db: Prisma.TransactionClient, now = new Date()): Promise<Set<string>> {
-  return new Set((await db.user.findMany({ where: effectiveWhere(now), select: { id: true } })).map(user => user.id))
+  return new Set((await db.user.findMany({ where: effectiveTesterWhere(now), select: { id: true } })).map(user => user.id))
 }
 export function testerTopupDelta(balanceMilli: number): number {
   if (!Number.isSafeInteger(balanceMilli) || balanceMilli < 0) throw new DataAccessError(409, 'CREDIT_BALANCE_INVALID', '额度余额需要核对。')

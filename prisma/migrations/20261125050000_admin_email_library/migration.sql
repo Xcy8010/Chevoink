@@ -1,0 +1,14 @@
+CREATE TABLE admin_email_templates (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE admin_email_segments (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  filters JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

@@ -26,6 +26,7 @@ import { ProfileRouteSkeleton } from '@/features/profile/components/ProfileLoadi
 // 首页/登录/404 保持同步导入保障首屏，其余页面按路由拆包懒加载
 const SettingsPage = lazyPage(() => import('@/app/routes/SettingsPage'))
 const AccountUsagePage = lazyPage(() => import('@/features/account/AccountUsagePage'))
+const ReturnRewardPage = lazyPage(() => import('@/features/account/ReturnRewardPage'))
 const AccountProfilePage = lazyPage(() => import('@/features/account/AccountProfilePage'))
 const AccountPostsPage = lazyPage(() => import('@/features/account/AccountPostsPage'))
 const AccountBillingPage = lazyPage(() => import('@/features/account/AccountBillingPage'))
@@ -66,6 +67,7 @@ const AdminMessagesPage = lazyPage(() => import('@/features/admin/pages/AdminMes
 const AdminAgentEvalsPage = lazyPage(() => import('@/features/admin/pages/AdminAgentEvalsPage'))
 const AdminCraftLibraryPage = lazyPage(() => import('@/features/admin/pages/AdminCraftLibraryPage'))
 const AdminFeedbackPage = lazyPage(() => import('@/features/admin/pages/AdminFeedbackPage'))
+const AdminEmailPage = lazyPage(() => import('@/features/admin/pages/AdminEmailPage'))
 const AdminLogsPage = lazyPage(() => import('@/features/admin/pages/AdminLogsPage'))
 const AdminSettingsPage = lazyPage(() => import('@/features/admin/pages/AdminSettingsPage'))
 const AdminAppReleasesPage = lazyPage(() => import('@/features/admin/pages/AdminAppReleasesPage'))
@@ -85,6 +87,8 @@ export type AppRouteDefinition = {
 }
 
 export const appRoutes: AppRouteDefinition[] = [
+  { path: '/return-reward', title: '回归奖励', description: '领取创作活动奖励额度。', element: <ReturnRewardPage/> },
+  { path: '/admin/email', title: '定向邮件', description: '管理定向邮件。', element: <AdminLayout><AdminEmailPage /></AdminLayout>, useShell: false },
   {path:'/admin/app-releases',title:'应用版本',description:'管理具体应用产物与版本通道。',element:<AdminLayout><AdminAppReleasesPage/></AdminLayout>,useShell:false},
   {path:'/version',title:'应用版本',description:'查看当前版本的新增功能、改进和修复。',element:<AppVersionPage/>},
   {path:'/admin/testers',title:'用户身份管理',description:'测试员资格统一在用户管理维护。',element:<Navigate to="/admin/users" replace/>,useShell:false},

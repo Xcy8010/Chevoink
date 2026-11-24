@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutDashboard, Menu, Search, Users, Workflow, Pin, X, FileText, MessageSquare, CreditCard, Activity, Settings, Shield, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutDashboard, Menu, Search, Users, Workflow, Mail, Pin, X, FileText, MessageSquare, CreditCard, Activity, Settings, Shield, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import AnnouncementBell from '@/features/site-content/AnnouncementBell'
 import TextInput from './components/AdminTextInput'
@@ -18,7 +18,7 @@ import { clearAdminModelHistoryDrafts } from './components/AdminModelDraftRecove
 
 let draftSessionOwner: string | null = null
 const scrollPositions = new Map<string, number>()
-const pageIcons: Record<string, typeof Users> = { '/admin/content': FileText, '/admin/site-settings': Settings, '/admin/app-releases': Workflow, '/admin/users': Users, '/admin/credits': CreditCard, '/admin/novels': BookOpen, '/admin/posts': MessageSquare, '/admin/comments': MessageSquare, '/admin/feedback': MessageSquare, '/admin/messages': MessageSquare, '/admin/creation-records': Activity, '/admin/evals': Activity, '/admin/craft': FileText, '/admin/models': Workflow, '/admin/tokens': Activity, '/admin/settings': Settings, '/admin/logs': Shield }
+const pageIcons: Record<string, typeof Users> = { '/admin/content': FileText, '/admin/site-settings': Settings, '/admin/app-releases': Workflow, '/admin/users': Users, '/admin/credits': CreditCard, '/admin/novels': BookOpen, '/admin/posts': MessageSquare, '/admin/comments': MessageSquare, '/admin/feedback': MessageSquare, '/admin/email': Mail, '/admin/messages': MessageSquare, '/admin/creation-records': Activity, '/admin/evals': Activity, '/admin/craft': FileText, '/admin/models': Workflow, '/admin/tokens': Activity, '/admin/settings': Settings, '/admin/logs': Shield }
 const mobileItems = [
   { to: '/admin', label: '总览', icon: LayoutDashboard },
   { to: '/admin/users', label: '用户', icon: Users },

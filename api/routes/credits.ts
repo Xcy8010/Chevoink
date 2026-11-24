@@ -17,6 +17,7 @@ import { validateCustomModelCapabilities } from '../lib/custom-model-validation.
 import { isLocalModelProvider, normalizeLocalModelUrl } from '../../shared/local-model.js'
 import { connectorKey, newConnectorToken } from '../lib/local-model-transport.js'
 import { localModelBroker } from '../lib/local-model-broker.js'
+import { claimAdminReturnReward } from '../lib/admin-return-reward.js'
 
 const router = Router()
 
@@ -55,6 +56,15 @@ router.get('/public-policy', async (_req: Request, res: Response): Promise<void>
   const requestId = createRequestId()
   try { res.json(buildSuccess(requestId, await getPublicCreditPolicy())) }
   catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.post('/return-reward/claim', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    const reward = await claimAdminReturnReward(userId, req.body?.token)
+    res.json(buildSuccess(requestId, reward))
+  } catch (error) { sendRouteError(res, requestId, error) }
 })
 
 router.get('/summary', async (req: Request, res: Response): Promise<void> => {

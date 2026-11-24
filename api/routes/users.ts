@@ -36,10 +36,28 @@ import { parseBody } from '../lib/parse-body.js'
 import { accountEmailAuthEnabled } from '../lib/account-email-auth-scope.js'
 import { hasConfiguredPassword, verifyPassword } from '../lib/password.js'
 import { DataAccessError } from '../lib/prisma.js'
+import { getReturnEmailPreference, setReturnEmailPreference } from '../lib/return-email-preference.js'
 import { sendRouteError } from '../lib/route-error.js'
 import { sendAuthSmsCode, verifyAuthSmsCode } from '../lib/sms-service.js'
 
 const router = Router()
+
+router.get('/me/return-email', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    res.json(buildSuccess(requestId, await getReturnEmailPreference(userId)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.put('/me/return-email', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    const { subscribed } = parseBody(z.object({ subscribed: z.boolean() }).strict(), req.body, '订阅状态无效。')
+    res.json(buildSuccess(requestId, await setReturnEmailPreference(userId, subscribed)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
 
 /* ---------------- 请求体校验 schema（文案与历史提示保持一致） ---------------- */
 

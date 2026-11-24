@@ -9,6 +9,7 @@ export const adminNavigation = [
   ] },
   { label: '用户与权益', items: [
     { to: '/admin/users', label: '用户管理', keywords: '角色 身份 测试员 资格 权益 封禁' },
+    { to: '/admin/email', label: '定向邮件', keywords: '邮件 模板 选人 抽样 投递 回执' },
     { to: '/admin/credits', label: 'Credits 权益', keywords: '账户 额度 全局政策 暂停 重置 奖励 赠送 扣减 覆盖' },
   ] },
   { label: '创作运营', items: [

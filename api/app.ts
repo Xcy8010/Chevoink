@@ -9,6 +9,8 @@ import express, {
 import cors from 'cors'
 import agentRoutes from './routes/agent.js'
 import adminRoutes from './routes/admin.js'
+import adminEmailRoutes from './routes/admin-email.js'
+import returnRewardLinkRoutes from './routes/return-reward-link.js'
 import siteContentRoutes, { publicSiteContentRouter } from './routes/site-content.js'
 import aiRoutes from './routes/ai.js'
 import authRoutes from './routes/auth.js'
@@ -110,6 +112,7 @@ app.use('/api', async (req, _res, next) => {
   }
 })
 app.use('/api/app-releases', publicAppReleaseRouter)
+app.use('/api/credits/return-reward', returnRewardLinkRoutes)
 app.use('/api/admin/app-releases', appReleaseRoutes)
 app.use('/api', accountAccessGuard)
 app.use('/api', appReleaseCapabilityGuard)
@@ -118,6 +121,7 @@ app.use('/api/agent', agentRoutes)
 app.use('/api/admin/site-content', siteContentRoutes)
 app.use('/api/site-content', publicSiteContentRouter)
 app.use('/api/admin/testers', testerRoutes)
+app.use('/api/admin/email', adminEmailRoutes)
 app.use('/api/admin', adminRoutes)
 app.use('/api/ai', aiRoutes)
 app.use('/api/auth', authRoutes)

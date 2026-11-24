@@ -3659,6 +3659,101 @@ model TesterEntitlement {
   @@map("tester_entitlements")
 }
 
+enum AdminEmailBatchState {
+  preview
+  confirmed
+  cancelled
+}
+
+enum AdminEmailMode {
+  mock
+  tencent
+}
+
+enum AdminEmailRecipientState {
+  preview
+  queued
+  sending
+  accepted
+  deferred
+  delivered
+  rejected
+  bounced
+  unknown
+  skipped
+  cancelled
+}
+
+enum AdminEmailSuppression {
+  unsubscribed
+  hard_bounce
+  complained
+}
+
+model AdminEmailPermission {
+  purpose     String                 @db.VarChar(32)
+  email       String                 @db.VarChar(255)
+  userId      String?                @map("user_id") @db.VarChar(64)
+  consentedAt DateTime?              @map("consented_at")
+  source      String?                @db.VarChar(128)
+  suppression AdminEmailSuppression?
+  updatedAt   DateTime               @updatedAt @map("updated_at")
+
+  @@id([purpose, email])
+  @@map("admin_email_permissions")
+}
+
+model AdminEmailBatch {
+  id             String              @id @default(uuid()) @db.Uuid
+  adminId        String              @map("admin_id") @db.VarChar(64)
+  purpose        String              @db.VarChar(32)
+  mode           AdminEmailMode
+  template       Json
+  templateHash   String              @map("template_hash") @db.VarChar(64)
+  selection      Json
+  sampling       Json?
+  exclusions     Json
+  candidateCount Int                 @map("candidate_count")
+  eligibleCount  Int                 @map("eligible_count")
+  recipientCount Int                 @map("recipient_count")
+  blocker        String?             @db.VarChar(24)
+  previewHash    String              @map("preview_hash") @db.VarChar(64)
+  replacedById   String?             @map("replaced_by_id") @db.Uuid
+  state          AdminEmailBatchState @default(preview)
+  expiresAt      DateTime            @map("expires_at")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  confirmedAt    DateTime?           @map("confirmed_at")
+  recipients     AdminEmailRecipient[]
+
+  @@index([adminId, mode, createdAt, id])
+  @@index([mode, state, expiresAt])
+  @@map("admin_email_batches")
+}
+
+model AdminEmailRecipient {
+  batchId           String                   @map("batch_id") @db.Uuid
+  batch             AdminEmailBatch          @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  userId            String                   @map("user_id") @db.VarChar(64)
+  email             String                   @db.VarChar(255)
+  nickname          String                   @db.VarChar(64)
+  weight            Int?
+  state             AdminEmailRecipientState @default(preview)
+  reason            String?                  @db.VarChar(48)
+  attemptId         String?                  @unique @map("attempt_id") @db.Uuid
+  attemptedAt       DateTime?                @map("attempted_at")
+  providerMessageId String?                  @unique @map("provider_message_id") @db.VarChar(128)
+  providerRequestId String?                  @map("provider_request_id") @db.VarChar(128)
+  nextCheckAt       DateTime?                @map("next_check_at")
+  updatedAt         DateTime                 @updatedAt @map("updated_at")
+
+  @@id([batchId, userId])
+  @@unique([batchId, email])
+  @@index([userId, state, attemptedAt])
+  @@index([state, updatedAt])
+  @@index([state, nextCheckAt])
+  @@map("admin_email_recipients")
+}
+
 /// Immutable installed artifact identity, separate from model revisions.
 model AppRelease {
   id String @id @db.VarChar(64)
@@ -3729,4 +3824,22 @@ model ImageOperation {
  updatedAt DateTime @updatedAt @map("updated_at")
  @@unique([userId, operationId])
  @@map("image_operations")
+}
+
+model AdminEmailTemplate {
+  id        Int      @id
+  name      String
+  subject   String
+  body      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("admin_email_templates")
+}
+
+model AdminEmailSegment {
+  id String @id
+  name String @unique
+  filters Json
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  @@map("admin_email_segments")
 }

@@ -12,6 +12,8 @@ import { recoverNovelImportJobs } from './lib/novel-import-service.js'
 import { isNovelImportMaintenanceEnabled, maintainNovelImports } from './lib/novel-import-maintenance.js'
 import { drainNovelImportEffects } from './lib/novel-import-effects.js'
 import { closeConfigurationStreams } from './lib/live-configuration.js'
+import { configuredAdminEmailDelivery } from './lib/admin-email-config.js'
+import { processAdminEmailQueue } from './lib/admin-email-queue.js'
 
 // Do not accept new runs or dispatch schedules while startup recovery is scanning
 // old queued/running rows: otherwise a fresh request can be mistaken for an orphan.
@@ -72,7 +74,18 @@ const styleTimer = setInterval(() => {
 }, 2000)
 styleTimer.unref()
 
+let emailQueueRunning = false
+const adminEmailTimer = (env.adminEmailMockEnabled || env.adminEmailTencentEnabled) ? setInterval(() => {
+  if (emailQueueRunning) return
+  emailQueueRunning = true
+  void Promise.resolve().then(() => processAdminEmailQueue(configuredAdminEmailDelivery())).catch(() => {
+    console.error('[admin-email] 邮件队列暂时不可用，投递记录已保留')
+  }).finally(() => { emailQueueRunning = false })
+}, 2_000) : undefined
+adminEmailTimer?.unref()
+
 process.on('SIGTERM', () => {
+  clearInterval(adminEmailTimer)
   clearInterval(styleTimer)
   clearInterval(queueTimer)
   clearInterval(scheduleTimer)
@@ -85,6 +98,7 @@ process.on('SIGTERM', () => {
 })
 
 process.on('SIGINT', () => {
+  clearInterval(adminEmailTimer)
   clearInterval(styleTimer)
   clearInterval(queueTimer)
   clearInterval(scheduleTimer)

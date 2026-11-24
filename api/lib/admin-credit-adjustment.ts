@@ -5,6 +5,16 @@ import { creditTransaction, lockCreditPolicy } from './credit-policy.js'
 import { buildNewCreditAccountData, getCreditWindow } from './credits.js'
 import { DataAccessError } from './prisma.js'
 
+export async function notifyBonusCreditChange(tx: Prisma.TransactionClient, userId: string, deltaMilli: number, balance: number, source: 'administrator' | 'creator_return') {
+  if (!deltaMilli) return
+  const format = (milli: number) => (milli / 1000).toLocaleString('zh-CN', { maximumFractionDigits: 3 })
+  const action = source === 'creator_return' ? '你已领取回归活动的' : deltaMilli > 0 ? '管理员已发放' : '管理员已扣减'
+  await tx.userNotification.create({ data: {
+    userId, title: deltaMilli > 0 ? '你收到了奖励额度' : '奖励额度已调整',
+    body: `${action} ${format(Math.abs(deltaMilli))} 奖励额度。操作完成时的奖励额度余额为 ${format(balance)}。`,
+  } })
+}
+
 /** Reward adjustment shares invitation rewards' balance, never the daily counter. */
 export async function adjustAdminBonusCredits(adminId: string, userId: string, input: AdminCreditAdjustmentInput, ip: string | null = null): Promise<AdminCreditAdjustmentResult> {
   const id = createHash('sha256').update(JSON.stringify(['credit-adjustment', adminId, input.requestKey])).digest('hex')
@@ -43,15 +53,7 @@ export async function adjustAdminBonusCredits(adminId: string, userId: string, i
           kind: 'admin_adjustment', sourceType: 'admin_bonus_adjustment', referenceId: adminId, idempotencyKey: `admin-bonus:${id}`, metadata: { mode: input.mode, reason: input.reason, requestKey: input.requestKey } } })
         await tx.adminAuditLog.create({ data: { id, adminId, action: 'credits.adjust_bonus', targetType: 'user', targetId: userId, ip,
           detail: { ...result, expectedBonusBalanceMilli: input.expectedBonusBalanceMilli, reason: input.reason, requestHash } } })
-        if (deltaMilli !== 0) {
-          const amount = (Math.abs(deltaMilli) / 1000).toLocaleString('zh-CN', { maximumFractionDigits: 3 })
-          const remaining = (balance / 1000).toLocaleString('zh-CN', { maximumFractionDigits: 3 })
-          await tx.userNotification.create({ data: {
-            userId,
-            title: deltaMilli > 0 ? '你收到了奖励额度' : '奖励额度已调整',
-            body: `管理员已${deltaMilli > 0 ? '发放' : '扣减'} ${amount} 奖励额度。操作完成时的奖励额度余额为 ${remaining}。`,
-          } })
-        }
+        await notifyBonusCreditChange(tx, userId, deltaMilli, balance, 'administrator')
         return result
       })
     } catch (error) {

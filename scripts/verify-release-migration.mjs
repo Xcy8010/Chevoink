@@ -41,6 +41,13 @@ export const deviceSessionsMigrationName = '20261120000100_account_device_sessio
 export const deviceSessionsMigrationChecksum = '0963c42ab6ab7fb1ea765ef8c68491913e76356c976298a0e56841a389913dc7'
 const deviceSessionsCandidateSchema = 'e2703020e367b55b2f7df900d6f0f0935364b50f3534625c529ecdc3c5ad3e5e'
 const deviceSessionsTable = 'account_device_sessions'
+export const directedEmailPlan = '20261125_directed_email'
+export const directedEmailMigrations = [
+  ['20261124090000_admin_directed_email', 'afbd87d10648998d01b3f8ed71ab13d0d808b132191634fbdfbda1ec195af989'],
+  ['20261125050000_admin_email_library', '71c200618bd467170b12b35a0752ee8fdc9a2296a5e2c639c41e984ef2cefa86'],
+  ['20261125060000_admin_return_reward', 'e3f77652b8b1e32b538e4df3d4321986d15af483433db5e4ecab48acfd056209'],
+]
+const directedEmailCandidateSchema = 'a55d3ee026715ce5c32cf9f46c2ddeb0be30e48d816af2f46d9a5577900dbee6'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -65,9 +72,11 @@ reviewed.set(agentPersonalizationMigrationName, agentPersonalizationMigrationChe
 reviewed.set(personalizationRulesMigrationName, personalizationRulesMigrationChecksum)
 reviewed.set(personalizationRuleTextsMigrationName, personalizationRuleTextsMigrationChecksum)
 reviewed.set(deviceSessionsMigrationName, deviceSessionsMigrationChecksum)
+reviewed.set(directedEmailPlan, createHash('sha256').update(JSON.stringify(directedEmailMigrations)).digest('hex'))
 reviewed.set(storyProfilesMigrationName, storyProfilesMigrationChecksum)
 const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName, personalizationRuleTextsMigrationName, storyProfilesMigrationName, deviceSessionsMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
+fullHistoryPlans.add(directedEmailPlan)
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
 const newDeclaration = '@@unique([reportId, source, signal, startOffset, endOffset, evidenceHash], map: "quality_findings_report_source_signal_span_key")'
@@ -90,6 +99,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const emailTargets = new Map(directedEmailMigrations.map(([name, hash]) => [`${name}/migration.sql`, hash]))
+  if (digest(previous.replaceAll('\r\n', '\n')) === deviceSessionsCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === directedEmailCandidateSchema
+    && !oldFiles.some(([name]) => emailTargets.has(name))
+    && JSON.stringify(currentFiles.filter(([name]) => !emailTargets.has(name))) === JSON.stringify(oldFiles)
+    && [...emailTargets].every(([name, hash]) => currentFiles.some(([file, actual]) => file === name && actual === hash))) return directedEmailPlan
   const deviceTarget = `${deviceSessionsMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === storyProfilesCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === deviceSessionsCandidateSchema
@@ -178,7 +193,8 @@ export function assertMigrationState(rows, checksums, phase, before, plan = migr
   if (!reviewed.has(plan)) throw Error('Unapproved migration plan')
   if (!['before', 'after'].includes(phase)) throw Error('Invalid migration verification phase')
   const expected = new Map(checksums)
-  const additions = plan === adminExperiencePlan ? new Map(adminExperienceMigrations) : new Map([[plan, reviewed.get(plan)]])
+  const additions = plan === adminExperiencePlan ? new Map(adminExperienceMigrations)
+    : plan === directedEmailPlan ? new Map(directedEmailMigrations) : new Map([[plan, reviewed.get(plan)]])
   for (const [name, hash] of additions) {
     if (checksums.find(([key]) => key === name)?.[1] !== hash) throw Error('Approved migration files are missing or changed')
     if (phase === 'before') expected.delete(name)
@@ -871,6 +887,41 @@ export async function readPersonalizationRuleTextsState(tx, phase) {
   throw Error('Personalization rule text catalog mismatch')
 }
 
+export async function readDirectedEmailCatalog(tx, phase) {
+  const tables = ['admin_email_permissions', 'admin_email_batches', 'admin_email_recipients', 'admin_email_templates', 'admin_email_segments']
+  const types = ['AdminEmailBatchState', 'AdminEmailMode', 'AdminEmailRecipientState', 'AdminEmailSuppression']
+  const indexes = ['admin_email_recipients_attempt_id_key', 'admin_email_recipients_provider_message_id_key',
+    'admin_email_recipients_batch_id_email_key', 'admin_email_recipients_user_id_state_attempted_at_idx', 'admin_email_segments_name_key']
+  const objects = await tx.$queryRawUnsafe(`
+    SELECT c.relname::text AS name, c.relkind::text AS kind
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname=current_schema() AND c.relname::text=ANY($1::text[])
+    UNION ALL
+    SELECT t.typname::text, t.typtype::text
+    FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+    WHERE n.nspname=current_schema() AND t.typname::text=ANY($2::text[])
+  `, [...tables, ...indexes], types)
+  if (phase === 'before') {
+    if (objects.length) throw Error('Directed mail schema objects exist before migration')
+    return { objects: 0 }
+  }
+  const expected = new Map([...tables.map(name => [name, 'r']), ...types.map(name => [name, 'e']), ...indexes.map(name => [name, 'i'])])
+  if (objects.length !== expected.size || objects.some(({ name, kind }) => expected.get(name) !== kind)) {
+    throw Error('Directed mail catalog mismatch')
+  }
+  const [constraints] = await tx.$queryRawUnsafe(`SELECT
+    EXISTS(SELECT 1 FROM pg_index WHERE indexrelid='admin_email_recipients_attempt_id_key'::regclass AND indisunique AND indisvalid) AS attempt,
+    EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='admin_email_recipients'::regclass AND confrelid='admin_email_batches'::regclass
+      AND conname='admin_email_recipients_batch_id_fkey' AND convalidated AND confdeltype='c') AS parent
+  `)
+  if (!constraints.attempt || !constraints.parent) throw Error('Directed mail recipient constraints mismatch')
+  for (const table of tables) {
+    const [result] = await tx.$queryRawUnsafe(`SELECT EXISTS(SELECT 1 FROM "${table}") AS populated`)
+    if (result.populated) throw Error('Unexpected directed mail data during migration: ' + table)
+  }
+  return { tables, types, indexes }
+}
+
 async function main() {
   const [phase, candidate, baseline, receipt] = process.argv.slice(2)
   const plan = releaseMigrationPlan(candidate, baseline)
@@ -902,6 +953,10 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === directedEmailPlan) {
+        const catalog = await readDirectedEmailCatalog(tx, phase)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, catalog }
+      }
       if (plan === deviceSessionsMigrationName) {
         const devices = await readDeviceSessionsState(tx, phase)
         assertDeviceSessionsState(devices, phase, before?.devices)

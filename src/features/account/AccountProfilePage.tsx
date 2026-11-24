@@ -1,6 +1,7 @@
 import { ChevronRight, Copy, Check, KeyRound, Phone, CalendarDays, Settings2, LogOut } from 'lucide-react'
 import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
 import Avatar from '@/features/community/components/Avatar'
@@ -22,6 +23,32 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 
 function maskPhone(phone: string): string {
   return phone.length >= 7 ? `${phone.slice(0, 3)}****${phone.slice(-4)}` : phone
+}
+
+function ReturnEmailPreference({ owner }: { owner: string }) {
+  const client = useQueryClient()
+  const toast = useToast()
+  const queryKey = ['account', 'return-email', owner] as const
+  const url = '/api/users/me/return-email'
+  type Preference = { available: boolean; subscribed: boolean }
+  const preference = useQuery({ queryKey, queryFn: () => requestJson<Preference>(url) })
+  const update = useMutation({
+    mutationFn: (subscribed: boolean) => requestJson<Preference>(url, { method: 'PUT', body: JSON.stringify({ subscribed }) }),
+    onSuccess: result => {
+      client.setQueryData(queryKey, result)
+      toast.success(result.subscribed ? '已订阅创作活动邮件。' : '已取消订阅创作活动邮件。')
+    },
+    onError: error => toast.error(error instanceof ApiClientError ? error.message : '暂时无法保存订阅状态。'),
+  })
+  return <Row label="创作活动邮件">
+    {preference.isPending ? <span role="status" className="text-sm">正在读取订阅状态…</span>
+      : preference.isError ? <Button size="sm" variant="secondary" onClick={() => void preference.refetch()}>重新读取订阅状态</Button>
+      : preference.data.available ? <label className="inline-flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={preference.data.subscribed} disabled={update.isPending}
+          onChange={event => update.mutate(event.target.checked)}/>
+        接收创作活动和回归奖励邮件
+      </label> : <span className="text-sm text-[var(--text-secondary)]">当前邮箱无法订阅活动邮件</span>}
+  </Row>
 }
 
 export default function AccountProfilePage() {
@@ -194,6 +221,7 @@ export default function AccountProfilePage() {
                 {user?.emailAuthEnabled ? '验证' : '管理'}
               </Link>}
             </Row>
+            {user?.email && <ReturnEmailPreference key={user.id + ':' + user.email} owner={user.id}/>}
             <Row label="加入时间">
               <span className="inline-flex items-center gap-1.5 text-sm">
                 <CalendarDays className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
