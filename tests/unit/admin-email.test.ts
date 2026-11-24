@@ -324,6 +324,9 @@ it('sends each claimed record at most once and reconciles mock receipts without 
 
   const provider = { send: vi.fn(mockAdminEmailProvider.send), status: vi.fn(mockAdminEmailProvider.status) }
   const delivery = { ...mockAdminEmailDelivery, provider }
+  const suppressionWrites = () => mocks.db.$executeRaw.mock.calls
+    .filter(([sql]) => (sql as TemplateStringsArray)[0].includes('INSERT INTO admin_email_permissions'))
+    .map(([, , , suppression]) => suppression)
   await Promise.all([processAdminEmailQueue(delivery, () => now), processAdminEmailQueue(delivery, () => now)])
   expect(provider.send).toHaveBeenCalledTimes(7)
   expect(rows.map(row => row.state)).toEqual(['accepted', 'accepted', 'accepted', 'accepted', 'accepted', 'unknown', 'rejected', 'skipped', 'skipped', 'unknown'])
@@ -333,11 +336,11 @@ it('sends each claimed record at most once and reconciles mock receipts without 
   expect(rows[0]).toMatchObject({ providerMessageId: expect.stringMatching(/^mock-message-/), providerRequestId: expect.stringMatching(/^mock-request-/) })
   await processAdminEmailQueue(delivery, () => new Date(now.getTime() + 5_000))
   expect(rows.map(row => row.state)).toEqual(['delivered', 'deferred', 'bounced', 'delivered', 'delivered', 'unknown', 'rejected', 'skipped', 'skipped', 'unknown'])
-  expect(mocks.db.$executeRaw.mock.calls.map(call => call[3])).toEqual(['hard_bounce'])
+  expect(suppressionWrites()).toEqual(['hard_bounce'])
   await processAdminEmailQueue(delivery, () => new Date(now.getTime() + 35_000))
   expect(rows[1].state).toBe('delivered')
   expect(rows[3]).toMatchObject({ state: 'delivered', reason: 'unsubscribed', nextCheckAt: null })
   expect(rows[4]).toMatchObject({ state: 'delivered', reason: 'complained', nextCheckAt: null })
-  expect(mocks.db.$executeRaw.mock.calls.map(call => call[3])).toEqual(['hard_bounce', 'unsubscribed', 'complained'])
+  expect(suppressionWrites()).toEqual(['hard_bounce', 'unsubscribed', 'complained'])
   expect(provider.send).toHaveBeenCalledTimes(7)
 })
