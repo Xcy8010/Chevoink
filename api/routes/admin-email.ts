@@ -6,7 +6,7 @@ import {
   adminEmailPurposeSchema, adminEmailSelectionSchema, adminEmailConfirmSchema, adminEmailId, adminEmailPreviewSchema, type AdminEmailInfo, type AdminEmailMode,
 } from '../../shared/contracts/admin-email.js'
 import { getRequestIp, requireAdmin } from '../lib/admin-auth.js'
-import { cancelEmailBatch, confirmEmailBatch, createEmailPreview, getEmailBatch, listEmailBatches, listEmailCandidates } from '../lib/admin-email-batches.js'
+import { cancelEmailBatch, confirmEmailBatch, createEmailPreview, getEmailBatch, listEmailBatches, listEmailCandidates, listEmailPreviewCandidates } from '../lib/admin-email-batches.js'
 import { configuredAdminEmailDelivery } from '../lib/admin-email-config.js'
 import type { AdminEmailDelivery } from '../lib/admin-email-provider.js'
 import { buildSuccess, createRequestId } from '../lib/http.js'
@@ -16,7 +16,9 @@ import { DataAccessError, prisma } from '../lib/prisma.js'
 import { sendRouteError } from '../lib/route-error.js'
 
 const router = Router()
-const candidateQuery = z.object({ purpose: adminEmailPurposeSchema.default(ADMIN_EMAIL_PURPOSE), search: z.string().trim().max(100).default(''), page: z.coerce.number().int().min(1).max(10_000).default(1) })
+const candidatePage = z.coerce.number().int().min(1).max(10_000).default(1)
+const candidateQuery = z.object({ purpose: adminEmailPurposeSchema.default(ADMIN_EMAIL_PURPOSE), search: z.string().trim().max(100).default(''), page: candidatePage })
+const previewCandidateQuery = z.object({ page: candidatePage })
 
 function emailAction(handler: (req: Request, adminId: string, delivery: AdminEmailDelivery) => unknown) {
   return async (req: Request, res: Response) => {
@@ -76,6 +78,11 @@ router.post('/previews', emailAction((req, adminId, delivery) => {
 router.get('/batches/:batchId', emailAction((req, adminId, delivery) => {
   const batchId = parseBody(adminEmailId, req.params.batchId, '邮件批次无效。')
   return getEmailBatch(adminId, batchId, delivery.mode)
+}))
+router.get('/batches/:batchId/candidates', emailAction((req, adminId, delivery) => {
+  const batchId = parseBody(adminEmailId, req.params.batchId, '邮件批次无效。')
+  const { page } = parseBody(previewCandidateQuery, req.query, '候选名单页码无效。')
+  return listEmailPreviewCandidates(adminId, batchId, page, delivery)
 }))
 router.post('/batches/:batchId/confirm', emailAction((req, adminId, delivery) => {
   const batchId = parseBody(adminEmailId, req.params.batchId, '邮件批次无效。')

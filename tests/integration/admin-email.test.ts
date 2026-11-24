@@ -6,7 +6,7 @@ import { randomUUID, randomInt } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ADMIN_EMAIL_PURPOSE, ADMIN_RETURN_EMAIL_PURPOSE, ADMIN_CUSTOM_EMAIL_PURPOSE } from '../../shared/contracts/admin-email.js'
-import { cancelEmailBatch, confirmEmailBatch, createEmailPreview, getEmailBatch, listEmailCandidates } from '../../api/lib/admin-email-batches.js'
+import { cancelEmailBatch, confirmEmailBatch, createEmailPreview, getEmailBatch, listEmailCandidates, listEmailPreviewCandidates } from '../../api/lib/admin-email-batches.js'
 import { mockAdminEmailDelivery, mockAdminEmailProvider, type AdminEmailDelivery } from '../../api/lib/admin-email-provider.js'
 import { createTencentAdminEmailDelivery } from '../../api/lib/admin-email-tencent.js'
 import { processAdminEmailQueue } from '../../api/lib/admin-email-queue.js'
@@ -55,6 +55,8 @@ describe.skipIf(!dbAvailable)('directed email persistence with mock SES (isolate
     expect((await getEmailBatch(adminId, preview.id)).campaign).toEqual(campaign)
     expect(preview.template.sampleBody).toContain('2026-11-30 23:30')
     await confirmEmailBatch(adminId, preview.id, preview.previewHash, null, at)
+    const confirmedBatch = await prisma.adminEmailBatch.findUniqueOrThrow({ where: { id: preview.id }, select: { sampling: true } })
+    expect(confirmedBatch.sampling).not.toHaveProperty('candidates')
     const provider = { ...mockAdminEmailProvider, send: vi.fn(mockAdminEmailProvider.send) }
     const delivery = { ...mockAdminEmailDelivery, provider }
     const sentAt = new Date('2026-11-25T16:15:00Z')
@@ -65,6 +67,46 @@ describe.skipIf(!dbAvailable)('directed email persistence with mock SES (isolate
     }))
     await processAdminEmailQueue(delivery, () => new Date(sentAt.getTime() + 5000))
     expect((await getEmailBatch(adminId, preview.id)).progress).toEqual({ delivered: 1 })
+  })
+
+  it('pages the frozen preview audience with masked addresses and reconstructs legacy previews', async () => {
+    const at = new Date()
+    const selected = await createRecipient('发送候选', at)
+    const excluded = await createRecipient('待验证候选', at)
+    await prisma.user.update({ where: { id: excluded.id }, data: { emailVerifiedAt: null } })
+    const missing = Array.from({ length: 24 }, () => randomUUID())
+    const preview = await createEmailPreview(adminId, { mode: 'manual', userIds: [selected.id, excluded.id, ...missing] }, {
+      campaign: { maxCredits: 200, deadline: { mode: 'relative', days: 7 }, workspacePath: 'studio' },
+    })
+    expect(preview).toMatchObject({ candidateCount: 26, recipientCount: 1, exclusions: { unverified_email: 1, missing_user: 24 } })
+    await expect(listEmailPreviewCandidates(randomUUID(), preview.id, 1, mockAdminEmailDelivery))
+      .rejects.toMatchObject({ status: 404 })
+    const previousMock = env.adminEmailMockEnabled
+    env.adminEmailMockEnabled = true
+    try {
+      const cookie = 'chevoink_session=' + buildSessionTokens(adminId, 0).accessToken
+      const url = '/api/admin/email/batches/' + preview.id + '/candidates'
+      await request(app).get(url + '?page=0').set('Cookie', cookie).expect(400)
+      await prisma.user.update({ where: { id: excluded.id }, data: { nickname: '修改后的昵称', emailVerifiedAt: at } })
+      const first = (await request(app).get(url).set('Cookie', cookie).expect(200)).body.data
+      expect(first).toMatchObject({ page: 1, hasNextPage: true, reconstructed: false })
+      expect(first.items).toHaveLength(25)
+      expect(first.items.slice(0, 2)).toMatchObject([
+        { id: selected.id, nickname: '发送候选', maskedEmail: expect.stringMatching(/•••@chevoink\.invalid$/), exclusion: null, selected: true },
+        { id: excluded.id, nickname: '待验证候选', exclusion: 'unverified_email', selected: false },
+      ])
+      const second = (await request(app).get(url + '?page=2').set('Cookie', cookie).expect(200)).body.data
+      expect(second).toMatchObject({ page: 2, hasNextPage: false, items: [{ id: missing.at(-1), exclusion: 'missing_user', selected: false }] })
+      await prisma.adminEmailBatch.update({ where: { id: preview.id }, data: { sampling: { version: 'exponential-race-v1' } } })
+      await prisma.user.update({ where: { id: selected.id }, data: { emailVerifiedAt: null } })
+      const legacy = (await request(app).get(url).set('Cookie', cookie).expect(200)).body.data
+      expect(legacy).toMatchObject({ reconstructed: true })
+      expect(legacy.items[0]).toMatchObject({ exclusion: 'unverified_email', selected: true })
+      expect(legacy.items[1]).toMatchObject({ nickname: '修改后的昵称', exclusion: null, selected: false })
+      expect(await prisma.adminEmailBatch.count({ where: { id: preview.id, confirmedAt: null } })).toBe(1)
+    } finally {
+      env.adminEmailMockEnabled = previousMock
+    }
   })
 
   it('adds a template to the shared library, reads it back and rejects a duplicate ID', async () => {

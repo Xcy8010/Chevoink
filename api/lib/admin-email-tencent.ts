@@ -77,8 +77,9 @@ function checkReturnContent(content: string, html: boolean, templateId: number) 
   if (/\{\{|\}\}/.test(content.replace(returnVariable, ''))) throw templateUnavailable()
   const document = html ? parseHTML(content).document : null
   const visible = (document ? document.body.textContent ?? '' : content.split(claimHref).join('')).replace(/\s+/g, '')
+  const hasClaimLimit = /(?:每封(?:邀请)?邮件|每个?账[号户]|每人).{0,8}(?:限领|限|领取)一次/.test(visible)
   const showsClaimTerms = visible.includes('{{max_credits}}') && visible.includes('{{expires_at}}')
-    && /(?:登录|点击|确认).{0,20}领取/.test(visible) && /(?:每个?账[号户]|每人).{0,8}(?:限领|限|领取)一次/.test(visible)
+    && /(?:登录|点击|确认).{0,20}领取/.test(visible) && hasClaimLimit
   const matchesOriginal = templateId === 237702 && createHash('sha256').update(visible).digest('hex') === approved237702TextHash
   if (!matchesOriginal && (!showsClaimTerms || /实际扣费.{0,30}返还|首笔.{0,20}返还|返还这笔消耗/.test(visible))) throw templateUnavailable()
   const uses = content.split('{{workspace_path}}').length - 1

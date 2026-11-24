@@ -87,6 +87,13 @@ export type AdminEmailCandidate = {
   exclusion: AdminEmailExclusion | null
 }
 
+export type AdminEmailPreviewCandidates = {
+  items: Array<AdminEmailCandidate & { selected: boolean }>
+  page: number
+  hasNextPage: boolean
+  reconstructed: boolean
+}
+
 export type AdminEmailBatch = {
   id: string
   mode: AdminEmailMode

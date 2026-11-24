@@ -71,6 +71,15 @@
 .admin-email details summary {cursor:pointer;font-size:13px;color:var(--mail-accent);font-weight:550;padding-block:6px}
 .admin-email [role=alert] {margin-top:10px;color:var(--color-danger,#ae3939)}
 .admin-email button:disabled {opacity:.55;cursor:not-allowed}
+.admin-workspace main .admin-email .mail-candidate-toggle {
+  display:inline-flex; align-items:center; gap:4px; min-height:32px; padding:2px 5px;
+  border-radius:4px; color:var(--mail-accent); font-weight:600;
+}
+.mail-candidate-toggle:hover { text-decoration:underline; }
+.mail-candidate-pager button[aria-disabled=true] { opacity:.55; cursor:not-allowed; }
+.admin-workspace main .admin-email :is(.mail-candidate-toggle,.mail-candidate-pager button):focus-visible {
+  outline:2px solid var(--mail-accent); outline-offset:1px; box-shadow:none;
+}
 @media(max-width:1020px){.mail-columns{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}}
 @media(max-width:740px){.mail-columns{grid-template-columns:1fr}.mail-tabs{gap:16px}.mail-proof iframe{height:410px}.mail-tabs button{font-size:13px}}
 @media(forced-colors:active){.admin-workspace main .admin-email :is(input,select,textarea):focus{outline:2px solid Highlight;outline-offset:0}}

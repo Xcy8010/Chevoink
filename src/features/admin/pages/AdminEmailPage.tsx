@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useId, useState, type FormEvent } from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { requestJson } from '@/app/api-client'
-import { Mail, Layers, History, ChevronRight, ArrowLeft } from 'lucide-react'
+import { Mail, Layers, History, ChevronRight, ChevronDown, ArrowLeft } from 'lucide-react'
 import { type EmailLibraryEntry } from '../../../../shared/contracts/email-library'
 import { TemplateLibrary, MailProof } from './EmailTemplateEditor'
 import { returnMail, invitation, defaultReturn, resolvedDate } from './email-composer'
@@ -11,7 +11,7 @@ import './admin-email.css'
 import Button from '@/components/ui/Button'
 import {
   ADMIN_EMAIL_BATCH_LIMIT, type AdminEmailBatch, type AdminEmailBatchDetail, type AdminEmailCandidate,
-  type AdminEmailExclusion, type AdminEmailInfo, type AdminEmailMode, type AdminEmailRecipientState, type AdminEmailSelection,
+  type AdminEmailExclusion, type AdminEmailInfo, type AdminEmailMode, type AdminEmailPreviewCandidates, type AdminEmailRecipientState, type AdminEmailSelection,
 } from '../../../../shared/contracts/admin-email'
 import { AdminCard, AdminPageHeader } from '../AdminLayout'
 import { formatDateTime, useAdminSession } from '../admin-shared'
@@ -44,12 +44,69 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : '操作暂时不可用。'
 }
 
-function EmailBatchDetails({ batch }: { batch: AdminEmailBatchDetail }) {
+function PreviewCandidateList({ batchId, batchKey }: { batchId: string; batchKey: QueryKey }) {
+  const [page, setPage] = useState(1)
+  const query = useQuery({
+    queryKey: [...batchKey, 'candidates', page],
+    queryFn: () => requestJson<AdminEmailPreviewCandidates>(`${endpoint}/batches/${batchId}/candidates?page=${page}`),
+    placeholderData: keepPreviousData,
+    retry: false,
+  })
+  const data = query.data
+  const canGoBack = page > 1 && !query.isFetching
+  const canGoNext = !!data?.hasNextPage && !query.isFetching
   return <>
-    <p className="text-sm">
-      {batch.state === 'preview' ? `合格 ${batch.eligibleCount} / 候选 ${batch.candidateCount}，选中 ${batch.recipientCount} 人`
-        : `${batch.state === 'cancelled' ? '排队已停止' : '已确认'} · ${batch.recipientCount} 人`}
-    </p>
+    {query.isError && <div role="alert" className="flex flex-wrap items-center gap-3">
+      <span>候选名单读取失败。{errorMessage(query.error)}</span>
+      <button type="button" className="mail-secondary" onClick={() => void query.refetch()}>重试</button>
+    </div>}
+    {query.isPending && <p role="status">正在读取候选名单…</p>}
+    {data && <>
+      {data.reconstructed && <p className="mb-2 text-xs text-[var(--text-secondary)]">这份旧预览按原筛选条件和当前账号资料重建。候选人、昵称、人数和排除原因可能已变化，下方可查看原预览选中名单。</p>}
+      {data.items.length ? <ul aria-label="候选名单" aria-busy={query.isFetching} className="divide-y divide-[var(--border-subtle)]">
+        {data.items.map((candidate, index) => <li key={`${candidate.id}-${index}`} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2 text-sm">
+          <span className="min-w-0"><span className="break-all font-medium">{candidate.nickname}</span><span className="ml-2 inline-block break-all text-[var(--text-secondary)]">{candidate.maskedEmail ?? '无邮箱记录'}</span></span>
+          <span className={candidate.selected ? 'font-medium text-[var(--mail-accent)]' : 'text-[var(--text-secondary)]'}>
+            {candidate.exclusion ? `${candidate.selected && data.reconstructed ? '原已选中 · 当前' : '已排除 · '}${exclusions[candidate.exclusion]}`
+              : candidate.selected ? '已选中' : '合格，未选中'}
+          </span>
+        </li>)}
+      </ul> : <p className="py-2">没有候选用户。</p>}
+    </>}
+    {(page > 1 || data?.hasNextPage) && <nav aria-label="候选名单分页" className="mail-actions mail-candidate-pager">
+      <button type="button" className="mail-secondary" aria-disabled={!canGoBack} onClick={() => { if (canGoBack) setPage(page - 1) }}>上一页</button>
+      <span aria-live="polite" className="text-sm text-[var(--text-secondary)]">第 {data?.page ?? page} 页</span>
+      <button type="button" className="mail-secondary" aria-disabled={!canGoNext} onClick={() => { if (canGoNext) setPage(page + 1) }}>下一页</button>
+    </nav>}
+  </>
+}
+
+function EmailBatchDetails({ batch, batchKey }: { batch: AdminEmailBatchDetail; batchKey: QueryKey }) {
+  const [showCandidates, setShowCandidates] = useState(false)
+  const panelId = useId()
+  const recipientList = batch.recipients.length > 0 ? <ul className="divide-y divide-[var(--border-subtle)]" aria-label="收件名单">
+      {batch.recipients.map(recipient => <li key={recipient.userId} className="py-2 text-sm">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+          <span className="min-w-0 break-all">{recipient.nickname} · {recipient.maskedEmail}</span>
+          <span>{labels[recipient.state]}{recipient.reason ? ` · ${reasons[recipient.reason] ?? '见处理状态'}` : ''}</span>
+        </div>
+        {(recipient.providerMessageId || recipient.providerRequestId || recipient.attemptedAt) && <p className="mt-1 break-all text-xs text-[var(--text-secondary)]">
+          {[recipient.attemptedAt ? formatDateTime(recipient.attemptedAt) : null,
+            recipient.providerMessageId, recipient.providerRequestId].filter(Boolean).join(' · ')}
+        </p>}
+      </li>)}
+    </ul> : null
+  return <>
+    {batch.state === 'preview' ? <>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+        <button type="button" aria-expanded={showCandidates} aria-controls={panelId} onClick={() => setShowCandidates(!showCandidates)}
+          className="mail-candidate-toggle">候选 {batch.candidateCount} 人 <ChevronDown size={14} aria-hidden="true" className={showCandidates ? 'rotate-180' : undefined}/></button>
+        <span>合格 {batch.eligibleCount} 人</span><span>选中 {batch.recipientCount} 人</span>
+      </div>
+      <div id={panelId} hidden={!showCandidates} className="border-y border-[var(--border-subtle)] py-2 text-sm">
+        {showCandidates && <PreviewCandidateList batchId={batch.id} batchKey={batchKey}/>}
+      </div>
+    </> : <p className="text-sm">{batch.state === 'cancelled' ? '排队已停止' : '已确认'} · {batch.recipientCount} 人</p>}
     {batch.state === 'preview' && <>
       <dl className="space-y-1 text-sm">
         <div><dt className="inline font-medium">发件人 </dt><dd className="inline break-all">{batch.template.from}</dd></div>
@@ -73,18 +130,9 @@ function EmailBatchDetails({ batch }: { batch: AdminEmailBatchDetail }) {
     {batch.state !== 'preview' && <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm" aria-label="各状态人数">
       {Object.entries(batch.progress).map(([state, count]) => <li key={state}>{labels[state as AdminEmailRecipientState]} {count}</li>)}
     </ul>}
-    {batch.recipients.length > 0 && <ul className="divide-y divide-[var(--border-subtle)]" aria-label="收件名单">
-      {batch.recipients.map(recipient => <li key={recipient.userId} className="py-2 text-sm">
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-          <span className="min-w-0 break-all">{recipient.nickname} · {recipient.maskedEmail}</span>
-          <span>{labels[recipient.state]}{recipient.reason ? ` · ${reasons[recipient.reason] ?? '见处理状态'}` : ''}</span>
-        </div>
-        {(recipient.providerMessageId || recipient.providerRequestId || recipient.attemptedAt) && <p className="mt-1 break-all text-xs text-[var(--text-secondary)]">
-          {[recipient.attemptedAt ? formatDateTime(recipient.attemptedAt) : null,
-            recipient.providerMessageId, recipient.providerRequestId].filter(Boolean).join(' · ')}
-        </p>}
-      </li>)}
-    </ul>}
+    {batch.state === 'preview' && showCandidates && recipientList
+      ? <details><summary>原预览选中名单（{batch.recipientCount} 人）</summary>{recipientList}</details>
+      : recipientList}
   </>
 }
 
@@ -355,7 +403,7 @@ export default function AdminEmailPage() {
         {batch.isPending && <p role="status">正在读取批次…</p>}
         {batch.isError && <p role="alert">{errorMessage(batch.error)}</p>}
         {snapshot && <>
-          <EmailBatchDetails batch={snapshot} />
+          <EmailBatchDetails key={snapshot.id} batch={snapshot} batchKey={batchKey(snapshot.id)} />
           {snapshot.replacedById && <div className="flex flex-wrap items-center gap-2">
             <p role="status">此预览已被替换。</p>
             <Button type="button" disabled={busy} onClick={() => {

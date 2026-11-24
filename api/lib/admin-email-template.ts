@@ -28,7 +28,7 @@ export function returnEmailTemplate(campaign: AdminEmailCampaign): AdminEmailTem
     id: ADMIN_RETURN_TEMPLATE_ID, providerTemplateId: Number(ADMIN_RETURN_TEMPLATE_ID),
     from: 'notices@chevolink.com', replyTo: '2449129862@qq.com',
     subject: '【启创墨域】你有一份创作额度福利！',
-    body: '在 {{expires_at}} 前，通过本邮件登录并领取 {{max_credits}} Credits。奖励额度将直接存入你的账号，每个账号限领一次。',
+    body: '在 {{expires_at}} 前，通过本邮件登录并领取 {{max_credits}} Credits。奖励额度将直接存入你的账号，每封邮件的奖励限领一次。',
     campaign,
   }
 }

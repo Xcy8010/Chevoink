@@ -132,34 +132,42 @@ describe.skipIf(!available)('claiming a directed return offer in isolated Postgr
   })
 
   it('credits the full offer in the user wallet with an ordinary unread reward notice, even without a previous wallet, creation or charge', async () => {
-    const { token } = await invite(125)
-    expect(await accounting()).toMatchObject({ wallet: null, entries: [], notices: [] })
+    const { batchId, token } = await invite(125)
+    const before = await accounting()
+    expect(before).toMatchObject({ wallet: null, entries: [] })
+    expect(before.notices).toMatchObject([{ title: '创作回归活动', body: expect.stringContaining('125 Credits'), readAt: null }])
     const response = await claim(userId, token).expect(200)
     expect(response.body.data).toMatchObject({ amountMilli: 125000, bonusBalanceMilli: 125000, alreadyClaimed: false, workspacePath: 'studio' })
     const { wallet, entries, notices } = await accounting()
     expect(wallet).toMatchObject({ dailyUsedMilli: 0, bonusBalanceMilli: 125000 })
     expect(entries).toHaveLength(1)
-    expect(entries[0]).toMatchObject({ sourceType: 'creator_return', kind: 'reward', idempotencyKey: 'creator-return:' + userId,
+    expect(entries[0]).toMatchObject({ sourceType: 'creator_return', kind: 'reward', idempotencyKey: `creator-return:${batchId}:${userId}`,
       dailyDeltaMilli: 0, bonusDeltaMilli: 125000, deltaMilli: 125000 })
-    expect(notices).toHaveLength(1)
-    expect(notices[0]).toMatchObject({ title: '你收到了奖励额度', body: expect.stringContaining('125'), readAt: null })
+    expect(notices).toHaveLength(2)
+    const rewardNotice = notices.find(row => row.title === '你收到了奖励额度')
+    expect(rewardNotice).toMatchObject({ body: expect.stringContaining('125'), readAt: null })
     const inbox = await request(app).get('/api/site-content/announcements').set('Cookie', cookie(userId)).expect(200)
-    expect(inbox.body.data.personalItems).toContainEqual(expect.objectContaining({ id: notices[0].id, unread: true }))
+    expect(inbox.body.data.personalItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: before.notices[0].id, unread: true }),
+      expect.objectContaining({ id: rewardNotice?.id, unread: true }),
+    ]))
     expect(await prisma.agentRun.count({ where: { userId } })).toBe(0)
   })
 
-  it('accepts one claim across concurrent requests, repeat opens and multiple offers for the same user', async () => {
+  it('accepts one claim per email across concurrent requests for multiple offers to the same user', async () => {
     const first = await invite(80)
-    const second = await invite(80)
+    const second = await invite(125)
     expect(first.token).not.toBe(second.token)
     const attempts = await Promise.all([first.token, second.token, first.token, second.token].map(token => claim(userId, token)))
     expect(attempts.map(result => result.status)).toEqual([200, 200, 200, 200])
-    expect(attempts.map(result => result.body.data.alreadyClaimed).sort()).toEqual([false, true, true, true])
-    expect((await claim(userId, second.token).expect(200)).body.data).toMatchObject({ alreadyClaimed: true, amountMilli: 80000 })
+    expect(attempts.map(result => result.body.data.alreadyClaimed).sort()).toEqual([false, false, true, true])
+    expect(attempts.map(result => result.body.data.amountMilli)).toEqual([80000, 125000, 80000, 125000])
+    expect((await claim(userId, first.token).expect(200)).body.data).toMatchObject({ alreadyClaimed: true, amountMilli: 80000 })
+    expect((await claim(userId, second.token).expect(200)).body.data).toMatchObject({ alreadyClaimed: true, amountMilli: 125000 })
     const { wallet, entries, notices } = await accounting()
-    expect(wallet?.bonusBalanceMilli).toBe(80000)
-    expect(entries).toHaveLength(1)
-    expect(notices).toHaveLength(1)
+    expect(wallet?.bonusBalanceMilli).toBe(205000)
+    expect(entries.map(row => row.referenceId).sort()).toEqual([first.batchId, second.batchId].sort())
+    expect(notices.map(row => row.title).sort()).toEqual(['你收到了奖励额度', '你收到了奖励额度', '创作回归活动', '创作回归活动'])
   })
 
   it('requires the addressed session and the actual delivered receipt, and rejects an unrelated token', async () => {
@@ -167,19 +175,47 @@ describe.skipIf(!available)('claiming a directed return offer in isolated Postgr
     await request(app).post(claimRoute).send({ token }).expect(401)
     expect((await claim(userId, token).expect(409)).body.error.code).toBe('RETURN_REWARD_RECEIPT_PENDING')
     expect(await accounting()).toMatchObject({ entries: [], notices: [] })
-    await processAdminEmailQueue(mockAdminEmailDelivery, () => new Date(Date.now() + 10000))
+    const receiptAt = new Date(Date.now() + 10_000)
+    await Promise.all([1, 2].map(() => processAdminEmailQueue(mockAdminEmailDelivery, () => receiptAt)))
+    await processAdminEmailQueue(mockAdminEmailDelivery, () => new Date(receiptAt.getTime() + 30_000))
     expect((await claim(adminId, token).expect(404)).body.error.code).toBe('RETURN_REWARD_UNAVAILABLE')
     expect((await claim(userId, 'a'.repeat(43)).expect(404)).body.error.code).toBe('RETURN_REWARD_UNAVAILABLE')
     env.adminEmailMockEnabled = false
     expect((await claim(userId, token).expect(404)).body.error.code).toBe('RETURN_REWARD_UNAVAILABLE')
     env.adminEmailMockEnabled = true
-    expect(await accounting()).toMatchObject({ entries: [], notices: [] })
+    expect(await accounting()).toMatchObject({ entries: [], notices: [{ title: '创作回归活动' }] })
     await claim(userId, token).expect(200)
   })
 
-  it('rejects a first claim after its relative deadline and leaves no award or notice', async () => {
-    const { token } = await invite(30, { sentAt: new Date(Date.now() - 4 * day) })
+  it('does not issue an invitation when the offer expires while its first delivery receipt is being checked', async () => {
+    const sentAt = new Date(Date.now() - 4 * day)
+    const expiresAt = sentAt.getTime() + 2 * day
+    const { token } = await invite(30, { sentAt, deliver: false })
+    let clock = new Date(expiresAt - 1)
+    const delivery = {
+      ...mockAdminEmailDelivery,
+      provider: {
+        ...mockAdminEmailProvider,
+        status: async () => {
+          clock = new Date(expiresAt)
+          return { state: 'delivered' as const }
+        },
+      },
+    }
+    await processAdminEmailQueue(delivery, () => clock)
     expect((await claim(userId, token).expect(410)).body.error.code).toBe('RETURN_REWARD_EXPIRED')
+    expect(await accounting()).toMatchObject({ entries: [], notices: [] })
+  })
+
+  it('records an opt-out reported with first delivery without posting an invitation', async () => {
+    await invite(30, { deliver: false })
+    const delivery = {
+      ...mockAdminEmailDelivery,
+      provider: { ...mockAdminEmailProvider, status: async () => ({ state: 'delivered' as const, suppression: 'unsubscribed' as const }) },
+    }
+    await processAdminEmailQueue(delivery, () => new Date(Date.now() + 5_000))
+    expect(await prisma.adminEmailPermission.findUnique({ where: { purpose_email: { purpose: ADMIN_RETURN_EMAIL_PURPOSE, email } } }))
+      .toMatchObject({ suppression: 'unsubscribed' })
     expect(await accounting()).toMatchObject({ entries: [], notices: [] })
   })
 
@@ -189,27 +225,30 @@ describe.skipIf(!available)('claiming a directed return offer in isolated Postgr
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(deadline)
     expect((await claim(userId, token).expect(410)).body.error.code).toBe('RETURN_REWARD_EXPIRED')
-    expect(await accounting()).toMatchObject({ entries: [], notices: [] })
+    expect(await accounting()).toMatchObject({ entries: [], notices: [{ title: '创作回归活动' }] })
     vi.setSystemTime(new Date(deadline.getTime() - 5000))
     expect((await claim(userId, token).expect(200)).body.data.alreadyClaimed).toBe(false)
     vi.setSystemTime(new Date(deadline.getTime() + 5000))
     expect((await claim(userId, token).expect(200)).body.data).toMatchObject({ alreadyClaimed: true, amountMilli: 55000 })
     const { entries, notices } = await accounting()
     expect(entries).toHaveLength(1)
-    expect(notices).toHaveLength(1)
+    expect(notices.map(row => row.title).sort()).toEqual(['你收到了奖励额度', '创作回归活动'])
   })
 
-  it('honors the original ledger key and original amount when the recipient already received a legacy rebate', async () => {
+  it('honors a legacy grant for its original email and allows a new email to grant its own reward', async () => {
+    const original = await invite(70)
     const window = getCreditWindow()
     await prisma.creditAccount.create({ data: { userId, dailyAllowanceMilli: 450000, dailyUsedMilli: 1200, bonusBalanceMilli: 1200,
       periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-    await prisma.creditLedgerEntry.create({ data: { userId, kind: 'reward', sourceType: 'creator_return', referenceId: 'historical-run',
+    await prisma.creditLedgerEntry.create({ data: { userId, kind: 'reward', sourceType: 'creator_return', referenceId: original.batchId,
       deltaMilli: 1200, bonusDeltaMilli: 1200, dailyDeltaMilli: 0, idempotencyKey: 'creator-return:' + userId } })
-    const { token } = await invite(70)
-    expect((await claim(userId, token).expect(200)).body.data).toMatchObject({ alreadyClaimed: true, amountMilli: 1200, bonusBalanceMilli: 1200 })
+    expect((await claim(userId, original.token).expect(200)).body.data).toMatchObject({ alreadyClaimed: true, amountMilli: 1200, bonusBalanceMilli: 1200 })
+    const next = await invite(90)
+    expect((await claim(userId, next.token).expect(200)).body.data).toMatchObject({ alreadyClaimed: false, amountMilli: 90000, bonusBalanceMilli: 91200 })
+    expect((await claim(userId, original.token).expect(200)).body.data).toMatchObject({ alreadyClaimed: true, amountMilli: 1200, bonusBalanceMilli: 91200 })
     const { entries, notices } = await accounting()
-    expect(entries).toHaveLength(1)
-    expect(notices).toHaveLength(0)
+    expect(entries.map(row => row.deltaMilli).sort((a, b) => a - b)).toEqual([1200, 90000])
+    expect(notices.map(row => row.title).sort()).toEqual(['你收到了奖励额度', '创作回归活动', '创作回归活动'])
   })
 
   it('never issues an account claim URL to a typed address without a bound recipient', async () => {

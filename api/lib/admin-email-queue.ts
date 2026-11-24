@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client'
 import { ADMIN_EMAIL_PURPOSE, ADMIN_RETURN_EMAIL_PURPOSE, adminEmailPurposeSchema } from '../../shared/contracts/admin-email.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { customMockRecipientKey, customMockAddressExclusion, emailCandidateSelect, excludeCandidate, normalizedEmail, permissionsFor } from './admin-email-audience.js'
-import { adminEmailTemplateHash, emailTemplateVariables, type AdminEmailTemplateSnapshot } from './admin-email-template.js'
+import { adminEmailTemplateHash, campaignDeadline, emailTemplateVariables, type AdminEmailTemplateSnapshot } from './admin-email-template.js'
 import { createRewardLink } from './admin-return-reward-link.js'
 import type { AdminEmailDelivery, AdminEmailProvider, AdminEmailStatusResult, AdminEmailSuppression } from './admin-email-provider.js'
 
@@ -93,7 +93,7 @@ async function sendQueuedEmail(delivery: AdminEmailDelivery, item: QueuedEmail, 
   })
 }
 
-async function reconcileDueEmail(provider: AdminEmailProvider, item: QueuedEmail, now: Date) {
+async function reconcileDueEmail(provider: AdminEmailProvider, item: QueuedEmail, now: Date, clock: () => Date) {
   const { attemptId, attemptedAt, providerMessageId, nextCheckAt } = item
   if (!attemptId || !attemptedAt || !providerMessageId || !nextCheckAt) return
   const where = { batchId: item.batchId, userId: item.userId, attemptId, state: item.state, nextCheckAt }
@@ -105,9 +105,9 @@ async function reconcileDueEmail(provider: AdminEmailProvider, item: QueuedEmail
     return
   }
 
+  const template = item.batch.template as AdminEmailTemplateSnapshot
   let result: AdminEmailStatusResult
   try {
-    const template = item.batch.template as AdminEmailTemplateSnapshot
     result = await provider.status({ messageId: providerMessageId, to: item.email, from: template.from, attemptedAt, now })
   } catch {
     await prisma.adminEmailRecipient.updateMany({ where, data: { nextCheckAt: new Date(now.getTime() + subsequentStatusDelayMs) } })
@@ -116,6 +116,11 @@ async function reconcileDueEmail(provider: AdminEmailProvider, item: QueuedEmail
 
   await prisma.$transaction(async tx => {
     const { state, reason, suppression } = result
+    const campaign = item.batch.purpose === ADMIN_RETURN_EMAIL_PURPOSE && item.state !== 'delivered' && state === 'delivered' && !suppression
+      ? template.campaign : undefined
+    // Match the suppression path's user-before-receipt lock order. A deleted user can still have a receipt.
+    const [recipient] = campaign
+      ? await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${item.userId} FOR KEY SHARE` : []
     if (suppression) {
       await tx.$queryRaw`SELECT id FROM users WHERE id = ${item.userId} FOR UPDATE`
       await lockRecipientAddress(tx, item)
@@ -132,7 +137,19 @@ async function reconcileDueEmail(provider: AdminEmailProvider, item: QueuedEmail
         nextCheckAt: delay ? new Date(now.getTime() + delay) : null,
       },
     })
-    if (updated.count && suppression) await suppressRecipient(tx, item, suppression)
+    if (!updated.count) return
+    if (suppression) {
+      await suppressRecipient(tx, item, suppression)
+      return
+    }
+    if (!campaign || !recipient || campaignDeadline(campaign, attemptedAt) <= clock()) return
+    await tx.userNotification.create({
+      data: {
+        userId: recipient.id,
+        title: '创作回归活动',
+        body: `活动邮件已送达。请在邮件注明的期限内，点击邮件中的「前往创作」并确认领取 ${campaign.maxCredits} Credits。这封邮件的奖励限领一次。`,
+      },
+    })
   })
 }
 
@@ -149,13 +166,13 @@ export async function processAdminEmailQueue(delivery: AdminEmailDelivery, clock
     where: { ...batchScope, state: { in: ['accepted', 'deferred'] }, nextCheckAt: { lte: now } },
     orderBy: { nextCheckAt: 'asc' }, take: 20, include: queuedEmailInclude,
   })
-  for (const item of pendingReceipts) await reconcileDueEmail(delivery.provider, item, now)
+  for (const item of pendingReceipts) await reconcileDueEmail(delivery.provider, item, now, clock)
 
   const feedback = await prisma.adminEmailRecipient.findMany({
     where: { ...batchScope, state: 'delivered', nextCheckAt: { lte: now } },
     orderBy: { nextCheckAt: 'asc' }, take: 20, include: queuedEmailInclude,
   })
-  for (const item of feedback) await reconcileDueEmail(delivery.provider, item, now)
+  for (const item of feedback) await reconcileDueEmail(delivery.provider, item, now, clock)
 
   const queued = await prisma.adminEmailRecipient.findMany({
     where: { ...batchScope, state: 'queued', OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: now } }] },

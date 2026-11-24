@@ -25,7 +25,14 @@ export async function claimAdminReturnReward(userId: string, token: unknown) {
     if (!recipient?.attemptedAt || recipient.userId.startsWith('mock-address:') || template?.id !== ADMIN_RETURN_TEMPLATE_ID || !campaign.success) throw unavailable()
     const { workspacePath, maxCredits } = campaign.data
     const now = new Date()
-    const paid = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: `creator-return:${userId}` }, select: { deltaMilli: true } })
+    const batchId = recipient.batch.id
+    const rewardKey = `creator-return:${batchId}:${userId}`
+    // A legacy grant blocks replay only for the batch that issued it.
+    const paid = await tx.creditLedgerEntry.findFirst({
+      where: { userId, sourceType: 'creator_return', referenceId: batchId,
+        idempotencyKey: { in: [rewardKey, `creator-return:${userId}`] } },
+      select: { deltaMilli: true },
+    })
     if (paid) {
       const wallet = await tx.creditAccount.findUniqueOrThrow({ where: { userId }, select: { bonusBalanceMilli: true } })
       return { ...wallet, workspacePath, amountMilli: paid.deltaMilli, alreadyClaimed: true }
@@ -44,9 +51,9 @@ export async function claimAdminReturnReward(userId: string, token: unknown) {
       data: { bonusBalanceMilli: { increment: amountMilli } } })
     if (!changed.count) throw new DataAccessError(409, 'CREDIT_BALANCE_OUT_OF_RANGE', '领取后的奖励余额超出允许范围。')
     const { bonusBalanceMilli } = await tx.creditAccount.findUniqueOrThrow({ where: { userId }, select: { bonusBalanceMilli: true } })
-    await tx.creditLedgerEntry.create({ data: { userId, kind: 'reward', sourceType: 'creator_return', referenceId: recipient.batch.id,
-      idempotencyKey: `creator-return:${userId}`, deltaMilli: amountMilli, dailyDeltaMilli: 0, bonusDeltaMilli: amountMilli,
-      metadata: { batchId: recipient.batch.id, claim: 'email_link' } } })
+    await tx.creditLedgerEntry.create({ data: { userId, kind: 'reward', sourceType: 'creator_return', referenceId: batchId,
+      idempotencyKey: rewardKey, deltaMilli: amountMilli, dailyDeltaMilli: 0, bonusDeltaMilli: amountMilli,
+      metadata: { batchId, claim: 'email_link' } } })
     await notifyBonusCreditChange(tx, userId, amountMilli, bonusBalanceMilli, 'creator_return')
     return { amountMilli, bonusBalanceMilli, workspacePath, alreadyClaimed: false }
   })

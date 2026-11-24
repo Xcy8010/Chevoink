@@ -143,7 +143,8 @@ describe('directed Tencent SES adapter with mock HTTP transport', () => {
     const cases = [approved(html, 1), approved(html.replaceAll('{{expires_at}}', '{{expiry}}')),
       approved(html.replace('https://chevoink.chevolink.com/{{workspace_path}}', 'https://other.invalid/{{workspace_path}}')),
       approved(html.replace('</body>', '<p>{{workspace_path}}</p></body>')),
-      approved(html.replace('每个账号限领一次', '首次实际扣费后返还这笔消耗'))]
+      approved(html.replace('每封邮件的奖励限领一次', '首次实际扣费后返还这笔消耗')),
+      approved(html.replace('每封邮件的奖励限领一次', '每封邮件的奖励限领两次'))]
     for (const response of cases) {
       transport.mockResolvedValueOnce(response)
       await expect(delivery.loadTemplate(campaign)).rejects.toMatchObject({ status: 409, code: 'ADMIN_EMAIL_TEMPLATE_UNAVAILABLE' })

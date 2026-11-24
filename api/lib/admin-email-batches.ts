@@ -3,7 +3,8 @@ import { Prisma } from '@prisma/client'
 import {
   ADMIN_EMAIL_BATCH_LIMIT, ADMIN_EMAIL_PURPOSE, ADMIN_RETURN_EMAIL_PURPOSE, ADMIN_CUSTOM_EMAIL_PURPOSE, adminEmailPurposeSchema,
   type AdminEmailCampaign, type AdminCustomEmailTemplate,
-  type AdminEmailBatch, type AdminEmailBatchDetail, type AdminEmailExclusion, type AdminEmailMode, type AdminEmailSelection,
+  type AdminEmailBatch, type AdminEmailBatchDetail, type AdminEmailCandidate, type AdminEmailExclusion,
+  type AdminEmailMode, type AdminEmailPreviewCandidates, type AdminEmailSelection,
 } from '../../shared/contracts/admin-email.js'
 import { DataAccessError, prisma } from './prisma.js'
 import {
@@ -14,8 +15,11 @@ import { adminEmailTemplateHash, emailTemplateVariables, substituteEmailVariable
 import { mockAdminEmailDelivery, type AdminEmailDelivery } from './admin-email-provider.js'
 
 const previewLifetimeMs = 15 * 60_000
-const detailInclude = { recipients: { orderBy: { userId: 'asc' } } } satisfies Prisma.AdminEmailBatchInclude
-type BatchDetailRecord = Prisma.AdminEmailBatchGetPayload<{ include: typeof detailInclude }>
+const batchDetail = {
+  include: { recipients: { orderBy: { userId: 'asc' } } },
+  omit: { sampling: true },
+} satisfies Prisma.AdminEmailBatchDefaultArgs
+type BatchDetailRecord = Prisma.AdminEmailBatchGetPayload<typeof batchDetail>
 
 function summarize(batch: Omit<BatchDetailRecord, 'recipients'>, recipients: Array<{ state: AdminEmailBatchDetail['recipients'][number]['state'] }>): AdminEmailBatch {
   const progress: AdminEmailBatch['progress'] = {}
@@ -54,7 +58,7 @@ function presentBatch(batch: BatchDetailRecord): AdminEmailBatchDetail {
 
 async function batchFor(db: Prisma.TransactionClient, adminId: string, batchId: string, mode: AdminEmailMode) {
   const batch = await db.adminEmailBatch.findFirst({
-    where: { id: batchId, adminId, purpose: { in: adminEmailPurposeSchema.options }, mode }, include: detailInclude,
+    where: { id: batchId, adminId, purpose: { in: adminEmailPurposeSchema.options }, mode }, ...batchDetail,
   })
   if (!batch) throw new DataAccessError(404, 'EMAIL_BATCH_NOT_FOUND', '找不到此邮件批次。')
   return batch
@@ -96,13 +100,96 @@ export async function listEmailCandidates(search: string, page: number, delivery
 export async function listEmailBatches(adminId: string, mode: AdminEmailMode = 'mock') {
   const items = await prisma.adminEmailBatch.findMany({
     where: { adminId, mode, purpose: { in: adminEmailPurposeSchema.options }, state: { not: 'preview' } },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 30, include: { recipients: { select: { state: true } } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 30,
+    include: { recipients: { select: { state: true } } }, omit: { sampling: true },
   })
   return { items: items.map(batch => summarize(batch, batch.recipients)) }
 }
 
 export async function getEmailBatch(adminId: string, batchId: string, mode: AdminEmailMode = 'mock') {
   return presentBatch(await batchFor(prisma, adminId, batchId, mode))
+}
+
+type AudienceDelivery = Pick<AdminEmailDelivery, 'mode' | 'allowedRecipients'>
+
+async function previewAudience(tx: Prisma.TransactionClient, selection: AdminEmailSelection, now: Date, purpose: string, delivery: AudienceDelivery) {
+  const users = await matchingEmailCandidates(tx, selection, now)
+  if (users.length > EMAIL_CANDIDATE_LIMIT) {
+    throw new DataAccessError(409, 'EMAIL_CANDIDATE_LIMIT', '候选范围超过 10000 个账号，请缩小筛选条件。')
+  }
+  const permissions = await permissionsFor(tx, users, purpose)
+  const userById = new Map(users.map(user => [user.id, user]))
+  const candidateIds = selection.mode === 'manual' ? [...new Set(selection.userIds)] : users.map(user => user.id)
+  const candidates: AdminEmailCandidate[] = []
+  const exclusions: Partial<Record<AdminEmailExclusion, number>> = {}
+  const record = (id: string, nickname: string, email: string | null, exclusion: AdminEmailExclusion | null) => {
+    candidates.push({ id, nickname, maskedEmail: maskedEmail(email), exclusion })
+    if (exclusion) exclusions[exclusion] = (exclusions[exclusion] ?? 0) + 1
+  }
+  const seenEmail = new Set<string>()
+  const eligible = candidateIds.flatMap(id => {
+    const user = userById.get(id)
+    let exclusion = excludeCandidate(user, permissions, purpose)
+    const email = normalizedEmail(user?.email ?? null)
+    if (!exclusion && email) {
+      if (delivery.allowedRecipients && !delivery.allowedRecipients.has(email)) exclusion = 'outside_send_scope'
+      else if (seenEmail.has(email)) exclusion = 'duplicate_email'
+    }
+    record(id, user?.nickname ?? '账号不存在', email, exclusion)
+    if (!user || !email || exclusion) return []
+    seenEmail.add(email)
+    return [{ id, email, nickname: user.nickname, lastActiveAt: user.lastActiveAt }]
+  })
+
+  if (selection.mode === 'emails') {
+    const userByEmail = new Map(users.map(user => [normalizedEmail(user.email), user]))
+    const supplied = selection.emails.map(email => email.trim().toLowerCase())
+    const missing = [...new Set(supplied)].filter(email => !userByEmail.has(email))
+    const suppressed = missing.length && delivery.mode === 'mock' ? await tx.adminEmailPermission.findMany({
+      where: { purpose, email: { in: missing }, suppression: { not: null } },
+      select: { email: true, suppression: true },
+    }) : []
+    const suppression = new Map(suppressed.map(item => [item.email, item.suppression]))
+    const seenInput = new Set<string>()
+    for (const email of supplied) {
+      const user = userByEmail.get(email)
+      const id = user?.id ?? customMockRecipientKey(email)
+      if (seenInput.has(email)) {
+        record(id, user?.nickname ?? '自定义邮箱', email, 'duplicate_email')
+      } else if (!user) {
+        const reason = delivery.mode === 'mock' ? suppression.get(email) ?? null : 'missing_user'
+        const nickname = delivery.mode === 'mock' ? '自定义邮箱（模拟）' : '自定义邮箱'
+        record(id, nickname, email, reason)
+        if (!reason) eligible.push({ id, email, nickname, lastActiveAt: null })
+      }
+      seenInput.add(email)
+    }
+  }
+  return { candidates, eligible, exclusions }
+}
+
+export async function listEmailPreviewCandidates(
+  adminId: string, batchId: string, page: number, delivery: AudienceDelivery,
+): Promise<AdminEmailPreviewCandidates> {
+  return prisma.$transaction(async tx => {
+    const batch = await tx.adminEmailBatch.findFirst({
+      where: { id: batchId, adminId, state: 'preview', purpose: { in: adminEmailPurposeSchema.options }, mode: delivery.mode },
+      select: { purpose: true, createdAt: true, selection: true, sampling: true, recipients: { select: { userId: true } } },
+    })
+    if (!batch) throw new DataAccessError(404, 'EMAIL_BATCH_NOT_FOUND', '找不到此邮件预览。')
+    // Candidate rows extend the existing sampling audit metadata without changing older batch payloads.
+    const snapshot = (batch.sampling as { candidates?: AdminEmailCandidate[] } | null)?.candidates
+    const candidates = snapshot ?? (await previewAudience(tx, batch.selection as AdminEmailSelection, batch.createdAt, batch.purpose, delivery)).candidates
+    const selected = new Set(batch.recipients.map(recipient => recipient.userId))
+    const pageSize = 25
+    const offset = (page - 1) * pageSize
+    return {
+      page, reconstructed: !snapshot, hasNextPage: offset + pageSize < candidates.length,
+      items: candidates.slice(offset, offset + pageSize).map(candidate => ({
+        ...candidate, selected: candidate.exclusion !== 'duplicate_email' && selected.has(candidate.id),
+      })),
+    }
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead })
 }
 
 export async function createEmailPreview(
@@ -125,58 +212,7 @@ export async function createEmailPreview(
       })
       if (!replaced.count) throw previewChanged()
     }
-    const users = await matchingEmailCandidates(tx, selection, now)
-    if (users.length > EMAIL_CANDIDATE_LIMIT) {
-      throw new DataAccessError(409, 'EMAIL_CANDIDATE_LIMIT', '候选范围超过 10000 个账号，请缩小筛选条件。')
-    }
-
-    const permissions = await permissionsFor(tx, users, purpose)
-    const userById = new Map(users.map(user => [user.id, user]))
-    const candidateIds = selection.mode === 'manual' ? [...new Set(selection.userIds)] : users.map(user => user.id)
-    const exclusions: Partial<Record<AdminEmailExclusion, number>> = {}
-    const exclude = (reason: AdminEmailExclusion) => { exclusions[reason] = (exclusions[reason] ?? 0) + 1 }
-    const seenEmail = new Set<string>()
-    const eligible = candidateIds.flatMap(id => {
-      const user = userById.get(id)
-      const exclusion = excludeCandidate(user, permissions, purpose)
-      if (exclusion) exclude(exclusion)
-      if (!user || exclusion) return []
-      const email = normalizedEmail(user.email)
-      if (!email) return []
-      if (delivery.allowedRecipients && !delivery.allowedRecipients.has(email)) {
-        exclude('outside_send_scope')
-        return []
-      }
-      if (seenEmail.has(email)) {
-        exclude('duplicate_email')
-        return []
-      }
-      seenEmail.add(email)
-      return [{ id, email, nickname: user.nickname, lastActiveAt: user.lastActiveAt }]
-    })
-
-    let candidateCount = candidateIds.length
-    if (selection.mode === 'emails') {
-      const bound = new Set(users.map(user => normalizedEmail(user.email)))
-      const distinct = [...new Set(selection.emails.map(email => email.trim().toLowerCase()))]
-      const missing = distinct.filter(email => !bound.has(email))
-      candidateCount += missing.length
-      if (selection.emails.length > distinct.length) {
-        exclusions.duplicate_email = (exclusions.duplicate_email ?? 0) + selection.emails.length - distinct.length
-        candidateCount += selection.emails.length - distinct.length
-      }
-      const suppressed = missing.length && delivery.mode === 'mock' ? await tx.adminEmailPermission.findMany({
-        where: { purpose, email: { in: missing }, suppression: { not: null } },
-        select: { email: true, suppression: true },
-      }) : []
-      const byEmail = new Map(suppressed.map(item => [item.email, item.suppression]))
-      for (const email of missing) {
-        const reason = byEmail.get(email)
-        if (delivery.mode !== 'mock') exclude('missing_user')
-        else if (reason) exclude(reason)
-        else eligible.push({ id: customMockRecipientKey(email), email, nickname: '自定义邮箱（模拟）', lastActiveAt: null })
-      }
-    }
+    const { candidates, eligible, exclusions } = await previewAudience(tx, selection, now, purpose, delivery)
 
     let blocker: AdminEmailBatchDetail['blocker'] = null
     if (!eligible.length) blocker = 'empty'
@@ -198,11 +234,11 @@ export async function createEmailPreview(
     const snapshot = await tx.adminEmailBatch.create({
       data: {
         id, adminId, mode: delivery.mode, purpose, template: { ...template }, templateHash,
-        selection, sampling: sample ? { version: 'exponential-race-v1', seed, weightCounts: sample.weightCounts } : undefined,
-        candidateCount, eligibleCount: eligible.length, recipientCount: recipients.length,
+        selection, sampling: { ...(sample && { version: 'exponential-race-v1', seed, weightCounts: sample.weightCounts }), candidates },
+        candidateCount: candidates.length, eligibleCount: eligible.length, recipientCount: recipients.length,
         exclusions, blocker, previewHash, createdAt: now, expiresAt, recipients: { create: recipients },
       },
-      include: detailInclude,
+      ...batchDetail,
     })
     return presentBatch(snapshot)
   }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }).catch(error => {
@@ -257,6 +293,9 @@ export async function confirmEmailBatch(
     }
 
     await tx.adminEmailRecipient.updateMany({ where: { batchId, state: 'preview' }, data: { state: 'queued' } })
+    // The detailed candidate list serves previews only. Keep the sample audit metadata and actual recipients.
+    await tx.$executeRaw`UPDATE admin_email_batches SET sampling = sampling - 'candidates'
+      WHERE id = ${batchId}::uuid AND sampling ? 'candidates'`
     await tx.adminAuditLog.create({ data: {
       adminId, action: 'email_batch.confirm', targetType: 'email_batch', targetId: batchId, ip,
       detail: { template: (batch.template as AdminEmailTemplateSnapshot).id, templateHash: batch.templateHash, provider: batch.mode,
