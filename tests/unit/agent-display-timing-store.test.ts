@@ -10,7 +10,10 @@ const start = (seq: number, seconds: number): AgentStreamEvent => ({ type: 'run.
 const finish = (status: 'succeeded' | 'failed' | 'cancelled', seq = 4, seconds = 10): AgentStreamEvent => ({ type: 'run.finished', runId: 'r', seq, ts: ts(seconds), status, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, artifacts: [], outputSummary: '' })
 beforeEach(() => {
   useAgentStore.getState().resetRun()
-  useAgentStore.setState({ runId: 'r', activeSessionId: 's', loadedSessionId: 's', phase: 'starting', messages: [{ ...user }], lastSeq: 0, workspaceActivities: [] })
+  useAgentStore.setState({
+    runId: 'r', activeSessionId: 's', loadedSessionId: 's', phase: 'starting',
+    messages: [{ ...user }], lastSeq: 0, workspaceActivities: [], sessionTerminals: {}, viewedSessionId: null,
+  })
 })
 const current = () => useAgentStore.getState().messages[0].runTiming!
 it('preserves the full latest measurement through repeated compaction events and run changes', () => {
