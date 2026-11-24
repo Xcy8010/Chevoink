@@ -34,7 +34,6 @@ describe.skipIf(!available)('claiming a directed return offer in isolated Postgr
     email = userId + '@example.test'
     const verifiedAt = new Date(Date.now() - 30 * day)
     await prisma.user.create({ data: { id: userId, email, nickname: '受邀作者', emailVerifiedAt: verifiedAt, passwordHash: 'fixture' } })
-    await prisma.adminEmailPermission.create({ data: { purpose: ADMIN_RETURN_EMAIL_PURPOSE, email, userId, consentedAt: verifiedAt, source: 'local-fixture' } })
   })
   afterEach(async () => {
     vi.useRealTimers()
@@ -76,21 +75,46 @@ describe.skipIf(!available)('claiming a directed return offer in isolated Postgr
     }
   }
 
-  it('uses the account preference as explicit consent and preserves a provider complaint', async () => {
+  it('defaults to receiving return mail and keeps an explicit opt-out and provider complaint', async () => {
     const preference = '/api/users/me/return-email'
     const key = { purpose_email: { purpose: ADMIN_RETURN_EMAIL_PURPOSE, email } }
-    await prisma.adminEmailPermission.delete({ where: key })
     const userCookie = cookie(userId)
     await request(app).put(preference).send({ subscribed: true }).expect(401)
     const current = await request(app).get(preference).set('Cookie', userCookie).expect(200)
-    expect(current.body.data).toEqual({ available: true, subscribed: false })
-    for (const subscribed of [true, false, true]) {
+    expect(current.body.data).toEqual({ available: true, subscribed: true })
+    expect(await prisma.adminEmailPermission.findUnique({ where: key })).toBeNull()
+    for (const subscribed of [false, true]) {
       const result = await request(app).put(preference).set('Cookie', userCookie).send({ subscribed }).expect(200)
       expect(result.body.data).toEqual({ available: true, subscribed })
+      expect((await request(app).get(preference).set('Cookie', userCookie).expect(200)).body.data)
+        .toEqual({ available: true, subscribed })
     }
     await prisma.adminEmailPermission.update({ where: key, data: { suppression: 'complained' } })
+    expect((await request(app).get(preference).set('Cookie', userCookie).expect(200)).body.data)
+      .toEqual({ available: false, subscribed: false })
     await request(app).put(preference).set('Cookie', userCookie).send({ subscribed: true }).expect(409)
     expect(await prisma.adminEmailPermission.findUnique({ where: key })).toMatchObject({ suppression: 'complained', userId })
+  })
+
+  it('defaults to receiving at a newly verified address and preserves the original address opt-out', async () => {
+    const preference = '/api/users/me/return-email'
+    const userCookie = cookie(userId)
+    await request(app).put(preference).set('Cookie', userCookie).send({ subscribed: false }).expect(200)
+    await prisma.user.update({ where: { id: userId }, data: { email: 'new-' + email, emailVerifiedAt: null } })
+    expect((await request(app).get(preference).set('Cookie', userCookie).expect(200)).body.data)
+      .toEqual({ available: false, subscribed: false })
+    await prisma.user.update({ where: { id: userId }, data: { emailVerifiedAt: new Date() } })
+    expect((await request(app).get(preference).set('Cookie', userCookie).expect(200)).body.data)
+      .toEqual({ available: true, subscribed: true })
+    await prisma.user.update({ where: { id: userId }, data: { email, emailVerifiedAt: new Date() } })
+    const preview = await request(app).post('/api/admin/email/previews').set('Cookie', cookie(adminId)).send({
+      mode: 'mock', selection: { mode: 'manual', userIds: [userId] }, campaign: {
+        maxCredits: 200, workspacePath: 'studio', deadline: { mode: 'relative', days: 2 },
+      },
+    }).expect(200)
+    expect(preview.body.data).toMatchObject({ recipientCount: 0, exclusions: { unsubscribed: 1 } })
+    expect((await request(app).get(preference).set('Cookie', userCookie).expect(200)).body.data)
+      .toEqual({ available: true, subscribed: false })
   })
 
   it('opens a mail fragment via a same-origin script before the SPA launcher', async () => {

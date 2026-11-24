@@ -265,7 +265,7 @@ export default function AdminEmailPage() {
                 <option value="sample">加权抽样</option>
               </select>
             </label>
-            {mode === 'emails' ? <label className="mail-addresses">自定义收件邮箱<textarea rows={5} placeholder="每行一个邮箱，也可用逗号分隔" value={addresses} onChange={e=>{clearPreview();setAddresses(e.target.value)}}/><small>正式发送按已绑定邮箱匹配账号，并核对活动许可。模拟模式可以预演独立地址。</small></label> : mode === 'manual' ? <>
+            {mode === 'emails' ? <label className="mail-addresses">自定义收件邮箱<textarea rows={5} placeholder="每行一个邮箱，也可用逗号分隔" value={addresses} onChange={e=>{clearPreview();setAddresses(e.target.value)}}/><small>{campaign ? '正式回归邮件发给已验证邮箱，自动排除退订和拒收的账号。' : '正式发送按已绑定邮箱匹配账号，并核对活动许可。'}模拟模式可以预演独立地址。</small></label> : mode === 'manual' ? <>
               <div className="flex flex-wrap items-end gap-2">
                 <label className="min-w-44 flex-1 text-sm">搜索账号
                   <input type="search" maxLength={100} className={field} value={draftSearch} onChange={event => setDraftSearch(event.target.value)}

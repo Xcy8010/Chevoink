@@ -6,12 +6,13 @@ export async function getReturnEmailPreference(userId: string) {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { email: true, emailVerifiedAt: true } })
   const email = normalizedEmail(user.email)
   if (!email || !user.emailVerifiedAt) return { available: false, subscribed: false }
-  const permission = await prisma.adminEmailPermission.findUnique({ where: { purpose_email: { purpose: ADMIN_RETURN_EMAIL_PURPOSE, email } } })
-  const blocked = permission?.suppression === 'hard_bounce' || permission?.suppression === 'complained'
+  const permission = await prisma.adminEmailPermission.findUnique({
+    where: { purpose_email: { purpose: ADMIN_RETURN_EMAIL_PURPOSE, email } }, select: { suppression: true },
+  })
+  const suppression = permission?.suppression
   return {
-    available: !blocked,
-    subscribed: !!(permission && permission.userId === userId && permission.consentedAt
-      && permission.consentedAt >= user.emailVerifiedAt && permission.source && !permission.suppression),
+    available: suppression !== 'hard_bounce' && suppression !== 'complained',
+    subscribed: !suppression,
   }
 }
 

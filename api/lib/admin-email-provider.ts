@@ -32,7 +32,6 @@ export type AdminEmailDelivery = {
   provider: AdminEmailProvider
   loadTemplate: (campaign?: AdminEmailCampaign, customTemplate?: AdminCustomEmailTemplate) => Promise<AdminEmailTemplateSnapshot>
   allowedRecipients?: ReadonlySet<string>
-  returnPilot?: { recipient: string; expiresAt: number }
   tencentPurposes?: Array<typeof ADMIN_EMAIL_PURPOSE | typeof ADMIN_RETURN_EMAIL_PURPOSE>
 }
 

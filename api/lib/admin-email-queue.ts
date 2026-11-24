@@ -18,6 +18,11 @@ const queuedEmailInclude = {
 } satisfies Prisma.AdminEmailRecipientInclude
 type QueuedEmail = Prisma.AdminEmailRecipientGetPayload<{ include: typeof queuedEmailInclude }>
 
+async function lockRecipientAddress(tx: Prisma.TransactionClient, item: QueuedEmail) {
+  const key = `admin-email-suppression:${item.batch.purpose}:${item.email}`
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`
+}
+
 async function suppressRecipient(tx: Prisma.TransactionClient, item: QueuedEmail, suppression: AdminEmailSuppression) {
   await tx.$executeRaw`
     INSERT INTO admin_email_permissions AS existing (purpose, email, suppression, updated_at)
@@ -38,6 +43,7 @@ async function sendQueuedEmail(delivery: AdminEmailDelivery, item: QueuedEmail, 
   const attemptedAt = await prisma.$transaction(async tx => {
     // Serialize the eligibility decision and claim with account edits and suppression writes.
     await tx.$queryRaw`SELECT id FROM users WHERE id = ${item.userId} FOR SHARE`
+    await lockRecipientAddress(tx, item)
     await tx.$queryRaw`
       SELECT email FROM admin_email_permissions
       WHERE purpose = ${item.batch.purpose} AND email = ${item.email} FOR SHARE
@@ -51,7 +57,7 @@ async function sendQueuedEmail(delivery: AdminEmailDelivery, item: QueuedEmail, 
       : user && normalizedEmail(user.email) !== item.email ? 'email_changed'
       : delivery.mode === 'mock' && item.userId === customMockRecipientKey(item.email)
         ? await customMockAddressExclusion(tx, item.email, item.batch.purpose)
-        : excludeCandidate(user ?? undefined, permissions, delivery, item.batch.purpose)
+        : excludeCandidate(user ?? undefined, permissions, item.batch.purpose)
     if (blocked) {
       await tx.adminEmailRecipient.updateMany({ where: { ...key, state: 'queued' }, data: { state: 'skipped', reason: blocked } })
       return null
@@ -72,6 +78,7 @@ async function sendQueuedEmail(delivery: AdminEmailDelivery, item: QueuedEmail, 
   await prisma.$transaction(async tx => {
     if (result.state === 'rejected' && result.suppression) {
       await tx.$queryRaw`SELECT id FROM users WHERE id = ${item.userId} FOR UPDATE`
+      await lockRecipientAddress(tx, item)
     }
     const updated = await tx.adminEmailRecipient.updateMany({
       where: { ...key, attemptId, state: { in: ['sending', 'unknown'] } },
@@ -109,8 +116,10 @@ async function reconcileDueEmail(provider: AdminEmailProvider, item: QueuedEmail
 
   await prisma.$transaction(async tx => {
     const { state, reason, suppression } = result
-    // Match queue admission's user lock even before the first permission row exists.
-    if (suppression) await tx.$queryRaw`SELECT id FROM users WHERE id = ${item.userId} FOR UPDATE`
+    if (suppression) {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${item.userId} FOR UPDATE`
+      await lockRecipientAddress(tx, item)
+    }
     // A later lookup can discover feedback without undoing a known delivery.
     const currentState = item.state === 'delivered' || (item.state === 'deferred' && state === 'accepted') ? item.state : state
     let delay = 0

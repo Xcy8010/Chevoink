@@ -58,27 +58,15 @@ describe('directed Tencent SES adapter with mock HTTP transport', () => {
     await expect(differentId.loadTemplate(campaign)).rejects.toMatchObject({ status: 409 })
   })
 
-  it('requires an exact pilot list by default and an explicit production scope for consented accounts', () => {
+  it('requires an exact allowed list by default and an explicit broader production scope', () => {
     const values = { appEnv: 'production', adminEmailMockEnabled: false, adminEmailTencentEnabled: true,
       adminEmailTencentSecretId: 'local-fixture', adminEmailTencentSecretKey: 'local-fixture',
       adminEmailTencentFrom: sender, adminEmailTencentReplyTo: config.replyTo, adminEmailTencentTemplateId: 0,
-      adminEmailTencentReturnTemplateId: 237702, adminEmailTencentRecipients: [recipient], adminEmailTencentRecipientScope: 'allowlist',
-      adminEmailTencentReturnPilotRecipient: '', adminEmailTencentReturnPilotUntil: '' }
+      adminEmailTencentReturnTemplateId: 237702, adminEmailTencentRecipients: [recipient], adminEmailTencentRecipientScope: 'allowlist' }
     const previous = Object.fromEntries((Object.keys(values) as Array<keyof typeof values>).map(key => [key, env[key]]))
     try {
       Object.assign(env, values)
       expect(configuredAdminEmailDelivery()).toMatchObject({ mode: 'tencent', tencentPurposes: ['creator_return'], allowedRecipients: new Set([recipient]) })
-      expect(configuredAdminEmailDelivery().returnPilot).toBeUndefined()
-      env.adminEmailTencentReturnPilotRecipient = recipient
-      env.adminEmailTencentReturnPilotUntil = new Date(Date.now() + 60_000).toISOString()
-      expect(configuredAdminEmailDelivery().returnPilot).toEqual({ recipient, expiresAt: Date.parse(env.adminEmailTencentReturnPilotUntil) })
-      env.adminEmailTencentReturnPilotRecipient = 'different@chevoink.invalid'
-      expect(configuredAdminEmailDelivery).toThrow()
-      env.adminEmailTencentReturnPilotRecipient = recipient
-      env.adminEmailTencentReturnPilotUntil = attemptedAt.toISOString()
-      expect(configuredAdminEmailDelivery().returnPilot).toBeUndefined()
-      env.adminEmailTencentReturnPilotRecipient = ''
-      env.adminEmailTencentReturnPilotUntil = ''
       env.adminEmailTencentRecipients = []
       expect(configuredAdminEmailDelivery).toThrow()
       env.adminEmailTencentRecipientScope = 'consented'

@@ -43,11 +43,12 @@ function ReturnEmailPreference({ owner }: { owner: string }) {
   return <Row label="创作活动邮件">
     {preference.isPending ? <span role="status" className="text-sm">正在读取订阅状态…</span>
       : preference.isError ? <Button size="sm" variant="secondary" onClick={() => void preference.refetch()}>重新读取订阅状态</Button>
-      : preference.data.available ? <label className="inline-flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={preference.data.subscribed} disabled={update.isPending}
-          onChange={event => update.mutate(event.target.checked)}/>
-        接收创作活动和回归奖励邮件
-      </label> : <span className="text-sm text-[var(--text-secondary)]">当前邮箱无法订阅活动邮件</span>}
+      : preference.data.available ? <>
+        <span className="text-sm text-[var(--text-secondary)]">{preference.data.subscribed ? '接收中' : '已退订'}</span>
+        <Button size="sm" variant="secondary" disabled={update.isPending} onClick={() => update.mutate(!preference.data.subscribed)}>
+          {preference.data.subscribed ? '取消订阅' : '恢复接收'}
+        </Button>
+      </> : <span className="text-sm text-[var(--text-secondary)]">当前邮箱无法接收活动邮件</span>}
   </Row>
 }
 
