@@ -34,19 +34,21 @@ const saved = (callId: string, toolName = 'chapter_write') => call(callId, toolN
   display: { kind: 'chapterDiff', chapterId: 'internal-chapter-id', chapterTitle: title, before: '原文。', after: '正文写好了。', appliedDirectly: true, revision: 5 },
 })
 
-function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptIds, textRevealTargets, finishTextReveal }: {
+function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptIds, textRevealTargets, finishTextReveal, working = true }: {
   messages: AgentUIMessage[]
   active?: string
   awaitingApprovalCallId?: string
   liveToolReceiptIds?: ReadonlySet<string>
   textRevealTargets?: Record<string, string>
   finishTextReveal?: (messageId: string, text: string) => void
+  working?: boolean
 }) {
   const projection = projectActivityGroups(messages)
   return <>{messages.map(item => {
     const runActive = (item.runTiming?.sourceRunId ?? item.runId) === active
     return <AuthorActivityParts key={item.id} messageId={item.id}
-      parts={item.parts} groups={projection.byMessage.get(item.id)} activeGroupId={active ? projection.activeByRun.get(active)?.id : undefined}
+      parts={item.parts} groups={projection.byMessage.get(item.id)} activeGroupId={active && working ? projection.activeByRun.get(active)?.id : undefined}
+      continuingGroupId={active && working ? projection.continuingByRun.get(active)?.id : undefined}
       runActive={runActive} activityChapters={chapters} awaitingApprovalCallId={awaitingApprovalCallId}
       liveToolReceiptIds={runActive ? liveToolReceiptIds : undefined}
       revealText={textRevealTargets?.[item.id]} onTextRevealed={finishTextReveal}
@@ -57,6 +59,50 @@ function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptI
 const goalTitle = '核对老周的出场时间'
 const activity: AgentMessagePart = { type: 'activity-title', title: goalTitle }
 const completed = (messages: AgentUIMessage[]) => messages.map(item => ({ ...item, completedAt: '2026-11-19T16:31:00.000Z' }))
+
+it('keeps a read row moving during the next private turn while its details confirm the reads', () => {
+  const read = message('read', [
+    call('plan', 'plan_read'),
+    call('chapter', 'chapter_read'),
+  ])
+  const nextTurn = message('next-turn', [reasoning])
+  const view = render(<Transcript active="r" messages={[read, nextTurn]} />)
+  const step = screen.getByRole('button', { name: '核对创作资料' })
+  expect(step.querySelector('[data-activity-continuing].agent-processing-shimmer')).toBeTruthy()
+  expect(step.querySelector('[data-activity-running]')).toBeNull()
+  fireEvent.click(step)
+  expect(screen.getByText('已查看创作计划')).toBeTruthy()
+  expect(screen.queryByText(/RAW_THOUGHT_ONLY/)).toBeNull()
+
+  const reply = '我会接着核对细节。'
+  view.rerender(<Transcript active="r" messages={[read, message(nextTurn.id, [reasoning, { type: 'text', text: reply }])]}
+    textRevealTargets={{ [nextTurn.id]: reply }} />)
+  expect(screen.getByRole('button', { name: '已查看创作资料', expanded: true })).toBe(step)
+  expect(step.querySelector('.agent-processing-shimmer')).toBeNull()
+  expect(screen.getByText('我会接')).toBeTruthy()
+})
+
+it('hands the existing review row to a preparation and clears the continuation when work stops', () => {
+  const review = message('review', [call('review', 'quality_analyze')])
+  const view = render(<Transcript active="r" messages={[review]} />)
+  const step = screen.getByRole('button', { name: '行文自然度复查' })
+  expect(step.querySelector('.agent-processing-shimmer')).toBeTruthy()
+  view.rerender(<Transcript active="r" working={false} messages={[review]} />)
+  expect(screen.getByRole('button', { name: '行文自然度复查完成' })).toBe(step)
+  expect(step.querySelector('.agent-processing-shimmer')).toBeNull()
+
+  const prep = message('edit', [call('edit', 'chapter_edit_range', { status: 'running', preparing: true })])
+  view.rerender(<Transcript active="r" messages={[review, prep]} />)
+  expect(step.querySelector('.agent-processing-shimmer')).toBeNull()
+  expect(screen.getByRole('button', { name: /正在准备/ }).querySelector('.agent-processing-shimmer')).toBeTruthy()
+
+  view.rerender(<Transcript active="next" messages={[review, message('new-run', [reasoning], 'next')]} />)
+  expect(view.container.querySelector('.agent-processing-shimmer')).toBeNull()
+  const failure = message('fail', [call('fail', 'quality_analyze', { status: 'failed' })])
+  view.rerender(<Transcript active="r" messages={[failure]} />)
+  expect(screen.getByRole('button', { name: '行文自然度复查未完成' })).toBeTruthy()
+  expect(view.container.querySelector('.agent-processing-shimmer')).toBeNull()
+})
 
 it('keeps a titled progress row in place through three overlapping tools and a later turn, then completes with the reply intact', () => {
   const first = call('search', 'project_search', { status: 'running' })
@@ -402,6 +448,9 @@ it('keeps a parent tool running when its child settles with the same provider ca
     expect(view.container.querySelector('[data-activity-tool="chapter_read"]')?.textContent).toContain('已查看章节')
     store.applyEvent({ ...base, seq: 5, type: 'tool.result', toolName: 'subagent_run', ok: true, summary: '协作完成' })
     view.rerender(<Transcript active={runId} messages={useAgentStore.getState().messages} />)
+    expect(screen.getByRole('button', { name: '协作创作' })).toBe(row)
+    expect(row.querySelector('[data-activity-running]')).toBeNull()
+    view.rerender(<Transcript messages={useAgentStore.getState().messages} />)
     expect(screen.getByRole('button', { name: '已协作创作' })).toBe(row)
     expect(row.querySelector('.agent-processing-shimmer')).toBeNull()
   } finally {
@@ -646,7 +695,8 @@ it('keeps a live opening visible and revealing when its tool arrives in the same
       store.applyEvent({ ...base, seq: 4, type: 'tool.call', callId: 'call_0', toolName: 'chapter_read', title: '读取', args: {} })
       store.applyEvent({ ...base, seq: 5, type: 'tool.result', callId: 'call_0', toolName: 'chapter_read', ok: true, summary: '已读取' })
     })
-    expect(screen.getByRole('button', { name: '已核对前文' })).toBe(row)
+    expect(screen.getByRole('button', { name: '核对前文' })).toBe(row)
+    expect(row.querySelector('[data-activity-continuing]')).toBeTruthy()
     expect(paragraph.textContent).not.toBe(opening)
     act(() => vi.advanceTimersByTime(600))
     expect(screen.getByText(opening)).toBe(paragraph)

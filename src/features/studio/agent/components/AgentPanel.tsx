@@ -723,6 +723,7 @@ export function AgentPanel({
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
   const working = activityRunActive && (panelPhase === 'starting' || panelPhase === 'running') && !pendingApproval && !pendingQuestion
   const currentActivity = activityRunActive && runId ? activityGroups.activeByRun.get(runId) : undefined
+  const continuingActivity = working && runId ? activityGroups.continuingByRun.get(runId) : undefined
   const creditSummaryQuery = useModelCreditSummary(active ? 20_000 : 60_000)
   const refetchCredits = creditSummaryQuery.refetch
   const previousActiveRef = useRef(active)
@@ -1886,7 +1887,8 @@ export function AgentPanel({
                 key={messageKey}
                 parts={message.parts}
                 groups={messageActivities}
-                activeGroupId={currentActivity?.id}
+                activeGroupId={working ? currentActivity?.id : undefined}
+                continuingGroupId={continuingActivity?.id}
                 liveToolReceiptIds={messageRunActive || revealText !== undefined ? liveToolReceiptIds : undefined}
                 messageId={message.id}
                 revealText={revealText}

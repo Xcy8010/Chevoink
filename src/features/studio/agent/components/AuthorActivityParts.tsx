@@ -230,8 +230,9 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters,
   </li>
 })
 
-const ActivityRow = memo(function ActivityRow({ group, runActive, active, chapters, readOnly, awaitingApprovalCallId, animateLive }: {
+const ActivityRow = memo(function ActivityRow({ group, runActive, active, continuing, chapters, readOnly, awaitingApprovalCallId, animateLive }: {
   group: ActivityGroup; runActive: boolean; active: boolean; chapters?: ActivityChapters; readOnly?: boolean
+  continuing: boolean
   awaitingApprovalCallId?: string
   animateLive?: boolean
 }) {
@@ -255,7 +256,9 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, chapte
     ? new Set(stageCalls.map(activityChapterId)) : undefined
   const readLabel = group.readLabel
   let label: string | undefined
-  if (group.title) {
+  if (runActive && continuing && !running && !namedInProgress && !waiting && part) {
+    label = group.readLabel === '查看创作资料' ? '核对创作资料' : getAgentToolPresentation(part.toolName).label
+  } else if (group.title) {
     const title = group.title
     if (waitingForAnswer) label = `等待你回答 · ${title}`
     else if (importWaiting || waitingForApproval) label = `等待你确认 · ${title}`
@@ -271,7 +274,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, chapte
     else label = activitySummary(part, runActive, chapters, false, grouped && !readChapterIds, group.staleReviewCalls?.has(part))
   }
   const showingActivity = Boolean(running && !waiting)
-  const shimmer = runActive && Boolean(showingActivity || namedInProgress) && !waiting
+  const shimmer = runActive && Boolean(showingActivity || namedInProgress || continuing) && !waiting
   const step = group.title ? label : part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : ''
   const enter = useRef<boolean | undefined>(undefined)
   if (enter.current === undefined) {
@@ -299,6 +302,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, chapte
         {Icon && <Icon aria-hidden className="h-4 w-4" />}
         <span className="min-w-0 break-words text-balance">
           <span aria-live={group.title || active || running ? 'polite' : undefined}
+            data-activity-continuing={runActive && continuing && !waiting || undefined}
             data-activity-preparing={showingActivity && running?.preparing || undefined}
             data-activity-running={showingActivity && !running?.preparing || undefined}
             className={cn('agent-activity-label', shimmer && 'agent-processing-shimmer')}>{label}</span>
@@ -346,12 +350,13 @@ export function AuthorProgressText({ text, className }: { text: string; classNam
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, revealText, onTextRevealed, activityChapters, readOnly, awaitingApprovalCallId, reportVisibility, liveToolReceiptIds,
+  parts, messageId, groups, activeGroupId, continuingGroupId, runActive, processOpen, collapseText = false, revealText, onTextRevealed, activityChapters, readOnly, awaitingApprovalCallId, reportVisibility, liveToolReceiptIds,
 }: {
   parts: AgentMessagePart[]
   messageId: string
   groups?: MessageActivityGroups
   activeGroupId?: string
+  continuingGroupId?: string
   runActive: boolean
   processOpen?: boolean
   collapseText?: boolean
@@ -395,9 +400,9 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
         if (!part.text) return null
-        // A tool can arrive in the same paint as the opening. Show its first
-        // few characters immediately and keep revealing the rest in place.
-        const opening = textOffset === 0 && index < lastToolIndex ? /^\s*.{1,3}/su.exec(part.text)?.[0].length ?? 0 : 0
+        // A progress row can settle in the same paint that public text arrives.
+        // Show the beginning immediately and keep revealing the rest in place.
+        const opening = textOffset === 0 ? /^\s*.{1,3}/su.exec(part.text)?.[0].length ?? 0 : 0
         const text = part.text.slice(0, Math.max(opening, revealed.text.length - textOffset))
         textOffset += part.text.length
         const inProcess = collapseText || index < lastToolIndex
@@ -411,7 +416,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       const key = rendered.size ? group.id : stepKey
       rendered.add(group.id)
       return <AgentProcessRegion key={key} open={processOpen ?? true}>
-        <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} chapters={activityChapters} readOnly={readOnly}
+        <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} continuing={continuingGroupId === group.id} chapters={activityChapters} readOnly={readOnly}
           awaitingApprovalCallId={awaitingApprovalCallId}
           animateLive={!readOnly && group.receiptKeys.some(key => liveToolReceiptIds?.has(key))} />
       </AgentProcessRegion>

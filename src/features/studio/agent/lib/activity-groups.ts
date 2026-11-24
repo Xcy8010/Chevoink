@@ -379,5 +379,31 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
     }
   }
   for (const [runId, group] of runningByRun) activeByRun.set(runId, group)
-  return { byMessage, reportsByMessage, runningByRun, activeByRun, authorSpokeByRun, savedReplyByRun, lastGroupByRun }
+
+  const continuingByRun = new Map<string, ActivityGroup>()
+  for (const { message, parts } of transcript) {
+    const runId = message.runTiming?.sourceRunId ?? message.runId
+    if (message.role !== 'assistant') {
+      if (!message.goalContinuation) continuingByRun.delete(runId)
+      continue
+    }
+    const hidden = activityReportVisibility(reportsByMessage.get(message.id), true)?.hidden
+    const messageGroups = byMessage.get(message.id)
+    let textIndex = 0
+    for (const part of parts) {
+      if (part.type === 'tool-call' && !part.subagentCallId) {
+        const group = messageGroups?.get(part.callId)
+        if (!group) continue
+        // Only the most recent visible action can carry the wait for the next
+        // step. Keep failures and individual tool receipts in their real state.
+        if (!group.closed && !group.completed && !group.unfinished
+          && !runningByRun.has(runId) && part.status === 'success') continuingByRun.set(runId, group)
+        else continuingByRun.delete(runId)
+      } else if (part.type === 'context-compaction' || (part.type === 'text' && !hidden?.has(textIndex))) {
+        continuingByRun.delete(runId)
+      }
+      if (part.type === 'text') textIndex++
+    }
+  }
+  return { byMessage, reportsByMessage, runningByRun, activeByRun, continuingByRun, authorSpokeByRun, savedReplyByRun, lastGroupByRun }
 }
