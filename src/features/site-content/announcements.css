@@ -51,7 +51,7 @@
   width: min(400px, calc(100vw - var(--announcement-right) - 12px)); max-width: none;
   max-height: min(32rem, calc(100dvh - var(--announcement-top) - max(12px, var(--safe-bottom, 0px))));
   overflow: hidden; padding: 0; border: 1px solid var(--border-subtle); border-radius: 16px;
-  background: var(--surface-default); color: var(--text-primary); box-shadow: 0 16px 52px #0004;
+  color: var(--text-primary); box-shadow: 0 16px 52px #0004;
   transform-origin: right top;
 }
 .site-announcement-inbox[open] {

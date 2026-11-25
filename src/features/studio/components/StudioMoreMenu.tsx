@@ -79,7 +79,7 @@ export default function StudioMoreMenu(props: Props) {
           open ? 'bg-[var(--surface-muted)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]',
         )}
       ><MoreHorizontal className="h-4 w-4" /></button>
-      <StudioPresence kind="menu">{open ? <div className="absolute right-0 top-[calc(100%+7px)] z-[70] [--studio-motion-origin:top_right] w-[268px] overflow-hidden rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[0_20px_55px_rgba(15,23,42,.22)] motion-safe:origin-top-right motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]">
+      <StudioPresence kind="menu">{open ? <div className="absolute right-0 top-[calc(100%+7px)] z-[70] [--studio-motion-origin:top_right] w-[268px] overflow-hidden rounded-[14px] border border-[var(--border-subtle)] studio-popover-glass p-1.5 shadow-[0_20px_55px_rgba(15,23,42,.22)] motion-safe:origin-top-right motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]">
         {betaEnabled ? <div className="mb-1 flex items-center gap-2 rounded-[10px] bg-emerald-600 px-3 py-2.5 text-[11px] text-white shadow-[0_5px_16px_rgba(5,150,105,.18)]">
           <Gift className="h-3.5 w-3.5" />
           <span className="font-medium">公测期间，每日送 450 Credits！</span>

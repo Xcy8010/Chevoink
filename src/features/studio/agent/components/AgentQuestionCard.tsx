@@ -126,7 +126,7 @@ function OptionTooltip({ id, anchor, detail, phase, onClose }: { phase: 'open' |
         onClose()
         anchor.focus({ preventScroll: true })
       }}
-      className="studio-workspace fixed z-[160] overflow-y-auto overscroll-contain break-words rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 py-2 text-xs leading-5 text-[var(--text-primary)] shadow-[0_8px_22px_rgba(0,0,0,0.18)]"
+      className="studio-workspace fixed z-[160] overflow-y-auto overscroll-contain break-words rounded-lg border border-[var(--border-subtle)] studio-popover-glass px-3 py-2 text-xs leading-5 text-[var(--text-primary)] shadow-[0_8px_22px_rgba(0,0,0,0.18)]"
       style={{ left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight, transform: position.above ? 'translateY(-100%)' : undefined }}>
       {detail}
     </div>,

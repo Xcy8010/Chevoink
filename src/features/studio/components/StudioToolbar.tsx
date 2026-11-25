@@ -184,7 +184,7 @@ export default function StudioToolbar({
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
               <StudioPresence kind="menu">{moreOpen ? (
-                <div className="absolute right-0 top-[calc(100%+6px)] z-40 [--studio-motion-origin:top_right] w-44 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[var(--shadow-soft)]">
+                <div className="absolute right-0 top-[calc(100%+6px)] z-40 [--studio-motion-origin:top_right] w-44 rounded-[14px] border border-[var(--border-subtle)] studio-popover-glass p-1.5 shadow-[var(--shadow-soft)]">
                   <button
                     type="button"
                     className={moreItemClass}

@@ -16,7 +16,7 @@ export async function getPagedAdminCreditAccounts(search: string | undefined, pa
     const expired = Prisma.sql`(a.user_id IS NULL OR (${setting.publicBetaEnabled} AND a.period_ends_at <= ${now.toISOString()}::timestamp))`
     const projection = Prisma.sql`WITH effective AS (
       SELECT u.id, u.nickname, u.avatar_url, u.email, u.phone,
-        CASE WHEN ${expired} THEN ${setting.dailyAllowanceMilli} ELSE a.daily_allowance_milli END::integer AS allowance,
+        CASE WHEN a.free_daily_withheld THEN 0 WHEN ${expired} THEN ${setting.dailyAllowanceMilli} ELSE a.daily_allowance_milli END::integer AS allowance,
         CASE WHEN ${expired} THEN 0 ELSE a.daily_used_milli END::integer AS used,
         COALESCE(a.bonus_balance_milli, 0) AS bonus,
         CASE WHEN ${expired} THEN ${window.endsAt.toISOString()}::timestamp ELSE a.period_ends_at END AS resets_at,

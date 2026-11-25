@@ -38,7 +38,7 @@ export default function InviteCreditsDialog({
               邀请好友，继续创作
             </h2>
             <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
-              好友通过专属链接完成首次注册后，你获得 {formatCreditAmount(referral?.inviterReward ?? 300)} Credits，好友获得 {formatCreditAmount(referral?.inviteeReward ?? 120)} Credits。
+              好友通过专属链接首次注册，完成手机验证并使用平台模型获得一次有效的 Agent 回复后，你获得 {formatCreditAmount(referral?.inviterReward ?? 300)} Credits，好友获得 {formatCreditAmount(referral?.inviteeReward ?? 120)} Credits。
             </p>
           </div>
           <button

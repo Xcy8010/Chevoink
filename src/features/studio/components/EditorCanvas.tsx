@@ -410,7 +410,7 @@ export default function EditorCanvas({
             <StudioPresence kind="menu">{mobileMenuOpen ? (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setMobileMenuOpen(false)} aria-hidden />
-                <div className="absolute right-0 top-full z-40 mt-1 max-h-[50dvh] w-52 overflow-y-auto overscroll-contain rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] py-1 shadow-[var(--shadow-modal)]">
+                <div className="absolute right-0 top-full z-40 mt-1 max-h-[50dvh] w-52 overflow-y-auto overscroll-contain rounded-xl border border-[var(--border-subtle)] studio-popover-glass py-1 shadow-[var(--shadow-modal)]">
                   {pendingChapterReview ? (
                     <div className="border-b border-[var(--border-subtle)] pb-1">
                       {onKeepPendingReview ? (

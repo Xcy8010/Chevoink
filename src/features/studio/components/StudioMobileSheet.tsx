@@ -42,7 +42,7 @@ export default function StudioMobileSheet({ title, label, closeLabel, trigger, b
     timer.current = window.setTimeout(finish, 200)
   }
 
-  return <dialog ref={dialog} className="studio-mobile-sheet" data-state={closing ? 'closing' : 'open'}
+  return <dialog ref={dialog} className="studio-mobile-sheet studio-popover-glass" data-state={closing ? 'closing' : 'open'}
     aria-label={label} aria-labelledby={label ? undefined : heading} data-native-back-dismiss
     onCancel={event => { event.preventDefault(); event.stopPropagation(); if (!busy) dismiss() }}
     onKeyDown={event => { if (event.key === 'Escape') event.stopPropagation() }}

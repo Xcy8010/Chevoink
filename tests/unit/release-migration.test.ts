@@ -13,6 +13,7 @@ import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex,
   emailAccountMigrationName, emailAccountMigrationChecksum,
   agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum,
   deviceSessionsMigrationName, deviceSessionsMigrationChecksum,
+  verifiedCreditMigrationName, verifiedCreditMigrationChecksum,
   storyProfilesMigrationName, storyProfilesMigrationChecksum, readStoryProfilesState, assertStoryProfilesState,
   assertAgentPersonalizationState, readAgentPersonalizationState } from '../../scripts/verify-release-migration.mjs'
 
@@ -551,6 +552,7 @@ model AgentPersonalizationMemory {
     [agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum],
     [storyProfilesMigrationName, storyProfilesMigrationChecksum],
     [deviceSessionsMigrationName, deviceSessionsMigrationChecksum],
+    [verifiedCreditMigrationName, verifiedCreditMigrationChecksum],
   ])('requires only %s pending, one exact successful row afterwards and unchanged full history', (migration, checksum) => {
     const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1, historyHash: 'a'.repeat(32) }
     const target = { ...old, migration_name: migration, checksum }
@@ -563,6 +565,43 @@ model AgentPersonalizationMemory {
       expect(() => assert([old, { ...target, ...changed }], 'after', [old])).toThrow()
     for (const rows of [[old], [old, target, target], [old, target, { ...old, migration_name: 'extra' }], [{ ...old, historyHash: 'b'.repeat(32) }, target]]) expect(() => assert(rows, 'after', [old])).toThrow()
     expect(() => assert([old, target], 'after', [old, target])).toThrow()
+  })
+  it('admits only the reviewed credit entitlement migration and requires API-only publication', () => {
+    const f = fixture()
+    const schemaFile = (root: string) => path.join(root, 'prisma/schema.prisma')
+    const candidate = readFileSync('prisma/schema.prisma', 'utf8').replaceAll('\r\n', '\n')
+    // CI uses a shallow checkout. Reverse exactly the reviewed schema additions
+    // and let the verifier check both frozen snapshots against their real hashes.
+    const baseline = candidate
+      .replace(/^ {2}freeDailyWithheld[^\n]+\n/m, '')
+      .replace(/^\/\/\/ Retains the original free entitlement owner[\s\S]*?(?=^\/\/\/ 额度不可变账本)/m, '')
+      .replace(/^ {2}rewardStatus[^\n]+\n/m, '')
+      .replace(/^ {2}@@index\(\[rewardStatus, createdAt, id\][^\n]+\n/m, '')
+    const relative = `prisma/migrations/${verifiedCreditMigrationName}/migration.sql`
+    const newMigration = path.join(f.candidate, relative)
+    const sql = readFileSync(relative, 'utf8').replaceAll('\r\n', '\n')
+    try {
+      writeFileSync(schemaFile(f.baseline), baseline)
+      writeFileSync(schemaFile(f.candidate), candidate)
+      mkdirSync(path.dirname(newMigration))
+      writeFileSync(newMigration, sql)
+      expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(verifiedCreditMigrationName)
+      for (const [file, contents] of [[schemaFile(f.baseline), baseline], [schemaFile(f.candidate), candidate], [newMigration, sql]]) {
+        writeFileSync(file, contents + '\n')
+        expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+        writeFileSync(file, contents)
+      }
+      const sh = readFileSync('deploy/deploy-production.sh', 'utf8')
+      const planCondition = `"$MIGRATION_PLAN" == "${verifiedCreditMigrationName}"`
+      const guard = sh.indexOf(`${planCondition} && "$PUBLICATION" != api-only`)
+      expect(guard).toBeGreaterThan(0)
+      expect(guard).toBeLessThan(sh.indexOf('phase preparing'))
+      const migrationGate = sh.slice(sh.indexOf('phase prepared'), sh.indexOf('phase migrated'))
+      expect(migrationGate).toContain(planCondition)
+      expect(migrationGate).toMatch(/verify-release-migration\.mjs before[^\n]*\s+phase migrating\s+npx prisma migrate deploy\s+[^\n]*verify-release-migration\.mjs after/)
+    } finally {
+      rmSync(path.dirname(f.candidate), { recursive: true })
+    }
   })
   it('requires exact retention catalog, restrict FK, valid full indexes and an empty claim table before restart', async () => {
     const before = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }

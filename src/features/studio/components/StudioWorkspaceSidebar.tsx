@@ -66,12 +66,10 @@ type Props = {
   onToggleNovelCompletion?: () => void
   onInvite?: () => void
 }
-type ContextTarget =
-  | { kind: 'novel'; id: string; title: string; pinned: boolean; x: number; y: number }
-  | { kind: 'task'; id: string; novelId: string; title: string; pinned: boolean; temporary: boolean; x: number; y: number }
 type ContextTargetInput =
   | { kind: 'novel'; id: string; title: string; pinned: boolean }
   | { kind: 'task'; id: string; novelId: string; title: string; pinned: boolean; temporary: boolean }
+type ContextTarget = ContextTargetInput & { x: number; y: number; anchor?: HTMLButtonElement }
 type RenameTarget = { kind: 'novel' | 'task'; id: string; title: string }
 /** 高危确认弹窗要处理的动作：删作品需逐字输入，删任务与切分支只需点确认 */
 type DangerAction =
@@ -161,6 +159,8 @@ export default function StudioWorkspaceSidebar(props: Props) {
   const taskListPrefix = useId()
   const [context, setContext] = useState<ContextTarget | null>(null)
   const contextTriggerRef = useRef<HTMLElement | null>(null)
+  const contextPanelRef = useRef<HTMLDivElement>(null)
+  const contextPanelId = useId()
   const [rename, setRename] = useState<RenameTarget | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [danger, setDanger] = useState<DangerAction | null>(null)
@@ -284,16 +284,23 @@ export default function StudioWorkspaceSidebar(props: Props) {
     setWarningDismissed(Boolean(key && window.localStorage.getItem(key) === 'dismissed'))
   }, [summary?.resetsAt, warningThreshold])
   useEffect(() => {
-    const close = () => {
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Node && (
+        contextTriggerRef.current?.contains(event.target) || contextPanelRef.current?.contains(event.target)
+      )) return
       setContext(null)
     }
-    document.addEventListener('mousedown', close)
-    return () => document.removeEventListener('mousedown', close)
+    document.addEventListener('pointerdown', close)
+    return () => document.removeEventListener('pointerdown', close)
   }, [])
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setSearchOpen(true) }
-      if (event.key === 'Escape') { setSearchOpen(false); setContext(null) }
+      if (event.key === 'Escape') {
+        if (contextPanelRef.current?.contains(document.activeElement)) contextTriggerRef.current?.focus()
+        setSearchOpen(false)
+        setContext(null)
+      }
     }
     window.addEventListener('keydown', shortcut)
     return () => window.removeEventListener('keydown', shortcut)
@@ -307,14 +314,16 @@ export default function StudioWorkspaceSidebar(props: Props) {
     event.preventDefault(); event.stopPropagation()
     contextTriggerRef.current = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
     hideTaskCard()
-    setContext({ ...target, x: event.clientX, y: event.clientY } as ContextTarget)
+    setContext({ ...target, x: event.clientX, y: event.clientY })
   }
   /** 「更多」按钮开的卡片与右键菜单共用一套：按钮位置作为锚点，避免两份菜单定义跑偏 */
-  function openContextAt(trigger: HTMLElement, target: ContextTargetInput) {
+  function toggleContextAt(trigger: HTMLButtonElement, target: ContextTargetInput) {
     contextTriggerRef.current = trigger
     const rect = trigger.getBoundingClientRect()
     hideTaskCard()
-    setContext({ ...target, x: rect.right - 8, y: rect.bottom + 6 } as ContextTarget)
+    setContext(current => current?.anchor === trigger
+      ? null
+      : { ...target, anchor: trigger, x: rect.right - 8, y: rect.bottom + 6 })
   }
   function clearTaskCardTimer() {
     if (taskCardTimerRef.current !== null) window.clearTimeout(taskCardTimerRef.current)
@@ -672,6 +681,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
             const activeTask = tasks.find(isActiveTask)
             if (activeTask && !visibleTasks.includes(activeTask)) visibleTasks[VISIBLE_PROJECT_TASKS - 1] = activeTask
             const target = { kind: 'novel' as const, id: novel.id, title, pinned: Boolean(novel.pinnedAt) }
+            const menuOpen = Boolean(context?.anchor && context.kind === 'novel' && context.id === novel.id)
             return (
               <div key={novel.id} className="space-y-px">
                 <div className="group/novel relative">
@@ -700,13 +710,14 @@ export default function StudioWorkspaceSidebar(props: Props) {
                       </span>
                     ) : null}
                   </button>
-                  <div className="pointer-events-none absolute right-1 top-0 flex h-full items-center gap-0.5 opacity-0 transition-opacity group-hover/novel:pointer-events-auto group-hover/novel:opacity-100 group-focus-within/novel:pointer-events-auto group-focus-within/novel:opacity-100">
+                  <div className={cn('absolute right-1 top-0 flex h-full items-center gap-0.5 transition-opacity', !menuOpen && 'pointer-events-none opacity-0 group-hover/novel:pointer-events-auto group-hover/novel:opacity-100 group-focus-within/novel:pointer-events-auto group-focus-within/novel:opacity-100')}>
                     <button
                       type="button"
-                      onMouseDown={(event) => event.stopPropagation()}
-                      onClick={(event) => openContextAt(event.currentTarget, target)}
+                      onClick={(event) => toggleContextAt(event.currentTarget, target)}
                       className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)]"
                       aria-label="作品更多操作"
+                      aria-expanded={menuOpen}
+                      aria-controls={menuOpen ? contextPanelId : undefined}
                       title="更多"
                     >
                       <MoreHorizontal className="h-3.5 w-3.5" />
@@ -794,9 +805,16 @@ export default function StudioWorkspaceSidebar(props: Props) {
     <aside data-sidebar-folding={foldingSidebar} ref={resizeRootRef} onPointerMove={resize} onPointerUp={finishResize} onPointerCancel={finishResize} onLostPointerCapture={finishResize} className={cn('studio-resizable-panel relative z-30 h-full min-h-0 shrink-0 overflow-visible border-r bg-[var(--app-bg)] transition-[width,border-color] duration-200 ease-[cubic-bezier(.22,1,.36,1)]', props.open ? 'border-[var(--border-subtle)]' : 'border-transparent')} style={{ width: props.open ? width : 0 }} data-workspace-sidebar={props.open ? 'open' : 'collapsed'}>{props.open ? body() : null}<div role="separator" aria-label="调整左侧栏宽度" aria-orientation="vertical" aria-valuenow={props.open ? width : 0} aria-valuemin={0} aria-valuemax={MAX_WIDTH} tabIndex={0} onPointerDown={beginResize} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); if (!props.open) { if (event.key === 'ArrowRight') props.onOpenChange(true) } else if (width <= MIN_WIDTH && event.key === 'ArrowLeft') props.onOpenChange(false); else setWidth(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, width + (event.key === 'ArrowRight' ? 24 : -24)))) } }} className="absolute inset-y-0 -right-1 z-[60] w-2 cursor-col-resize touch-none hover:bg-[var(--border-strong)] focus-visible:bg-[var(--border-strong)]" /></aside>
     {!props.open ? <div className="studio-sidebar-peek absolute bottom-0 left-0 top-0 z-50 overflow-visible transition-[width] duration-200 ease-[cubic-bezier(.22,1,.36,1)]" style={{ width: peek ? peekWidth : 12 }} onMouseEnter={showPeek} onMouseLeave={schedulePeekClose}><div aria-hidden="true" onPointerDown={beginResize} className="absolute inset-y-0 left-0 z-[60] w-2 cursor-col-resize touch-none" /><aside className={cn('h-full border-r border-[var(--border-subtle)] bg-[var(--app-bg)] shadow-[12px_0_34px_rgba(15,23,42,.14)] transition-[opacity,transform] duration-180 ease-out', peek ? 'translate-x-0 opacity-100' : 'pointer-events-none -translate-x-3 opacity-0')} style={{ width: peekWidth }}>{body()}</aside></div> : null}
 
-    <StudioPresence kind="dialog">{searchOpen ? <div className="fixed inset-0 z-[180] flex items-start justify-center bg-black/25 px-4 pt-[10vh] backdrop-blur-[2px]" onMouseDown={() => setSearchOpen(false)}><section data-studio-motion-panel role="dialog" aria-modal="true" aria-label="搜索作品、任务与聊天记录" onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-2xl overflow-hidden rounded-[18px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-[0_28px_90px_rgba(15,23,42,.24)]"><div className="flex h-14 items-center gap-3 border-b border-[var(--border-subtle)] px-4"><Search className="h-4 w-4 text-[var(--text-tertiary)]" /><input autoFocus value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索作品、任务或聊天记录" className="min-w-0 flex-1 bg-transparent text-sm outline-none" /><kbd className="rounded border border-[var(--border-subtle)] px-1.5 py-0.5 text-[10px] text-[var(--text-tertiary)]">Esc</kbd></div><div className="max-h-[62vh] overflow-y-auto p-2"><p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">作品</p>{foundNovels.map((item) => <button key={item.id} type="button" onClick={() => { props.onSelectNovel(item.id); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><BookOpenText className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="flex-1 truncate">{novelTitle(item)}</span><span className="text-[10px] text-[var(--text-tertiary)]">作品</span></button>)}<p className="mt-2 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">任务与聊天记录</p>{foundSessions.map((session) => <button key={session.id} type="button" onClick={() => { props.onSelectTask(session.id, session.novelId); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><Clock3 className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="min-w-0 flex-1 truncate">{session.title}</span><span className="max-w-36 truncate text-[10px] text-[var(--text-tertiary)]">{session.novelTitle ?? '任务'}</span></button>)}{needle && !foundNovels.length && !foundSessions.length ? <p className="px-3 py-10 text-center text-xs text-[var(--text-tertiary)]">没有找到相关作品、任务或聊天记录</p> : null}</div></section></div> : null}</StudioPresence>
+    <StudioPresence kind="dialog">{searchOpen ? <div className="fixed inset-0 z-[180] flex items-start justify-center bg-black/25 px-4 pt-[10vh] backdrop-blur-[2px]" onMouseDown={() => setSearchOpen(false)}><section data-studio-motion-panel role="dialog" aria-modal="true" aria-label="搜索作品、任务与聊天记录" onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-2xl overflow-hidden rounded-[18px] border border-[var(--border-subtle)] studio-popover-glass shadow-[0_28px_90px_rgba(15,23,42,.24)]"><div className="flex h-14 items-center gap-3 border-b border-[var(--border-subtle)] px-4"><Search className="h-4 w-4 text-[var(--text-tertiary)]" /><input autoFocus value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索作品、任务或聊天记录" className="min-w-0 flex-1 bg-transparent text-sm outline-none" /><kbd className="rounded border border-[var(--border-subtle)] px-1.5 py-0.5 text-[10px] text-[var(--text-tertiary)]">Esc</kbd></div><div className="max-h-[62vh] overflow-y-auto p-2"><p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">作品</p>{foundNovels.map((item) => <button key={item.id} type="button" onClick={() => { props.onSelectNovel(item.id); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><BookOpenText className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="flex-1 truncate">{novelTitle(item)}</span><span className="text-[10px] text-[var(--text-tertiary)]">作品</span></button>)}<p className="mt-2 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">任务与聊天记录</p>{foundSessions.map((session) => <button key={session.id} type="button" onClick={() => { props.onSelectTask(session.id, session.novelId); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><Clock3 className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="min-w-0 flex-1 truncate">{session.title}</span><span className="max-w-36 truncate text-[10px] text-[var(--text-tertiary)]">{session.novelTitle ?? '任务'}</span></button>)}{needle && !foundNovels.length && !foundSessions.length ? <p className="px-3 py-10 text-center text-xs text-[var(--text-tertiary)]">没有找到相关作品、任务或聊天记录</p> : null}</div></section></div> : null}</StudioPresence>
 
-    <StudioPresence kind="menu">{context ? <div onMouseDown={(event) => event.stopPropagation()} className="fixed z-[190] max-h-[calc(100dvh-24px)] w-48 overflow-y-auto rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1 shadow-2xl" style={{ left: Math.min(context.x, window.innerWidth - 208), top: Math.max(12, Math.min(context.y, window.innerHeight - (context.kind === 'novel' ? 424 : 304))) }}>
+    <StudioPresence kind="menu">{context ? <div
+      ref={contextPanelRef}
+      id={contextPanelId}
+      role="group"
+      aria-label={context.title + '的操作'}
+      className="studio-popover-glass fixed z-[190] max-h-[calc(100dvh-24px)] w-48 overflow-y-auto rounded-[12px] border border-[var(--border-subtle)] p-1 shadow-2xl"
+      style={{ left: Math.min(context.x, window.innerWidth - 208), top: Math.max(12, Math.min(context.y, window.innerHeight - (context.kind === 'novel' ? 424 : 304))) }}
+    >
       {context.kind === 'novel' ? <>
         <button type="button" disabled={props.taskSwitchLocked} onClick={() => { const novelId = context.id; setContext(null); props.onSelectNovel(novelId) }} className={menuItem}>
           <BookOpenText className="h-3.5 w-3.5" />进入作品
@@ -818,7 +836,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
     </div> : null}</StudioPresence>
 
     {/* 任务悬停信息卡片：列表容器有纵向滚动会裁切绝对定位元素，改用 fixed 按行坐标渲染 */}
-    <StudioPresence kind="menu">{taskCard ? <div className="pointer-events-none fixed z-[150] w-64 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3 shadow-[0_18px_50px_rgba(15,23,42,.18)]" style={{ left: Math.min(taskCard.x, window.innerWidth - 272), top: Math.max(12, Math.min(taskCard.y, window.innerHeight - 172)) }}>
+    <StudioPresence kind="menu">{taskCard ? <div className="pointer-events-none fixed z-[150] w-64 rounded-[14px] border border-[var(--border-subtle)] studio-popover-glass p-3 shadow-[0_18px_50px_rgba(15,23,42,.18)]" style={{ left: Math.min(taskCard.x, window.innerWidth - 272), top: Math.max(12, Math.min(taskCard.y, window.innerHeight - 172)) }}>
       <div className="flex items-start gap-2"><p className="line-clamp-2 min-w-0 flex-1 text-xs font-semibold leading-5 text-[var(--text-primary)]">{taskCard.task.title || '新任务'}</p><span className="shrink-0 pt-0.5 text-[10px] text-[var(--text-tertiary)]">{taskCard.task.temporary ? '未开始' : formatTaskRelativeTime(taskCard.task.lastActiveAt)}</span></div>
       <div className="mt-2.5 space-y-1 text-[10px]">{[
         { label: '所属作品', value: taskCardNovel ? novelTitle(taskCardNovel) : '—' },

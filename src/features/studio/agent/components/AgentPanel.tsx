@@ -1728,7 +1728,7 @@ export function AgentPanel({
           }
         }}>
           <button type="button" title="任务操作" onClick={() => { setHistoryOpen(false); setTaskMenuOpen(value => !value) }} className="agent-task-more transition-colors" aria-label="任务操作" aria-expanded={taskMenuOpen}><MoreHorizontal className="h-4 w-4" /></button>
-          <StudioPresence kind="menu">{taskMenuOpen ? <div className="absolute right-2 top-full z-50 w-52 max-w-[calc(100%-1rem)] rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)] [--studio-motion-origin:top_right]">
+          <StudioPresence kind="menu">{taskMenuOpen ? <div className="absolute right-2 top-full z-50 w-52 max-w-[calc(100%-1rem)] rounded-[12px] border border-[var(--border-subtle)] studio-popover-glass p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)] [--studio-motion-origin:top_right]">
             {onOpenStudioSettings ? <button type="button" onClick={openAgentOperations} className={taskMenuItem}><Workflow aria-hidden="true" className="h-4 w-4" />Agent 操作中心</button> : null}
             {onPinTask ? <button type="button" disabled={!sessionId} className={taskMenuItem} onClick={() => { setTaskMenuOpen(false); onPinTask() }}><Pin className="h-3.5 w-3.5" />置顶当前任务</button> : null}
             {onRenameTask ? <button type="button" className={taskMenuItem} onClick={() => { setTaskTitleDraft(taskTitle?.trim() || '新任务'); setTaskRenaming(true); setTaskMenuOpen(false) }}><PencilLine className="h-3.5 w-3.5" />编辑任务名称</button> : null}
@@ -1749,7 +1749,7 @@ export function AgentPanel({
 
         {/* 历史任务对话下拉：列表项可切换/重命名/删除 */}
         <StudioPresence kind="menu">{historyOpen ? (
-          <div role="dialog" aria-label="历史任务对话" className="agent-task-history absolute left-2 right-2 top-full z-30 mt-1 max-h-80 overflow-y-auto rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1.5 shadow-[0_16px_40px_rgba(15,23,42,0.14)]">
+          <div role="dialog" aria-label="历史任务对话" className="agent-task-history absolute left-2 right-2 top-full z-30 mt-1 max-h-80 overflow-y-auto rounded-[16px] border border-[var(--border-subtle)] studio-popover-glass p-1.5 shadow-[0_16px_40px_rgba(15,23,42,0.14)]">
             {sessionsLoading ? (
               <div className="flex items-center gap-2 px-2 py-2 text-xs text-[var(--text-secondary)]">
                 <LoaderCircle className="h-3.5 w-3.5 animate-spin" />

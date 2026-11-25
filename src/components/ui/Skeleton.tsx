@@ -226,7 +226,7 @@ function StudioComposerSkeleton({ region }: { region: string }) {
 }
 
 export function StudioTaskStatusSkeleton() {
-  return <div role="status" aria-label="正在载入任务状态" className="rounded-[20px] bg-[var(--surface-muted)] p-3">
+  return <div role="status" aria-label="正在载入任务状态" className="studio-popover-glass rounded-[20px] p-3">
     <div aria-hidden="true">
       <div className="flex h-7 items-center px-2"><Skeleton className="h-3.5 w-16" /></div>
       <div className="flex h-9 items-center gap-2 px-2"><Skeleton className="size-3.5" /><Skeleton className="h-3 w-20" /><Skeleton className="h-2.5 w-9" /></div>

@@ -34,6 +34,7 @@ import { getActiveTokenPrices } from './billing/rate-cards.js'
 import { tokenPriceSchema, frozenTokenPriceMatchesModel, type TokenPrice } from './billing/token-price.js'
 import { fallbackUsageEvidenceSchema, FALLBACK_USAGE_POLICY, RESERVATION_TTL_MS, tokenReservationMilli } from './billing/reservation-policy.js'
 import { presentLedgerPrice, readLedgerPriceMetadata, readLedgerActivity } from './billing/ledger-presentation.js'
+import { claimCreditPhone } from './credit-phone-identity.js'
 
 export const CREDIT_MILLI = 1000
 export const PUBLIC_BETA_DAILY_MILLI = 450 * CREDIT_MILLI
@@ -194,26 +195,37 @@ async function ensureAccountWithDb(db: CreditDb, userId: string, now = new Date(
   if (db === prisma) return creditTransaction(tx => ensureAccountWithDb(tx, userId, now))
   const setting = await lockCreditPolicy(db)
   const window = getCreditWindow(now, setting.resetHourUtc8)
-  await db.creditAccount.upsert({
+  let account = await db.creditAccount.upsert({
     where: { userId },
     create: buildNewCreditAccountData(userId, setting, window, now),
     update: {},
   })
-  if (setting.publicBetaEnabled) await db.creditAccount.updateMany({
-    where: { userId, periodEndsAt: { lte: now } },
+  if (setting.publicBetaEnabled && account.periodEndsAt <= now) account = await db.creditAccount.update({
+    where: { userId },
     data: {
-      dailyAllowanceMilli: setting.dailyAllowanceMilli,
+      dailyAllowanceMilli: account.freeDailyWithheld ? 0 : setting.dailyAllowanceMilli,
       dailyUsedMilli: 0,
       periodStartedAt: window.startedAt,
       periodEndsAt: window.endsAt,
     },
   })
-  const account = await db.creditAccount.findUniqueOrThrow({ where: { userId } })
   return { account, setting }
 }
 
 export async function ensureCreditAccount(userId: string, now = new Date()) {
   return ensureAccountWithDb(prisma, userId, now)
+}
+
+export async function updateCreditPhoneEligibility(tx: Prisma.TransactionClient, userId: string, phone: string, retainPriorEligibility = false) {
+  const allowed = await claimCreditPhone(tx, userId, phone)
+  const freeDailyWithheld = !allowed && !retainPriorEligibility
+  const { account, setting } = await ensureAccountWithDb(tx, userId)
+  if (account.freeDailyWithheld !== freeDailyWithheld) {
+    await tx.creditAccount.update({
+      where: { userId },
+      data: { freeDailyWithheld, dailyAllowanceMilli: freeDailyWithheld ? 0 : setting.dailyAllowanceMilli },
+    })
+  }
 }
 
 async function listPublicModelOptions(tester: boolean, now: number): Promise<CreditModelOption[]> {
@@ -1231,12 +1243,17 @@ export async function initializeNewUserCredits(
   tx: Prisma.TransactionClient,
   userId: string,
   referralCode?: string | null,
+  verifiedPhone?: string | null,
 ): Promise<void> {
   const setting = await lockCreditPolicy(tx)
   const now = new Date()
   const window = getCreditWindow(now, setting.resetHourUtc8)
   // 注册即建账：暂停期间注册的新用户必须继承全局暂停，否则将绕过计费门禁。
-  await tx.creditAccount.create({ data: buildNewCreditAccountData(userId, setting, window, now) })
+  const freeDailyWithheld = verifiedPhone === null || (verifiedPhone !== undefined && !await claimCreditPhone(tx, userId, verifiedPhone))
+  const initial = buildNewCreditAccountData(userId, setting, window, now)
+  await tx.creditAccount.create({ data: {
+    ...initial, freeDailyWithheld, dailyAllowanceMilli: freeDailyWithheld ? 0 : initial.dailyAllowanceMilli,
+  } })
   await tx.referralCode.create({ data: { userId, code: makeReferralCode(userId) } })
 
   const normalizedCode = referralCode?.trim().toUpperCase()
@@ -1245,7 +1262,6 @@ export async function initializeNewUserCredits(
   if (!source || source.userId === userId) {
     throw new DataAccessError(400, 'REFERRAL_INVALID', '邀请链接无效或已失效。')
   }
-  await ensureAccountWithDb(tx, source.userId)
   await tx.referralRedemption.create({
     data: {
       id: randomUUID(),
@@ -1254,21 +1270,8 @@ export async function initializeNewUserCredits(
       inviteeUserId: userId,
       inviterRewardMilli: REFERRER_REWARD_MILLI,
       inviteeRewardMilli: REFEREE_REWARD_MILLI,
+      rewardStatus: verifiedPhone !== null && freeDailyWithheld ? 'ineligible' : 'pending',
     },
-  })
-  await tx.creditAccount.update({ where: { userId: source.userId }, data: { bonusBalanceMilli: { increment: REFERRER_REWARD_MILLI } } })
-  await tx.creditAccount.update({ where: { userId }, data: { bonusBalanceMilli: { increment: REFEREE_REWARD_MILLI } } })
-  await tx.creditLedgerEntry.createMany({
-    data: [
-      {
-        id: randomUUID(), userId: source.userId, deltaMilli: REFERRER_REWARD_MILLI, bonusDeltaMilli: REFERRER_REWARD_MILLI,
-        kind: 'reward', sourceType: 'referral_inviter', referenceId: userId, idempotencyKey: `referral:inviter:${userId}`,
-      },
-      {
-        id: randomUUID(), userId, deltaMilli: REFEREE_REWARD_MILLI, bonusDeltaMilli: REFEREE_REWARD_MILLI,
-        kind: 'reward', sourceType: 'referral_invitee', referenceId: source.userId, idempotencyKey: `referral:invitee:${userId}`,
-      },
-    ],
   })
 }
 
@@ -1290,7 +1293,7 @@ export async function getReferralPayload(userId: string, publicOrigin: string): 
   await ensureCreditAccount(userId)
   const code = await ensureReferralCode(userId)
   const [successfulInvites, rewards] = await Promise.all([
-    prisma.referralRedemption.count({ where: { inviterUserId: userId } }),
+    prisma.referralRedemption.count({ where: { inviterUserId: userId, rewardStatus: 'credited' } }),
     prisma.creditLedgerEntry.aggregate({ where: { userId, sourceType: 'referral_inviter' }, _sum: { deltaMilli: true } }),
   ])
   return {

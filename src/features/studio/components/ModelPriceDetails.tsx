@@ -138,7 +138,7 @@ export function ModelPriceDetails({ model, children, className = '', reasoningEf
     {children ?? <span className="flex items-center justify-between gap-3 text-sm"><span>{model.label}</span><ModelPriceSummary model={model} /></span>}
     {rendered && createPortal(<div ref={panel} id={panelId} role="dialog" aria-label={model.label + '模型详情'} tabIndex={0}
       data-studio-surface="menu" data-phase={phase} {...studioInert(!open)}
-      className="studio-workspace fixed z-[250] overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-5 text-left text-[13px] font-normal leading-relaxed text-[var(--text-primary)] shadow-[0_16px_48px_rgba(0,0,0,.18)]"
+      className="studio-workspace fixed z-[250] overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] studio-popover-glass p-5 text-left text-[13px] font-normal leading-relaxed text-[var(--text-primary)] shadow-[0_16px_48px_rgba(0,0,0,.18)]"
       style={{ position: 'fixed', backgroundColor: 'color-mix(in srgb, var(--surface-default) 60%, var(--surface-elevated))', ...position }}
       onMouseEnter={keepOpen} onMouseLeave={event => leave(event.relatedTarget)} onFocus={keepOpen} onBlur={event => { if (!contains(event.relatedTarget)) close() }}
       onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>

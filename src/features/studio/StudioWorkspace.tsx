@@ -4714,7 +4714,7 @@ export default function StudioWorkspace() {
                 conversation={<div className="work-agent-frame h-full min-h-0 w-full pb-2">{renderWritingAgent(undefined, false)}</div>}
                 activityDockId={taskDockId}
                 activityDockExpanded={taskStatusExpanded}
-                activityDock={hasTaskStatus ? <div className="flex h-full min-h-0 flex-col"><div className="rounded-[20px] bg-[var(--surface-muted)] p-3"><p className="px-2 pb-1 pt-1 text-sm font-semibold text-[var(--text-secondary)]">任务状态</p><AgentActivityBar
+                activityDock={hasTaskStatus ? <div className="flex h-full min-h-0 flex-col"><div className="studio-popover-glass rounded-[20px] p-3"><p className="px-2 pb-1 pt-1 text-sm font-semibold text-[var(--text-secondary)]">任务状态</p><AgentActivityBar
                   activities={workspaceActivities}
                   activitiesVersion={workspaceActivitiesVersion}
                   todos={agentTodos}

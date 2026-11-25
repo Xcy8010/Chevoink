@@ -905,7 +905,7 @@ export default function ImmersiveComposer({
               {mobileMenuOpen ? (
                 <>
                   <div className="fixed inset-0 z-30" onClick={() => setMobileMenuOpen(false)} aria-hidden />
-                  <div className="absolute bottom-full right-0 z-40 mb-2 w-44 overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] py-1 shadow-[0_16px_40px_rgba(15,23,42,0.16)]">
+                  <div className="absolute bottom-full right-0 z-40 mb-2 w-44 overflow-hidden rounded-[16px] border border-[var(--border-subtle)] studio-popover-glass py-1 shadow-[0_16px_40px_rgba(15,23,42,0.16)]">
                     {/* 设置入口二选一：当前是计划文档显示「计划设置」，否则是章节显示「章节设置」 */}
                     {activePlanId ? (
                       <button

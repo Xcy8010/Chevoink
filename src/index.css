@@ -4,6 +4,21 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Floating surfaces keep their text opaque and soften only the canvas beneath them. */
+:is(.studio-popover-glass, .studio-rail-card, .studio-rail-tip, .studio-floating-menu) {
+  background-color: var(--studio-popover-tint, var(--studio-card-bg, var(--surface-elevated)));
+  background-color: color-mix(in srgb, var(--studio-popover-tint, var(--studio-card-bg, var(--surface-elevated))) var(--studio-popover-opacity, 90%), transparent);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  :is(.studio-popover-glass, .studio-rail-card, .studio-rail-tip, .studio-floating-menu) {
+    background-color: var(--studio-popover-tint, var(--studio-card-bg, var(--surface-elevated)));
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
 /* 全页状态自带短标题；不再叠加路由的说明性页头。 */
 .app-main-content:has(> [data-app-state]:not([data-compact='true'])) > .app-route-heading { display: none; }
 .app-main-content:has(> [data-app-state]:not([data-compact='true'])) { min-height: 100%; display: flex; flex-direction: column; }
@@ -1244,7 +1259,6 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
   overflow: hidden;
   border: 0;
   border-radius: 24px 24px 0 0;
-  background: var(--surface-elevated);
   color: var(--text-primary);
   box-shadow: 0 -12px 48px rgb(0 0 0 / 18%);
 }

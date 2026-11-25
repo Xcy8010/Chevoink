@@ -265,14 +265,15 @@ describe.runIf(available)('admin dynamic catalog and independent public beta on 
     await Promise.all([stop, rollover])
     expect((await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).dailyUsedMilli).toBe(2000)
   }))
-  it('signup/invite keeps initial allowance and bonus while the inviter frozen window does not roll over', async () => fixture(async f => {
+  it('signup records a pending invite while neither balance nor the frozen inviter window changes', async () => fixture(async f => {
     await expiredAccount(f.userId)
     const code = ('BETA' + f.userId.replace(/-/g, '').slice(0, 8)).toUpperCase()
     await prisma.referralCode.create({ data: { userId: f.userId, code } })
     await setPublicBetaEnabled(f.adminId, false, 0)
     await prisma.$transaction(tx => initializeNewUserCredits(tx, f.adminId, code))
-    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.adminId } })).toMatchObject({ dailyAllowanceMilli: 450000, bonusBalanceMilli: 120000, suspendedAt: null })
-    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toMatchObject({ dailyUsedMilli: 2000, bonusBalanceMilli: 303000 })
+    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.adminId } })).toMatchObject({ dailyAllowanceMilli: 450000, bonusBalanceMilli: 0, suspendedAt: null })
+    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toMatchObject({ dailyUsedMilli: 2000, bonusBalanceMilli: 3000 })
+    expect(await prisma.referralRedemption.findUniqueOrThrow({ where: { inviteeUserId: f.adminId } })).toMatchObject({ rewardStatus: 'pending' })
   }))
   it('anonymous policy returns only public fields without initializing accounts or allowing mutation', async () => fixture(async () => {
     const count = await prisma.creditAccount.count(), auditCount = await prisma.adminAuditLog.count()

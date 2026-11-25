@@ -141,16 +141,25 @@ async function ensureAllPublicBetaAccounts(tx: Prisma.TransactionClient) {
       skipDuplicates: true,
     })
   }
-  if (setting.publicBetaEnabled) await tx.creditAccount.updateMany({
-    where: { periodEndsAt: { lte: now } },
-    data: {
-      dailyAllowanceMilli: setting.dailyAllowanceMilli,
-      dailyUsedMilli: 0,
-      periodStartedAt: window.startedAt,
-      periodEndsAt: window.endsAt,
-    },
-  })
+  if (setting.publicBetaEnabled) await resetCreditWindows(tx, { periodEndsAt: { lte: now } }, setting.dailyAllowanceMilli, window)
   return setting
+}
+
+async function resetCreditWindows(
+  tx: Prisma.TransactionClient, scope: Prisma.CreditAccountWhereInput, dailyAllowanceMilli: number,
+  window: ReturnType<typeof getCreditWindow>,
+) {
+  for (const freeDailyWithheld of [false, true]) {
+    await tx.creditAccount.updateMany({
+      where: { ...scope, freeDailyWithheld },
+      data: {
+        dailyUsedMilli: 0,
+        dailyAllowanceMilli: freeDailyWithheld ? 0 : dailyAllowanceMilli,
+        periodStartedAt: window.startedAt,
+        periodEndsAt: window.endsAt,
+      },
+    })
+  }
 }
 
 export async function getAdminCreditsManagement(search?: string, paging: { page?: number; pageSize?: number } = {}): Promise<AdminCreditsManagementPayload> {
@@ -171,10 +180,7 @@ export async function resetAdminUsersCredits(userIds: string[], adminId: string,
     const setting = await tx.creditSystemSetting.findUnique({ where: { id: 'global' } })
     const window = getCreditWindow(new Date(), setting?.resetHourUtc8 ?? 15)
     const accounts = await tx.creditAccount.findMany({ where: { userId: { in: normalized } }, select: { userId: true, dailyUsedMilli: true } })
-    await tx.creditAccount.updateMany({
-      where: { userId: { in: normalized } },
-      data: { dailyUsedMilli: 0, dailyAllowanceMilli: setting?.dailyAllowanceMilli ?? 450_000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt },
-    })
+    await resetCreditWindows(tx, { userId: { in: normalized } }, setting?.dailyAllowanceMilli ?? 450_000, window)
     const charged = accounts.filter((account) => account.dailyUsedMilli > 0)
     if (charged.length > 0) {
       await tx.creditLedgerEntry.createMany({ data: charged.map((account) => ({
@@ -214,7 +220,7 @@ export async function resetAllAdminCredits(adminId: string, requestKey: string =
     const currentSetting = await tx.creditSystemSetting.findUniqueOrThrow({ where: { id: 'global' } })
     const accounts = await tx.creditAccount.findMany({ select: { userId: true, dailyUsedMilli: true } })
     const window = getCreditWindow(new Date(), currentSetting.resetHourUtc8)
-    await tx.creditAccount.updateMany({ data: { dailyUsedMilli: 0, dailyAllowanceMilli: currentSetting.dailyAllowanceMilli, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    await resetCreditWindows(tx, {}, currentSetting.dailyAllowanceMilli, window)
     const chargedAccounts = accounts.filter((account) => account.dailyUsedMilli > 0)
     if (chargedAccounts.length > 0) {
       await tx.creditLedgerEntry.createMany({

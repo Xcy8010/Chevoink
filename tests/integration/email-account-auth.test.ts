@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto'
+import { createHmac, randomInt, randomUUID } from 'node:crypto'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import app from '../../api/app.js'
@@ -9,6 +9,9 @@ import { buildSessionTokens } from '../../api/lib/auth-session.js'
 import { sendAccountEmailCode } from '../../api/lib/email-verification.js'
 import { hashPassword } from '../../api/lib/password.js'
 import { prisma } from '../../api/lib/prisma.js'
+import { consumeCredits, ensureCreditAccount, getReferralPayload } from '../../api/lib/credits.js'
+import { settleReadyReferralRewards } from '../../api/lib/credit-referral-settlement.js'
+import { bindAdminPhoneData } from '../../api/lib/data-access.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 import { integrationLegalConsent } from '../support/legal-consent.js'
 import { openReservedAdminFixture } from '../support/reserved-admin-database.js'
@@ -168,6 +171,109 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     } finally {
       env.accountEmailAuthEnabled = previouslyEnabled
     }
+  })
+
+  it('waits for a verified delivered reply to reward a referral and keeps the free allowance with its original owner', async () => {
+    const { legalConsent } = await integrationLegalConsent()
+    const signup = async (referralCode?: string) => {
+      const email = recipient()
+      const code = await emailCode('/email/send-code', { email, purpose: 'register' }, email)
+      const response = await api().post(auth + '/email/register').send({ email, code, legalConsent, referralCode })
+      expect(response.status, JSON.stringify(response.body)).toBe(201)
+      return { id: response.body.data.user.id as string, token: response.body.data.tokens.accessToken as string }
+    }
+    const attach = async (owner: { token: string }, phone: string) => {
+      const code = await smsCode('/account/phone/send-code', { phone }, phone, owner.token)
+      const result = await api().post(auth + '/account/phone').set('Cookie', cookie(owner.token)).send({ phone, code })
+      expect(result.status, JSON.stringify(result.body)).toBe(200)
+    }
+    const inviteState = (id: string) => prisma.referralRedemption.findUniqueOrThrow({ where: { inviteeUserId: id } })
+    const wallet = (id: string) => prisma.creditAccount.findUniqueOrThrow({ where: { userId: id } })
+    const complete = async (userId: string) => {
+      const novel = await prisma.novel.create({ data: { authorId: userId, title: 'Synthetic referral', slug: randomUUID(), summary: '' } })
+      const session = await prisma.agentSession.create({ data: { userId, novelId: novel.id, title: 'Synthetic conversation' } })
+      const run = await prisma.agentRun.create({ data: {
+        userId, novelId: novel.id, sessionId: session.id, mode: 'act', action: 'workspaceAgent',
+        agentType: 'writingOrchestrator', status: 'completed', finishedAt: new Date(),
+        messages: { create: { sessionId: session.id, role: 'assistant', parts: [{ type: 'text', text: '  ' }] } },
+      } })
+      return prisma.aiUsageLog.create({ data: {
+        userId, novelId: novel.id, agentRunId: run.id, providerType: 'text', providerMode: 'fixture',
+        modelName: 'fixture', targetType: 'agentRun', targetId: run.id, action: 'workspaceAgent',
+        requestTokens: 120, responseTokens: 42, durationMs: 10, billingStatus: 'pending_usage',
+      } })
+    }
+    const number = () => '+86137' + String(randomInt(100_000_000)).padStart(8, '0')
+    const firstPhone = number()
+    const referrer = await signup()
+    const referral = await getReferralPayload(referrer.id, 'https://example.test')
+    const first = await signup(referral.code)
+    expect(await wallet(first.id)).toMatchObject({ freeDailyWithheld: true, dailyAllowanceMilli: 0, bonusBalanceMilli: 0 })
+    expect(await wallet(referrer.id)).toMatchObject({ bonusBalanceMilli: 0 })
+    await settleReadyReferralRewards()
+    expect((await inviteState(first.id)).rewardStatus).toBe('pending')
+    await attach(first, firstPhone)
+    expect(await wallet(first.id)).toMatchObject({ freeDailyWithheld: false, dailyAllowanceMilli: expect.any(Number), bonusBalanceMilli: 0 })
+    expect((await wallet(first.id)).dailyAllowanceMilli).toBeGreaterThan(0)
+
+    const delivered = await complete(first.id)
+    await settleReadyReferralRewards()
+    expect((await inviteState(first.id)).rewardStatus).toBe('pending')
+    await prisma.agentMessage.updateMany({
+      where: { runId: delivered.agentRunId },
+      data: { parts: [{ type: 'text', text: 'Synthetic response' }] },
+    })
+    await prisma.aiUsageLog.update({ where: { id: delivered.id }, data: { billingStatus: 'exempt' } })
+    await settleReadyReferralRewards()
+    expect((await inviteState(first.id)).rewardStatus).toBe('pending')
+    await prisma.agentMessage.updateMany({
+      where: { runId: delivered.agentRunId },
+      data: { parts: [{ type: 'text', text: '  ' }] },
+    })
+    await prisma.aiUsageLog.update({ where: { id: delivered.id }, data: { billingStatus: 'settled' } })
+    await settleReadyReferralRewards()
+    expect((await inviteState(first.id)).rewardStatus).toBe('pending')
+    await prisma.agentMessage.updateMany({
+      where: { runId: delivered.agentRunId },
+      data: { parts: [{ type: 'text', text: 'Synthetic response' }] },
+    })
+    await Promise.all([settleReadyReferralRewards(), settleReadyReferralRewards()])
+    expect((await inviteState(first.id)).rewardStatus).toBe('credited')
+    expect(await wallet(first.id)).toMatchObject({ bonusBalanceMilli: 120000 })
+    expect(await wallet(referrer.id)).toMatchObject({ bonusBalanceMilli: 300000 })
+    expect(await getReferralPayload(referrer.id, 'https://example.test')).toMatchObject({ successfulInvites: 1, totalEarned: 300 })
+
+    await consumeCredits({ userId: first.id, amountMilli: 2000, kind: 'usage', sourceType: 'fixture', idempotencyKey: randomUUID() })
+    await prisma.user.update({ where: { id: first.id }, data: { role: 'admin' } })
+    const priorOwner = await signup()
+    const released = [number(), number()]
+    await attach(priorOwner, released[0])
+    for (const replacement of [released[1], number()]) {
+      expect(await bindAdminPhoneData(priorOwner.id, replacement)).toEqual({ ok: true })
+    }
+    for (const phone of released) {
+      expect(await bindAdminPhoneData(first.id, phone)).toEqual({ ok: true })
+      expect(await wallet(first.id)).toMatchObject({ freeDailyWithheld: false, dailyUsedMilli: 2000, bonusBalanceMilli: 120000 })
+    }
+
+    const reused = await signup(referral.code)
+    await attach(reused, firstPhone)
+    expect(await wallet(reused.id)).toMatchObject({ freeDailyWithheld: true, dailyAllowanceMilli: 0 })
+    const later = new Date((await wallet(reused.id)).periodEndsAt.getTime() + 1000)
+    expect((await ensureCreditAccount(reused.id, later)).account.dailyAllowanceMilli).toBe(0)
+    await prisma.creditAccount.update({ where: { userId: reused.id }, data: { bonusBalanceMilli: 5000 } })
+    const charge = await consumeCredits({ userId: reused.id, amountMilli: 2000, kind: 'usage', sourceType: 'fixture', idempotencyKey: randomUUID() })
+    expect(charge.chargedMilli).toBe(2000)
+    expect(await wallet(reused.id)).toMatchObject({ dailyUsedMilli: 0, bonusBalanceMilli: 3000 })
+    const secondDelivery = await complete(reused.id)
+    await prisma.agentMessage.updateMany({
+      where: { runId: secondDelivery.agentRunId },
+      data: { parts: [{ type: 'text', text: 'Synthetic response' }] },
+    })
+    await prisma.aiUsageLog.update({ where: { id: secondDelivery.id }, data: { billingStatus: 'settled' } })
+    await settleReadyReferralRewards()
+    expect((await inviteState(reused.id)).rewardStatus).toBe('ineligible')
+    expect(await wallet(referrer.id)).toMatchObject({ bonusBalanceMilli: 300000 })
   })
 
   it('requires server captcha, isolates purposes and consumes a registration code exactly once', async () => {

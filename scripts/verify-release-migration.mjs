@@ -48,6 +48,9 @@ export const directedEmailMigrations = [
   ['20261125060000_admin_return_reward', 'e3f77652b8b1e32b538e4df3d4321986d15af483433db5e4ecab48acfd056209'],
 ]
 const directedEmailCandidateSchema = 'a55d3ee026715ce5c32cf9f46c2ddeb0be30e48d816af2f46d9a5577900dbee6'
+export const verifiedCreditMigrationName = '20261126010000_verified_credit_entitlements'
+export const verifiedCreditMigrationChecksum = 'c3aa054fed8e9418c8e3db00bf539c50942f62680ad0931507d95ee5640e58ea'
+const verifiedCreditCandidateSchema = 'ff346a3d5845f97654b27000ee0028deef8d35057276f89aaf27df2bf09f1dcc'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -73,10 +76,12 @@ reviewed.set(personalizationRulesMigrationName, personalizationRulesMigrationChe
 reviewed.set(personalizationRuleTextsMigrationName, personalizationRuleTextsMigrationChecksum)
 reviewed.set(deviceSessionsMigrationName, deviceSessionsMigrationChecksum)
 reviewed.set(directedEmailPlan, createHash('sha256').update(JSON.stringify(directedEmailMigrations)).digest('hex'))
+reviewed.set(verifiedCreditMigrationName, verifiedCreditMigrationChecksum)
 reviewed.set(storyProfilesMigrationName, storyProfilesMigrationChecksum)
 const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName, personalizationRuleTextsMigrationName, storyProfilesMigrationName, deviceSessionsMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 fullHistoryPlans.add(directedEmailPlan)
+fullHistoryPlans.add(verifiedCreditMigrationName)
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
 const newDeclaration = '@@unique([reportId, source, signal, startOffset, endOffset, evidenceHash], map: "quality_findings_report_source_signal_span_key")'
@@ -99,6 +104,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const verifiedCreditTarget = `${verifiedCreditMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === directedEmailCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === verifiedCreditCandidateSchema
+    && !oldFiles.some(([name]) => name === verifiedCreditTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== verifiedCreditTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === verifiedCreditTarget)?.[1] === verifiedCreditMigrationChecksum) return verifiedCreditMigrationName
   const emailTargets = new Map(directedEmailMigrations.map(([name, hash]) => [`${name}/migration.sql`, hash]))
   if (digest(previous.replaceAll('\r\n', '\n')) === deviceSessionsCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === directedEmailCandidateSchema
@@ -922,6 +933,85 @@ export async function readDirectedEmailCatalog(tx, phase) {
   return { tables, types, indexes }
 }
 
+const creditIdentityTable = 'credit_phone_identities'
+const creditKeyTable = 'credit_phone_keys'
+const creditReferralIndex = 'referral_rewards_queue_idx'
+const creditReferralConstraint = 'referral_reward_status_check'
+
+export async function readVerifiedCreditCatalog(tx, phase) {
+  const columns = await tx.$queryRaw`SELECT c.relname::text AS "table", a.attname::text AS name, format_type(a.atttypid,a.atttypmod) AS type,
+    a.attnotnull AS required, pg_get_expr(d.adbin,d.adrelid) AS "defaultValue"
+    FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+    WHERE n.nspname=current_schema() AND a.attnum>0 AND NOT a.attisdropped
+      AND ((c.relname='credit_accounts' AND a.attname='free_daily_withheld')
+        OR (c.relname='referral_redemptions' AND a.attname='reward_status'))`
+  const referralIndexes = await tx.$queryRaw`SELECT c.relname::text AS name, c.relkind::text AS kind, t.relname::text AS "table",
+    pg_get_indexdef(c.oid) AS definition, i.indisvalid AS valid, i.indisready AS ready
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_index i ON i.indexrelid=c.oid
+    LEFT JOIN pg_class t ON t.oid=i.indrelid
+    WHERE n.nspname=current_schema() AND c.relname=${creditReferralIndex}`
+  const referralConstraints = await tx.$queryRaw`SELECT k.conname::text AS name, k.contype::text AS kind,
+    pg_get_constraintdef(k.oid) AS definition, k.convalidated AS valid
+    FROM pg_constraint k JOIN pg_class t ON t.oid=k.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname=current_schema() AND t.relname='referral_redemptions' AND k.conname=${creditReferralConstraint}`
+  if (phase === 'before') {
+    const reserved = await tx.$queryRaw`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname=current_schema() AND c.relname IN ('credit_phone_identities_pkey', 'credit_phone_keys_pkey')`
+    if (reserved.length) throw Error('Verified credit identity index names already exist')
+  }
+  const identities = await readAddedTableState(tx, phase, creditIdentityTable)
+  const key = await readAddedTableState(tx, phase, creditKeyTable)
+  return { columns, referralIndexes, referralConstraints, identities, key }
+}
+
+export function assertVerifiedCreditCatalog(state, phase, before, schema = 'public') {
+  const table = (name, key, columns, state) => ({
+    tables: [{ name, kind: 'r' }],
+    columns: columns.map(([name, type]) => ({ name, type, required: true, defaultValue: null })),
+    indexes: [{
+      name: `${name}_pkey`, unique: true, columns: [key],
+      definition: `CREATE UNIQUE INDEX ${name}_pkey ON ${schema}.${name} USING btree (${key})`,
+      valid: true, ready: true, partial: false, expression: false,
+    }],
+    constraints: [
+      { name: `${name}_pkey`, kind: 'p', definition: `PRIMARY KEY (${key})`, valid: true },
+      // PG18 materializes NOT NULL in pg_constraint as well as pg_attribute.
+      ...(state.constraints.some(row => row.kind === 'n') ? columns.map(([column]) => ({
+        name: `${name}_${column}_not_null`, kind: 'n', definition: `NOT NULL ${column}`, valid: true,
+      })) : []),
+    ],
+    rowCount: 0,
+  })
+  assertAddedTableState(state.identities, phase, before?.identities,
+    table(creditIdentityTable, 'phone_digest', [['phone_digest', 'character(64)'], ['owner_user_id', 'character varying(64)']], state.identities),
+    'Verified credit identities')
+  assertAddedTableState(state.key, phase, before?.key,
+    table(creditKeyTable, 'id', [['id', 'character varying(16)'], ['ciphertext', 'text']], state.key), 'Verified credit key')
+  if (phase === 'before') {
+    if (state.columns.length || state.referralIndexes.length || state.referralConstraints.length) throw Error('Verified credit catalog objects already exist')
+    return
+  }
+  assertVerifiedCreditCatalog(before, 'before', undefined, schema)
+  const columns = [
+    { table: 'credit_accounts', name: 'free_daily_withheld', type: 'boolean', required: true, defaultValue: 'false' },
+    { table: 'referral_redemptions', name: 'reward_status', type: 'character varying(16)', required: true, defaultValue: "'credited'::character varying" },
+  ]
+  const indexes = [{
+    name: creditReferralIndex, kind: 'i', table: 'referral_redemptions',
+    definition: `CREATE INDEX ${creditReferralIndex} ON ${schema}.referral_redemptions USING btree (reward_status, created_at, id)`,
+    valid: true, ready: true,
+  }]
+  const constraints = [{
+    name: creditReferralConstraint, kind: 'c',
+    definition: "CHECK (((reward_status)::text = ANY ((ARRAY['pending'::character varying, 'credited'::character varying, 'ineligible'::character varying])::text[])))",
+    valid: true,
+  }]
+  if (!sameRows(state.columns, columns) || !sameRows(state.referralIndexes, indexes) || !sameRows(state.referralConstraints, constraints)) {
+    throw Error('Verified credit catalog additions mismatch')
+  }
+}
+
 async function main() {
   const [phase, candidate, baseline, receipt] = process.argv.slice(2)
   const plan = releaseMigrationPlan(candidate, baseline)
@@ -955,6 +1045,11 @@ async function main() {
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
       if (plan === directedEmailPlan) {
         const catalog = await readDirectedEmailCatalog(tx, phase)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, catalog }
+      }
+      if (plan === verifiedCreditMigrationName) {
+        const catalog = await readVerifiedCreditCatalog(tx, phase)
+        assertVerifiedCreditCatalog(catalog, phase, before?.catalog)
         return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, catalog }
       }
       if (plan === deviceSessionsMigrationName) {

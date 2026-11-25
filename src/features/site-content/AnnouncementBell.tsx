@@ -200,7 +200,7 @@ function InboxDialog(props: InboxDialogProps) {
     data-phase={phase}
     {...studioInert(covered)}
     className={cn(
-      'site-announcement-inbox',
+      'site-announcement-inbox studio-popover-glass',
       !isHistory && props.placement === 'studio-mobile' && 'site-announcement-inbox--mobile',
       !isHistory && props.placement === 'studio-rail' && 'site-announcement-inbox--rail studio-workspace',
       isHistory && 'site-announcement-inbox--history',

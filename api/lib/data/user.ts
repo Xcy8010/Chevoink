@@ -874,7 +874,7 @@ async function createRegisteredUser(
     adminId: user.id, action: 'registration.legal_consent', targetType: 'user', targetId: user.id,
     detail: { versions, acceptedAt: acceptedAt.toISOString() },
   } })
-  await initializeNewUserCredits(tx, user.id, input.referralCode)
+  await initializeNewUserCredits(tx, user.id, input.referralCode, user.phoneVerifiedAt ? user.phone : null)
   return user
 }
 

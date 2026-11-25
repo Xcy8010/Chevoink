@@ -4,6 +4,9 @@
  * 本文件为 api/lib/data-access.ts 桶文件的重导出源，禁止绕过桶文件新增消费者。
  */
 import { presentTesterIdentity } from '../tester-entitlement.js'
+import { creditTransaction } from '../credit-policy.js'
+import { claimCreditPhone } from '../credit-phone-identity.js'
+import { updateCreditPhoneEligibility } from '../credits.js'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import type {
@@ -325,16 +328,22 @@ export async function bindAdminPhoneData(
   adminId: string,
   phone: string,
 ): Promise<{ ok: boolean; reason?: 'taken' }> {
-  const occupied = await prisma.user.findFirst({
-    where: { phone, id: { not: adminId } },
-    select: { id: true },
+  return creditTransaction(async tx => {
+    const occupied = await tx.user.findFirst({ where: { phone, id: { not: adminId } }, select: { id: true } })
+    if (occupied) return { ok: false, reason: 'taken' }
+    const admin = await tx.user.findUniqueOrThrow({
+      where: { id: adminId }, select: { phone: true, phoneVerifiedAt: true },
+    })
+    // Persist the old identity before releasing it, including for pre-migration users.
+    if (admin.phone && admin.phoneVerifiedAt) await claimCreditPhone(tx, adminId, admin.phone)
+    const wallet = await tx.creditAccount.findUnique({
+      where: { userId: adminId }, select: { freeDailyWithheld: true },
+    })
+    const retainsEligibility = Boolean(admin.phoneVerifiedAt && !wallet?.freeDailyWithheld)
+    await tx.user.update({ where: { id: adminId }, data: { phone, phoneVerifiedAt: new Date() } })
+    await updateCreditPhoneEligibility(tx, adminId, phone, retainsEligibility)
+    return { ok: true }
   })
-  if (occupied) {
-    return { ok: false, reason: 'taken' }
-  }
-
-  await prisma.user.update({ where: { id: adminId }, data: { phone, phoneVerifiedAt: new Date() } })
-  return { ok: true }
 }
 
 

@@ -115,7 +115,7 @@ function ActivityPopover({ anchor, open, label, behindQuestion, onClose, onEnter
   if (!open && !retained) return null
   // Portals opened beside a question sit below the floating footer (z-index 80).
   return createPortal(<div ref={popup} role="dialog" tabIndex={-1} aria-hidden={!open} {...(!open ? { inert: '' } : {})} aria-label={label} onPointerEnter={onEnter} onPointerDown={onEnter} onPointerLeave={event => { if (!event.pointerType || event.pointerType === 'mouse') onLeave?.() }}
-    className={cn('studio-workspace touch-pan-y overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] text-[var(--text-primary)] shadow-xl animate-[studio-change-reveal_160ms_ease-out] motion-reduce:animate-none', behindQuestion ? 'z-[70]' : 'z-[110]')}
+    className={cn('studio-workspace studio-popover-glass touch-pan-y overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] text-[var(--text-primary)] shadow-xl animate-[studio-change-reveal_160ms_ease-out] motion-reduce:animate-none', behindQuestion ? 'z-[70]' : 'z-[110]')}
     style={{ opacity: open ? 1 : 0, pointerEvents: open ? undefined : 'none', transition: 'opacity 160ms ease-out', position: 'fixed', left: position.left, top: position.top, transform: position.above ? 'translateY(-100%)' : undefined, width: position.width, maxHeight: position.height }}>{children}</div>, document.fullscreenElement ?? document.body)
 }
 /** The right task-status card keeps its expanded, vertical lists; capsules belong only above the composer. */

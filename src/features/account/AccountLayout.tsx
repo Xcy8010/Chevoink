@@ -48,7 +48,7 @@ const NAV_CARDS: { id: string; label: string; items: NavCardItem[] }[] = [
     id: 'partner',
     label: '合作',
     items: [
-      { title: '邀请计划', desc: '邀请好友注册，获得长期有效的 Credits', action: 'invite' },
+      { title: '邀请计划', desc: '好友验证手机号并使用平台模型完成首次创作后，双方获得奖励', action: 'invite' },
       { title: '商业合作', desc: '内容授权、品牌联动等商务洽谈入口', external: FEEDBACK_QQ_GROUP_URL },
       { title: '反馈与建议', desc: '把使用感受与产品建议直接告诉我们', action: 'feedback', kind: 'suggestion' },
     ],

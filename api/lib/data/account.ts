@@ -9,6 +9,8 @@ import { normalizeAccountPhoneNumber } from '../phone.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { prepareAuthSmsCode } from '../sms-service.js'
 import { ensureUserExists, toUser } from './internal.js'
+import { creditTransaction } from '../credit-policy.js'
+import { updateCreditPhoneEligibility } from '../credits.js'
 
 type Identity = { email: string } | { phone: string }
 type ProofPurpose = 'reset_password' | 'change_password'
@@ -96,7 +98,7 @@ export async function loginAccountSmsCodeData(phone: string, code: string) {
   assertPreviewAccountAllowed(user)
   const proof = await prepareAuthSmsCode({ phone, code, purpose: 'login', ownerId: user?.id ?? null })
   if (!user || user.bannedAt) throw invalidAccountCode()
-  const updated = await prisma.$transaction(async tx => {
+  const updated = await creditTransaction(async tx => {
     await proof.consume(tx)
     const verified = await tx.user.updateMany({
       where: { id: user.id, phone, bannedAt: null, phoneVerifiedAt: null },
@@ -104,6 +106,7 @@ export async function loginAccountSmsCodeData(phone: string, code: string) {
     })
     const account = await tx.user.findFirst({ where: { id: user.id, phone, bannedAt: null } })
     if (!account || (!verified.count && !account.phoneVerifiedAt)) throw invalidAccountCode()
+    if (verified.count) await updateCreditPhoneEligibility(tx, user.id, phone)
     return account
   })
   return { user: toUser(updated), tokenVersion: user.tokenVersion }
@@ -131,7 +134,7 @@ export async function bindAccountEmailData(userId: string, email: string, code: 
 
 export async function bindAccountPhoneData(userId: string, phone: string, code: string) {
   const proof = await prepareAuthSmsCode({ phone, code, purpose: 'bind_phone', ownerId: userId })
-  const user = await prisma.$transaction(async tx => {
+  const user = await creditTransaction(async tx => {
     await proof.consume(tx)
     const conflict = await tx.user.findFirst({ where: { phone, id: { not: userId } }, select: { id: true } })
     if (conflict) throw new DataAccessError(409, 'AUTH_PHONE_UNAVAILABLE', '暂时无法绑定此手机号。')
@@ -141,6 +144,7 @@ export async function bindAccountPhoneData(userId: string, phone: string, code: 
       data: { phone, phoneVerifiedAt: new Date() },
     })
     if (!updated.count) throw new DataAccessError(409, 'AUTH_PHONE_UNAVAILABLE', '暂时无法绑定此手机号，请刷新后继续。')
+    await updateCreditPhoneEligibility(tx, userId, phone)
     return tx.user.findUniqueOrThrow({ where: { id: userId } })
   })
   return toUser(user)

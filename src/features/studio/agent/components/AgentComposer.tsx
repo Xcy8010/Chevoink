@@ -1071,7 +1071,7 @@ export function AgentComposer({
         role={slashSubmenu ? 'region' : 'listbox'}
         aria-label="工具"
         onKeyDown={event => { if (!event.nativeEvent.isComposing && event.key === 'Escape') { event.preventDefault(); dismissSlashMenu() } }}
-        className="absolute bottom-full left-0 right-0 z-50 mb-2 [--studio-motion-origin:bottom_center] max-h-[min(32rem,60dvh)] overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] py-1 shadow-[0_14px_34px_rgba(15,23,42,0.16)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&_*]:[scrollbar-width:none] [&_*::-webkit-scrollbar]:hidden"
+        className="absolute bottom-full left-0 right-0 z-50 mb-2 [--studio-motion-origin:bottom_center] max-h-[min(32rem,60dvh)] overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] studio-popover-glass py-1 shadow-[0_14px_34px_rgba(15,23,42,0.16)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&_*]:[scrollbar-width:none] [&_*::-webkit-scrollbar]:hidden"
       >{renderToolMenu(true)}</div> : null}</StudioPresence>
       {dragActive ? <div className="pointer-events-none absolute inset-1 z-20 flex items-center justify-center rounded-[16px] bg-[var(--surface-default)]/95 text-xs font-medium text-[var(--text-primary)]">松开即可添加引用、图片或文件</div> : null}
       {publicSearch ? <div className="mb-2 flex items-center gap-2 rounded-md border border-[var(--border-subtle)] px-2">
@@ -1242,7 +1242,7 @@ export function AgentComposer({
             >
               <Plus className="h-4 w-4 transition-transform group-open/attach:rotate-45" />
             </summary>
-            <div className="absolute bottom-full left-0 z-50 mb-2 max-h-[min(32rem,60dvh)] w-64 overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] py-1 shadow-[0_14px_34px_rgba(15,23,42,0.16)]">
+            <div className="absolute bottom-full left-0 z-50 mb-2 max-h-[min(32rem,60dvh)] w-64 overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] studio-popover-glass py-1 shadow-[0_14px_34px_rgba(15,23,42,0.16)]">
               {renderToolMenu(false)}
             </div>
           </details>
@@ -1257,7 +1257,7 @@ export function AgentComposer({
               <span className="max-w-16 truncate mobile:hidden">{CREATIVE_MODES.find((item) => item.value === creativeFreedom)?.label}</span>
               <ChevronDown className="h-3 w-3 transition-transform group-open/mode:rotate-180" />
             </summary>
-            <div className="absolute bottom-full left-0 z-50 mb-2 max-h-[60dvh] w-64 overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-[0_14px_34px_rgba(15,23,42,0.16)] motion-safe:origin-bottom-left">
+            <div className="absolute bottom-full left-0 z-50 mb-2 max-h-[60dvh] w-64 overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] studio-popover-glass shadow-[0_14px_34px_rgba(15,23,42,0.16)] motion-safe:origin-bottom-left">
               {CREATIVE_MODES.map((mode) => (
                 <button
                   key={mode.value}
@@ -1268,7 +1268,7 @@ export function AgentComposer({
                     creativeModeRef.current?.removeAttribute('open')
                   }}
                   aria-pressed={mode.value === creativeFreedom}
-                  className={`flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors ${mode.value === creativeFreedom ? 'bg-[var(--surface-muted)]' : 'bg-[var(--surface-default)] hover:bg-[var(--surface-muted)]'}`}
+                  className={`flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors ${mode.value === creativeFreedom ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]'}`}
                 >
                   <mode.icon className={cn('mt-0.5 h-4 w-4 shrink-0', mode.value === 'bold' ? 'text-orange-600 dark:text-orange-400' : 'text-[var(--text-secondary)]')} />
                   <span className="min-w-0"><span className={cn('block text-xs font-medium', mode.value === 'bold' ? 'text-orange-600 dark:text-orange-400' : 'text-[var(--text-primary)]')}>{mode.label}</span><span className="mt-0.5 block text-[11px] leading-4 text-[var(--text-secondary)]">{mode.description}</span></span>
@@ -1302,10 +1302,10 @@ export function AgentComposer({
               </>}
               <ChevronDown className="h-3 w-3 transition-transform group-open/model:rotate-180" />
             </summary>
-            <div className={cn('absolute bottom-full right-0 z-[140] mb-2 w-[248px] overflow-visible rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1.5 shadow-[0_18px_46px_rgba(15,23,42,0.18)] motion-safe:origin-bottom-right', mobileModelsOpen && 'mobile:invisible mobile:pointer-events-none')}>
+            <div className={cn('absolute bottom-full right-0 z-[140] mb-2 w-[248px] overflow-visible rounded-[14px] border border-[var(--border-subtle)] studio-popover-glass p-1.5 shadow-[0_18px_46px_rgba(15,23,42,0.18)] motion-safe:origin-bottom-right', mobileModelsOpen && 'mobile:invisible mobile:pointer-events-none')}>
               <div className="group/models relative">
                 <button type="button" onClick={() => setMobileModelsOpen(true)} className="flex h-9 w-full items-center justify-between rounded-[9px] px-2.5 text-xs hover:bg-[var(--surface-muted)]"><span className="font-medium text-[var(--text-primary)]">模型</span><span className="inline-flex max-w-36 items-center gap-1 truncate text-[var(--text-secondary)]">{activeModelLabel}<ChevronRight className="h-3 w-3" /></span></button>
-                <div className={cn('invisible absolute bottom-0 right-[calc(100%-1px)] z-[150] w-60 translate-x-1 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1.5 opacity-0 shadow-[0_18px_46px_rgba(15,23,42,0.2)] transition-[opacity,transform,visibility] duration-150 ease-out group-hover/models:visible group-hover/models:translate-x-0 group-hover/models:opacity-100 group-focus-within/models:visible group-focus-within/models:translate-x-0 group-focus-within/models:opacity-100 group-has-[[data-model-price-open]]/models:visible group-has-[[data-model-price-open]]/models:translate-x-0 group-has-[[data-model-price-open]]/models:opacity-100 mobile:left-0 mobile:right-0 mobile:w-auto mobile:translate-x-0 mobile:overflow-y-auto mobile:max-h-72 mobile:transition-none mobile:pointer-events-auto', mobileModelsOpen ? 'mobile:visible mobile:opacity-100' : 'mobile:hidden')}>
+                <div className={cn('invisible absolute bottom-0 right-[calc(100%-1px)] z-[150] w-60 translate-x-1 rounded-[14px] border border-[var(--border-subtle)] studio-popover-glass p-1.5 opacity-0 shadow-[0_18px_46px_rgba(15,23,42,0.2)] transition-[opacity,transform,visibility] duration-150 ease-out group-hover/models:visible group-hover/models:translate-x-0 group-hover/models:opacity-100 group-focus-within/models:visible group-focus-within/models:translate-x-0 group-focus-within/models:opacity-100 group-has-[[data-model-price-open]]/models:visible group-has-[[data-model-price-open]]/models:translate-x-0 group-has-[[data-model-price-open]]/models:opacity-100 mobile:left-0 mobile:right-0 mobile:w-auto mobile:translate-x-0 mobile:overflow-y-auto mobile:max-h-72 mobile:transition-none mobile:pointer-events-auto', mobileModelsOpen ? 'mobile:visible mobile:opacity-100' : 'mobile:hidden')}>
                   <button type="button" onClick={(event) => { event.currentTarget.blur(); setMobileModelsOpen(false) }} className="mb-1 hidden h-8 w-full items-center gap-1.5 rounded-[8px] px-2 text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] mobile:flex" aria-label="返回模型菜单"><ChevronRight className="h-3.5 w-3.5 rotate-180" />返回</button>
                   <p className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--text-tertiary)]">可用内置模型</p>
                   {modelOptions.filter(option => option.available).map(option => {

@@ -48,7 +48,7 @@ export default function StudioMobileAccountCard() {
         </span>
         <ChevronRight aria-hidden="true" className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
       </summary>
-      <div className="absolute inset-x-3 bottom-full z-10 mb-2 rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3 shadow-xl">
+      <div className="absolute inset-x-3 bottom-full z-10 mb-2 rounded-[16px] border border-[var(--border-subtle)] studio-popover-glass p-3 shadow-xl">
       <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium text-[var(--text-primary)]">账户与用量</p>

@@ -8,6 +8,7 @@ import { dispatchQueuedRequests } from './lib/agent/request-queue.js'
 import { dispatchAgentGoals } from './lib/agent/goal-supervisor.js'
 import { reconcileGoalUsage } from './lib/agent/goal-budget.js'
 import { reconcileCreditRefunds, reconcileTokenSettlements } from './lib/credits.js'
+import { settleReadyReferralRewards } from './lib/credit-referral-settlement.js'
 import { recoverNovelImportJobs } from './lib/novel-import-service.js'
 import { isNovelImportMaintenanceEnabled, maintainNovelImports } from './lib/novel-import-maintenance.js'
 import { drainNovelImportEffects } from './lib/novel-import-effects.js'
@@ -44,7 +45,7 @@ function recoverSavedTasks() {
   void recoverStaleLoopRuns()
   if (!refundSweepRunning) {
     refundSweepRunning = true
-    void Promise.allSettled([reconcileCreditRefunds(), reconcileTokenSettlements(), reconcileGoalUsage()]).then(results => {
+    void Promise.allSettled([reconcileCreditRefunds(), reconcileTokenSettlements(), reconcileGoalUsage(), settleReadyReferralRewards()]).then(results => {
       if (results.some(result => result.status === 'rejected')) console.error('[credits] 费用对账扫描暂时失败，持久记录保留')
     }).finally(() => { refundSweepRunning = false })
   }

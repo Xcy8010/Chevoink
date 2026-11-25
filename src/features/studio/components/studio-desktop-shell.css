@@ -82,20 +82,17 @@ html[data-desktop-frame="studio"] .desktop-caption {
   position: fixed;
   z-index: 1;
   border: 1px solid var(--border-strong);
-  background: var(--studio-card-bg, var(--surface-elevated));
   color: var(--text-primary);
   box-shadow: 0 10px 36px rgb(0 0 0 / 18%);
 }
 .studio-rail-tip { transform: translateY(-50%); display: grid; gap: 2px; padding: 5px 10px; border-radius: 8px; font-size: 12px; white-space: nowrap; pointer-events: none; }
 .studio-rail-card, .studio-floating-menu {
   border-color: color-mix(in srgb, var(--text-primary) 9%, transparent);
-  background: color-mix(in srgb, var(--studio-card-bg, var(--surface-elevated)) 92%, transparent);
-  backdrop-filter: blur(1px);
 }
 .studio-novel-actions { max-height: calc(100dvh - 64px); }
 .studio-document-picker {
   max-height: min(27rem, calc(100dvh - 64px));
-  background: color-mix(in srgb, var(--studio-card-bg, var(--surface-elevated)) 96%, transparent);
+  --studio-popover-opacity: 94%;
 }
 .studio-novel-actions button[aria-expanded="true"], .studio-document-picker button:is(:hover, :focus-visible) {
   background: color-mix(in srgb, var(--text-primary) 10%, transparent);

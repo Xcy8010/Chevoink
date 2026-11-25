@@ -38,6 +38,30 @@ it('preserves the persistent more-button focus before opening import', () => {
   expect(screen.queryByRole('button', { name: '一键导入' })).toBeNull()
 })
 
+it('toggles the same novel menu and switches directly to a different novel', () => {
+  render(<Fixture />)
+  const [first, second] = screen.getAllByRole('button', { name: '作品更多操作' })
+  const press = (button: HTMLElement) => {
+    fireEvent.pointerDown(button)
+    fireEvent.click(button)
+  }
+
+  press(first)
+  expect(first.getAttribute('aria-expanded')).toBe('true')
+  expect(screen.getByRole('group', { name: '作品A的操作' }).id).toBe(first.getAttribute('aria-controls'))
+  press(first)
+  expect(first.getAttribute('aria-expanded')).toBe('false')
+  expect(screen.queryByRole('group', { name: '作品A的操作' })).toBeNull()
+
+  press(first)
+  press(second)
+  expect(first.getAttribute('aria-expanded')).toBe('false')
+  expect(second.getAttribute('aria-expanded')).toBe('true')
+  expect(screen.getByRole('group', { name: '作品B的操作' })).toBeTruthy()
+  fireEvent.pointerDown(document.body)
+  expect(screen.queryByRole('group', { name: '作品B的操作' })).toBeNull()
+})
+
 it('preserves the novel row focus when import is opened from right click', () => {
   const onImportNovel = vi.fn()
   render(<Fixture onImportNovel={onImportNovel} />)

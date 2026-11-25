@@ -1271,6 +1271,7 @@ model CreditAccount {
   userId              String    @id @map("user_id") @db.VarChar(64)
   dailyAllowanceMilli Int       @default(450000) @map("daily_allowance_milli")
   dailyUsedMilli      Int       @default(0) @map("daily_used_milli")
+  freeDailyWithheld   Boolean   @default(false) @map("free_daily_withheld")
   bonusBalanceMilli   Int       @default(0) @map("bonus_balance_milli")
   periodStartedAt     DateTime  @map("period_started_at")
   periodEndsAt        DateTime  @map("period_ends_at")
@@ -1282,6 +1283,23 @@ model CreditAccount {
   @@index([periodEndsAt])
   @@index([suspendedAt])
   @@map("credit_accounts")
+}
+
+/// Retains the original free entitlement owner after a verified number is released.
+/// No FK to User: account removal must not grant a fresh benefit for the same number.
+model CreditPhoneIdentity {
+  phoneDigest     String @id @map("phone_digest") @db.Char(64)
+  ownerUserId     String @map("owner_user_id") @db.VarChar(64)
+
+  @@map("credit_phone_identities")
+}
+
+/// Random, persistent key wrapped by the application's existing secret encryption.
+model CreditPhoneKey {
+  id         String @id @db.VarChar(16)
+  ciphertext String @db.Text
+
+  @@map("credit_phone_keys")
 }
 
 /// 额度不可变账本：消费为负，邀请/管理员补发为正；idempotencyKey 防止网络重试重复扣款。
@@ -1372,6 +1390,7 @@ model ReferralRedemption {
   inviteeUserId      String       @unique @map("invitee_user_id") @db.VarChar(64)
   inviterRewardMilli Int          @default(300000) @map("inviter_reward_milli")
   inviteeRewardMilli Int          @default(120000) @map("invitee_reward_milli")
+  rewardStatus       String       @default("credited") @map("reward_status") @db.VarChar(16)
   createdAt          DateTime     @default(now()) @map("created_at")
   referralCode       ReferralCode @relation(fields: [code], references: [code], onDelete: Restrict)
   inviter            User         @relation("ReferralInviter", fields: [inviterUserId], references: [id], onDelete: Cascade)
@@ -1379,6 +1398,7 @@ model ReferralRedemption {
 
   @@index([inviterUserId, createdAt])
   @@index([code])
+  @@index([rewardStatus, createdAt, id], map: "referral_rewards_queue_idx")
   @@map("referral_redemptions")
 }
 

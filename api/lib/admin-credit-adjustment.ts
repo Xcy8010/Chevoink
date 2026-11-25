@@ -44,7 +44,8 @@ export async function adjustAdminBonusCredits(adminId: string, userId: string, i
         const deltaMilli = balance - account.bonusBalanceMilli
         if (deltaMilli < 0) {
           const held = await tx.aiUsageLog.aggregate({ where: { userId, reservedCreditMilli: { gt: 0 }, reservationExpiresAt: { gt: now } }, _sum: { reservedCreditMilli: true } })
-          const dailyRemaining = setting.publicBetaEnabled && account.periodEndsAt <= now ? setting.dailyAllowanceMilli : Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli)
+          const dailyRemaining = account.freeDailyWithheld ? 0 : setting.publicBetaEnabled && account.periodEndsAt <= now
+            ? setting.dailyAllowanceMilli : Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli)
           if (dailyRemaining + balance < (held._sum.reservedCreditMilli ?? 0)) throw new DataAccessError(409, 'CREDIT_BALANCE_RESERVED', '额度已被进行中的调用预留，请稍后再调整。')
         }
         await tx.creditAccount.update({ where: { userId }, data: { bonusBalanceMilli: balance } })

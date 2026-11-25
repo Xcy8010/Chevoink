@@ -30,7 +30,7 @@ export default function AccountPlanPage() {
             </p>
             <p className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400">
               <Megaphone className="h-4 w-4 shrink-0" />
-              邀请好友注册可叠加长期有效的奖励额度，不受每日重置影响。
+              好友完成手机验证并使用平台模型获得有效回复后，双方获得长期有效的奖励额度。
             </p>
           </div>
 
