@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fixture } from '../support/agent-durable-runtime-fixture.js'
+import { createDurableTestLifecycle, DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS } from '../support/durable-test-lifecycle.js'
+import { stopAgentRun } from '../../api/lib/agent/active-runs.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { executeAgentRun } from '../../api/lib/agent/loop.js'
 import { prepareStoryCompilation, saveSceneTasks, recordStoryCompilerWrite } from '../../api/lib/agent/story-compiler.js'
@@ -25,8 +27,11 @@ const finalText = '现金已按正文证据修正为随身390元，家中97元�
 
 // Required PostgreSQL scenario: provider bytes alone are mocked. Registered
 // handlers, reports, original authority, body CAS and terminal commit are real.
-describe('authorized current-report workflow through the real model loop', () => {
-  it.each(['fresh', 'legacy-phase-checkpoint', 'final-advisory'] as const)('%s lets observations drive quality repair, continuity repair, final rechecks and one actual commit', async scenario => fixture(async f => {
+type Scenario = 'fresh' | 'legacy-phase-checkpoint' | 'final-advisory'
+
+function runScenario(scenario: Scenario, signal: AbortSignal) {
+  const lifecycle = createDurableTestLifecycle(signal)
+  return fixture(async f => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Live provider calls are forbidden in this fixture'))
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
@@ -52,6 +57,7 @@ describe('authorized current-report workflow through the real model loop', () =>
     const summary = scenario === 'final-advisory' ? finalText + '最终报告另有一条节奏建议，供作者参考；该建议没有冒充已修复或已明确留置。' : finalText
     vi.spyOn(ai, 'generateTextCompletion').mockImplementation(async (_system, content, options) => {
       try {
+      lifecycle.mockRequest()
       options.signal?.throwIfAborted()
       const current = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       const table = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: current.id, chapterRevision: current.revision }, current.content)
@@ -125,6 +131,7 @@ describe('authorized current-report workflow through the real model loop', () =>
     const calls: Array<{ name: string; args: unknown }> = []
     const chat = vi.spyOn(ai, 'chatWithTools').mockImplementation(async request => {
       try {
+      lifecycle.mockRequest()
       const observations = request.messages.filter(item => item.role === 'tool')
       const last = observations.at(-1)
       let nextCallId: string | undefined
@@ -179,7 +186,15 @@ describe('authorized current-report workflow through the real model loop', () =>
       } catch (error) { modelFailures.push(error); throw error }
     })
     if (scenario !== 'legacy-phase-checkpoint') await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'queued' } })
-    await executeAgentRun({ ...f, chapterId: f.chapterId, mode: 'build', prompt, modelTier: 'speed', creativeFreedom: 'balanced', qualityMode: 'premium', ...resume })
+    await lifecycle.phase('step', async () => {
+      const stop = () => { stopAgentRun(f.runId) }
+      signal.addEventListener('abort', stop, { once: true })
+      try {
+        await executeAgentRun({ ...f, chapterId: f.chapterId, mode: 'build', prompt, modelTier: 'speed', creativeFreedom: 'balanced', qualityMode: 'premium', ...resume })
+      } finally {
+        signal.removeEventListener('abort', stop)
+      }
+    })
     if (modelFailures.length) throw modelFailures[0]
     const current = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     expect(current.revision).toBe(7)
@@ -224,5 +239,12 @@ describe('authorized current-report workflow through the real model loop', () =>
     expect(ledger.reduce((total, row) => total - row.deltaMilli, 0)).toBe(usage.length * 7)
     const messages = await prisma.agentMessage.findMany({ where: { runId: f.runId, role: 'assistant' } })
     expect(messages.some(message => JSON.stringify(message.parts).includes(summary))).toBe(true)
-  }, undefined, prompt, { freezeWriting: true, continuityReportProtocol: 5 }))
+  }, undefined, prompt, { freezeWriting: true, continuityReportProtocol: 5, lifecycle })
+}
+
+describe('authorized current-report workflow through the real model loop', () => {
+  for (const scenario of ['fresh', 'legacy-phase-checkpoint', 'final-advisory'] as const) {
+    it(`${scenario} lets observations drive quality repair, continuity repair, final rechecks and one actual commit`,
+      { timeout: DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS }, ({ signal }) => runScenario(scenario, signal))
+  }
 })
