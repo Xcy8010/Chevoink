@@ -16,7 +16,7 @@ beforeEach(() => {
   mocks.account.mockResolvedValue({ userId: 'author', suspendedAt: null, dailyAllowanceMilli: 50000, dailyUsedMilli: 0, bonusBalanceMilli: 0 })
   const tx = { user: { findFirst: vi.fn(async () => null) }, aiUsageLog: { findFirstOrThrow: mocks.row, update: mocks.update, count: vi.fn(async () => 0),
     aggregate: vi.fn(async () => ({ _sum: { reservedCreditMilli: 18023 } })) }, creditLedgerEntry: { findUnique: mocks.ledger },
-    creditAccount: { upsert: vi.fn(), findUniqueOrThrow: mocks.account } }
+    creditAccount: { upsert: mocks.account } }
   mocks.transaction.mockImplementation(async work => work(tx))
 })
 it('real reserveTokenCredits admits only a scoped authorized pre-dispatch row while retaining other reservations', async () => {

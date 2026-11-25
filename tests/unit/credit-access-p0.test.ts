@@ -8,7 +8,7 @@ vi.mock('../../api/lib/prisma.js', () => {
     appReleaseChannel: { findMany: vi.fn(async () => []) },
     $queryRaw: vi.fn(async () => [{ id: 'global' }]),
     creditSystemSetting: { findUniqueOrThrow: mocks.setting, upsert: mocks.initialize },
-    creditAccount: { upsert: vi.fn(), updateMany: vi.fn(), findUniqueOrThrow: mocks.account },
+    creditAccount: { upsert: mocks.account },
     aiUsageLog: { aggregate: mocks.pending }, aiModelConfig: { findFirst: mocks.model },
   }
   return { DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
