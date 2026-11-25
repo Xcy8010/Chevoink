@@ -43,6 +43,7 @@ it('starts with plans collapsed and groups outlines, details and old plans indep
 
 it('requires reading and an explicit confirmation before adopting a changed parent version', async () => {
   const { props } = settings()
+  expect(screen.getByRole('dialog', { name: '计划设置 · 第21章细纲' })).toBeTruthy()
   const checkbox = screen.getByRole('checkbox') as HTMLInputElement
   expect(checkbox.disabled).toBe(true)
   expect(checkbox.checked).toBe(false)

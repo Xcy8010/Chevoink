@@ -44,8 +44,14 @@ export function useDialogFocusTrap({ panel, open, onClose }: DialogFocusTrapOpti
     }
     focus()
 
+    // A native modal in the browser's top layer owns focus and Escape until it closes.
+    const ownsEvent = (event: Event) => {
+      if (!isTopDialog(currentPanel)) return false
+      const nativeDialog = event.target instanceof Element ? event.target.closest('dialog[open]') : null
+      return !nativeDialog || nativeDialog.contains(currentPanel) || !nativeDialog.matches(':modal')
+    }
     const keydown = (event: KeyboardEvent) => {
-      if (!isTopDialog(currentPanel)) return
+      if (!ownsEvent(event)) return
       if (event.isComposing || event.keyCode === 229) return
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close.current(); return }
       if (event.key !== 'Tab') return
@@ -59,7 +65,7 @@ export function useDialogFocusTrap({ panel, open, onClose }: DialogFocusTrapOpti
       }
     }
     const focusin = (event: FocusEvent) => {
-      if (isTopDialog(currentPanel) && !currentPanel.contains(event.target as Node)) focus()
+      if (ownsEvent(event) && !currentPanel.contains(event.target as Node)) focus()
     }
     document.addEventListener('keydown', keydown, true)
     document.addEventListener('focusin', focusin)

@@ -12,7 +12,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear() })
 const noop = () => undefined
 const novels = [{ id: 'a', title: '作品A', status: 'draft', chapterCount: 1, updatedAt: '2026-09-10' }, { id: 'b', title: '作品B', status: 'draft', chapterCount: 1, updatedAt: '2026-09-09' }] as ComponentProps<typeof StudioWorkspaceSidebar>['novels']
 function Fixture(overrides: Partial<ComponentProps<typeof StudioWorkspaceSidebar>>) {
-  return <StudioWorkspaceSidebar open onOpenChange={noop} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="a" currentTasksNovelId="a" currentNovelTitle="作品A" novels={novels} currentTasks={[]} activeTaskId={null} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskDeleted={noop} onTaskForked={noop} onNovelDeleted={noop} autoFollow={false} onAutoFollowChange={noop} onOpenStudioSettings={noop} onExportNovel={noop} onImportNovel={noop} {...overrides} />
+  return <StudioWorkspaceSidebar open onOpenChange={noop} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="a" currentTasksNovelId="a" currentNovelTitle="作品A" novels={novels} currentTasks={[]} activeTaskId={null} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskDeleted={noop} onTaskForked={noop} onNovelDeleted={noop} onExportNovel={noop} onImportNovel={noop} {...overrides} />
 }
 
 it('exposes import for the current novel only, without capability gating', () => {

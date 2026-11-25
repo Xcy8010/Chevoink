@@ -26,7 +26,7 @@ export function AuthorRequestBubble({ parts, onPreview }: {
           ))}
         </div>
       ) : null}
-      <div className="whitespace-pre-wrap break-words rounded-[20px] bg-[var(--surface-contrast)] px-4 py-3 text-sm leading-7 text-[var(--text-contrast)]">
+      <div className="whitespace-pre-wrap break-words rounded-[20px] bg-[var(--studio-user-bubble,var(--surface-muted))] px-4 py-3 text-sm leading-7 text-[var(--text-primary)]">
         {parts.map(part => part.type === 'text' ? part.text : '').join('')}
       </div>
     </div>

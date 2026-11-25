@@ -39,6 +39,7 @@ it.each(['same', 'changed', 'changed-twice'])('finishes concurrent initial hydra
   const shell = useShellStore.getState()
   expect(shell.authStatus).toBe(mode === 'changed-twice' ? 'unavailable' : 'authenticated')
   expect(shell.sessionUser?.id).toBe(mode === 'changed-twice' ? undefined : 'user-second')
+  expect(client.getQueryData(['community', 'me'])).toEqual(mode === 'changed-twice' ? undefined : me('second'))
   expect(selectedDevice()).toBe(mode === 'changed-twice' ? 'third' : 'second')
   expect(requestJson).toHaveBeenCalledTimes(mode === 'same' ? 1 : 2)
 })

@@ -53,7 +53,7 @@ function Fixture(overrides: Partial<ComponentProps<typeof StudioWorkspaceSidebar
     if (id === activeTaskId) setActiveTaskId(remaining[0]?.id ?? null)
     overrides.onTaskDeleted?.(id)
   }
-  return <StudioWorkspaceSidebar open onOpenChange={noop} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="a" currentTasksNovelId="a" currentNovelTitle="作品A" novels={data ?? novels} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskForked={noop} onNovelDeleted={noop} autoFollow={false} onAutoFollowChange={noop} onOpenStudioSettings={noop} onExportNovel={noop} onImportNovel={noop} {...overrides} currentTasks={currentTasks} activeTaskId={activeTaskId} onTaskDeleted={onTaskDeleted} />
+  return <StudioWorkspaceSidebar open onOpenChange={noop} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="a" currentTasksNovelId="a" currentNovelTitle="作品A" novels={data ?? novels} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskForked={noop} onNovelDeleted={noop} onExportNovel={noop} onImportNovel={noop} {...overrides} currentTasks={currentTasks} activeTaskId={activeTaskId} onTaskDeleted={onTaskDeleted} />
 }
 
 const navigationKey = ['agent', 'sessions', 'workspace-navigation']

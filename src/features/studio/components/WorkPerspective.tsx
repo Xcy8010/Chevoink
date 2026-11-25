@@ -9,7 +9,7 @@ import { useWorkSplitMotion } from './use-work-split-motion'
 import { WORK_OPEN_DOCUMENT } from './work-viewer-events'
 
 type Props = {
-  conversationRail: ReactNode; conversation: ReactNode; activityDock?: ReactNode
+  conversationRail: ReactNode; conversation: ReactNode; activityDock?: ReactNode; activityDockId?: string; activityDockExpanded?: boolean
   inspector: ReactNode; viewer?: ReactNode; viewerIdentity?: string | null; scopeKey?: string
   rightOpen: boolean; inspectorWidth: number; viewerWidth: number
   onToggleRight: () => void; inspectorTab: WorkInspectorTab; onSelectInspectorTab: (tab: WorkInspectorTab) => void
@@ -32,7 +32,7 @@ function restoreSplit(scope: string | undefined, fallback: WorkSplit): WorkSplit
 }
 type Gesture = WorkSplitGesture & { pointer: number }
 
-export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
+export default function WorkPerspective({ conversationRail, conversation, activityDock, activityDockId, activityDockExpanded = true, inspector, viewer, scopeKey, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
   const root = useRef<HTMLDivElement>(null)
   const contentHandle = useRef<HTMLDivElement>(null)
   const restoreSeparatorFocus = useRef(false)
@@ -57,7 +57,9 @@ export default function WorkPerspective({ conversationRail, conversation, activi
     restoreSeparatorFocus.current = false
     contentHandle.current?.focus()
   }, [viewerOpen])
-  const dockVisible = !geometry.chatCollapsed && shouldShowWorkActivityDock({ containerWidth: width, leftWidth: geometry.rail, rightWidth: geometry.inspector, hasActivity: Boolean(activityDock), hasViewer: viewerOpen })
+  const dockFits = !geometry.chatCollapsed && shouldShowWorkActivityDock({ containerWidth: width, leftWidth: geometry.rail, rightWidth: geometry.inspector, hasActivity: Boolean(activityDock), hasViewer: viewerOpen })
+  const dockVisible = dockFits && activityDockExpanded
+  const dockState = dockFits ? (dockVisible ? 'expanded' : 'collapsed') : undefined
   const motion = useWorkSplitMotion({ rail: geometry.rail, chat: geometry.chat, viewer: viewerOpen ? geometry.viewer : 0, inspector: geometry.inspector, dock: dockVisible ? WORK_ACTIVITY_DOCK_WIDTH : 0 }, `${geometry.chatCollapsed}:${viewerOpen}:${inspectorOpen}:${dockVisible}`)
   const update = useCallback((value: WorkSplit) => {
     splitRef.current = value; setSplit(value)
@@ -66,7 +68,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
     }
   }, [])
   const expand = useCallback(() => update({ ...splitRef.current, chatCollapsed: false, viewerCollapsed: true, inspectorCollapsed: true }), [update])
-  const context = useMemo(() => ({ collapsed: geometry.chatCollapsed, expand }), [geometry.chatCollapsed, expand])
+  const context = useMemo(() => ({ collapsed: geometry.chatCollapsed, expand, activityDock: dockState } as const), [geometry.chatCollapsed, expand, dockState])
   useEffect(() => {
     const openDocument = (event: Event) => {
       if (!scopeKey || (event as CustomEvent<{ scope?: string }>).detail?.scope !== scopeKey) return
@@ -144,10 +146,10 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       if (rightOpen) onToggleRight()
     }
   }
-  const separator = (boundary: 'content' | 'inspector', left: number, label: string) => <div
+  const separator = (boundary: 'content' | 'inspector', right: number, label: string) => <div
     ref={boundary === 'content' ? contentHandle : undefined}
-    role="separator" aria-orientation="vertical" aria-label={label} aria-valuenow={Math.round(left)} aria-valuemin={0} aria-valuemax={Math.round(width)} tabIndex={0}
-    className="work-split-handle absolute inset-y-0 z-50 w-2 -translate-x-1/2 cursor-col-resize touch-none hover:bg-[var(--border-strong)] focus-visible:bg-[var(--border-strong)] focus-visible:outline-none" style={{ left: Math.max(4, Math.min((width || 1600) - 4, left)) }}
+    role="separator" aria-orientation="vertical" aria-label={label} aria-valuenow={Math.max(0, Math.round(width - right))} aria-valuemin={0} aria-valuemax={Math.round(width)} tabIndex={0}
+    className="work-split-handle absolute inset-y-0 z-50 w-2 translate-x-1/2 cursor-col-resize touch-none hover:bg-[var(--border-strong)] focus-visible:bg-[var(--border-strong)] focus-visible:outline-none" style={{ right: `clamp(4px, ${right}px, calc(100% - 4px))` }}
     onPointerDown={event => {
       if (event.button !== 0 || !root.current) return
       event.preventDefault()
@@ -192,19 +194,21 @@ export default function WorkPerspective({ conversationRail, conversation, activi
     }} onPointerCancel={finish} onLostPointerCapture={() => { if (drag.current) finish() }}>
     <aside className="work-split-column h-full shrink-0 overflow-hidden" style={{ width: motion.rail }} aria-hidden={geometry.chatCollapsed} {...(geometry.chatCollapsed ? { inert: '' } : {})}>{conversationRail}</aside>
     <main data-work-conversation className="work-split-column min-w-0 bg-[var(--surface-default)]" style={{
-      flex: `0 0 ${motion.chat}px`,
+      // The outer sidebar animates independently of ResizeObserver. Let flexbox
+      // resolve the remaining space in this frame so the inspector stays pinned.
+      flex: '1 1 0px',
       '--work-agent-chat-width': `${motion.chat}px`,
       '--work-agent-rail-width': `${motion.rail}px`,
       '--work-agent-dock-reserve': `${dockVisible ? motion.dock + WORK_ACTIVITY_DOCK_EDGE_GAP : 0}px`,
       '--work-agent-center-reserve': `${dockVisible && !inspectorOpen && !viewerOpen ? motion.dock + WORK_ACTIVITY_DOCK_EDGE_GAP : 0}px`,
     } as CSSProperties}>{conversation}</main>
-    <aside aria-hidden={!dockVisible} {...(!dockVisible ? { inert: '' } : {})} className={cn('work-activity-dock absolute top-0 z-40 h-full min-h-0 overflow-hidden', dockVisible && 'is-visible')} style={{ width: motion.dock, right: motion.inspector + motion.viewer + WORK_ACTIVITY_DOCK_EDGE_GAP }}><div className="h-full px-3 py-4" style={{ width: WORK_ACTIVITY_DOCK_WIDTH }}>{activityDock}</div></aside>
-    <section data-studio-panel="workViewer" aria-hidden={!viewerOpen} {...(!viewerOpen ? { inert: '' } : {})} className="work-split-column h-full min-h-0 shrink-0 overflow-hidden border-[var(--border-subtle)]" style={{ width: motion.viewer, borderLeftWidth: motion.viewer > 0 ? 1 : 0 }}><div className="h-full" style={{ minWidth: WORK_SPLIT.viewer }}>{viewer ?? (retainedViewer.scopeKey === scopeKey ? retainedViewer.viewer : undefined)}</div></section>
-    <aside data-studio-panel="workInspector" className="work-split-column work-inspector-column relative ml-auto h-full min-h-0 shrink-0 overflow-hidden border-l border-[var(--border-subtle)] bg-[var(--app-bg)]" style={{ width: motion.inspector }}>
+    <aside id={activityDockId} aria-hidden={!dockVisible} {...(!dockVisible ? { inert: '' } : {})} className={cn('work-activity-dock absolute bottom-0 z-40 min-h-0 overflow-y-auto overflow-x-hidden', dockVisible && 'is-visible')} style={{ top: 'var(--work-chat-header-height, 3.25rem)', width: motion.dock, right: motion.inspector + motion.viewer + WORK_ACTIVITY_DOCK_EDGE_GAP }}><div className="px-3 pt-2 pb-4" style={{ width: WORK_ACTIVITY_DOCK_WIDTH }}>{activityDock}</div></aside>
+    <section data-studio-panel="workViewer" aria-hidden={!viewerOpen} {...(!viewerOpen ? { inert: '' } : {})} className="work-split-column h-full min-h-0 shrink-0 overflow-hidden border-[var(--border-subtle)]" style={{ width: motion.viewer, maxWidth: `calc(100% - ${motion.rail + motion.inspector}px)`, borderLeftWidth: motion.viewer > 0 ? 1 : 0 }}><div className="h-full" style={{ minWidth: WORK_SPLIT.viewer }}>{viewer ?? (retainedViewer.scopeKey === scopeKey ? retainedViewer.viewer : undefined)}</div></section>
+    <aside data-studio-panel="workInspector" className="work-split-column work-inspector-column relative ml-auto h-full min-h-0 shrink-0 overflow-hidden border-l border-[var(--border-subtle)] bg-[var(--app-bg)]" style={{ width: motion.inspector, maxWidth: `calc(100% - ${motion.rail}px)` }}>
       <div aria-hidden={!inspectorOpen} {...(!inspectorOpen ? { inert: '' } : {})} className={cn('absolute inset-0 overflow-hidden transition-opacity duration-200', inspectorOpen ? 'opacity-100' : 'pointer-events-none opacity-0')}>{inspector}</div>
       {!inspectorOpen ? <div className="absolute inset-0 flex flex-col items-center py-2"><button type="button" onClick={toggleInspector} className="flex h-9 w-9 items-center justify-center" aria-label="展开检查区"><ChevronLeft className="h-4 w-4" /></button>{items.map(({ key, label, icon: Icon }) => <button key={key} type="button" aria-label={label} title={label} className="mt-2 flex h-9 w-9 items-center justify-center rounded-lg hover:bg-[var(--surface-muted)]" onClick={() => { onSelectInspectorTab(key); toggleInspector() }}><Icon className="h-4 w-4" /></button>)}</div> : <button type="button" onClick={toggleInspector} className="absolute left-1 top-2 z-20 rounded p-1.5 text-[var(--text-secondary)]" aria-label="收起检查区"><PanelRightClose className="h-4 w-4" /></button>}
     </aside>
-    {separator('content', width - motion.viewer - motion.inspector, viewerOpen ? '调整查看器与对话宽度' : '调整对话与右侧栏宽度')}
-    {viewerOpen ? separator('inspector', width - motion.inspector, '调整检查区宽度') : null}
+    {separator('content', motion.viewer + motion.inspector, viewerOpen ? '调整查看器与对话宽度' : '调整对话与右侧栏宽度')}
+    {viewerOpen ? separator('inspector', motion.inspector, '调整检查区宽度') : null}
   </div></WorkConversationContext.Provider>
 }

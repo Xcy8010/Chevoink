@@ -1955,9 +1955,14 @@ export async function listAgentSessionsData(userId: string, novelId?: string, op
     },
     include: {
       novel: { select: { title: true, displayTitle: true } },
-      runs: { where: MAIN_RUN_FILTER, take: 1, select: { id: true } },
+      runs: {
+        where: { ...MAIN_RUN_FILTER, userId, ...(novelId ? { novelId } : {}) },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: 1,
+        select: { novelId: true, status: true, inputSummary: true, outputSummary: true, goalExecution: { select: { trigger: true } } },
+      },
     },
-    orderBy: [{ pinnedAt: 'desc' }, { updatedAt: 'desc' }],
+    orderBy: [{ pinnedAt: 'desc' }, { updatedAt: 'desc' }, { id: 'asc' }],
     take: 100,
   })
 
@@ -1965,10 +1970,17 @@ export async function listAgentSessionsData(userId: string, novelId?: string, op
   const visible = items.filter((session) => session.lastRunAt || !isDefaultSessionTitle(session.title))
 
   return {
-    items: visible.map(session => toAgentSession({
-      ...session,
-      ...(Array.isArray(session.runs) ? { hasAgentHistory: session.runs.length > 0 } : {}),
-    })),
+    items: visible.map(({ runs, ...session }) => {
+      const latest = runs?.[0]
+      const dto = toAgentSession({ ...session, ...(Array.isArray(runs) ? { hasAgentHistory: runs.length > 0 } : {}) })
+      if (!latest || latest.novelId !== session.novelId) return dto
+      // Non-author goal admissions use a system prompt. Failed or paused output summaries may contain service notices.
+      const authorInput = !latest.goalExecution || latest.goalExecution.trigger === 'author' ? latest.inputSummary : null
+      const response = latest.status === 'completed' && latest.outputSummary ? projectAgentAuthorText(latest.outputSummary).trim() : ''
+      const text = (response || authorInput || '').trim().replace(/\s+/gu, ' ')
+      if (text) dto.latestMessagePreview = Array.from(text).slice(0, 160).join('')
+      return dto
+    }),
   }
 }
 

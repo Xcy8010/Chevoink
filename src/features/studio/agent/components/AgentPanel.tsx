@@ -5,6 +5,7 @@ import {
   CircleAlert,
   CircleCheck,
   Copy,
+  FolderClosed,
   GitBranch,
   History,
   LoaderCircle,
@@ -13,10 +14,10 @@ import {
   PencilLine,
   Pin,
   ShieldCheck,
-  SlidersHorizontal,
   SquarePen,
   Trash2,
   Wrench,
+  Workflow,
   X,
 } from 'lucide-react'
 
@@ -163,15 +164,14 @@ type AgentPanelProps = {
   onWorkspaceRollback?: () => void
   onClose?: () => void
   className?: string
-  /** Work 宽屏存在独立任务停靠区时，内联待办/变更自动隐藏。 */
-  activityPresentation?: 'inline' | 'responsive'
+  taskStatus?: { available: boolean; dockId?: string; toggle: () => void }
   /** 手机工作台在视图导航下保留紧凑的 Agent 任务控件行。 */
   mobileIntegratedHeader?: boolean
   /** 桌面端顶栏展示当前任务标题（替代 Chevoink Agent 标识位），空则回退「新任务」。 */
   taskTitle?: string | null
-  /** 任务标题下方副标题：作品名 · 视角，与原顶栏任务展示一致。 */
+  /** 标题提示中的作品名与视角。 */
   taskSubtitle?: string | null
-  /** 任务「更多」菜单：置顶/重命名/分支，紧随任务标题展示（原 StudioCommandBar 任务三点按钮迁入）。 */
+  /** 当前任务的置顶、重命名和分支操作。 */
   onPinTask?: () => void
   onRenameTask?: (title: string) => void
   onOpenBranches?: () => void
@@ -191,6 +191,8 @@ type AgentPanelProps = {
   onOpenSkills?: () => void
   onImportModelSelection?: (novelId: string, selection: NovelImportModelSelection | null) => void
 }
+
+const taskMenuItem = 'flex min-h-9 w-full items-center gap-2 px-2.5 text-left text-xs text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-45'
 
 function ConversationSkeleton() {
   return <div role="status" aria-label="正在载入对话" className="studio-pending w-full space-y-7 py-4">
@@ -234,7 +236,7 @@ export function AgentPanel({
   onWorkspaceRollback,
   onClose,
   className,
-  activityPresentation = 'inline',
+  taskStatus,
   mobileIntegratedHeader = false,
   taskTitle,
   taskSubtitle,
@@ -253,6 +255,8 @@ export function AgentPanel({
 }: AgentPanelProps) {
   const queryClient = useQueryClient()
   const workConversation = useWorkConversation()
+  const dockExpanded = workConversation.activityDock === 'expanded'
+  const dockAction = dockExpanded ? '折叠任务状态' : '展开任务状态'
   const userId = useShellStore((state) => state.sessionUser?.id)
   const runId = useAgentStore((state) => state.runId)
   const runGoalId = useAgentStore((state) => state.runGoalId)
@@ -1611,10 +1615,31 @@ export function AgentPanel({
 
   const floatingFooterRef = useComposerInset(scrollRef, pinnedToBottomRef, lastScrollTopRef, workConversation.collapsed)
 
+  function openAgentOperations() {
+    setTaskMenuOpen(false)
+    setHistoryOpen(false)
+    onOpenStudioSettings?.('operations')
+  }
+
+  const newTaskButton = (
+    <button
+      type="button"
+      onClick={() => {
+        setHistoryOpen(false)
+        onNewSession?.()
+      }}
+      className={cn('inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]', mobileIntegratedHeader && 'h-11 w-11 motion-reduce:transition-none')}
+      aria-label="新建任务对话"
+      title="新建任务对话"
+    >
+      <SquarePen className="h-4 w-4" />
+    </button>
+  )
+
   return (
     <div className={cn('agent-conversation-panel relative flex h-full min-h-0 flex-col', workConversation.collapsed && 'work-agent-compact', className)}>
       {/* 状态栏 */}
-      {!hideHeader ? <div data-agent-mobile-header={mobileIntegratedHeader || undefined} className={cn(
+      {!hideHeader ? <div data-agent-mobile-header={mobileIntegratedHeader || undefined} data-task-header={mobileIntegratedHeader ? undefined : true} className={cn(
         'agent-conversation-header relative flex items-center gap-2 border-b border-[var(--border-subtle)] px-4 py-2.5',
         mobileIntegratedHeader && 'h-11 shrink-0 gap-1 bg-[var(--app-bg)] px-3 py-0',
       )}>
@@ -1624,21 +1649,9 @@ export function AgentPanel({
             <span className="min-w-0 truncate text-xs font-medium text-[var(--text-primary)]">Chevoink Agent</span>
           </>
         ) : (
-          // 桌面端顶栏承接原 StudioCommandBar 的任务标题展示（border-l 样式保持一致）；
-          // 「更多」按钮紧随标题块：它只作用于当前任务，与顶栏全局菜单无关
-          <div className="flex min-w-0 items-center gap-1">
-            <div className="min-w-0 max-w-[360px] border-l-2 border-[var(--text-primary)] pl-2.5">
-              <p className="truncate text-[13px] font-medium leading-4 text-[var(--text-primary)]">{taskTitle?.trim() || '新任务'}</p>
-              {taskSubtitle ? <p className="mt-0.5 truncate text-[10px] leading-3 text-[var(--text-tertiary)]">{taskSubtitle}</p> : null}
-            </div>
-            {onPinTask || onRenameTask || onOpenBranches ? <div ref={taskMenuRef} className="relative shrink-0">
-              <button type="button" onClick={() => setTaskMenuOpen((value) => !value)} className="inline-flex h-7 w-7 items-center justify-center rounded-[8px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]" aria-label="任务操作" aria-expanded={taskMenuOpen}><MoreHorizontal className="h-4 w-4" /></button>
-              {taskMenuOpen ? <div className="absolute left-0 top-[calc(100%+7px)] z-50 w-52 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)] motion-safe:origin-top-left motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]">
-                {onPinTask ? <button type="button" disabled={!sessionId} className="flex min-h-9 w-full items-center gap-2 px-2.5 text-left text-xs text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-45" onClick={() => { setTaskMenuOpen(false); onPinTask() }}><Pin className="h-3.5 w-3.5" />置顶当前任务</button> : null}
-                {onRenameTask ? <button type="button" className="flex min-h-9 w-full items-center gap-2 px-2.5 text-left text-xs text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)]" onClick={() => { setTaskTitleDraft(taskTitle?.trim() || '新任务'); setTaskRenaming(true); setTaskMenuOpen(false) }}><PencilLine className="h-3.5 w-3.5" />编辑任务名称</button> : null}
-                {onOpenBranches ? <button type="button" className="flex min-h-9 w-full items-center gap-2 px-2.5 text-left text-xs text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)]" onClick={() => { setTaskMenuOpen(false); onOpenBranches() }}><GitBranch className="h-3.5 w-3.5" />创建分支与版本</button> : null}
-              </div> : null}
-            </div> : null}
+          <div className="flex min-w-0 items-center gap-2.5" title={[taskTitle?.trim() || '新任务', taskSubtitle].filter(Boolean).join(' · ')}>
+            <FolderClosed aria-hidden="true" className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
+            <p className="truncate text-sm font-semibold text-[var(--text-primary)]">{taskTitle?.trim() || '新任务'}</p>
           </div>
         )}
         {panelPhase !== 'idle' || outcome ? (
@@ -1660,18 +1673,13 @@ export function AgentPanel({
           {currentTurn > 0 ? `第 ${currentTurn} 轮 · ` : ''}
           {usage.totalTokens > 0 ? `${usage.totalTokens.toLocaleString()} tokens` : ''}
         </span>
+        {mobileIntegratedHeader ? <button
+          type="button" onClick={openAgentOperations} aria-label="打开 Agent 操作中心" title="Agent 操作中心"
+          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
+        ><Workflow aria-hidden="true" className="h-4 w-4" /></button> : newTaskButton}
         <button
           type="button"
-          onClick={() => { setHistoryOpen(false); onOpenStudioSettings?.('operations') }}
-          className={cn('inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]', mobileIntegratedHeader && 'h-11 w-11 motion-reduce:transition-none')}
-          aria-label="打开 Agent 操作中心"
-          title="Agent 操作中心"
-        >
-          <SlidersHorizontal className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          onClick={toggleHistory}
+          onClick={() => { setTaskMenuOpen(false); toggleHistory() }}
           className={cn(
             'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 transition-colors',
             mobileIntegratedHeader && 'ml-auto h-11 w-11 motion-reduce:transition-none',
@@ -1680,23 +1688,45 @@ export function AgentPanel({
               : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
           )}
           aria-label="展开或收起历史任务对话"
+          aria-expanded={historyOpen}
+          aria-haspopup="dialog"
           title="历史任务对话"
         >
           <History className="h-4 w-4" />
         </button>
-        <button
+        {mobileIntegratedHeader ? newTaskButton : null}
+        {taskStatus && !mobileIntegratedHeader ? <button
           type="button"
-          onClick={() => {
-            setHistoryOpen(false)
-            onNewSession?.()
-          }}
-          className={cn('inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]', mobileIntegratedHeader && 'h-11 w-11 motion-reduce:transition-none')}
-          aria-label="新建任务对话"
-          title="新建任务对话"
+          className="agent-task-status-toggle inline-flex shrink-0 items-center justify-center rounded-lg"
+          onClick={taskStatus.toggle}
+          aria-label={dockAction}
+          aria-expanded={dockExpanded}
+          aria-controls={taskStatus.dockId}
+          title={!taskStatus.available ? '暂无任务状态' : workConversation.activityDock ? dockAction : '当前布局无法展示右侧任务状态栏'}
+          disabled={!taskStatus.available || !workConversation.activityDock}
         >
-          <SquarePen className="h-4 w-4" />
-        </button>
-        {onClose ? (
+          <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <circle cx="5.5" cy="6.5" r="3" /><circle cx="5.5" cy="17.5" r="3" />
+            <path d="M12.5 6.5h9m-9 11h9" />
+          </svg>
+        </button> : null}
+        {!mobileIntegratedHeader && (onPinTask || onRenameTask || onOpenBranches || onOpenStudioSettings || onClose) ? <div ref={taskMenuRef} className="shrink-0" onKeyDown={event => {
+          if (event.key === 'Escape' && taskMenuOpen) {
+            event.stopPropagation()
+            setTaskMenuOpen(false)
+            taskMenuRef.current?.querySelector('button')?.focus()
+          }
+        }}>
+          <button type="button" title="任务操作" onClick={() => { setHistoryOpen(false); setTaskMenuOpen(value => !value) }} className="agent-task-more transition-colors" aria-label="任务操作" aria-expanded={taskMenuOpen}><MoreHorizontal className="h-4 w-4" /></button>
+          {taskMenuOpen ? <div className="absolute right-2 top-full z-50 w-52 max-w-[calc(100%-1rem)] rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)] motion-safe:origin-top-right motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]">
+            {onOpenStudioSettings ? <button type="button" onClick={openAgentOperations} className={taskMenuItem}><Workflow aria-hidden="true" className="h-4 w-4" />Agent 操作中心</button> : null}
+            {onPinTask ? <button type="button" disabled={!sessionId} className={taskMenuItem} onClick={() => { setTaskMenuOpen(false); onPinTask() }}><Pin className="h-3.5 w-3.5" />置顶当前任务</button> : null}
+            {onRenameTask ? <button type="button" className={taskMenuItem} onClick={() => { setTaskTitleDraft(taskTitle?.trim() || '新任务'); setTaskRenaming(true); setTaskMenuOpen(false) }}><PencilLine className="h-3.5 w-3.5" />编辑任务名称</button> : null}
+            {onOpenBranches ? <button type="button" className={taskMenuItem} onClick={() => { setTaskMenuOpen(false); onOpenBranches() }}><GitBranch className="h-3.5 w-3.5" />创建分支与版本</button> : null}
+            {onClose ? <button type="button" className={taskMenuItem} onClick={() => { setTaskMenuOpen(false); onClose() }}><X aria-hidden="true" className="h-3.5 w-3.5" />关闭面板</button> : null}
+          </div> : null}
+        </div> : null}
+        {mobileIntegratedHeader && onClose ? (
           <button
             type="button"
             onClick={onClose}
@@ -1709,7 +1739,7 @@ export function AgentPanel({
 
         {/* 历史任务对话下拉：列表项可切换/重命名/删除 */}
         {historyOpen ? (
-          <div className="absolute left-2 right-2 top-full z-30 mt-1 max-h-80 overflow-y-auto rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[0_16px_40px_rgba(15,23,42,0.14)]">
+          <div role="dialog" aria-label="历史任务对话" className="agent-task-history absolute left-2 right-2 top-full z-30 mt-1 max-h-80 overflow-y-auto rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1.5 shadow-[0_16px_40px_rgba(15,23,42,0.14)]">
             {sessionsLoading ? (
               <div className="flex items-center gap-2 px-2 py-2 text-xs text-[var(--text-secondary)]">
                 <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
@@ -1982,9 +2012,8 @@ export function AgentPanel({
 
       <div ref={floatingFooterRef} data-agent-floating-footer className="agent-floating-footer">
       <div className="agent-conversation-width">
-      {/* 任务停靠区：待办清单 + 工作区变更（默认折叠，被触发时自动展开） */}
-      {workspaceActivities.length > 0 || todos.length > 0 || pendingReviewCount > 0 ? (
-        <div data-agent-activity className={cn('px-4 pb-2', activityPresentation === 'responsive' && 'agent-activity-responsive')}>
+      {!dockExpanded && (workspaceActivities.length > 0 || todos.length > 0 || pendingReviewCount > 0) ? (
+        <div data-agent-activity className="px-4 pb-2">
           <AgentActivityBar
             activities={workspaceActivities}
             activitiesVersion={activitiesVersion}
@@ -2196,7 +2225,7 @@ export function AgentPanel({
         onClose={() => { autoCopyInviteRef.current = false; setInviteDialogOpen(false) }}
       />
       {/* 任务重命名弹窗（原 StudioCommandBar 任务三点菜单迁入） */}
-      {taskRenaming ? <div className="fixed inset-0 z-[170] flex items-center justify-center bg-black/25 p-4" onMouseDown={() => setTaskRenaming(false)}><form onSubmit={(event) => { event.preventDefault(); if (taskTitleDraft.trim()) onRenameTask?.(taskTitleDraft.trim()); setTaskRenaming(false) }} onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-2xl"><h2 className="text-sm font-semibold">编辑任务名称</h2><input autoFocus maxLength={160} value={taskTitleDraft} onChange={(event) => setTaskTitleDraft(event.target.value)} className="mt-4 h-10 w-full rounded-[9px] border border-[var(--border-subtle)] bg-transparent px-3 text-sm outline-none focus:border-[var(--border-strong)]" /><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setTaskRenaming(false)} className="h-9 rounded-[9px] px-3 text-xs hover:bg-[var(--surface-muted)]">取消</button><button type="submit" disabled={!taskTitleDraft.trim()} className="h-9 rounded-[9px] bg-[var(--surface-contrast)] px-4 text-xs font-medium text-[var(--text-contrast)] disabled:opacity-45">保存</button></div></form></div> : null}
+      {taskRenaming ? <div className="fixed inset-0 z-[170] flex items-center justify-center bg-black/25 p-4" onMouseDown={() => setTaskRenaming(false)}><form onSubmit={(event) => { event.preventDefault(); if (taskTitleDraft.trim()) onRenameTask?.(taskTitleDraft.trim()); setTaskRenaming(false) }} onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-5 shadow-2xl"><h2 className="text-sm font-semibold">编辑任务名称</h2><input autoFocus maxLength={160} value={taskTitleDraft} onChange={(event) => setTaskTitleDraft(event.target.value)} className="mt-4 h-10 w-full rounded-[9px] border border-[var(--border-subtle)] bg-transparent px-3 text-sm outline-none focus:border-[var(--border-strong)]" /><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setTaskRenaming(false)} className="h-9 rounded-[9px] px-3 text-xs hover:bg-[var(--surface-muted)]">取消</button><button type="submit" disabled={!taskTitleDraft.trim()} className="h-9 rounded-[9px] bg-[var(--surface-contrast)] px-4 text-xs font-medium text-[var(--text-contrast)] disabled:opacity-45">保存</button></div></form></div> : null}
     </div>
   )
 }

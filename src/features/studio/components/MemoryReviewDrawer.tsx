@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BrainCircuit, Check, LoaderCircle, X } from 'lucide-react'
 
 import { fetchMemoryReviewInbox, resolveMemoryReviewItem, type MemoryReviewItem } from '../agent/agentApi'
+import { useDialogFocusTrap } from './use-dialog-focus-trap'
 
 export default function MemoryReviewDrawer({ open, novelId, onClose }: { open: boolean; novelId: string; onClose: () => void }) {
+  const panel = useRef<HTMLElement>(null)
+  useDialogFocusTrap({ panel, open, onClose })
   const [items, setItems] = useState<MemoryReviewItem[]>([])
   const [loading, setLoading] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -34,12 +37,17 @@ export default function MemoryReviewDrawer({ open, novelId, onClose }: { open: b
 
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-[125] bg-[rgba(15,23,42,0.3)] md:flex md:justify-end" onClick={onClose}>
+    <div className="studio-tool-overlay fixed inset-0 z-[125] bg-[rgba(15,23,42,0.3)] md:flex md:justify-end lg:justify-center" onClick={onClose}>
       <section
-        className="flex h-full w-full flex-col bg-[var(--surface-default)] md:max-w-[34rem] md:border-l md:border-[var(--border-subtle)]"
+        ref={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-label="记忆审核箱"
+        tabIndex={-1}
+        className="studio-tool-dialog flex h-full min-h-0 w-full flex-col bg-[var(--surface-default)] md:max-w-[34rem] md:border-l md:border-[var(--border-subtle)]"
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 pb-3 pt-[max(var(--safe-top),14px)] md:px-5 md:pt-4">
+        <header className="flex shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] px-4 pb-3 pt-[max(var(--safe-top),14px)] md:px-5 md:pt-4">
           <BrainCircuit className="h-5 w-5 text-[var(--text-secondary)]" />
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-semibold text-[var(--text-primary)]">记忆审核箱</h2>
@@ -47,9 +55,9 @@ export default function MemoryReviewDrawer({ open, novelId, onClose }: { open: b
           </div>
           <button type="button" onClick={onClose} className="p-2 text-[var(--text-secondary)]" aria-label="关闭记忆审核箱"><X className="h-4 w-4" /></button>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-5">
-          {loading ? <p className="flex items-center gap-2 text-sm text-[var(--text-secondary)]"><LoaderCircle className="h-4 w-4 animate-spin" />正在读取证据…</p> : null}
-          {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+        <div className="studio-tool-body min-h-0 flex-auto overflow-y-auto px-4 py-4 md:px-5">
+          {loading ? <p role="status" className="flex items-center gap-2 text-sm text-[var(--text-secondary)]"><LoaderCircle className="h-4 w-4 animate-spin" />正在读取证据…</p> : null}
+          {error ? <p role="alert" className="text-sm text-rose-600">{error}</p> : null}
           {!loading && !error && items.length === 0 ? <p className="py-12 text-center text-sm text-[var(--text-secondary)]">没有待处理的记忆冲突</p> : null}
           <div className="divide-y divide-[var(--border-subtle)]">
             {items.map((item) => (

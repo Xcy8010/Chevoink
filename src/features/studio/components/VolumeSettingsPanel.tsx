@@ -110,7 +110,7 @@ export default function VolumeSettingsPanel({
         </p>
       </div>
 
-      <section className="space-y-2 border-t border-[var(--border-subtle)] pt-4">
+      <section className="studio-document-options space-y-2 border-t border-[var(--border-subtle)] pt-4">
         <h3 className="text-sm font-medium">危险操作</h3>
         <p className="text-xs leading-5 text-[var(--text-secondary)]">
           删除卷不会删除其中章节；章节会移入{deleteDestinationTitle ? `「${deleteDestinationTitle}」` : '相邻卷'}，并保持原有阅读顺序。

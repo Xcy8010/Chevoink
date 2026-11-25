@@ -554,7 +554,7 @@ export default function SettingsPage() {
           }
         />
 
-        {!isNativeApp() && (
+        {!isNativeApp() && !isWindowsDesktopApp() && (
           <SettingsRow
             icon={<Maximize size={18} />}
             title="全屏模式"

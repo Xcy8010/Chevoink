@@ -868,6 +868,8 @@ export interface AgentSession {
   sandboxMode: import('./agent-productivity.js').AgentSandboxMode
   /** Server-side existence check for a main agent run; false safely skips empty-history hydration. */
   hasAgentHistory?: boolean
+  /** Single-line excerpt from the latest main run in the session list. */
+  latestMessagePreview?: string
   novelTitle?: string
   lastRunAt: string | null
   /** 分支来源任务 ID：非空表示本任务是某个任务的分支副本 */

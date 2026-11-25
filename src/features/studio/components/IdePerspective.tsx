@@ -14,7 +14,7 @@ export default function IdePerspective({ children, treeWidth, treeOpen = true, a
     <div
       data-studio-layout="ide"
       className="studio-resizable-grid grid h-full min-h-0 overflow-hidden bg-[var(--surface-default)]"
-      style={{ gridTemplateColumns: `${treeOpen ? treeWidth : 46}px minmax(0,1fr) ${agentOpen ? agentWidth : 46}px` }}
+      style={{ gridTemplateColumns: `${treeOpen ? treeWidth - 46 : 0}px minmax(0,1fr) ${agentOpen ? agentWidth : 46}px` }}
     >
       {children}
     </div>

@@ -1,0 +1,69 @@
+@media (min-width: 1024px) {
+  .studio-tool-overlay {
+    display: grid;
+    inset: 0;
+    place-items: center;
+    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+    width: auto;
+    padding: clamp(16px, 2.5vmin, 28px);
+    background: rgb(0 0 0 / 35%);
+    backdrop-filter: blur(2px);
+  }
+  html[data-desktop-frame="studio"] .studio-tool-overlay {
+    inset-block-start: var(--caption-height, 36px);
+  }
+  .studio-tool-overlay > [role="dialog"] { max-height: 100%; }
+  .studio-tool-overlay > .studio-tool-dialog {
+    position: relative;
+    inset: auto;
+    display: flex;
+    flex-direction: column;
+    width: min(100%, var(--studio-tool-width, 49rem));
+    height: auto;
+    max-width: none;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    outline: none;
+    background: var(--surface-default);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-modal);
+  }
+  .studio-tool-dialog--wide { --studio-tool-width: 57rem; }
+  .studio-tool-dialog > header, .studio-tool-dialog > footer {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 24px;
+    height: auto;
+  }
+  .studio-tool-dialog > header { min-height: 62px; border-bottom: 1px solid var(--border-subtle); }
+  .studio-tool-dialog > header :is(h2, h3) { font-size: 18px; line-height: 1.4; font-weight: 600; }
+  .studio-tool-dialog > footer { border-top: 1px solid var(--border-subtle); }
+  .studio-tool-dialog .studio-tool-body {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .studio-tool-dialog .studio-document-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    padding: 0;
+    align-content: start;
+  }
+  .studio-document-grid > :first-child, .studio-document-grid > .studio-document-options {
+    margin: 0;
+    min-width: 0;
+    padding: 24px;
+  }
+  .studio-document-grid > .studio-document-options {
+    border-top: 0;
+    border-inline-start: 1px solid var(--border-subtle);
+  }
+  .studio-document-options > section:first-child { border-top: 0; padding-top: 0; }
+  .studio-document-grid > [role="alert"] { grid-column: 1 / -1; margin: 0; padding: 0 24px 16px; }
+}

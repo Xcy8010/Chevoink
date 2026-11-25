@@ -8,7 +8,7 @@ type TreeMenuAction = { label: string; icon: LucideIcon; onSelect: () => void; d
 export type TreeMenuItem = TreeMenuAction | { label: string; icon: LucideIcon; children: TreeMenuAction[] }
 export type TreeMenuAnchor = { x: number; y: number; trigger: HTMLElement }
 
-const cardClass = 'fixed z-[190] overflow-y-auto rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)]'
+const cardClass = 'fixed z-[190] overflow-y-auto rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)]'
 const itemClass = 'flex h-8 w-full items-center gap-2 rounded-[8px] px-2 text-left text-xs text-[var(--text-primary)] outline-none transition hover:bg-[var(--surface-muted)] focus:bg-[var(--surface-muted)]'
 const viewportPadding = 8
 

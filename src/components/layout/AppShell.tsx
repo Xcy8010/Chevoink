@@ -147,8 +147,8 @@ export default function AppShell({ title, description, children }: AppShellProps
   // 加载时自动全屏，故开启后在用户每次点击/触摸时进入并持续保持；关闭开关后立即
   // 退出全屏且不再自动进入；不支持的环境静默降级（进入逻辑见 lib/immersive-fullscreen）
   useEffect(() => {
-    // APP 壳内天生全屏，不使用网页 Fullscreen API（避免与原生全屏打架、强制横屏等）
-    if (isNativeApp()) return
+    // 桌面窗口由 Windows 管理最大化与全屏。网页端才消费沉浸模式偏好。
+    if (isNativeApp() || isWindowsDesktopApp()) return
     if (!fullscreenEnabled) {
       if (document.fullscreenElement) {
         document.exitFullscreen?.().catch(() => {})
@@ -541,6 +541,7 @@ export default function AppShell({ title, description, children }: AppShellProps
   return (
     <div
       data-app-shell
+      data-studio-route={isStudioRoute || undefined}
       // 壳高随软键盘收缩（iOS 等不缩小布局视口的浏览器），消息输入栏、评论框等随之被顶到键盘上方
       className="flex h-[calc(100dvh-var(--keyboard-inset,0px))] flex-col overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]"
       data-site-header-hidden={headerHidden}
@@ -732,7 +733,7 @@ export default function AppShell({ title, description, children }: AppShellProps
                 isReaderRoute && 'flex h-full min-h-0 flex-col space-y-4 pb-0 md:pb-0 md:pt-0',
                 // 创作区手机端由自己的底部导航接管，不再为全局底栏留白
                 isStudioRoute && 'flex h-full min-h-0 flex-col space-y-4 md:space-y-4 pb-0 md:pb-0',
-                isStudioRoute && '!space-y-0 !pt-0',
+                isStudioRoute && '!space-y-0 !pt-0 pr-0',
                 // 消息页：列式铺满剩余高度，手机端避让底部导航，桌面端留少量底边距；app-messages-main 供键盘打开时收紧底部留白
                 isMessagesRoute && 'app-messages-main flex h-full min-h-0 flex-col space-y-0 pb-[calc(76px+var(--bottom-bar-inset))] md:pb-6',
                 // 聊天详情态：输入栏自己承接底部高度，外层不重复留白

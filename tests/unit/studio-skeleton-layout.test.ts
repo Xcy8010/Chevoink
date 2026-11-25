@@ -9,8 +9,8 @@ describe('StudioSkeleton responsive layout', () => {
   it('keeps dark shimmer independent from reversed surface colors and preserves light fallbacks', () => {
     const css = readFileSync(new URL('../../src/index.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
     const dark = css.match(/html\.dark \.studio-workspace \{([^}]+)\}/)![1]
-    expect(dark).toContain('--skeleton-base: #353535')
-    expect(dark).toContain('--skeleton-highlight: #414141')
+    expect(dark).toContain('--skeleton-base: #252525')
+    expect(dark).toContain('--skeleton-highlight: #343434')
     expect(css).toContain('var(--skeleton-base, var(--surface-muted)) 25%')
     expect(css).toContain('var(--skeleton-highlight, var(--surface-default)) 50%')
     expect(css).toContain("[data-studio-region='mobile-conversation']\n) { background-color: var(--surface-default); }")
@@ -48,7 +48,11 @@ describe('StudioSkeleton responsive layout', () => {
       expect(composer.querySelector('[data-studio-skeleton-model-effort]')?.className).toContain('ml-auto')
       expect(composer.innerHTML).not.toMatch(/mt-(12|14)/)
     }
-    expect(document.querySelector('[data-studio-command-menus]')?.children).toHaveLength(6)
+    const commands = document.querySelector('[data-studio-region="desktop-command-bar"]')!
+    expect(commands.children[1].hasAttribute('data-studio-history')).toBe(true)
+    expect(commands.children[1].children).toHaveLength(2)
+    expect(commands.lastElementChild?.hasAttribute('data-studio-command-menus')).toBe(true)
+    expect(commands.lastElementChild?.children).toHaveLength(6)
   })
 
   it('provides a mobile skeleton matching the integrated agent workspace', () => {
@@ -71,7 +75,15 @@ describe('StudioSkeleton responsive layout', () => {
 
   it('provides a desktop Work skeleton with the fused workspace sidebar and centered conversation', () => {
     expect(markup).toContain('data-studio-skeleton="desktop"')
-    expect(markup).toContain('data-studio-region="desktop-command-bar"')
+    const commands = document.querySelector('[data-studio-region="desktop-command-bar"]')!
+    const rail = document.querySelector('[data-studio-region="desktop-activity-rail"]')!
+    expect(commands.nextElementSibling?.firstElementChild).toBe(rail)
+    expect(rail.className).toContain('w-[52px]')
+    expect(rail.querySelector(':scope > span')?.className).toContain('w-6')
+    const slots = rail.querySelectorAll(':scope > div')
+    expect(slots).toHaveLength(9)
+    expect(Array.from(slots).every(slot => slot.className.includes('h-9 w-9'))).toBe(true)
+    expect(rail.nextElementSibling?.getAttribute('data-studio-region')).toBe('desktop-workspace-sidebar')
     expect(markup).toContain('data-studio-region="desktop-workspace-sidebar"')
     expect(markup).not.toContain('data-studio-region="desktop-task-rail"')
     expect(markup).toContain('data-studio-region="desktop-conversation"')

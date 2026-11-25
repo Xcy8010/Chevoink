@@ -1,5 +1,5 @@
 import type { ReactNode, SelectHTMLAttributes } from 'react'
-import { Check, ChevronDown, Clock3, LoaderCircle, RefreshCcw } from 'lucide-react'
+import { Check, Clock3, LoaderCircle, RefreshCcw } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import { cn } from '@/lib/utils'
@@ -21,20 +21,7 @@ export function SelectControl({
   ...props
 }: SelectHTMLAttributes<HTMLSelectElement>) {
   return (
-    <div className="relative">
-      <select
-        {...props}
-        className={cn(
-          'h-11 w-full appearance-none rounded-[999px] border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 pr-14 text-sm text-[var(--text-primary)] outline-none transition focus:border-[var(--accent-border)] focus:ring-2 focus:ring-[var(--focus-ring)]',
-          className,
-        )}
-      >
-        {children}
-      </select>
-      <span className="pointer-events-none absolute inset-y-0 right-5 flex items-center text-[var(--text-secondary)]">
-        <ChevronDown className="h-4 w-4" />
-      </span>
-    </div>
+    <select {...props} className={cn('studio-form-select', className)}>{children}</select>
   )
 }
 

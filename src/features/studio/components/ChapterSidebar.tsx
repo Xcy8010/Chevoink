@@ -2,27 +2,12 @@ import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type Keyb
 import { ChevronDown, ChevronRight, FilePlus2, FileText, FolderPlus, FolderTree, GripVertical, NotebookPen, NotebookText, PencilLine, ScrollText, Settings2, Trash2, type LucideIcon } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import { plainChapterTitle } from '../../../../shared/structure/chapter-title'
+import { formatNumberedChapterTitle } from '../lib/document-title'
 import type { StudioPayload } from '../../../../shared/contracts/index.js'
 import type { WorkspacePlanFile } from '../types'
 import { COMPOSER_REFERENCE_MIME, serializeComposerReferenceTransfer } from '../agent/composer-content'
 import TreeContextMenu, { TreeMenuButton, type TreeMenuAnchor, type TreeMenuItem } from './TreeContextMenu'
 import './chapter-tree.css'
-
-function formatChapterTreeLabel(chapter: StudioPayload['chapters'][number]) {
-  const normalizedTitle = plainChapterTitle(chapter.title) || chapter.title.trim()
-
-  if (!normalizedTitle) {
-    return `第 ${chapter.orderInVolume} 章`
-  }
-
-  const prefixedPattern = new RegExp(`^第\\s*${chapter.orderInVolume}\\s*章(?:\\s*[：:.·\\-]\\s*.*)?$`)
-  if (prefixedPattern.test(normalizedTitle)) {
-    return normalizedTitle
-  }
-
-  return `第 ${chapter.orderInVolume} 章 · ${normalizedTitle}`
-}
 
 type CreatePlanKind = 'outline' | 'detail'
 type PlanFolderKind = CreatePlanKind | 'legacy'
@@ -592,7 +577,7 @@ export default function ChapterSidebar({
                           event.dataTransfer.setData(COMPOSER_REFERENCE_MIME, serializeComposerReferenceTransfer({
                             id: `chapter:${chapter.id}`,
                             kind: 'chapter',
-                            name: formatChapterTreeLabel(chapter),
+                            name: formatNumberedChapterTitle(chapter.title, chapter.orderInVolume),
                             // 作品树列表为轻量 ChapterListItem，不携带正文；输入框接收后按 id 懒取全文。
                             text: '',
                             startLine: 1,
@@ -644,7 +629,7 @@ export default function ChapterSidebar({
                         >
                           <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
                           <span className="truncate">
-                            {formatChapterTreeLabel(chapter)}
+                            {formatNumberedChapterTitle(chapter.title, chapter.orderInVolume)}
                           </span>
                         </button>
                         <button

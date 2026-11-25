@@ -197,7 +197,7 @@ function StudioActivitySkeleton({ region }: { region: string }) {
 }
 
 function StudioComposerSkeleton({ region }: { region: string }) {
-  return <div data-studio-region={region} aria-hidden="true" className="mb-4 flex min-h-[112px] min-w-0 shrink-0 flex-col rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-2.5 shadow-sm mobile:mb-0 mobile:min-h-[120px]">
+  return <div data-studio-region={region} aria-hidden="true" className="mb-4 flex min-h-[112px] min-w-0 shrink-0 flex-col rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-2.5 shadow-sm lg:mb-2 lg:min-h-[118px] mobile:mb-0 mobile:min-h-[120px]">
     <div className="min-h-12 flex-1 px-1.5 pt-1"><Skeleton className="h-3.5 w-3/5" /></div>
     <div data-studio-composer-toolbar className="mt-1.5 flex min-w-0 items-center gap-1.5">
       <Skeleton className="h-6 w-6 shrink-0 rounded-lg" />
@@ -274,48 +274,43 @@ export function StudioSkeleton() {
       </div>
 
       {/* 桌面端：作品与任务融合侧栏固定在左侧，命令栏保留唯一折叠入口。 */}
-      <div className="studio-pending hidden min-h-0 flex-1 lg:flex" data-studio-skeleton="desktop">
-        <aside className="flex w-[284px] shrink-0 flex-col border-r border-[var(--border-subtle)] p-3" data-studio-region="desktop-workspace-sidebar">
-          <div className="flex h-9 items-center gap-2"><Skeleton className="h-5 w-5 rounded-full" /><Skeleton className="h-3.5 w-24" /><Skeleton className="ml-auto h-7 w-7 rounded-[7px]" /></div>
+      <div className="studio-pending hidden min-h-0 flex-1 flex-col lg:flex" data-studio-skeleton="desktop">
+        <div className="studio-skeleton-command flex h-9 shrink-0 items-center gap-[5px] px-2" data-studio-region="desktop-command-bar">
+          <div className="grid w-9 place-items-center"><Skeleton className="h-4 w-4 rounded" /></div>
+          <div className="flex gap-0.5" data-studio-history>{[0, 1].map(index => <div key={index} className="grid w-[26px] place-items-center"><Skeleton className="h-3.5 w-3.5 rounded" /></div>)}</div>
+          <div className="h-4 w-px bg-[var(--border-subtle)]" />
+          <div className="flex items-center gap-0.5" data-studio-command-menus>{Array.from({ length: 6 }, (_, index) => <div key={index} className="grid w-10 place-items-center"><Skeleton className="h-3 w-6" /></div>)}</div>
+          {perspective === 'ide' && <div className="flex min-w-0 gap-2">
+            <Skeleton className="h-6 w-24 rounded" />
+            <Skeleton className="h-6 w-24 rounded" />
+          </div>}
+        </div>
+
+        <div className="flex min-h-0 flex-1">
+        <div data-studio-region="desktop-activity-rail" className="flex w-[52px] shrink-0 flex-col items-center gap-2 border-r border-[var(--border-subtle)] bg-[var(--studio-rail-bg)] py-3">
+          {Array.from({ length: perspective === 'ide' ? 8 : 5 }, (_, index) => <div key={index} className="grid h-9 w-9 place-items-center"><Skeleton className="h-5 w-5 rounded-[6px]" /></div>)}
+          <span aria-hidden="true" className="my-1 h-px w-6 shrink-0 bg-[var(--border-strong)]" />
+          <div className="grid h-9 w-9 place-items-center"><Skeleton className="h-5 w-5 rounded-[6px]" /></div>
+          <div className="grid h-9 w-9 place-items-center"><Skeleton className="h-5 w-5 rounded-[6px]" /></div>
+          <div className="mt-auto grid h-9 w-9 place-items-center"><Skeleton className="h-5 w-5 rounded-full" /></div>
+          <div className="grid h-9 w-9 place-items-center"><Skeleton className="h-7 w-7 rounded-full" /></div>
+        </div>
+        {perspective === 'work' && <aside className="flex w-[280px] shrink-0 flex-col p-3" data-studio-region="desktop-workspace-sidebar">
+          <div className="flex h-9 items-center gap-2"><Skeleton className="h-5 w-16 rounded" /><Skeleton className="ml-auto h-6 w-6 rounded-[7px]" /><Skeleton className="h-6 w-6 rounded-[7px]" /></div>
           <Skeleton className="mt-3 h-8 w-full rounded-[4px]" />
-          <Skeleton className="mt-3 h-10 w-full rounded-[14px]" />
-          <Skeleton className="mt-2 h-9 w-full rounded-[4px]" />
           <Skeleton className="mt-5 h-3 w-12" />
           <div className="mt-2 space-y-2">{Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="h-8 w-full rounded-[4px]" />)}</div>
           <div className="mt-4 border-t border-[var(--border-subtle)] pt-4"><Skeleton className="h-3 w-12" /><div className="mt-2 space-y-2">{Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-10 w-full rounded-[4px]" />)}</div></div>
           <div className="mt-auto"><Skeleton className="h-9 w-full rounded-[10px]" /><Skeleton className="mt-2 h-11 w-full rounded-[4px]" /></div>
-        </aside>
+        </aside>}
         <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-[52px] shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] px-3" data-studio-region="desktop-command-bar">
-          <Skeleton className="h-8 w-8 rounded-[8px]" />
-          <div className="h-6 w-px bg-[var(--border-subtle)]" />
-          {perspective === 'work' ? <div className="flex min-w-0 gap-4" data-studio-command-menus>{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-3 w-6" />)}</div> : <div><Skeleton className="h-3.5 w-32" /><Skeleton className="mt-1 h-2.5 w-20" /></div>}
-          <div className="ml-auto flex gap-2">
-            {perspective === 'ide' ? <>
-            <Skeleton className="h-9 w-24 rounded-[4px]" />
-            <Skeleton className="h-9 w-20 rounded-[4px]" />
-            <Skeleton className="h-9 w-9 rounded-[4px]" />
-            </> : null}
-            <Skeleton className="h-9 w-24 rounded-[4px]" />
-          </div>
-        </div>
-
         {perspective === 'ide' ? (
           <div
             className="grid min-h-0 flex-1 overflow-hidden border-y border-[var(--border-subtle)] bg-[var(--surface-default)]"
             data-studio-skeleton="ide"
-            style={{ gridTemplateColumns: 'minmax(0, 280px) minmax(0, 1fr) minmax(0, 320px)' }}
+            style={{ gridTemplateColumns: 'minmax(0, 234px) minmax(0, 1fr) minmax(0, 320px)' }}
           >
             <div className="flex min-h-0 overflow-hidden border-r border-[var(--border-subtle)]">
-              <nav className="flex w-[46px] shrink-0 flex-col items-center border-r border-[var(--border-subtle)] py-2" aria-label="IDE 工作区导航">
-                <Skeleton className="mb-3 h-8 w-8 rounded-[8px]" />
-                <div className="h-px w-5 bg-[var(--border-subtle)]" />
-                <div className="mt-2 flex flex-col gap-1">
-                  {studioSkeletonInspectorTabs.map((tab) => (
-                    <Skeleton key={tab} className="h-9 w-9 rounded-[8px]" />
-                  ))}
-                </div>
-              </nav>
               <div className="min-w-0 flex-1 space-y-3 overflow-hidden p-3">
                 <Skeleton className="h-4 w-24" />
                 <Skeleton className="h-9 w-full rounded-[10px]" />
@@ -390,6 +385,7 @@ export function StudioSkeleton() {
         )}
         </div>
       </div>
+    </div>
     </div>
   )
 }

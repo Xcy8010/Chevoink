@@ -38,10 +38,35 @@ it('keeps the activity dock beside the scrollbar without narrowing the conversat
   const conversation = root.querySelector<HTMLElement>('[data-work-conversation]')!
   const dock = root.querySelector<HTMLElement>('.work-activity-dock')!
   expect(root.getAttribute('data-activity-dock')).toBe('visible')
-  expect(conversation.style.flexBasis).toBe('1236px')
+  expect(conversation.style.flexGrow).toBe('1')
+  expect(conversation.style.flexBasis).toBe('0px')
+  expect(conversation.style.getPropertyValue('--work-agent-chat-width')).toBe('1236px')
   expect(dock.classList.contains('absolute')).toBe(true)
   expect(dock.style.right).toBe('332px')
   expect(dock.style.width).toBe('296px')
+})
+
+it('reports the actual dock state to the conversation when the layout or preference changes', () => {
+  function DockState() {
+    return <output aria-label="Dock state">{useWorkConversation().activityDock ?? 'unavailable'}</output>
+  }
+  const base = { ...props(), conversation: <DockState />, viewer: undefined, inspectorWidth: 320 }
+  const view = render(<WorkPerspective {...base} />)
+  const state = screen.getByLabelText('Dock state')
+  const dock = view.container.querySelector('.work-activity-dock')!
+  function expectState(expected: string) {
+    expect(state.textContent).toBe(expected)
+    expect(dock.getAttribute('aria-hidden')).toBe(String(expected !== 'expanded'))
+  }
+  expectState('expanded')
+  view.rerender(<WorkPerspective {...base} activityDockExpanded={false} />)
+  expectState('collapsed')
+  view.rerender(<WorkPerspective {...base} viewer="正文" />)
+  expectState('unavailable')
+  view.rerender(<WorkPerspective {...base} activityDock={null} />)
+  expectState('unavailable')
+  view.rerender(<WorkPerspective {...base} />)
+  expectState('expanded')
 })
 
 it('preserves a folded viewer through delayed hydration, task revisit and remount, but opens for an explicit scoped selection', () => {

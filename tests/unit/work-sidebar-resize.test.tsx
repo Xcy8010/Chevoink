@@ -12,7 +12,7 @@ vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ suc
 const noop = () => undefined
 function Fixture(overrides: Partial<ComponentProps<typeof StudioWorkspaceSidebar>> = {}) {
   const [open, setOpen] = useState(true)
-  return <StudioWorkspaceSidebar open={open} onOpenChange={setOpen} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="preview" currentTasksNovelId="preview" currentNovelTitle="预览" novels={[]} currentTasks={[]} activeTaskId={null} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskDeleted={noop} onTaskForked={noop} onNovelDeleted={noop} autoFollow={false} onAutoFollowChange={noop} onOpenStudioSettings={noop} {...overrides} />
+  return <StudioWorkspaceSidebar open={open} onOpenChange={setOpen} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="preview" currentTasksNovelId="preview" currentNovelTitle="预览" novels={[]} currentTasks={[]} activeTaskId={null} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskDeleted={noop} onTaskForked={noop} onNovelDeleted={noop} {...overrides} />
 }
 beforeEach(() => {
   localStorage.clear()

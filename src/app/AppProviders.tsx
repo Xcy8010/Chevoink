@@ -1,9 +1,10 @@
 import { PropsWithChildren, useEffect, useLayoutEffect } from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
 
 import { ACCOUNT_REQUIREMENT_EVENT, ApiClientError, requestJson } from '@/app/api-client'
 import { useLiveConfiguration } from './live-configuration'
 import { requestSessionSignIn } from './session-activity'
+import { getSessionQueryScope, meQueryKey } from './session-query-cache'
 import { DEVICE_SELECTION_KEY, readDeviceSelection, selectedDevice } from '@/lib/auth-token'
 import { DeviceProvider } from '@/components/layout/DeviceProvider'
 import { ToastProvider } from '@/components/ui/Toast'
@@ -13,21 +14,12 @@ import { restoreNativeSystemBarsToTheme } from '@/lib/native-app'
 import { useShellStore } from '@/store/useShellStore'
 import type { UserMePayload } from '../../shared/contracts'
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      refetchOnWindowFocus: false,
-      retry: 1,
-      staleTime: 30_000,
-    },
-  },
-})
-
 export default function AppProviders({ children }: PropsWithChildren) {
   const theme = useShellStore((state) => state.theme)
   const studioAppearance = useShellStore((state) => state.studioAppearance)
   const authStatus = useShellStore((state) => state.authStatus)
   const viewerId = useShellStore((state) => state.sessionUser?.id ?? null)
+  const { client: queryClient, generation } = useShellStore(getSessionQueryScope)
   useLiveConfiguration(queryClient, authStatus, viewerId)
   const setSessionChecking = useShellStore((state) => state.setSessionChecking)
   const setSessionUnavailable = useShellStore((state) => state.setSessionUnavailable)
@@ -64,17 +56,17 @@ export default function AppProviders({ children }: PropsWithChildren) {
     let refreshingRequirements = false
 
     async function bootstrapShellSession(requirementsOnly = false, canRetrySelection = true) {
-      const { sessionUser, authTokens } = useShellStore.getState()
+      const requestScope = getSessionQueryScope()
+      const { client } = requestScope
+      const { authTokens } = useShellStore.getState()
       const selection = selectedDevice()
-      const isCurrentSession = () => {
-        const current = useShellStore.getState()
-        return !disposed && current.sessionUser?.id === sessionUser?.id && current.authTokens === authTokens
-      }
+      const isCurrentSession = () =>
+        !disposed && getSessionQueryScope() === requestScope && useShellStore.getState().authTokens === authTokens
       function selectionChanged(confirmedId?: string) {
         const selected = selectedDevice()
         if (selected === selection || (selected && selected === confirmedId)) return false
         if (!requirementsOnly) {
-          queryClient.removeQueries({ queryKey: ['community', 'me'], exact: true })
+          client.removeQueries({ queryKey: meQueryKey, exact: true })
           if (canRetrySelection) void bootstrapShellSession(false, false)
           else setSessionUnavailable()
         }
@@ -84,8 +76,8 @@ export default function AppProviders({ children }: PropsWithChildren) {
 
       try {
         // 经 react-query 缓存拉取：与页面级 ['community','me'] 查询共享同一请求/缓存，避免首屏重复请求 /api/users/me
-        const payload = await queryClient.fetchQuery({
-          queryKey: ['community', 'me'],
+        const payload = await client.fetchQuery({
+          queryKey: meQueryKey,
           queryFn: () => requestJson<UserMePayload>('/api/users/me'),
           // Share in-flight requests with the route, but always verify this login at open.
           staleTime: 0,
@@ -108,9 +100,10 @@ export default function AppProviders({ children }: PropsWithChildren) {
 
           // 登录后水合书架/阅读进度：拉取云端并合并本地，变更后刷新 /me 让书架列表重算
           if (!requirementsOnly) {
+            const verifiedScope = getSessionQueryScope()
             void hydrateReadingSync().then((changed) => {
-              if (changed && !disposed) {
-                void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
+              if (changed && !disposed && getSessionQueryScope() === verifiedScope) {
+                void verifiedScope.client.invalidateQueries({ queryKey: meQueryKey })
               }
             })
           }
@@ -161,13 +154,13 @@ export default function AppProviders({ children }: PropsWithChildren) {
   }, [setGuest, setSessionChecking, setSessionUnavailable, syncSessionUser])
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <DeviceProvider>
-        <ToastProvider>
+    <DeviceProvider>
+      <ToastProvider>
+        <QueryClientProvider key={generation} client={queryClient}>
           {children}
-          <UpdateBanner />
-        </ToastProvider>
-      </DeviceProvider>
-    </QueryClientProvider>
+        </QueryClientProvider>
+        <UpdateBanner />
+      </ToastProvider>
+    </DeviceProvider>
   )
 }

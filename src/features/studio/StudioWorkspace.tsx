@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ComponentProps } from 'react'
 import { hasComposerDraft, promoteComposerDraft } from './agent/composer-drafts'
@@ -11,7 +11,8 @@ import { BookOpen, BookOpenText, Brain, Bug, FileText, Flag, FolderDown, ImagePl
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { plainChapterTitle } from '../../../shared/structure/chapter-title'
 
-import Surface from '@/components/ui/Surface'
+import { useDialogFocusTrap } from './components/use-dialog-focus-trap'
+import './components/studio-tool-dialog.css'
 import { AppStateRefreshNotice } from '@/components/ui/AppState'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
@@ -46,6 +47,9 @@ import NovelCoverCropDialog from './components/NovelCoverCropDialog'
 import PublishMetadataDialog from './components/PublishMetadataDialog'
 import PublishNovelDialog from './components/PublishNovelDialog'
 import StudioCommandBar from './components/StudioCommandBar'
+import StudioDesktopRail from './components/StudioDesktopRail'
+import StudioDesktopContent from './components/StudioDesktopContent'
+import StudioDesktopInvite from './components/StudioDesktopInvite'
 import StudioMobileAccountCard from './components/StudioMobileAccountCard'
 import StudioMobileHeader from './components/StudioMobileHeader'
 import StudioMobileNavigation from './components/StudioMobileNavigation'
@@ -59,7 +63,6 @@ import type { StudioSettingsSection } from './components/StudioSettingsDialog'
 import { agentPersonalizationQueryKey } from './personalization-api'
 import WorkInspector from './components/WorkInspector'
 import IdePerspective from './components/IdePerspective'
-import IdeNavigationRail from './components/IdeNavigationRail'
 import { AgentPanel } from './agent/components/AgentPanel'
 import { fetchAgentSessions, updateAgentSessionSettings } from './agent/agentApi'
 import { refreshMemoryAfterWrite } from './agent/lib/memory-read'
@@ -239,6 +242,8 @@ export default function StudioWorkspace() {
     panelWidths, beginPanelResize,
   } = useWorkspaceLayout(activeNovelId)
   const [studioSettingsOpen, setStudioSettingsOpen] = useState<boolean | null>(null)
+  const settingsTrigger = useRef<HTMLButtonElement | null>(null)
+  const [desktopInviteOpen, setDesktopInviteOpen] = useState(false)
   const [studioSettingsSection, setStudioSettingsSection] = useState<StudioSettingsSection>('general')
   const featureFlags = studioQuery.data?.featureFlags ?? DEFAULT_AGENT2_FEATURE_FLAGS
   useEffect(() => {
@@ -269,6 +274,8 @@ export default function StudioWorkspace() {
   // 创作区内滚动条静止时隐藏，滚动中才显示
   useAutoHideScrollbars()
   const [activeToolPanel, setActiveToolPanel] = useState<ToolPanel | null>(null)
+  const metaDialog = useRef<HTMLDivElement>(null)
+  useDialogFocusTrap({ panel: metaDialog, open: desktopLayout && activeToolPanel === 'meta' && Boolean(novelForm), onClose: () => setActiveToolPanel(null) })
   const platformCapabilities = useMemo(() => getPlatformCapabilities(), [])
   const mobileMotion = platformCapabilities.native && /Android/i.test(navigator.userAgent)
   const mobilePrimary = mobileView === 'assistant' || mobileView === 'editor'
@@ -322,6 +329,18 @@ export default function StudioWorkspace() {
   const taskScopeOwner = taskUiUserId ?? queryClient.getQueryData<UserMePayload>(['community', 'me'])?.user?.id ?? 'current'
   const taskUiScope = activeAgentTaskWindowId && agentStateNovelId === activeNovelId
     ? `${taskScopeOwner}:${activeNovelId}:${activeAgentTaskWindowId}` : undefined
+  const taskDockId = useId()
+  const [foldedTaskStatuses, setFoldedTaskStatuses] = useState<ReadonlySet<string>>(() => new Set())
+  const taskStatusExpanded = !taskUiScope || !foldedTaskStatuses.has(taskUiScope)
+  function toggleTaskStatus() {
+    if (!taskUiScope) return
+    setFoldedTaskStatuses(current => {
+      const next = new Set(current)
+      if (next.has(taskUiScope)) next.delete(taskUiScope)
+      else next.add(taskUiScope)
+      return next
+    })
+  }
   const taskLocationRef = useRef({ novelId: activeNovelId, taskId: activeAgentTaskWindowId })
   taskLocationRef.current = { novelId: activeNovelId, taskId: activeAgentTaskWindowId }
   const workPanelScope = useWorkPanelState(taskUiScope,
@@ -821,6 +840,7 @@ export default function StudioWorkspace() {
     setMissingPublishFields([])
     setPublishDialogOpen(false)
     setEditorChapterSettingsOpen(false)
+    setPlanSettingsPlanId(null)
   }, [activeNovelId])
 
   useEffect(() => {
@@ -4087,10 +4107,11 @@ export default function StudioWorkspace() {
     return createdSession.id
   }
 
+  const hasTaskStatus = hasVisibleWorkspaceChanges || agentTodos.some(item => item.status !== 'cancelled') || pendingChapterReviews.length > 0 || Boolean(pendingPlanReview)
+
   function renderWritingAgent(
     close?: () => void,
     showCloseAction = true,
-    activityPresentation: 'inline' | 'responsive' = 'inline',
     mobileIntegratedHeader = false,
     showCreditWarning = false,
   ) {
@@ -4136,11 +4157,14 @@ export default function StudioWorkspace() {
           onNewSession={handleCreateAgentTaskWindow}
           onWorkspaceRollback={() => void refreshWorkspaceAfterAgentWrite()}
           onClose={showCloseAction ? close : undefined}
-          activityPresentation={activityPresentation}
+          taskStatus={mobileIntegratedHeader ? undefined : {
+            available: Boolean(taskUiScope) && hasTaskStatus,
+            dockId: workspacePerspective === 'work' ? taskDockId : undefined,
+            toggle: toggleTaskStatus,
+          }}
           mobileIntegratedHeader={mobileIntegratedHeader}
           taskTitle={activeAgentTaskWindow?.title ?? null}
-          taskSubtitle={`${novelTitle} · ${workspacePerspective === 'work' ? 'Work 创作' : 'IDE 写作'}`}
-          // 任务「更多」菜单：紧随 Agent 面板顶栏的任务标题展示，仅作用于当前任务
+          taskSubtitle={`${novelTitle} · ${workspacePerspective === 'work' ? 'Studio' : 'Editor'}`}
           onPinTask={() => {
             if (!activeAgentTaskWindow?.sessionId) return
             void updateAgentSessionSettings(activeAgentTaskWindow.sessionId, { pinned: true }).then(() => queryClient.invalidateQueries({ queryKey: ['agent', 'sessions'] }))
@@ -4201,34 +4225,6 @@ export default function StudioWorkspace() {
         onDownloadAsset={handleDownloadCoverAsset}
         onClose={() => setActiveToolPanel(null)}
       />
-    )
-  }
-
-  function renderToolPanel() {
-    if (!activeToolPanel) {
-      return null
-    }
-
-    return (
-      <Surface as="section" padding="md" className="flex h-full min-h-0 flex-col overflow-hidden">
-        {activeToolPanel === 'meta' && novelForm ? (
-          <MetaPanel
-            novelForm={novelForm}
-            coverUrl={currentNovel?.coverUrl}
-            message={novelSaveState === 'idle' ? '' : novelSaveDisplayMessage}
-            saving={saveNovelMutation.isPending}
-            onChange={setNovelForm}
-            onRequestVisibilityAction={handleRequestNovelVisibilityAction}
-            onRequestStatusAction={handleRequestNovelStatusAction}
-            detailPreviewHref={detailPreviewHref}
-            onOpenCover={() => setActiveToolPanel('cover')}
-            onCoverFile={handleOpenCoverCropDialog}
-            onSave={handleSaveNovel}
-            onClose={() => setActiveToolPanel(null)}
-          />
-        ) : null}
-        {activeToolPanel === 'assistant' ? renderWritingAgent(() => setActiveToolPanel(null)) : null}
-      </Surface>
     )
   }
 
@@ -4313,6 +4309,10 @@ export default function StudioWorkspace() {
   const memorySessionId = agentStateNovelId === activeNovelId && currentNovel.id === activeNovelId ? agentSessionId : null
   const switchingWork = currentNovel.id !== activeNovelId || studioQuery.isPlaceholderData
   const lockOutgoingContent = (element: HTMLDivElement | null) => { if (element) element.inert = switchingWork }
+  const returnFromSettings = studioSettingsOpen ? () => {
+    settingsTrigger.current = null
+    setStudioSettingsOpen(false)
+  } : undefined
   const mobileConversationOwner = workspaceOwnerRef.current
   return (
     <>
@@ -4414,7 +4414,7 @@ export default function StudioWorkspace() {
               data-page="assistant"
               className={cn('z-20 min-h-0 flex-1 flex-col overflow-visible', mobileMotion && mobilePrimary ? 'studio-mobile-tab-page flex' : cn('relative', mobileView === 'assistant' ? 'flex' : 'hidden'))}
             >
-              {renderWritingAgent(undefined, false, 'inline', true, true)}
+              {renderWritingAgent(undefined, false, true, true)}
             </div>
 
             {mobileView === 'memory' && featureFlags.memory2 ? (
@@ -4548,7 +4548,55 @@ export default function StudioWorkspace() {
           </StudioMobileNavigation>
         </div>}
 
-        {desktopLayout && <div className="hidden min-h-0 flex-1 lg:flex">
+        {desktopLayout && <div className="studio-desktop-shell hidden min-h-0 flex-1 flex-col lg:flex">
+          <StudioCommandBar
+            key={activeNovelId}
+            switchingWork={switchingWork}
+            onReturnToWorkspace={returnFromSettings}
+            workspaceControls={workspacePerspective === 'ide'}
+            workspaceSidebarOpen={workspacePerspective === 'ide' ? ideTreeOpen : workspaceSidebarOpen}
+            onWorkspaceSidebarToggle={() => workspacePerspective === 'ide' ? setIdeTreeOpen((value) => !value) : setWorkspaceSidebarOpen((value) => !value)}
+            perspective={workspacePerspective}
+            perspectiveSwitchEnabled={featureFlags.dualWorkspace}
+            onPerspectiveChange={setWorkspacePerspective}
+            currentNovelId={currentNovel.id}
+            novelTitle={novelTitle}
+            novelOptions={activeNovelOptions}
+            novelsLoading={myNovelsQuery.isLoading}
+            switchingNovel={createNovelMutation.isPending}
+            onSelectNovel={handleSelectWorkspaceNovel}
+            onCreateNovel={handleCreateWorkspaceNovel}
+            onPublish={handlePublishNovel}
+            onOpenCover={() => setActiveToolPanel('cover')}
+            onOpenMeta={() => setActiveToolPanel('meta')}
+            documents={{ chapters, volumes, plans: agentStateNovelId === activeNovelId ? savedPlanFiles : [], plansLoaded: plansLoadedNovelId === activeNovelId }}
+            onOpenChapterSettings={id => handleSelectChapter(id, { openSettings: true })}
+            onOpenPlanSettings={setPlanSettingsPlanId}
+            onExport={() => setExportDialogOpen(true)}
+            onImport={openNovelImport}
+            onDeleteNovel={handleRequestDeleteNovel}
+            onCreateVolume={handleRequestCreateVolume}
+            onCreateChapter={handleRequestCreateChapter}
+            onCreatePlan={handleRequestCreatePlan}
+            previewHref={previewHref}
+            detailPreviewHref={detailPreviewHref}
+            published={novelForm?.status === 'published'}
+            novelStatus={novelForm?.status}
+            onToggleNovelCompletion={handleToggleNovelCompletion}
+          />
+          <div className="flex min-h-0 flex-1">
+            <StudioDesktopRail onReturnToWorkspace={returnFromSettings} onOpenSettings={(section, trigger) => {
+              settingsTrigger.current = trigger
+              setStudioSettingsSection(section)
+              setStudioSettingsOpen(true)
+            }} onInvite={() => setDesktopInviteOpen(true)}
+              ide={workspacePerspective === 'ide' ? {
+                tab: ideSidebarTab, open: ideTreeOpen,
+                onToggle: () => setIdeTreeOpen(value => !value),
+                onSelect: tab => { setIdeSidebarTab(tab); setIdeTreeOpen(true) },
+              } : undefined}
+            />
+            <StudioDesktopContent inactive={Boolean(studioSettingsOpen)}>
           {workspacePerspective === 'work' ? <StudioWorkspaceSidebar
             open={workspaceSidebarOpen}
             onOpenChange={setWorkspaceSidebarOpen}
@@ -4579,54 +4627,23 @@ export default function StudioWorkspace() {
             onNovelDeleted={(deletedNovelId) => void handleNovelDeletedFromSidebar(deletedNovelId)}
             onNovelArchived={handleNovelArchivedFromSidebar}
             currentNovelStatus={novelForm?.status}
+            onInvite={() => setDesktopInviteOpen(true)}
             onOpenNovelMeta={() => setActiveToolPanel('meta')}
             onExportNovel={() => setExportDialogOpen(true)}
             onImportNovel={openNovelImport}
             onPublishNovel={handlePublishNovel}
             onToggleNovelCompletion={handleToggleNovelCompletion}
-            autoFollow={autoFollow}
-            onAutoFollowChange={setAutoFollow}
-            onOpenStudioSettings={(section = 'general') => { setStudioSettingsSection(section); setStudioSettingsOpen(true) }}
           /> : null}
           <div ref={lockOutgoingContent} aria-busy={switchingWork} className="flex min-w-0 flex-1 flex-col">
-          <StudioCommandBar
-            workspaceControls={workspacePerspective === 'ide'}
-            workspaceSidebarOpen={workspacePerspective === 'ide' ? ideTreeOpen : workspaceSidebarOpen}
-            onWorkspaceSidebarToggle={() => workspacePerspective === 'ide' ? setIdeTreeOpen((value) => !value) : setWorkspaceSidebarOpen((value) => !value)}
-            perspective={workspacePerspective}
-            perspectiveSwitchEnabled={featureFlags.dualWorkspace}
-            onPerspectiveChange={setWorkspacePerspective}
-            currentNovelId={currentNovel.id}
-            novelTitle={novelTitle}
-            novelOptions={activeNovelOptions}
-            novelsLoading={myNovelsQuery.isLoading}
-            switchingNovel={createNovelMutation.isPending}
-            onSelectNovel={handleSelectWorkspaceNovel}
-            onCreateNovel={handleCreateWorkspaceNovel}
-            onPublish={handlePublishNovel}
-            onOpenCover={() => setActiveToolPanel('cover')}
-            onOpenMeta={() => setActiveToolPanel('meta')}
-            onExport={() => setExportDialogOpen(true)}
-            onImport={openNovelImport}
-            onDeleteNovel={handleRequestDeleteNovel}
-            onCreateVolume={handleRequestCreateVolume}
-            onCreateChapter={handleRequestCreateChapter}
-            onCreatePlan={handleRequestCreatePlan}
-            previewHref={previewHref}
-            detailPreviewHref={detailPreviewHref}
-            published={novelForm?.status === 'published'}
-            novelStatus={novelForm?.status}
-            onToggleNovelCompletion={handleToggleNovelCompletion}
-            onOpenStudioSettings={(section = 'general') => { setStudioSettingsSection(section); setStudioSettingsOpen(true) }}
-          />
-
-          <div className="min-h-0 flex-1 overflow-hidden">
+          <div className="studio-canvas-frame min-h-0 flex-1 overflow-hidden">
             <div key={workspacePerspective} data-studio-perspective={workspacePerspective} className="studio-perspective-enter h-full min-h-0">
             {featureFlags.dualWorkspace && workspacePerspective === 'work' ? (
               <WorkPerspective
                 conversationRail={<AgentConversationRail conversations={agentConversationRailItems} onSelectConversation={(messageId) => window.dispatchEvent(new CustomEvent('chevoink:agent-conversation-navigate', { detail: { messageId } }))} />}
-                conversation={<div className="work-agent-frame h-full min-h-0 w-full py-2">{renderWritingAgent(undefined, false, workViewerMode ? 'inline' : 'responsive')}</div>}
-                activityDock={(hasVisibleWorkspaceChanges || agentTodos.some(item => item.status !== 'cancelled') || pendingChapterReviews.length > 0 || Boolean(pendingPlanReview)) ? <div className="flex h-full min-h-0 flex-col"><div className="rounded-[20px] bg-[var(--surface-muted)] p-3"><p className="px-2 pb-1 pt-1 text-sm font-semibold text-[var(--text-secondary)]">任务状态</p><AgentActivityBar
+                conversation={<div className="work-agent-frame h-full min-h-0 w-full pb-2">{renderWritingAgent(undefined, false)}</div>}
+                activityDockId={taskDockId}
+                activityDockExpanded={taskStatusExpanded}
+                activityDock={hasTaskStatus ? <div className="flex h-full min-h-0 flex-col"><div className="rounded-[20px] bg-[var(--surface-muted)] p-3"><p className="px-2 pb-1 pt-1 text-sm font-semibold text-[var(--text-secondary)]">任务状态</p><AgentActivityBar
                   activities={workspaceActivities}
                   activitiesVersion={workspaceActivitiesVersion}
                   todos={agentTodos}
@@ -4711,15 +4728,8 @@ export default function StudioWorkspace() {
               agentOpen={ideAgentOpen}
             >
               <div className="relative min-h-0 min-w-0 border-r border-[var(--border-subtle)]">
-                <IdeNavigationRail
-                  tab={ideSidebarTab}
-                  open={ideTreeOpen}
-                  onToggle={() => setIdeTreeOpen((value) => !value)}
-                  onSelect={(tab) => {
-                    setIdeSidebarTab(tab)
-                    setIdeTreeOpen(true)
-                  }}
-                  panel={ideSidebarTab === 'work' ? <ChapterSidebar
+                <div aria-hidden={!ideTreeOpen} className={cn('h-full min-w-0 overflow-hidden bg-[var(--studio-sidebar-bg,var(--app-bg))]', !ideTreeOpen && 'invisible')}>
+                  {ideSidebarTab === 'work' ? <ChapterSidebar
                   taskScope={taskUiScope}
                     embedded
                     showExtendedMenus={false}
@@ -4774,11 +4784,11 @@ export default function StudioWorkspace() {
                     skillsPanel={<SkillsPanel novelId={currentNovel.id} chapters={chapters} />}
                     contextPanel={<AgentMemoryCenter sessionId={memorySessionId} novelId={currentNovel.id} active={agentRunState.active} onOpenDetail={() => setContextDetailOpen(true)} />}
                   />}
-                />
+                </div>
                 {ideTreeOpen ? <PanelResizeHandle
                   panel="tree"
                   side="right"
-                  label="拖拽调整 IDE 左侧面板宽度"
+                  label="拖拽调整 Editor 左侧面板宽度"
                   onBegin={beginPanelResize}
                 /> : null}
               </div>
@@ -4819,21 +4829,21 @@ export default function StudioWorkspace() {
             )}
             </div>
           </div>
-          {activeToolPanel === 'meta' ? (
-            <div className="fixed inset-0 z-[90] hidden bg-[rgba(15,23,42,0.18)] md:block" onClick={() => setActiveToolPanel(null)}>
-              <div className="absolute inset-y-4 right-4 max-h-[48rem] w-[29rem] max-w-[calc(100vw-2rem)]" onClick={(event) => event.stopPropagation()}>
-                {renderToolPanel()}
-              </div>
-            </div>
-          ) : null}
+          </div>
+            </StudioDesktopContent>
           </div>
         </div>}
+        {desktopInviteOpen && <StudioDesktopInvite onClose={() => setDesktopInviteOpen(false)} />}
         {studioSettingsOpen !== null && (
             <StudioSettingsDialog
               open={studioSettingsOpen}
               section={studioSettingsSection}
               onSectionChange={setStudioSettingsSection}
-              onClose={() => setStudioSettingsOpen(false)}
+              onClose={() => {
+                setStudioSettingsOpen(false)
+                settingsTrigger.current?.focus()
+                settingsTrigger.current = null
+              }}
               onOpenImportHistory={importHistoryAvailable ? () => { setStudioSettingsOpen(false); openImportHistory() } : undefined}
               perspective={workspacePerspective}
               onPerspectiveChange={setWorkspacePerspective}
@@ -4853,6 +4863,26 @@ export default function StudioWorkspace() {
               onTaskForked={handleAgentTaskForked}
               onTaskArchived={handleAgentTaskArchived}
             />
+        )}
+        {desktopLayout && activeToolPanel === 'meta' && novelForm && (
+          <div className="studio-tool-overlay fixed inset-0 z-[90]" onClick={event => { if (event.target === event.currentTarget) setActiveToolPanel(null) }}>
+            <div className="studio-tool-dialog studio-tool-dialog--wide" role="dialog" aria-modal="true" aria-label="作品设置" ref={metaDialog} tabIndex={-1}>
+              <MetaPanel
+                novelForm={novelForm}
+                coverUrl={currentNovel?.coverUrl}
+                message={novelSaveState === 'idle' ? '' : novelSaveDisplayMessage}
+                saving={saveNovelMutation.isPending}
+                onChange={setNovelForm}
+                onRequestVisibilityAction={handleRequestNovelVisibilityAction}
+                onRequestStatusAction={handleRequestNovelStatusAction}
+                detailPreviewHref={detailPreviewHref}
+                onOpenCover={() => setActiveToolPanel('cover')}
+                onCoverFile={handleOpenCoverCropDialog}
+                onSave={handleSaveNovel}
+                onClose={() => setActiveToolPanel(null)}
+              />
+            </div>
+          </div>
         )}
         {activeToolPanel === 'cover' ? renderCoverToolPanel(true) : null}
       </div>

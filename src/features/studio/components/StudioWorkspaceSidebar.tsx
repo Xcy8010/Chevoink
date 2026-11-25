@@ -1,33 +1,27 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Archive, BookOpenText, Bot, Bug, Check, ChevronDown, ChevronRight, Clock3, Copy, Crosshair, Flag, FolderDown,
-  Gauge, Gift, GitBranch, Home, Lightbulb, LoaderCircle, MoreHorizontal, PencilLine, Pin, PinOff, Plus, RotateCcw,
+  Archive, BookOpenText, ChevronRight, Clock3, Copy, Flag, FolderDown,
+  Gauge, Gift, GitBranch, ListFilter, LoaderCircle, MoreHorizontal, PencilLine, Pin, PinOff, Plus, RotateCcw,
   Search, Settings2, Trash2, Upload, X,
 } from 'lucide-react'
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useNavigate } from 'react-router-dom'
 
 import { useToast } from '@/components/ui/toast-context'
-import { SiteAnnouncements } from '@/features/site-content/public'
-import { fetchCreditSummary, fetchReferral } from '@/features/account/credits-api'
-import { formatCreditAmount, formatCreditResetLabel } from '@/features/account/credit-format'
-import InviteCreditsDialog from '@/features/account/InviteCreditsDialog'
-import Avatar from '@/features/community/components/Avatar'
-import FeedbackDialog from '@/features/feedback/components/FeedbackDialog'
+import { useStudioCredits } from '../hooks/useStudioCredits'
 import { copyToClipboard } from '@/lib/clipboard'
 import { cn } from '@/lib/utils'
+import { groupTimelineTasks, type SidebarTask } from './studio-task-timeline'
 import { useShellStore } from '@/store/useShellStore'
-import type { AgentSession, FeedbackKind, Novel, UserMePayload } from '../../../../shared/contracts/index.js'
+import type { AgentSession, Novel, UserMePayload } from '../../../../shared/contracts/index.js'
 import { deleteNovelWorkspace, updateNovelMeta } from '../api'
 import { deleteAgentSession, fetchAgentSessions, fetchSessionsRunStatus, forkAgentSession, renameAgentSession, updateAgentSessionSettings } from '../agent/agentApi'
-import ChevoinkAgentMark from '../agent/components/ChevoinkAgentMark'
+import StudioSidebarHeader from './StudioSidebarHeader'
 import { useAgentStore } from '../agent/agentStore'
 import { selectAgentActivityRunActive, selectAgentGoalView } from '../agent/goal-selectors'
 import { formatTaskRelativeTime } from '../lib/relative-time'
 import type { AgentTaskSidebarItem } from './AgentTaskSidebar'
 import DangerConfirmDialog from './DangerConfirmDialog'
 
-type SettingsSection = 'general' | 'models' | 'operations' | 'archives'
 type Props = {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -68,9 +62,7 @@ type Props = {
   onImportNovel: () => void
   onPublishNovel?: () => void
   onToggleNovelCompletion?: () => void
-  autoFollow: boolean
-  onAutoFollowChange: (enabled: boolean) => void
-  onOpenStudioSettings: (section?: SettingsSection) => void
+  onInvite?: () => void
 }
 type ContextTarget =
   | { kind: 'novel'; id: string; title: string; pinned: boolean; x: number; y: number }
@@ -79,14 +71,6 @@ type ContextTargetInput =
   | { kind: 'novel'; id: string; title: string; pinned: boolean }
   | { kind: 'task'; id: string; novelId: string; title: string; pinned: boolean; temporary: boolean }
 type RenameTarget = { kind: 'novel' | 'task'; id: string; title: string }
-type SidebarTask = {
-  id: string; novelId: string; title: string; updatedAt: string; pinnedAt: string | null; temporary: boolean
-  /** 分支副本：行尾展示分支 icon */
-  isBranch: boolean
-  /** 最近活跃时间（lastRunAt 优先）：悬停信息卡片右上角显示多久前 */
-  lastActiveAt: string
-  createdAt: string | null
-}
 /** 高危确认弹窗要处理的动作：删作品需逐字输入，删任务与切分支只需点确认 */
 type DangerAction =
   | { kind: 'deleteNovel'; id: string; title: string }
@@ -109,7 +93,7 @@ const workspaceSessionsKey = ['agent', 'sessions', 'workspace-navigation'] as co
 const workspaceSearchKey = ['agent', 'sessions', 'workspace-search'] as const
 const workspaceNovelsKey = ['studio', 'my-novels'] as const
 const profileKey = ['community', 'me'] as const
-const sidebarRowClass = 'flex h-8 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--border-strong)]'
+const sidebarRowClass = 'flex h-[34px] w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-[13px] transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--border-strong)]'
 
 function TaskDisclosure({ id, label, open, children }: { id?: string; label?: string; open: boolean; children: ReactNode }) {
   return (
@@ -137,6 +121,7 @@ function toSidebarTask(session: AgentSession): SidebarTask {
   return {
     id: session.id, novelId: session.novelId, title: session.title, updatedAt: session.updatedAt,
     pinnedAt: session.pinnedAt, temporary: false, isBranch: Boolean(session.forkedFromSessionId),
+    preview: typeof session.latestMessagePreview === 'string' ? session.latestMessagePreview : undefined,
     lastActiveAt: session.lastRunAt ?? session.updatedAt, createdAt: session.createdAt,
   }
 }
@@ -164,7 +149,6 @@ function initialWidth() {
 }
 
 export default function StudioWorkspaceSidebar(props: Props) {
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const toast = useToast()
   const sessionUser = useShellStore((state) => state.sessionUser)
@@ -178,15 +162,9 @@ export default function StudioWorkspaceSidebar(props: Props) {
     if (!dragRef.current) onWidthChangeRef.current?.(width)
   }, [width])
   const [peek, setPeek] = useState(false)
-  const [productMenu, setProductMenu] = useState(false)
-  const [moreMenu, setMoreMenu] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [timeline, setTimeline] = useState(false)
   const [searchText, setSearchText] = useState('')
-  const [accountOpen, setAccountOpen] = useState(false)
-  const [usageExpanded, setUsageExpanded] = useState(false)
-  const [inviteOpen, setInviteOpen] = useState(false)
-  const [inviteCopied, setInviteCopied] = useState(false)
-  const [feedbackKind, setFeedbackKind] = useState<FeedbackKind | null>(null)
   const [warningDismissed, setWarningDismissed] = useState(false)
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set())
   const [expandedTaskLists, setExpandedTaskLists] = useState<Set<string>>(() => new Set())
@@ -200,9 +178,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
   const [taskCard, setTaskCard] = useState<TaskCard | null>(null)
   const taskCardTimerRef = useRef<number | null>(null)
   const [busy, setBusy] = useState(false)
-  const accountRef = useRef<HTMLDivElement | null>(null)
   const peekCloseTimerRef = useRef<number | null>(null)
-  const autoCopyRef = useRef(false)
   const resizeRootRef = useRef<HTMLElement>(null)
   const [foldingSidebar, setFoldingSidebar] = useState(false)
   useEffect(() => {
@@ -251,8 +227,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
     staleTime: 8_000,
     enabled: searchOpen && searchText.trim().length > 0,
   })
-  const creditQuery = useQuery({ queryKey: ['credits', 'summary'], queryFn: fetchCreditSummary, staleTime: 20_000, refetchInterval: 60_000 })
-  const referralQuery = useQuery({ queryKey: ['credits', 'referral'], queryFn: fetchReferral, staleTime: 60_000, enabled: inviteOpen })
+  const creditQuery = useStudioCredits()
   const sessions = useMemo(() => (sessionsQuery.data?.items ?? []).filter(
     session => session.status !== 'archived' && !archivedNovelIds.has(session.novelId),
   ), [sessionsQuery.data?.items, archivedNovelIds])
@@ -264,7 +239,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
   }, [sessions])
   const localTasks = useMemo<SidebarTask[]>(() => props.currentTasks.map((task) => ({
     id: task.id, novelId: props.currentTasksNovelId, title: task.title, updatedAt: task.updatedAt,
-    pinnedAt: null, temporary: task.temporary, isBranch: false, lastActiveAt: task.updatedAt, createdAt: null,
+    pinnedAt: null, temporary: task.temporary, isBranch: false, lastActiveAt: task.updatedAt, createdAt: null, preview: task.prompt,
   })), [props.currentTasksNovelId, props.currentTasks])
   useLayoutEffect(() => {
     setTaskSnapshots(current => ({ ...current, [props.currentTasksNovelId]: localTasks }))
@@ -319,15 +294,12 @@ export default function StudioWorkspaceSidebar(props: Props) {
     setWarningDismissed(Boolean(key && window.localStorage.getItem(key) === 'dismissed'))
   }, [summary?.resetsAt, warningThreshold])
   useEffect(() => {
-    const close = (event: MouseEvent) => {
-      if (accountOpen && !accountRef.current?.contains(event.target as Node)) setAccountOpen(false)
-      setProductMenu(false)
-      setMoreMenu(false)
+    const close = () => {
       setContext(null)
     }
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
-  }, [accountOpen])
+  }, [])
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setSearchOpen(true) }
@@ -341,27 +313,6 @@ export default function StudioWorkspaceSidebar(props: Props) {
     if (taskCardTimerRef.current !== null) window.clearTimeout(taskCardTimerRef.current)
   }, [])
 
-  const copyInvite = useCallback(async () => {
-    const url = referralQuery.data?.inviteUrl
-    if (!url || !navigator.clipboard) return
-    try {
-      await navigator.clipboard.writeText(url)
-      setInviteCopied(true)
-      window.setTimeout(() => setInviteCopied(false), 1800)
-    } catch { /* 显式复制按钮仍可用 */ }
-  }, [referralQuery.data?.inviteUrl])
-  useEffect(() => {
-    if (!inviteOpen || !autoCopyRef.current || !referralQuery.data?.inviteUrl) return
-    autoCopyRef.current = false
-    void copyInvite()
-  }, [copyInvite, inviteOpen, referralQuery.data?.inviteUrl])
-
-  function openInvite() {
-    setAccountOpen(false)
-    setInviteOpen(true)
-    autoCopyRef.current = true
-    if (referralQuery.data?.inviteUrl) { autoCopyRef.current = false; void copyInvite() }
-  }
   function openContext(event: React.MouseEvent, target: ContextTargetInput) {
     event.preventDefault(); event.stopPropagation()
     contextTriggerRef.current = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
@@ -567,9 +518,6 @@ export default function StudioWorkspaceSidebar(props: Props) {
     if (peekCloseTimerRef.current !== null) window.clearTimeout(peekCloseTimerRef.current)
     peekCloseTimerRef.current = window.setTimeout(() => {
       setPeek(false)
-      setProductMenu(false)
-      setMoreMenu(false)
-      setAccountOpen(false)
       peekCloseTimerRef.current = null
     }, 180)
   }
@@ -593,10 +541,11 @@ export default function StudioWorkspaceSidebar(props: Props) {
   const projectHasActiveTask = !collapsedProjects.has(props.currentNovelId) &&
     novelTitles.has(props.currentNovelId) && projectTasks(props.currentNovelId).some(isActiveTask)
   const recentHasActiveTask = recentTasks.some(isActiveTask)
+  const timelineGroups = timeline ? groupTimelineTasks(novels.flatMap(novel => projectTasks(novel.id))) : []
 
-  function taskRow(task: SidebarTask, location: 'project' | 'recent' | 'pinned' = 'project') {
+  function taskRow(task: SidebarTask, location: 'project' | 'recent' | 'pinned' | 'timeline' = 'project') {
     const active = isActiveTask(task)
-    const selected = active && (location === 'project' ? projectHasActiveTask : !projectHasActiveTask && (location === 'recent' || !recentHasActiveTask))
+    const selected = active && (location === 'timeline' || (location === 'project' ? projectHasActiveTask : !projectHasActiveTask && (location === 'recent' || !recentHasActiveTask)))
     const signal = sessionSignals[task.id]
     // 正在直播的任务窗口以本地 phase 为唯一真相：run-status 轮询最多滞后 10s，
     // 作者答完选择后不能再残留黄点，必须立即回到转圈
@@ -630,7 +579,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
       <div
         key={task.novelId + ':' + task.id}
         className={cn('group/task relative', location === 'project' && 'mb-px')}
-        onMouseEnter={(event) => scheduleTaskCard(event, task)}
+        onMouseEnter={location === 'timeline' ? undefined : (event) => scheduleTaskCard(event, task)}
         onMouseLeave={hideTaskCard}
       >
         <button
@@ -640,13 +589,17 @@ export default function StudioWorkspaceSidebar(props: Props) {
           disabled={props.taskSwitchLocked}
           className={cn(
             sidebarRowClass,
-            'pl-8 disabled:opacity-50',
+            location === 'timeline' ? 'studio-timeline-task' : 'pl-8', 'disabled:opacity-50',
             selected ? 'bg-[var(--surface-muted)] font-medium text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
           )}
           aria-current={selected ? 'page' : undefined}
           aria-label={location === 'recent' ? [title, novelTitles.get(task.novelId), '最近任务'].filter(Boolean).join('，') : undefined}
         >
-          <span className="min-w-0 flex-1 truncate">{title}</span>
+          {location === 'timeline' ? <span className="min-w-0 flex-1">
+            <span className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 flex-1 truncate font-medium">{title}</span>
+              <span className="max-w-[40%] shrink-0 truncate text-xs text-[var(--text-tertiary)]">{novelTitles.get(task.novelId)}</span></span>
+            {task.preview && <span className="studio-timeline-preview">{task.preview}</span>}
+          </span> : <span className="min-w-0 flex-1 truncate">{title}</span>}
           {indicator ? <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{indicator}</span> : null}
           {task.isBranch ? <GitBranch className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" aria-label="分支任务" /> : null}
           {task.pinnedAt ? <Pin className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" aria-hidden="true" /> : null}
@@ -682,22 +635,26 @@ export default function StudioWorkspaceSidebar(props: Props) {
 
   function body() {
     return <div className="studio-sidebar-surface relative flex h-full min-h-0 flex-col bg-[var(--app-bg)]">
-      <div className="flex h-12 shrink-0 items-center gap-1.5 px-3">
-        <div className="relative min-w-0 flex-1">
-          <button type="button" onMouseDown={(event) => event.stopPropagation()} onClick={() => setProductMenu((value) => !value)} className="flex h-8 max-w-full items-center gap-2 rounded-[9px] px-2 text-sm font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"><ChevoinkAgentMark className="h-5 w-5 shrink-0" /><span key={props.perspective} className="truncate motion-safe:animate-[mode-label-in_180ms_cubic-bezier(.22,1,.36,1)]">{props.perspective === 'work' ? 'Work' : 'IDE'}</span><ChevronDown className={cn('h-3.5 w-3.5 text-[var(--text-tertiary)] transition-transform', productMenu && 'rotate-180')} /></button>
-          {productMenu ? <div onMouseDown={(event) => event.stopPropagation()} className="absolute left-0 top-[calc(100%+5px)] z-50 w-64 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[0_18px_50px_rgba(15,23,42,.18)]">{([{ id: 'work' as const, title: 'Work', description: '协作、任务与创作' }, { id: 'ide' as const, title: 'IDE', description: '结构、正文与预览' }]).map((item) => <button key={item.id} type="button" onClick={() => { props.onPerspectiveChange(item.id); setProductMenu(false) }} disabled={!props.perspectiveSwitchEnabled} className="flex w-full items-center gap-3 rounded-[10px] px-3 py-2.5 text-left hover:bg-[var(--surface-muted)] disabled:opacity-50"><div className="min-w-0 flex-1"><p className="text-xs font-semibold">{item.title}</p><p className="mt-0.5 text-[10px] text-[var(--text-tertiary)]">{item.description}</p></div>{props.perspective === item.id ? <Check className="h-4 w-4" /> : null}</button>)}</div> : null}
-        </div>
-        <button type="button" onClick={() => setSearchOpen(true)} className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]" aria-label="搜索作品与任务" title="搜索（Ctrl+K）"><Search className="h-4 w-4" /></button>
-      </div>
+      <StudioSidebarHeader key={props.open || peek ? 'visible' : 'hidden'}
+        actions={<button type="button" className="studio-task-view-toggle" aria-label="任务视图" aria-pressed={timeline}
+          title={timeline ? '按作品查看' : '按时间查看任务'} onClick={() => {
+            listScrollTopRef.current = 0
+            setTimeline(!timeline)
+          }}><ListFilter aria-hidden="true" size={17} /></button>}
+        perspective={props.perspective} enabled={props.perspectiveSwitchEnabled}
+        onChange={props.onPerspectiveChange} onSearch={() => setSearchOpen(true)} />
 
-      <div ref={restoreListScroll} onScroll={(event) => { listScrollTopRef.current = event.currentTarget.scrollTop; hideTaskCard() }} className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-3 [scrollbar-width:thin]">
+      <div key={timeline ? 'timeline' : 'projects'} ref={restoreListScroll} onScroll={(event) => { listScrollTopRef.current = event.currentTarget.scrollTop; hideTaskCard() }} className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-3 [scrollbar-width:thin]">
         <div className="space-y-0.5 pb-3">
-          <button type="button" onClick={props.onCreateTask} disabled={props.taskSwitchLocked} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs font-medium hover:bg-[var(--surface-muted)] disabled:opacity-45"><PencilLine className="h-4 w-4" /><span className="flex-1">新对话</span><Plus className="h-3.5 w-3.5 text-[var(--text-tertiary)]" /></button>
-          <button type="button" onClick={() => props.onAutoFollowChange(!props.autoFollow)} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"><Crosshair className="h-4 w-4" /><span className="flex-1">正文追踪</span><span className="text-[10px] text-[var(--text-tertiary)]">{props.autoFollow ? '已开启' : '已关闭'}</span></button>
-          <button type="button" onClick={() => props.onOpenStudioSettings('operations')} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"><Bot className="h-4 w-4" /><span className="flex-1">Agent 与定时</span></button>
-          <div className="relative"><button type="button" onMouseDown={(event) => event.stopPropagation()} onClick={() => setMoreMenu((value) => !value)} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"><MoreHorizontal className="h-4 w-4" />更多</button>{moreMenu ? <div onMouseDown={(event) => event.stopPropagation()} className="absolute left-2 right-2 top-full z-40 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-xl"><button type="button" onClick={() => props.onOpenStudioSettings('archives')} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-xs hover:bg-[var(--surface-muted)]"><Archive className="h-3.5 w-3.5" />归档内容</button><button type="button" onClick={() => props.onOpenStudioSettings('general')} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-xs hover:bg-[var(--surface-muted)]"><Settings2 className="h-3.5 w-3.5" />创作区设置</button></div> : null}</div>
+          <button type="button" onClick={props.onCreateTask} disabled={props.taskSwitchLocked} className="flex h-[34px] w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-[13px] font-medium hover:bg-[var(--surface-muted)] disabled:opacity-45"><PencilLine className="h-4 w-4" /><span className="flex-1">新对话</span><Plus className="h-3.5 w-3.5 text-[var(--text-tertiary)]" /></button>
         </div>
 
+        {timeline ? <div aria-label="按时间查看任务" role="region" className="studio-timeline">
+          {timelineGroups.map(group => <section key={group.title} aria-label={group.title}>
+            <h2>{group.title}</h2>{group.tasks.map(task => taskRow(task, 'timeline'))}
+          </section>)}
+          {!timelineGroups.length && <p role="status" className="px-2.5 py-3 text-xs text-[var(--text-tertiary)]">{sessionsQuery.isLoading ? '正在读取任务…' : sessionsQuery.isError ? '任务暂时无法读取' : '暂无创作任务'}</p>}
+        </div> : <>
         {pinnedNovels.length || pinnedSessions.length ? <section className="pb-4"><p className="px-2.5 pb-1.5 text-[11px] font-medium text-[var(--text-tertiary)]">置顶</p>{pinnedNovels.map((novel) => <button key={novel.id} type="button" onClick={() => props.onSelectNovel(novel.id)} onContextMenu={(event) => openContext(event, { kind: 'novel', id: novel.id, title: novelTitle(novel), pinned: true })} className={cn(sidebarRowClass, 'text-[var(--text-secondary)]')}><BookOpenText className="h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1 truncate">{novelTitle(novel)}</span><Pin className="h-3 w-3" /></button>)}{pinnedSessions.map((session) => taskRow(toSidebarTask(session), 'pinned'))}</section> : null}
 
         <section aria-label="作品" className="space-y-0.5">
@@ -808,13 +765,11 @@ export default function StudioWorkspaceSidebar(props: Props) {
             {recentTasks.map(task => taskRow(task, 'recent'))}
           </section>
         ) : null}
+        </>}
       </div>
 
-      <div className="relative shrink-0 border-t border-[var(--border-subtle)]" ref={accountRef} data-studio-region="sidebar-account">
-        {betaEnabled && warningThreshold && !warningDismissed ? <div className="mx-2 my-2 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] p-2.5 text-[10px]"><div className="flex items-start gap-2"><Gauge className="mt-px h-3.5 w-3.5 shrink-0 text-amber-500" /><span className="min-w-0 flex-1 leading-4">{creditsExhausted ? <><span className="font-medium text-[var(--text-primary)]">额度已耗尽</span><br />邀请好友领取 300 Credits！</> : `剩余 ${remainingPercent}% 使用量`}</span><button type="button" onClick={openInvite} className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-emerald-600 px-2 font-medium text-white transition-opacity hover:opacity-90"><Gift className="h-3 w-3" />邀请</button><button type="button" onClick={() => { if (summary?.resetsAt) window.localStorage.setItem(`chevoink:credit-warning:${summary.resetsAt}:${warningThreshold}`, 'dismissed'); setWarningDismissed(true) }} className="shrink-0 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]" aria-label="关闭提醒"><X className="h-3 w-3" /></button></div></div> : null}
-        <SiteAnnouncements scope="studio" />
-        <button type="button" onClick={() => setAccountOpen((value) => !value)} className="flex h-11 w-full items-center gap-2.5 px-3 text-left hover:bg-[var(--surface-muted)]" aria-expanded={accountOpen}><Avatar name={sessionUser?.nickname ?? '创作者'} src={sessionUser?.avatarUrl} size="sm" className="h-7 w-7" /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{sessionUser?.nickname ?? '创作者'}</span>{sessionUser?.emailAuthEnabled && sessionUser.email ? <span className="mt-0.5 block truncate text-[11px] text-[var(--text-tertiary)]" title={sessionUser.email}>{sessionUser.email}</span> : null}</span><ChevronDown className={cn('h-3.5 w-3.5 text-[var(--text-tertiary)] transition-transform', accountOpen && 'rotate-180')} /></button>
-        {accountOpen ? <div className="absolute bottom-[calc(100%-2px)] left-2 right-2 z-[70] overflow-hidden rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[0_20px_55px_rgba(15,23,42,.22)] motion-safe:origin-bottom motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]">{betaEnabled ? <div className="mb-1 flex items-center gap-2 rounded-[10px] bg-emerald-600 px-3 py-2.5 text-[11px] text-white shadow-[0_5px_16px_rgba(5,150,105,.18)]"><Gift className="h-3.5 w-3.5" /><span className="font-medium">公测期间，每日送 450 Credits！</span></div> : null}<button type="button" onClick={() => setUsageExpanded((value) => !value)} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-left text-xs font-medium hover:bg-[var(--surface-muted)]"><Gauge className="h-3.5 w-3.5" /><span className="flex-1">剩余用量</span><ChevronDown className={cn('h-3.5 w-3.5 transition-transform', usageExpanded && 'rotate-180')} /></button>{usageExpanded ? <div className="mx-1 mb-1 rounded-[10px] bg-[var(--surface-muted)] px-3 py-2.5 text-[11px]"><div className="flex items-end justify-between"><div><p className="text-[var(--text-tertiary)]">当前可用</p><p className="mt-0.5 text-base font-semibold tabular-nums">{summary ? formatCreditAmount(summary.totalRemaining) : '—'} <span className="text-[10px] font-normal">Credits</span></p></div>{betaEnabled ? <span className="text-[10px] text-[var(--text-tertiary)]">{remainingPercent}%</span> : null}</div>{betaEnabled ? <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--border-subtle)]"><div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${remainingPercent}%` }} /></div> : null}<div className="mt-2 flex justify-between text-[10px] text-[var(--text-tertiary)]"><span>{betaEnabled ? '每日' : '基础额度'} {summary ? formatCreditAmount(summary.dailyAllowance) : '—'} Credits</span>{betaEnabled ? <span>{formatCreditResetLabel(summary?.resetsAt)}</span> : null}</div><button type="button" onClick={() => window.open('/account/usage', '_blank', 'noopener,noreferrer')} className="mt-2 text-[10px] font-medium hover:underline">查看详细记录 →</button></div> : null}<button type="button" onClick={openInvite} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-left text-xs hover:bg-[var(--surface-muted)]"><Gift className="h-3.5 w-3.5" />邀请好友</button><button type="button" onClick={() => { setAccountOpen(false); props.onOpenStudioSettings('general') }} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-left text-xs hover:bg-[var(--surface-muted)]"><Settings2 className="h-3.5 w-3.5" />创作区设置</button><button type="button" onClick={() => { setAccountOpen(false); setFeedbackKind('suggestion') }} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-left text-xs hover:bg-[var(--surface-muted)]"><Lightbulb className="h-3.5 w-3.5" />提交建议</button><button type="button" onClick={() => { setAccountOpen(false); setFeedbackKind('bug') }} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-left text-xs hover:bg-[var(--surface-muted)]"><Bug className="h-3.5 w-3.5" />问题反馈</button><button type="button" onClick={() => navigate('/')} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-left text-xs hover:bg-[var(--surface-muted)]"><Home className="h-3.5 w-3.5" />返回首页</button></div> : null}
+      <div className="relative shrink-0" data-studio-region="sidebar-notices">
+        {betaEnabled && warningThreshold && !warningDismissed ? <div className="mx-2 my-2 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] p-2.5 text-[10px]"><div className="flex items-start gap-2"><Gauge className="mt-px h-3.5 w-3.5 shrink-0 text-amber-500" /><span className="min-w-0 flex-1 leading-4">{creditsExhausted ? <><span className="font-medium text-[var(--text-primary)]">额度已耗尽</span><br />邀请好友领取 300 Credits！</> : `剩余 ${remainingPercent}% 使用量`}</span><button type="button" onClick={props.onInvite} className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-emerald-600 px-2 font-medium text-white transition-opacity hover:opacity-90"><Gift className="h-3 w-3" />邀请</button><button type="button" onClick={() => { if (summary?.resetsAt) window.localStorage.setItem(`chevoink:credit-warning:${summary.resetsAt}:${warningThreshold}`, 'dismissed'); setWarningDismissed(true) }} className="shrink-0 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]" aria-label="关闭提醒"><X className="h-3 w-3" /></button></div></div> : null}
       </div>
     </div>
   }
@@ -847,11 +802,11 @@ export default function StudioWorkspaceSidebar(props: Props) {
 
   return <>
     <aside data-sidebar-folding={foldingSidebar} ref={resizeRootRef} onPointerMove={resize} onPointerUp={finishResize} onPointerCancel={finishResize} onLostPointerCapture={finishResize} className={cn('studio-resizable-panel relative z-30 h-full min-h-0 shrink-0 overflow-visible border-r bg-[var(--app-bg)] transition-[width,border-color] duration-200 ease-[cubic-bezier(.22,1,.36,1)]', props.open ? 'border-[var(--border-subtle)]' : 'border-transparent')} style={{ width: props.open ? width : 0 }} data-workspace-sidebar={props.open ? 'open' : 'collapsed'}>{props.open ? body() : null}<div role="separator" aria-label="调整左侧栏宽度" aria-orientation="vertical" aria-valuenow={props.open ? width : 0} aria-valuemin={0} aria-valuemax={MAX_WIDTH} tabIndex={0} onPointerDown={beginResize} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); if (!props.open) { if (event.key === 'ArrowRight') props.onOpenChange(true) } else if (width <= MIN_WIDTH && event.key === 'ArrowLeft') props.onOpenChange(false); else setWidth(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, width + (event.key === 'ArrowRight' ? 24 : -24)))) } }} className="absolute inset-y-0 -right-1 z-[60] w-2 cursor-col-resize touch-none hover:bg-[var(--border-strong)] focus-visible:bg-[var(--border-strong)]" /></aside>
-    {!props.open ? <div className="fixed bottom-0 left-0 top-12 z-50 overflow-visible transition-[width] duration-200 ease-[cubic-bezier(.22,1,.36,1)]" style={{ width: peek ? peekWidth : 12 }} onMouseEnter={showPeek} onMouseLeave={schedulePeekClose}><div aria-hidden="true" onPointerDown={beginResize} className="absolute inset-y-0 left-0 z-[60] w-2 cursor-col-resize touch-none" /><aside className={cn('h-full border-r border-[var(--border-subtle)] bg-[var(--app-bg)] shadow-[12px_0_34px_rgba(15,23,42,.14)] transition-[opacity,transform] duration-180 ease-out', peek ? 'translate-x-0 opacity-100' : 'pointer-events-none -translate-x-3 opacity-0')} style={{ width: peekWidth }}>{body()}</aside></div> : null}
+    {!props.open ? <div className="studio-sidebar-peek absolute bottom-0 left-0 top-0 z-50 overflow-visible transition-[width] duration-200 ease-[cubic-bezier(.22,1,.36,1)]" style={{ width: peek ? peekWidth : 12 }} onMouseEnter={showPeek} onMouseLeave={schedulePeekClose}><div aria-hidden="true" onPointerDown={beginResize} className="absolute inset-y-0 left-0 z-[60] w-2 cursor-col-resize touch-none" /><aside className={cn('h-full border-r border-[var(--border-subtle)] bg-[var(--app-bg)] shadow-[12px_0_34px_rgba(15,23,42,.14)] transition-[opacity,transform] duration-180 ease-out', peek ? 'translate-x-0 opacity-100' : 'pointer-events-none -translate-x-3 opacity-0')} style={{ width: peekWidth }}>{body()}</aside></div> : null}
 
-    {searchOpen ? <div className="fixed inset-0 z-[180] flex items-start justify-center bg-black/25 px-4 pt-[10vh] backdrop-blur-[2px]" onMouseDown={() => setSearchOpen(false)}><section role="dialog" aria-modal="true" aria-label="搜索作品、任务与聊天记录" onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-2xl overflow-hidden rounded-[18px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_28px_90px_rgba(15,23,42,.24)]"><div className="flex h-14 items-center gap-3 border-b border-[var(--border-subtle)] px-4"><Search className="h-4 w-4 text-[var(--text-tertiary)]" /><input autoFocus value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索作品、任务或聊天记录" className="min-w-0 flex-1 bg-transparent text-sm outline-none" /><kbd className="rounded border border-[var(--border-subtle)] px-1.5 py-0.5 text-[10px] text-[var(--text-tertiary)]">Esc</kbd></div><div className="max-h-[62vh] overflow-y-auto p-2"><p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">作品</p>{foundNovels.map((item) => <button key={item.id} type="button" onClick={() => { props.onSelectNovel(item.id); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><BookOpenText className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="flex-1 truncate">{novelTitle(item)}</span><span className="text-[10px] text-[var(--text-tertiary)]">作品</span></button>)}<p className="mt-2 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">任务与聊天记录</p>{foundSessions.map((session) => <button key={session.id} type="button" onClick={() => { props.onSelectTask(session.id, session.novelId); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><Clock3 className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="min-w-0 flex-1 truncate">{session.title}</span><span className="max-w-36 truncate text-[10px] text-[var(--text-tertiary)]">{session.novelTitle ?? '任务'}</span></button>)}{needle && !foundNovels.length && !foundSessions.length ? <p className="px-3 py-10 text-center text-xs text-[var(--text-tertiary)]">没有找到相关作品、任务或聊天记录</p> : null}</div></section></div> : null}
+    {searchOpen ? <div className="fixed inset-0 z-[180] flex items-start justify-center bg-black/25 px-4 pt-[10vh] backdrop-blur-[2px]" onMouseDown={() => setSearchOpen(false)}><section role="dialog" aria-modal="true" aria-label="搜索作品、任务与聊天记录" onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-2xl overflow-hidden rounded-[18px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-[0_28px_90px_rgba(15,23,42,.24)]"><div className="flex h-14 items-center gap-3 border-b border-[var(--border-subtle)] px-4"><Search className="h-4 w-4 text-[var(--text-tertiary)]" /><input autoFocus value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索作品、任务或聊天记录" className="min-w-0 flex-1 bg-transparent text-sm outline-none" /><kbd className="rounded border border-[var(--border-subtle)] px-1.5 py-0.5 text-[10px] text-[var(--text-tertiary)]">Esc</kbd></div><div className="max-h-[62vh] overflow-y-auto p-2"><p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">作品</p>{foundNovels.map((item) => <button key={item.id} type="button" onClick={() => { props.onSelectNovel(item.id); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><BookOpenText className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="flex-1 truncate">{novelTitle(item)}</span><span className="text-[10px] text-[var(--text-tertiary)]">作品</span></button>)}<p className="mt-2 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">任务与聊天记录</p>{foundSessions.map((session) => <button key={session.id} type="button" onClick={() => { props.onSelectTask(session.id, session.novelId); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><Clock3 className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="min-w-0 flex-1 truncate">{session.title}</span><span className="max-w-36 truncate text-[10px] text-[var(--text-tertiary)]">{session.novelTitle ?? '任务'}</span></button>)}{needle && !foundNovels.length && !foundSessions.length ? <p className="px-3 py-10 text-center text-xs text-[var(--text-tertiary)]">没有找到相关作品、任务或聊天记录</p> : null}</div></section></div> : null}
 
-    {context ? <div onMouseDown={(event) => event.stopPropagation()} className="fixed z-[190] max-h-[calc(100dvh-24px)] w-48 overflow-y-auto rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-2xl" style={{ left: Math.min(context.x, window.innerWidth - 208), top: Math.max(12, Math.min(context.y, window.innerHeight - (context.kind === 'novel' ? 424 : 304))) }}>
+    {context ? <div onMouseDown={(event) => event.stopPropagation()} className="fixed z-[190] max-h-[calc(100dvh-24px)] w-48 overflow-y-auto rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1 shadow-2xl" style={{ left: Math.min(context.x, window.innerWidth - 208), top: Math.max(12, Math.min(context.y, window.innerHeight - (context.kind === 'novel' ? 424 : 304))) }}>
       {context.kind === 'novel' ? <>
         <button type="button" disabled={props.taskSwitchLocked} onClick={() => { const novelId = context.id; setContext(null); props.onSelectNovel(novelId) }} className={menuItem}>
           <BookOpenText className="h-3.5 w-3.5" />进入作品
@@ -873,7 +828,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
     </div> : null}
 
     {/* 任务悬停信息卡片：列表容器有纵向滚动会裁切绝对定位元素，改用 fixed 按行坐标渲染 */}
-    {taskCard ? <div className="pointer-events-none fixed z-[150] w-64 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-3 shadow-[0_18px_50px_rgba(15,23,42,.18)]" style={{ left: Math.min(taskCard.x, window.innerWidth - 272), top: Math.max(12, Math.min(taskCard.y, window.innerHeight - 172)) }}>
+    {taskCard ? <div className="pointer-events-none fixed z-[150] w-64 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3 shadow-[0_18px_50px_rgba(15,23,42,.18)]" style={{ left: Math.min(taskCard.x, window.innerWidth - 272), top: Math.max(12, Math.min(taskCard.y, window.innerHeight - 172)) }}>
       <div className="flex items-start gap-2"><p className="line-clamp-2 min-w-0 flex-1 text-xs font-semibold leading-5 text-[var(--text-primary)]">{taskCard.task.title || '新任务'}</p><span className="shrink-0 pt-0.5 text-[10px] text-[var(--text-tertiary)]">{taskCard.task.temporary ? '未开始' : formatTaskRelativeTime(taskCard.task.lastActiveAt)}</span></div>
       <div className="mt-2.5 space-y-1 text-[10px]">{[
         { label: '所属作品', value: taskCardNovel ? novelTitle(taskCardNovel) : '—' },
@@ -885,8 +840,6 @@ export default function StudioWorkspaceSidebar(props: Props) {
 
     {dangerCopy ? <DangerConfirmDialog open title={dangerCopy.title} description={dangerCopy.description} bullets={dangerCopy.bullets} requiredText={dangerCopy.requiredText} confirmLabel={dangerCopy.confirmLabel} tone={dangerCopy.tone} busy={busy} onConfirm={() => void runDangerAction()} onCancel={() => setDanger(null)} /> : null}
     {archiveCopy ? <DangerConfirmDialog open title={archiveCopy.title} description={archiveCopy.description} bullets={archiveCopy.bullets} confirmLabel={archiveCopy.confirmLabel} tone="default" busy={busy} onConfirm={() => void runArchive()} onCancel={() => setArchiveTarget(null)} /> : null}
-    {rename ? <div className="fixed inset-0 z-[195] flex items-center justify-center bg-black/25 p-4" onMouseDown={() => setRename(null)}><form onSubmit={(event) => { event.preventDefault(); void commitRename() }} onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-2xl"><h2 className="text-sm font-semibold">重命名{rename.kind === 'novel' ? '作品' : '任务'}</h2><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} maxLength={160} className="mt-4 h-10 w-full rounded-[9px] border border-[var(--border-subtle)] bg-transparent px-3 text-sm outline-none focus:border-[var(--border-strong)]" /><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setRename(null)} className="h-9 rounded-[9px] px-3 text-xs hover:bg-[var(--surface-muted)]">取消</button><button type="submit" disabled={busy || !renameValue.trim()} className="h-9 rounded-[9px] bg-[var(--surface-contrast)] px-4 text-xs font-medium text-[var(--text-contrast)] disabled:opacity-45">保存</button></div></form></div> : null}
-    <InviteCreditsDialog open={inviteOpen} referral={referralQuery.data ?? null} copied={inviteCopied} onCopy={() => void copyInvite()} onClose={() => { autoCopyRef.current = false; setInviteOpen(false) }} />
-    <FeedbackDialog open={feedbackKind !== null} kind={feedbackKind ?? 'bug'} source="studio-work" onClose={() => setFeedbackKind(null)} />
+    {rename ? <div className="fixed inset-0 z-[195] flex items-center justify-center bg-black/25 p-4" onMouseDown={() => setRename(null)}><form onSubmit={(event) => { event.preventDefault(); void commitRename() }} onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-5 shadow-2xl"><h2 className="text-sm font-semibold">重命名{rename.kind === 'novel' ? '作品' : '任务'}</h2><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} maxLength={160} className="mt-4 h-10 w-full rounded-[9px] border border-[var(--border-subtle)] bg-transparent px-3 text-sm outline-none focus:border-[var(--border-strong)]" /><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setRename(null)} className="h-9 rounded-[9px] px-3 text-xs hover:bg-[var(--surface-muted)]">取消</button><button type="submit" disabled={busy || !renameValue.trim()} className="h-9 rounded-[9px] bg-[var(--surface-contrast)] px-4 text-xs font-medium text-[var(--text-contrast)] disabled:opacity-45">保存</button></div></form></div> : null}
   </>
 }

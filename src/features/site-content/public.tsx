@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronLeft, ChevronRight, Megaphone, X } from 'lucide-react'
 import type { PublicSiteContent } from '../../../shared/contracts/site-content'
@@ -43,7 +43,7 @@ function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNex
     </div>
   </dialog>,document.fullscreenElement??document.body)
 }
-export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
+export function SiteAnnouncements({ scope, focusAfterDismiss }: { scope: 'home' | 'studio'; focusAfterDismiss?: RefObject<HTMLElement> }) {
   const query=usePublicSiteContent()
   const { query: inbox, read, viewerId } = useAnnouncementInbox(scope === 'studio')
   const [dismissed,setDismissed]=useState<Record<string,number>>({})
@@ -51,6 +51,7 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
   const [openedKey,setOpenedKey]=useState<string|null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const origin=useRef<HTMLElement|null>(null)
+  const focusContent = useRef(false)
   const previousUnreadCard = useRef<{ viewerId: string; key: string; batch: string[] } | null>(null)
   const dialogId=useId()
   const history = historyOpen && <AnnouncementHistoryDialog returnFocus={origin.current} onClose={() => setHistoryOpen(false)} />
@@ -90,6 +91,13 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
     }
   })
 
+  useLayoutEffect(() => {
+    if (!firstKey && focusContent.current) {
+      focusContent.current = false
+      focusAfterDismiss?.current?.focus({ preventScroll: true })
+    }
+  }, [firstKey, focusAfterDismiss])
+
   if (!first) return history || null
 
   function openItem(item: PublicAnnouncement) {
@@ -100,6 +108,7 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
     if (scope === 'studio' && viewerId && versionId && receipt?.unread !== false) read.mutate({ viewerId, action: 'one', versionId })
   }
   function dismiss(item:PublicAnnouncement, collapseDock = false) {
+    focusContent.current = collapseDock || items.length === 1
     const key=dismissalKey(item.id,item.contentVersion)
     const storage=item.dismissal.mode==='session' ? sessionStorage : localStorage
     const entries={...readDismissals(storage),[key]:now}
@@ -114,26 +123,25 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
       setOpenedKey(next ? dismissalKey(next.id, next.contentVersion) : null)
     }
   }
-  return <div aria-label="站点公告" className={scope==='studio'?'site-announcements-studio':'site-announcements-home'}>
-    <aside className={'site-announcement-card '+(scope==='studio'?'site-announcement-dock':'site-announcement-banner')}>
-      <button type="button" aria-label={'打开公告：'+first.title} aria-haspopup="dialog" aria-expanded={Boolean(active)} aria-controls={dialogId} className="site-announcement-open" onClick={event=>{origin.current=event.currentTarget;openItem(first)}}>
-        {scope === 'home' && <Megaphone aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]" />}
+  return <div aria-label="站点公告" data-studio-region={scope === 'studio' ? 'announcement-banner' : undefined} className={scope==='studio'?'site-announcements-studio':'site-announcements-home'}>
+    <aside className={'site-announcement-card '+(scope==='studio'?'site-announcement-strip':'site-announcement-banner')}>
+      <button type="button" aria-label={'打开公告：'+first.title} title={scope === 'studio' ? first.title : undefined} aria-haspopup="dialog" aria-expanded={Boolean(active)} aria-controls={dialogId} className="site-announcement-open" onClick={event=>{origin.current=event.currentTarget;openItem(first)}}>
+        <Megaphone aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]" />
+        {isNew && <span className="site-announcement-strip-new">NEW</span>}
         <span className="min-w-0 flex-1 text-left">
-          {isNew && <span className="site-announcement-dock-new">NEW</span>}
-          <span className={'block text-sm font-medium ' + (scope === 'studio' ? 'site-announcement-dock-title' : 'truncate')}>{first.title}</span>
+          <span className="block truncate text-sm font-medium">{first.title}</span>
           {scope === 'home' && <span className="block truncate text-xs text-[var(--text-secondary)]">{first.body}</span>}
         </span>
         {items.length > 1 && <span className="shrink-0 text-xs text-[var(--text-secondary)]">{items.length}条</span>}
-        {scope === 'home' && <ChevronRight aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]" />}
+        <ChevronRight aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]" />
       </button>
       <button
         type="button"
         aria-label={'关闭公告：'+first.title}
         onClick={() => dismiss(first, scope === 'studio')}
-        className={'site-announcement-dismiss' + (scope === 'studio' ? ' site-announcement-dock-action' : '')}
+        className="site-announcement-dismiss"
       >
-        {scope === 'studio' && <ChevronRight aria-hidden="true" size={16} className="site-announcement-dock-chevron" />}
-        <X aria-hidden="true" size={16} className={scope === 'studio' ? 'site-announcement-dock-close' : undefined} />
+        <X aria-hidden="true" size={16} />
       </button>
     </aside>
     {active?<AnnouncementDialog scope={scope} item={active} index={index} total={items.length} id={dialogId} returnFocus={origin.current} onClose={()=>setOpenedKey(null)} onDismiss={()=>dismiss(active)} onPrevious={()=>openItem(items[index-1])} onNext={()=>openItem(items[index+1])} onViewAll={() => { setOpenedKey(null); setHistoryOpen(true) }}/>:null}

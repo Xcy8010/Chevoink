@@ -1,15 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
 
 import { shouldShowWorkActivityDock } from '../../src/features/studio/components/work-layout'
 
 describe('Work activity dock responsive placement', () => {
-  it('hides the inline activity copy when the locally controlled dock is visible', () => {
-    const css = readFileSync('src/index.css', 'utf8')
-    const panel = readFileSync('src/features/studio/agent/components/AgentPanel.tsx', 'utf8')
-    expect(panel).toContain('<div data-agent-activity')
-    expect(css).toMatch(/\.work-perspective\[data-activity-dock='visible'\] \[data-agent-activity\]\s*\{\s*display: none;/)
-  })
   it('shows only when the conversation keeps its minimum usable width', () => {
     expect(shouldShowWorkActivityDock({
       containerWidth: 1920,

@@ -2,6 +2,8 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import StudioWorkspaceSidebar from '../../src/features/studio/components/StudioWorkspaceSidebar'
+import StudioDesktopRail from '../../src/features/studio/components/StudioDesktopRail'
+import StudioDesktopContent from '../../src/features/studio/components/StudioDesktopContent'
 import StudioMobileAccountCard from '../../src/features/studio/components/StudioMobileAccountCard'
 import { useShellStore } from '../../src/store/useShellStore'
 import type { User } from '../../shared/contracts'
@@ -9,11 +11,21 @@ import type { AnnouncementInbox, PublicSiteContent } from '../../shared/contract
 const state=vi.hoisted(()=>({content:undefined as PublicSiteContent|undefined,inbox:undefined as AnnouncementInbox|undefined,markRead:vi.fn()}))
 vi.mock('../../src/features/site-content/announcement-inbox-api',()=>({useAnnouncementInbox:()=>({query:{data:state.inbox},viewerId:'author',read:{mutate:state.markRead}})}))
 vi.mock('@tanstack/react-query',()=>({useQuery:({queryKey}:{queryKey:string[]})=>({data:queryKey[0]==='site-content'?state.content:undefined,dataUpdatedAt:Date.now()}),useQueryClient:()=>({invalidateQueries:vi.fn()})}))
-vi.mock('react-router-dom',()=>({useNavigate:()=>vi.fn()}))
+import { MemoryRouter } from 'react-router-dom'
 vi.mock('../../src/components/ui/toast-context',()=>({useToast:()=>({success:vi.fn(),error:vi.fn()})}))
 const noop=()=>undefined
 const originalShow=Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype,'showModal'),originalClose=Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype,'close')
-function Fixture(){return <div className="studio-workspace" data-testid="workspace"><StudioWorkspaceSidebar open onOpenChange={noop} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="synthetic" currentNovelTitle="合成作品" novels={[]} currentTasks={[]} currentTasksNovelId="synthetic" activeTaskId={null} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskDeleted={noop} onTaskForked={noop} onNovelDeleted={noop} onImportNovel={noop} autoFollow={false} onAutoFollowChange={noop} onOpenStudioSettings={noop}/><main data-testid="main">主工作区</main></div>}
+function Fixture({ perspective = 'work' }: { perspective?: 'work' | 'ide' }) {
+  return <MemoryRouter>
+    <div className="studio-workspace" data-testid="workspace">
+      <StudioDesktopRail onOpenSettings={noop} onInvite={noop} />
+      <StudioDesktopContent>
+        {perspective === 'work' && <StudioWorkspaceSidebar open onOpenChange={noop} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="synthetic" currentNovelTitle="合成作品" novels={[]} currentTasks={[]} currentTasksNovelId="synthetic" activeTaskId={null} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskDeleted={noop} onTaskForked={noop} onNovelDeleted={noop} onImportNovel={noop}/>}
+        <main data-testid="main">主工作区</main>
+      </StudioDesktopContent>
+    </div>
+  </MemoryRouter>
+}
 beforeEach(()=>{
  sessionStorage.clear();localStorage.clear()
  useShellStore.setState({sessionUser:null})
@@ -23,13 +35,21 @@ beforeEach(()=>{
  Object.defineProperty(HTMLDialogElement.prototype,'close',{configurable:true,value:function(this:HTMLDialogElement){this.removeAttribute('open')}})
 })
 afterEach(()=>{cleanup();vi.restoreAllMocks();if(originalShow)Object.defineProperty(HTMLDialogElement.prototype,'showModal',originalShow);else Reflect.deleteProperty(HTMLDialogElement.prototype,'showModal');if(originalClose)Object.defineProperty(HTMLDialogElement.prototype,'close',originalClose);else Reflect.deleteProperty(HTMLDialogElement.prototype,'close')})
-it('places the single compact announcement directly above the actual sidebar account button',()=>{
- const view=render(<Fixture/>),notice=screen.getByLabelText('站点公告'),account=view.container.querySelector('[data-studio-region="sidebar-account"]')!
- const accountButton=screen.getByRole('button',{name:'创作者'})
- expect(notice.parentElement).toBe(account);expect(notice.nextElementSibling).toBe(accountButton)
- expect(account.closest('[data-workspace-sidebar]')).toBeTruthy()
- expect(screen.getByTestId('main').contains(notice)).toBe(false)
- expect(screen.getByTestId('workspace').lastElementChild).toBe(screen.getByTestId('main'))
+it('keeps one announcement above Work and IDE content, outside the rail and the collapsible list', () => {
+  const view = render(<Fixture />)
+  const banner = screen.getByLabelText('站点公告')
+  const content = screen.getByRole('region', { name: '创作内容' })
+  expect(banner.dataset.studioRegion).toBe('announcement-banner')
+  expect(banner.nextElementSibling).toBe(content)
+  expect(content.contains(screen.getByTestId('main'))).toBe(true)
+  const work = content.querySelector('[data-workspace-sidebar]')!
+  expect(work.contains(banner)).toBe(false)
+  expect(work.querySelector('button[aria-label="Agent 与定时"]')).toBeNull()
+  expect(Array.from(work.querySelectorAll('button'), button => button.textContent)).not.toContain('更多')
+  expect(screen.getByRole('button', { name: '个人菜单，创作者' }).closest('.studio-desktop-rail')).toBeTruthy()
+  view.rerender(<Fixture perspective="ide" />)
+  expect(screen.getByLabelText('站点公告')).toBe(banner)
+  expect(content.querySelector('[data-workspace-sidebar]')).toBeNull()
 })
 it('places the email immediately below the nickname in both studio account controls', () => {
   useShellStore.setState({ sessionUser: {
@@ -40,7 +60,8 @@ it('places the email immediately below the nickname in both studio account contr
     emailVerified: true,
   } as User })
   const view = render(<><Fixture /><StudioMobileAccountCard /></>)
-  const desktop = view.container.querySelector('[data-studio-region="sidebar-account"]')!
+  fireEvent.click(screen.getByRole('button', {name:'个人菜单，合成作者'}))
+  const desktop = screen.getByRole('region', {name:'个人菜单'})
   const mobile = view.container.querySelector('details > summary')!
   for (const control of [desktop, mobile]) {
     const email = control.querySelector('[title="writer@example.com"]')!
@@ -48,23 +69,36 @@ it('places the email immediately below the nickname in both studio account contr
     expect(email.previousElementSibling?.textContent).toBe('合成作者')
   }
 })
-it('places the hover-to-close icons after a long announcement title', () => {
- const title = '这是一条用于验证窄侧栏保留完整标题的合成公告'
- state.content!.announcements[0].title = title
- render(<Fixture />)
- const open = screen.getByRole('button', { name: '打开公告：' + title })
- const close = screen.getByRole('button', { name: '关闭公告：' + title })
- expect(open.nextElementSibling).toBe(close)
- expect(close.querySelector('.site-announcement-dock-chevron')).toBeTruthy()
- expect(close.querySelector('.site-announcement-dock-close')).toBeTruthy()
- expect(screen.getByText(title).classList.contains('site-announcement-dock-title')).toBe(true)
+it('keeps the full accessible title and gives the banner a separate close control', () => {
+  const title = '这是一条用于验证桌面横幅保留完整标题的合成公告'.repeat(4)
+  state.content!.announcements[0].title = title
+  render(<Fixture />)
+  const open = screen.getByRole('button', { name: '打开公告：' + title })
+  const close = screen.getByRole('button', { name: '关闭公告：' + title })
+  expect(open.nextElementSibling).toBe(close)
+  expect(open.title).toBe(title)
+  expect(open.querySelector('.lucide-chevron-right')).toBeTruthy()
+  expect(close.querySelector('.lucide-x')).toBeTruthy()
+  expect(screen.getByText(title).classList.contains('truncate')).toBe(true)
 })
-it('removes the announcement and its wrapper entirely after closing without a ghost account row',()=>{
- const view=render(<Fixture/>),account=view.container.querySelector('[data-studio-region="sidebar-account"]')!,accountButton=screen.getByRole('button',{name:'创作者'}),main=screen.getByTestId('main')
- fireEvent.click(screen.getByRole('button',{name:'关闭公告：侧栏合成公告'}))
- expect(screen.queryByLabelText('站点公告')).toBeNull();expect(account.children).toHaveLength(1);expect(account.firstElementChild).toBe(accountButton)
- expect(screen.getByTestId('main')).toBe(main);expect(screen.getByTestId('workspace').lastElementChild).toBe(main)
- expect(localStorage.getItem('site-announcement-dismissals')).toContain('sidebar-notice:1')
+it('removes the whole banner on dismissal and keeps keyboard navigation in the same workspace', () => {
+  render(<Fixture />)
+  const content = screen.getByRole('region', { name: '创作内容' })
+  const main = screen.getByTestId('main')
+  const close = screen.getByRole('button', {name:'关闭公告：侧栏合成公告'})
+  close.focus()
+  fireEvent.click(close)
+  expect(screen.queryByLabelText('站点公告')).toBeNull()
+  expect(content.previousElementSibling).toBeNull()
+  expect(document.activeElement).toBe(content)
+  expect(screen.getByTestId('main')).toBe(main)
+  expect(localStorage.getItem('site-announcement-dismissals')).toContain('sidebar-notice:1')
+})
+it('renders no banner or spacer for an empty batch', () => {
+  state.content!.announcements = []
+  render(<Fixture perspective="ide" />)
+  expect(screen.queryByLabelText('站点公告')).toBeNull()
+  expect(screen.getByRole('region', { name: '创作内容' }).previousElementSibling).toBeNull()
 })
 it('prioritizes the latest unread notice and dismisses the batch without reading it or exposing the next card',()=>{
  const first=state.content!.announcements[0]
@@ -73,7 +107,7 @@ it('prioritizes the latest unread notice and dismisses the batch without reading
  state.inbox={viewerId:'author',serverNow:first.startsAt,nextBoundaryAt:null,items:[second,first].map(item=>({...item,versionId:item.id+'-v1',publishedAt:item.startsAt,unread:true}))}
  const view=render(<Fixture/>)
  expect(screen.queryByText(first.title)).toBeNull()
- expect(screen.getByText('NEW').className).toBe('site-announcement-dock-new')
+ expect(screen.getByText('NEW').className).toBe('site-announcement-strip-new')
  fireEvent.click(screen.getByRole('button',{name:'关闭公告：'+second.title}))
  expect(screen.queryByLabelText('站点公告')).toBeNull()
  expect(state.markRead).not.toHaveBeenCalled()

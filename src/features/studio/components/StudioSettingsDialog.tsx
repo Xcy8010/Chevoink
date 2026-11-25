@@ -25,6 +25,7 @@ import {
   SlidersHorizontal,
   Smartphone,
   UserRound,
+  Workflow,
   type LucideIcon,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
@@ -39,6 +40,7 @@ import { formatCreditAmount } from '@/features/account/credit-format'
 import InviteCreditsDialog from '@/features/account/InviteCreditsDialog'
 import Avatar from '@/features/community/components/Avatar'
 import { isNativeApp } from '@/lib/native-app'
+import { isWindowsDesktopApp } from '@/lib/desktop-app'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
 import type { ThemeMode } from '@/types/app'
@@ -55,11 +57,13 @@ import AgentOperationsCenter from '../agent/components/AgentOperationsCenter'
 import VoicePackSettings from './VoicePackSettings'
 import ModelAssignmentsSettings from './ModelAssignmentsSettings'
 import PersonalizationSettings from './PersonalizationSettings'
+import StudioUsageSettings from './StudioUsageSettings'
 import './studio-settings.css'
 
 export type StudioSettingsSection =
   | 'general'
   | 'profile'
+  | 'usage'
   | 'personalization'
   | 'appearance'
   | 'models'
@@ -106,6 +110,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { id: 'general', label: '通用', keywords: '工作区 基础行为 模式 自动追踪 全屏 账号安全 登录设备 设备管理', icon: Settings2 },
       { id: 'profile', label: '个人资料', keywords: '头像 昵称 简介 作者身份 公开信息 账号', icon: UserRound },
+      { id: 'usage', label: '使用情况', keywords: '额度 Credits 余额 用量 奖励 消耗 账单 流水 重置', icon: Gauge },
       { id: 'personalization', label: '个性化', keywords: '自定义指令 回答偏好 风格 语气 全局记忆 权限 自定义规则 Agent', icon: SlidersHorizontal },
       { id: 'appearance', label: '外观', keywords: '主题 浅色 深色 正文 排版 字体 字号 行距 宽度 动画', icon: Eye },
       { id: 'models', label: '模型', keywords: '自定义模型 密钥 API Key DeepSeek GLM 推理', icon: BrainCircuit },
@@ -117,7 +122,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     label: '创作与协作',
     items: [
       { id: 'writing', label: '写作偏好', keywords: '写作 自由度 编辑 严谨 平衡 大胆 正文 Agent', icon: FileText },
-      { id: 'operations', label: 'Agent 操作', keywords: '任务 分支 子Agent 定时 权限 评测', icon: Bot },
+      { id: 'operations', label: 'Agent 操作', keywords: '任务 分支 子Agent 定时 权限 评测', icon: Workflow },
       { id: 'archives', label: '归档', keywords: '归档 恢复 作品 历史 任务', icon: Archive },
     ],
   },
@@ -189,16 +194,16 @@ function GeneralPanel(props: Props) {
   return (
     <div className="studio-settings-groups">
       <SettingsGroup title="工作区">
-        <SettingsRow title="工作模式" description="Work 适合与 Agent 协作；IDE 适合集中编辑结构与正文。">
+        <SettingsRow title="工作模式" description="Studio 用于对话、任务与创作。Editor 用于结构、正文与预览。">
           <select aria-label="工作模式" value={props.perspective} onChange={event => props.onPerspectiveChange(event.target.value as Props['perspective'])}>
-            <option value="work">Work</option>
-            <option value="ide">IDE</option>
+            <option value="work">Studio</option>
+            <option value="ide">Editor</option>
           </select>
         </SettingsRow>
         <SettingsRow title="正文自动追踪" description="Agent 打开或写入章节时，查看器自动定位到对应内容。">
           <Toggle checked={props.autoFollow} label="正文自动追踪" onChange={props.onAutoFollowChange} />
         </SettingsRow>
-        {!isNativeApp() ? (
+        {!isNativeApp() && !isWindowsDesktopApp() ? (
           <SettingsRow title="沉浸全屏" description="进入创作时允许浏览器切换到沉浸式全屏。">
             <Toggle checked={fullscreenEnabled} label="沉浸全屏" onChange={setFullscreenEnabled} />
           </SettingsRow>
@@ -209,7 +214,7 @@ function GeneralPanel(props: Props) {
           <SettingsRow
             title={currentNovel?.displayTitle?.trim() || currentNovel?.title || '未命名作品'}
             description={`${currentNovel?.chapterCount ?? 0} 章 · ${props.chapterId ? '已打开章节' : '尚未打开章节'}`}
-            value={props.perspective === 'work' ? 'Work 工作区' : 'IDE 写作台'}
+            value={props.perspective === 'work' ? 'Studio' : 'Editor'}
           />
           {props.onOpenImportHistory ? (
             <button type="button" onClick={props.onOpenImportHistory} className="studio-settings-row studio-settings-row-link spacious">
@@ -384,7 +389,7 @@ function CreditsActivityHeatmap({
   )
 }
 
-function ProfilePanel() {
+function ProfilePanel({ onOpenUsage }: { onOpenUsage: () => void }) {
   const toast = useToast()
   const sessionUser = useShellStore((state) => state.sessionUser)
   const unreadMessageCount = useShellStore((state) => state.unreadMessageCount)
@@ -458,7 +463,7 @@ function ProfilePanel() {
     <div className="pb-8">
       <div className="flex flex-wrap items-center justify-end gap-1.5">
         <button type="button" onClick={() => setInviteOpen(true)} className="inline-flex h-9 items-center gap-2 rounded-[9px] px-3 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"><Gift className="h-3.5 w-3.5" />邀请好友</button>
-        <button type="button" onClick={() => window.open('/account/usage', '_blank', 'noopener,noreferrer')} className="inline-flex h-9 items-center gap-2 rounded-[9px] px-3 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"><Activity className="h-3.5 w-3.5" />用量明细</button>
+        <button type="button" onClick={onOpenUsage} className="inline-flex h-9 items-center gap-2 rounded-[9px] px-3 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"><Activity className="h-3.5 w-3.5" />用量明细</button>
         <button type="button" onClick={() => setEditing((value) => !value)} className="inline-flex h-9 items-center gap-2 rounded-[9px] px-3 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"><Pencil className="h-3.5 w-3.5" />{editing ? '收起编辑' : '编辑资料'}</button>
       </div>
 
@@ -635,8 +640,8 @@ function WritingPanel(props: Props) {
         </SettingsRow>
         <SettingsRow title="当前工作模式" description="切换后立即回到对应创作界面。">
           <select aria-label="当前工作模式" value={props.perspective} onChange={event => props.onPerspectiveChange(event.target.value as Props['perspective'])}>
-            <option value="work">Work</option>
-            <option value="ide">IDE</option>
+            <option value="work">Studio</option>
+            <option value="ide">Editor</option>
           </select>
         </SettingsRow>
       </SettingsGroup>
@@ -708,6 +713,7 @@ export default function StudioSettingsDialog(props: Props) {
   const { onClose, open } = props
   const [query, setQuery] = useState('')
   const mobileSettingsNav = useRef<HTMLDetailsElement>(null)
+  const sectionHeading = useRef<HTMLHeadingElement>(null)
   const title = NAV_ITEMS.find(item => item.id === props.section)?.label
   const filteredGroups = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase()
@@ -716,6 +722,10 @@ export default function StudioSettingsDialog(props: Props) {
       .map((group) => ({ ...group, items: group.items.filter((item) => `${item.label} ${item.keywords}`.toLocaleLowerCase().includes(needle)) }))
       .filter((group) => group.items.length > 0)
   }, [query])
+
+  useLayoutEffect(() => {
+    if (open) sectionHeading.current?.focus({ preventScroll: true })
+  }, [open, props.section])
 
   useEffect(() => {
     if (!open) return
@@ -763,15 +773,14 @@ export default function StudioSettingsDialog(props: Props) {
   return createPortal(
     <section aria-label="创作区设置" className="studio-settings-page studio-workspace studio-settings-style fixed inset-0 z-[200] flex h-dvh w-screen overflow-hidden">
       <aside className="studio-settings-sidebar h-full shrink-0 flex-col" aria-label="设置侧栏">
-        <div className="studio-settings-brand">chevoink<span>创作区</span></div>
-        <h2 className="studio-settings-sidebar-title">设置</h2>
+        <div className="studio-settings-sidebar-header">
+          <h2 className="studio-settings-sidebar-title">设置</h2>
+          <button type="button" onClick={onClose} className="studio-settings-back" aria-label="返回创作区" title="返回创作区"><ArrowLeft size={16} aria-hidden="true" /></button>
+        </div>
         {settingsSearch}
         <nav className="scrollbar-none min-h-0 flex-1 overflow-y-auto" aria-label="设置导航">
           {settingsNavigation}
         </nav>
-        <div className="studio-settings-sidebar-footer">
-          <button type="button" onClick={onClose} className="inline-flex items-center gap-1.5"><ArrowLeft size={13} aria-hidden="true" />返回创作区</button>
-        </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -788,9 +797,10 @@ export default function StudioSettingsDialog(props: Props) {
 
         <main key={props.section} className="scrollbar-none min-h-0 flex-1 overflow-y-auto">
           <div className="studio-settings-main">
-            <h1>{title}</h1>
+            <h1 ref={sectionHeading} tabIndex={-1} className="outline-none">{title}</h1>
             {props.section === 'general' ? <GeneralPanel {...props} /> : null}
-            {props.section === 'profile' ? <ProfilePanel /> : null}
+            {props.section === 'profile' ? <ProfilePanel onOpenUsage={() => props.onSectionChange('usage')} /> : null}
+            {props.section === 'usage' ? <StudioUsageSettings /> : null}
             {props.section === 'personalization' ? <PersonalizationSettings /> : null}
             {props.section === 'appearance' ? <AppearancePanel /> : null}
             {props.section === 'models' ? <div className="studio-settings-card py-5"><CustomModelSettingsContent active /></div> : null}

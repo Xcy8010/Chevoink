@@ -43,13 +43,11 @@ export function useWorkspaceLayout(activeNovelId: string) {
   const conversationMinWidth = WORK_CONVERSATION_WIDTH_LIMITS.collapsedMin
   const getPanelMaximum = useCallback((panel: ResizablePanel, widths: StudioPanelWidths) => {
     const viewportWidth = typeof window === 'undefined' ? 1440 : window.innerWidth
-    // Work 必须同时为最左创作栏（最大 392）、聊天轨（44）和可完整操作的 Agent 对话
-    // 保留空间；IDE 没有外层创作栏，但仍保证正文/编辑器不会被两侧面板夹没。
-    // 侧栏折叠后保留收窄为「聊天轨 44 + 压缩后的聊天区最小宽度」，
-    // 查看器拖拽上限同步放大；侧栏展开后由 normalizeForViewport 自动回弹。
+    // Work reserves the new 52px global rail plus its collapsible work list.
+    // Persisted IDE tree widths already include the former 46px IDE rail.
     const centerReserve = workspacePerspective === 'work'
-      ? (workspaceSidebarOpen ? workspaceSidebarWidth : 0) + 44 + conversationMinWidth
-      : 520
+      ? 52 + (workspaceSidebarOpen ? workspaceSidebarWidth : 0) + 44 + conversationMinWidth
+      : 520 + (52 - 46)
     if (panel === 'tree') {
       return viewportWidth - centerReserve - (ideAgentOpen ? widths.agent : 46)
     }

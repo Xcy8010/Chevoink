@@ -169,7 +169,7 @@ export default function CoverPanel({
               候选数量
               <SelectControl
                 value={coverForm.count}
-                className="rounded-xl border-[var(--border-subtle)] bg-transparent"
+                className="w-24"
                 onChange={(event) => onChange({ ...coverForm, count: Number(event.target.value) })}
               >
                 {[1, 2, 3, 4].map((count) => <option key={count} value={count}>{count} 张</option>)}
@@ -273,7 +273,7 @@ export default function CoverPanel({
   )
 
   return modal ? (
-    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/35 p-3 lg:p-6" onClick={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="studio-tool-overlay fixed inset-0 z-[90] grid place-items-center bg-black/35 p-3 lg:p-6" onClick={(event) => { if (event.target === event.currentTarget) onClose() }}>
       {panel}
     </div>
   ) : panel

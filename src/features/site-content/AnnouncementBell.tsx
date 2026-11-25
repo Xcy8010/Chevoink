@@ -1,11 +1,18 @@
-import { useEffect, useId, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { ArrowLeft, Bell, CheckCheck, ChevronRight, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { AnnouncementNotification, PersonalNotification } from '../../../shared/contracts/site-content'
 import { useAnnouncementInbox } from './announcement-inbox-api'
 import './announcements.css'
 
-type Placement = 'site' | 'studio' | 'studio-mobile' | 'admin'
+type Placement = 'site' | 'studio' | 'studio-mobile' | 'studio-rail' | 'admin'
+type InboxAnchor = { top: number; right: number; bottom: number; left?: number }
+type InboxControl = {
+  hasUnread: boolean
+  open: (trigger: HTMLButtonElement) => void
+  expanded: boolean
+  dialogId: string
+}
 type InboxItem = PersonalNotification & { type: 'announcement' | 'personal' }
 const announcementItem = (item: AnnouncementNotification): InboxItem => ({ ...item, type: 'announcement', id: item.versionId })
 const itemKey = (item: InboxItem) => item.type + ':' + item.id
@@ -19,11 +26,15 @@ function PublishedTime({ value }: { value: string }) {
   return <time dateTime={value} title="北京时间（UTC+8）">{dateFormat.format(new Date(value))}</time>
 }
 
-export default function AnnouncementBell({ placement, viewerId: adminViewerId }: { placement: Placement; viewerId?: string }) {
-  const [anchor, setAnchor] = useState<{ top: number; right: number; bottom: number } | null>(null)
+export function AnnouncementInboxControl({ placement, viewerId: adminViewerId, children }: {
+  placement: Placement
+  viewerId?: string
+  children: (control: InboxControl) => ReactNode
+}) {
+  const [anchor, setAnchor] = useState<InboxAnchor | null>(null)
   const { query, read, viewerId } = useAnnouncementInbox(true, anchor !== null, adminViewerId)
   const dialogId = useId()
-  const trigger = useRef<HTMLButtonElement>(null)
+  const returnFocus = useRef<HTMLButtonElement | null>(null)
   const announcements = query.data?.items ?? []
   const personal = query.data?.personalItems ?? []
   const hasUnread = announcements.some(item => item.unread) || personal.some(item => item.unread)
@@ -31,44 +42,25 @@ export default function AnnouncementBell({ placement, viewerId: adminViewerId }:
     ...announcements.map(announcementItem),
     ...personal.map((item): InboxItem => ({ ...item, type: 'personal' })),
   ].sort((a, b) => b.publishedAt.localeCompare(a.publishedAt) || itemKey(b).localeCompare(itemKey(a))) : []
-  const label = hasUnread ? '未读通知' : '通知中心'
-
-  function open() {
-    const rect = trigger.current!.getBoundingClientRect()
+  function open(trigger: HTMLButtonElement) {
+    returnFocus.current = trigger
+    const rect = trigger.getBoundingClientRect()
     setAnchor({
-      top: rect.bottom + 8,
+      top: placement === 'studio-rail' ? rect.top : rect.bottom + 8,
       right: Math.max(12, window.innerWidth - rect.right),
       bottom: window.innerHeight - rect.top + 8,
+      left: placement === 'studio-rail' ? (trigger.closest('aside')?.getBoundingClientRect().right ?? rect.right) + 3 : undefined,
     })
     read.reset()
     if (viewerId) void query.refetch()
   }
 
   return <>
-    <button
-      ref={trigger}
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-haspopup="dialog"
-      aria-expanded={anchor !== null}
-      aria-controls={anchor ? dialogId : undefined}
-      className={cn(
-        'site-announcement-bell',
-        (placement === 'studio' || placement === 'admin') && 'site-announcement-bell--compact',
-        placement === 'studio-mobile' && 'site-announcement-bell--plain',
-      )}
-      onClick={open}
-    >
-      <span className="relative inline-flex">
-        <Bell aria-hidden="true" size={18} />
-        {hasUnread && <span aria-hidden="true" className="site-announcement-bell-dot" />}
-      </span>
-    </button>
+    {children({ hasUnread, open, expanded: anchor !== null, dialogId })}
     {anchor && <InboxDialog
       key={viewerId}
       id={dialogId}
-      returnFocus={trigger.current}
+      returnFocus={returnFocus.current}
       placement={placement}
       anchor={anchor}
       items={items}
@@ -88,6 +80,22 @@ export default function AnnouncementBell({ placement, viewerId: adminViewerId }:
       }}
     />}
   </>
+}
+
+export default function AnnouncementBell({ placement, viewerId }: { placement: Placement; viewerId?: string }) {
+  return <AnnouncementInboxControl placement={placement} viewerId={viewerId}>{({ hasUnread, open, expanded, dialogId }) => {
+    const label = hasUnread ? '未读通知' : '通知中心'
+    return <button type="button" title={label} aria-label={label} aria-haspopup="dialog" aria-expanded={expanded}
+      aria-controls={expanded ? dialogId : undefined} onClick={event => open(event.currentTarget)}
+      className={cn('site-announcement-bell',
+        (placement === 'studio' || placement === 'admin') && 'site-announcement-bell--compact',
+        placement === 'studio-mobile' && 'site-announcement-bell--plain')}>
+      <span className="relative inline-flex">
+        <Bell aria-hidden="true" size={18} />
+        {hasUnread && <span aria-hidden="true" className="site-announcement-bell-dot" />}
+      </span>
+    </button>
+  }}</AnnouncementInboxControl>
 }
 
 export function AnnouncementHistoryDialog({ returnFocus, onClose }: {
@@ -120,7 +128,7 @@ type InboxDialogProps = {
   id: string
   returnFocus: HTMLElement | null
   placement: Placement | 'history'
-  anchor?: { top: number; right: number; bottom: number }
+  anchor?: InboxAnchor
   items: InboxItem[]
   unread: number
   viewerId: string | null
@@ -168,12 +176,14 @@ function InboxDialog(props: InboxDialogProps) {
     className={cn(
       'site-announcement-inbox',
       props.placement === 'studio-mobile' && 'site-announcement-inbox--mobile',
+      props.placement === 'studio-rail' && 'site-announcement-inbox--rail studio-workspace',
       isHistory && 'site-announcement-inbox--history',
     )}
     style={props.anchor && {
       '--announcement-top': props.anchor.top + 'px',
       '--announcement-right': props.anchor.right + 'px',
       '--announcement-bottom': props.anchor.bottom + 'px',
+      '--announcement-left': props.anchor.left === undefined ? undefined : props.anchor.left + 'px',
     } as CSSProperties}
     onCancel={event => { event.preventDefault(); props.onClose() }}
     onClick={event => {

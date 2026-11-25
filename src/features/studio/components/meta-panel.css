@@ -1,0 +1,96 @@
+@media (min-width: 1024px) {
+  .studio-meta-dialog-content {
+    flex: 1 1 auto;
+    width: 100%;
+    height: auto;
+    max-height: inherit;
+    overflow: hidden;
+  }
+
+  .studio-meta-dialog-content .studio-meta-header {
+    padding: 0.75rem 1.5rem;
+  }
+
+  .studio-meta-dialog-content .studio-meta-body {
+    display: grid;
+    flex: 1 1 auto;
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    gap: 0;
+    padding: 0;
+  }
+
+  .studio-meta-dialog-content .studio-meta-main,
+  .studio-meta-dialog-content .studio-meta-companion {
+    gap: 1.5rem;
+    padding: 1.5rem;
+  }
+
+  .studio-meta-dialog-content .studio-meta-summary {
+    min-height: clamp(8rem, 22dvh, 11rem);
+  }
+
+  .studio-meta-dialog-content .studio-meta-companion {
+    border-inline-start: 1px solid var(--border-subtle);
+  }
+
+  .studio-meta-dialog-content .studio-meta-cover {
+    gap: 1.25rem;
+    padding: 0;
+    border: 0;
+  }
+
+  .studio-meta-dialog-content .studio-meta-cover-preview {
+    width: 6.75rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+  }
+
+  .studio-meta-dialog-content .studio-meta-cover-empty {
+    border: 1px dashed var(--border-strong);
+    background: var(--surface-muted);
+  }
+
+  .studio-meta-dialog-content .studio-meta-cover-empty svg {
+    width: 1.75rem;
+    height: 1.75rem;
+    stroke-width: 1.5;
+  }
+
+  .studio-meta-dialog-content .studio-meta-cover-actions {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+    margin-block-start: 0.75rem;
+  }
+
+  .studio-meta-dialog-content .studio-meta-display-title {
+    padding-block-start: 0.75rem;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .studio-meta-dialog-content .studio-meta-footer {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1.5rem;
+  }
+
+  .studio-meta-dialog-content .studio-meta-footer-actions {
+    display: contents;
+  }
+
+  .studio-meta-dialog-content .studio-meta-footer-actions a {
+    grid-area: 1 / 1;
+  }
+
+  .studio-meta-dialog-content .studio-meta-feedback {
+    grid-area: 1 / 2;
+    margin: 0;
+    text-align: end;
+  }
+
+  .studio-meta-dialog-content .studio-meta-footer-actions button {
+    grid-area: 1 / 3;
+  }
+}

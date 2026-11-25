@@ -12,7 +12,6 @@ import { novelImportApi } from '../../src/features/studio/import-api'
 
 vi.mock('../../src/features/feedback/components/FeedbackDialog', () => ({ default: () => null }))
 vi.mock('../../src/features/studio/components/StudioMoreMenu', () => ({ default: () => null }))
-vi.mock('../../src/features/site-content/AnnouncementBell', () => ({ default: () => null }))
 vi.mock('../../src/features/studio/agent/components/AgentOperationsCenter', () => ({ default: () => null }))
 vi.mock('../../src/features/account/CustomModelSettingsDialog', () => ({ CustomModelSettingsContent: () => null }))
 vi.mock('../../src/features/account/InviteCreditsDialog', () => ({ default: () => null }))
@@ -21,7 +20,19 @@ afterEach(() => { cleanup(); vi.restoreAllMocks() })
 const commandProps: ComponentProps<typeof StudioCommandBar> = {
   perspective: 'work', perspectiveSwitchEnabled: false, onPerspectiveChange: vi.fn(), currentNovelId: 'a', novelTitle: '作品', novelOptions: [],
   onSelectNovel: vi.fn(), onCreateNovel: vi.fn(), onPublish: vi.fn(), onOpenCover: vi.fn(), onOpenMeta: vi.fn(), onExport: vi.fn(), onImport: vi.fn(), onDeleteNovel: vi.fn(),
+  documents: { chapters: [], volumes: [], plans: [], plansLoaded: true }, onOpenChapterSettings: vi.fn(), onOpenPlanSettings: vi.fn(),
 }
+
+it.each(['work', 'ide'] as const)('starts the %s desktop caption with sidebar, history, and work menus', perspective => {
+  const { container } = render(<MemoryRouter><StudioCommandBar {...commandProps} workspaceSidebarOpen
+    onWorkspaceSidebarToggle={vi.fn()} perspective={perspective} perspectiveSwitchEnabled /></MemoryRouter>)
+  const buttons = Array.from(container.querySelectorAll('.studio-web-caption button'), node => node.getAttribute('aria-label') || node.textContent)
+  expect(buttons.slice(0, 9)).toEqual(['折叠左侧栏', '后退', '前进', '作品', '查看', '设计', '发布', '导出', '帮助'])
+  expect(container.querySelector('.desktop-product, .desktop-go, .site-announcement-bell')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: perspective === 'ide' ? 'Editor' : 'Studio' }))
+  expect(screen.getByRole('button', { name: 'Studio 对话、任务与创作' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Editor 结构、正文与预览' })).toBeTruthy()
+})
 
 it.each(['work', 'ide'] as const)('places import immediately above export in the %s work menu regardless of capability', perspective => {
   const onImport = vi.fn()
@@ -32,6 +43,56 @@ it.each(['work', 'ide'] as const)('places import immediately above export in the
   fireEvent.click(upload)
   expect(onImport).toHaveBeenCalledOnce()
   expect(document.activeElement).toBe(screen.getByRole('button', { name: '作品' }))
+})
+
+it('selects another chapter by title from the current work, with keyboard focus returning to the work menu', () => {
+  const openChapter = vi.fn()
+  const documents = {
+    chapters: [
+      { id: 'first', title: '启程', orderIndex: 1, volumeId: 'v' },
+      { id: 'second', title: '第 2 章 · 回信', orderIndex: 2, volumeId: 'v' },
+      { id: 'third', title: '《第三章》', orderIndex: 3, volumeId: 'v' },
+    ],
+    volumes: [{ id: 'v', title: '海岸线', orderIndex: 1 }], plans: [], plansLoaded: true,
+  }
+  render(<MemoryRouter><StudioCommandBar {...commandProps} documents={documents} onOpenChapterSettings={openChapter} /></MemoryRouter>)
+  const work = screen.getByRole('button', { name: '作品' })
+  fireEvent.click(work)
+  const meta = screen.getByRole('button', { name: '作品设置' })
+  const chapter = screen.getByRole('button', { name: '章节设置' })
+  expect(meta.nextElementSibling).toBe(chapter)
+  expect(chapter.nextElementSibling).toBe(screen.getByRole('button', { name: '计划设置' }))
+  fireEvent.keyDown(chapter, { key: 'ArrowRight' })
+  const search = screen.getByRole('textbox', { name: '搜索章节' })
+  expect(document.activeElement).toBe(search)
+  expect(screen.getByRole('button', { name: '第 3 章' })).toBeTruthy()
+  fireEvent.change(search, { target: { value: '回信' } })
+  expect(screen.queryByText('第 1 章 · 启程')).toBeNull()
+  expect(screen.getByRole('button', { name: '第 2 章 · 回信' })).toBeTruthy()
+  fireEvent.keyDown(search, { key: 'Enter' })
+  expect(openChapter).toHaveBeenCalledWith('second')
+  expect(document.activeElement).toBe(work)
+})
+
+it('uses the current plan list, including the empty state, and Escape closes one level at a time', () => {
+  const openPlan = vi.fn()
+  const renderBar = (plans: ComponentProps<typeof StudioCommandBar>['documents']['plans']) => (
+    <MemoryRouter><StudioCommandBar {...commandProps} documents={{ ...commandProps.documents, plans }} onOpenPlanSettings={openPlan} /></MemoryRouter>
+  )
+  const view = render(renderBar([]))
+  const work = screen.getByRole('button', { name: '作品' })
+  fireEvent.click(work)
+  const plan = screen.getByRole('button', { name: '计划设置' })
+  fireEvent.click(plan)
+  expect(screen.getByRole('status').textContent).toBe('当前作品暂无计划')
+  fireEvent.keyDown(screen.getByRole('region', { name: '选择计划' }), { key: 'Escape' })
+  expect(document.activeElement).toBe(plan)
+  expect(work.getAttribute('aria-expanded')).toBe('true')
+  view.rerender(renderBar([{ id: 'synopsis-id', title: '回信的时间线', planKind: 'outline' }]))
+  fireEvent.click(plan)
+  fireEvent.click(screen.getByRole('button', { name: '回信的时间线' }))
+  expect(openPlan).toHaveBeenCalledWith('synopsis-id')
+  expect(work.getAttribute('aria-expanded')).toBe('false')
 })
 
 it('toolbar import is optional, above export, and returns focus to a persistent trigger', () => {

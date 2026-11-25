@@ -103,7 +103,7 @@ export default function WorkspaceNovelSwitcher({
       </button>
 
       {open ? createPortal(
-        <div ref={panelRef} role="region" aria-label="我的作品" style={position} className="studio-workspace fixed z-[180] flex flex-col overflow-hidden rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-2 text-[var(--text-primary)] shadow-[0_20px_48px_rgba(15,23,42,0.16)]">
+        <div ref={panelRef} role="region" aria-label="我的作品" style={position} className="studio-workspace fixed z-[180] flex flex-col overflow-hidden rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-2 text-[var(--text-primary)] shadow-[0_20px_48px_rgba(15,23,42,0.16)]">
           <div className="flex items-center justify-between gap-3 px-2 py-2">
             <div className="min-w-0">
               <p className="text-xs tracking-[0.08em] text-[var(--text-secondary)]">我的作品</p>

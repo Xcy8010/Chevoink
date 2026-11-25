@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, expect, it, vi } from 'vitest'
 import { ToastProvider } from '../../src/components/ui/Toast'
 import { AgentPanel } from '../../src/features/studio/agent/components/AgentPanel'
+import { WorkConversationContext } from '../../src/features/studio/components/work-conversation-context'
 import { restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 const remote = vi.hoisted(() => ({ changed: undefined as undefined | ((id: string) => void) }))
@@ -18,6 +19,46 @@ afterEach(() => {
   window.localStorage.clear()
   vi.unstubAllGlobals()
   vi.useRealTimers()
+})
+
+it('moves changes and todos to the composer whenever the side dock is not visible', () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ success: true, data: null })))
+  const client = new QueryClient({ defaultOptions: { queries: { enabled: false } } })
+  const sessionId = 'dock-task'
+  useAgentStore.getState().restoreMessages([], sessionId)
+  useAgentStore.setState({
+    todos: [{ content: '核对章节', status: 'pending' }],
+    workspaceActivities: [{ callId: 'write', toolName: 'chapter_write', label: '第一章', chapterId: 'one', before: '', after: '正文', deltaChars: 2, status: 'done' }],
+  })
+  const toggle = vi.fn()
+  function panel(activityDock?: 'expanded' | 'collapsed') {
+    return <QueryClientProvider client={client}><ToastProvider>
+      <WorkConversationContext.Provider value={{ collapsed: false, expand: () => {}, activityDock }}>
+        <AgentPanel novelId="book" novelName="合成作品" sessionId={sessionId} ensureSession={async () => sessionId} taskStatus={{ available: true, dockId: 'side-dock', toggle }} />
+      </WorkConversationContext.Provider>
+    </ToastProvider></QueryClientProvider>
+  }
+  const view = render(panel('expanded'))
+  const status = screen.getByRole('button', { name: '折叠任务状态' })
+  const todos = () => screen.queryByRole('button', { name: '待办进度' })
+  const changes = () => screen.queryByTitle(/悬停查看正文变更/)
+  expect(status.getAttribute('aria-controls')).toBe('side-dock')
+  expect(todos()).toBeNull()
+  expect(changes()).toBeNull()
+  for (const state of ['collapsed', undefined] as const) {
+    view.rerender(panel(state))
+    expect(status.getAttribute('aria-expanded')).toBe('false')
+    expect(status.hasAttribute('disabled')).toBe(state === undefined)
+    expect(todos()).toBeTruthy()
+    expect(changes()).toBeTruthy()
+  }
+  fireEvent.click(todos()!)
+  expect(screen.getByRole('dialog', { name: '任务待办列表' })).toBeTruthy()
+  view.rerender(panel('expanded'))
+  expect(todos()).toBeNull()
+  expect(changes()).toBeNull()
+  expect(screen.queryByRole('dialog', { name: '任务待办列表' })).toBeNull()
 })
 
 it('keeps the loaded timeline visible on the first render of a remote activity header', async () => {

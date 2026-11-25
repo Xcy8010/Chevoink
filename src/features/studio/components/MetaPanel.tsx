@@ -1,5 +1,5 @@
 import { useId, useRef } from 'react'
-import { ArrowUpRight, ChevronDown, Image, X } from 'lucide-react'
+import { ArrowUpRight, ChevronDown, Image, Upload, X } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import Button from '@/components/ui/Button'
@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils'
 import type { NovelFormState } from '../types'
 import { SelectControl } from './StudioControls'
 import TagPicker from './TagPicker'
+import './meta-panel.css'
 
 type MetaPanelProps = {
   novelForm: NovelFormState
@@ -28,7 +29,6 @@ type MetaPanelProps = {
 }
 
 const labelClass = 'block text-sm font-medium text-[var(--text-primary)]'
-const sectionClass = 'space-y-4 border-t border-[var(--border-subtle)] pt-4'
 const linkClass = 'inline-flex min-h-9 items-center gap-1.5 rounded-md text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]'
 
 export default function MetaPanel({
@@ -53,10 +53,62 @@ export default function MetaPanel({
   const statusId = useId()
   const coverInputRef = useRef<HTMLInputElement>(null)
 
+  const coverSection = (
+    <section aria-label="作品封面" className="studio-meta-cover flex min-w-0 items-center gap-3 border-t border-[var(--border-subtle)] pt-4">
+      {coverUrl ? (
+        <img
+          src={coverUrl}
+          alt="当前作品封面"
+          className="studio-meta-cover-preview aspect-[3/4] w-14 shrink-0 rounded-md bg-[var(--surface-muted)] object-cover"
+        />
+      ) : (
+        <span aria-hidden="true" className="studio-meta-cover-preview studio-meta-cover-empty flex aspect-[3/4] w-14 shrink-0 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[var(--text-tertiary)]">
+          <Image className="h-5 w-5" />
+        </span>
+      )}
+      <div className="min-w-0 flex-1">
+        <h3 className={labelClass}>作品封面</h3>
+        {!coverUrl ? <p className="mt-0.5 text-xs text-[var(--text-tertiary)]">未设置</p> : null}
+        <div className="studio-meta-cover-actions mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+          {onCoverFile ? (
+            <input
+              ref={coverInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              aria-label="选择作品封面图片"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0]
+                event.currentTarget.value = ''
+                if (file) onCoverFile(file)
+              }}
+            />
+          ) : null}
+          {onCoverFile || onOpenCover ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              className="rounded-lg"
+              onClick={onCoverFile ? () => coverInputRef.current?.click() : onOpenCover}
+            >
+              {!mobile && onCoverFile ? <Upload aria-hidden="true" className="h-4 w-4" /> : null}
+              {coverUrl ? '更换封面' : '上传封面'}
+            </Button>
+          ) : null}
+          {onCoverFile && onOpenCover ? (
+            <Button variant="ghost" size="sm" className="rounded-lg" onClick={onOpenCover}>
+              封面工坊{!mobile ? <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" /> : null}
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  )
+
   return (
-    <section aria-label="作品设置" className="flex h-full min-h-0 min-w-0 flex-col text-[var(--text-primary)]">
+    <section aria-label="作品设置" className={cn('flex h-full min-h-0 min-w-0 flex-col text-[var(--text-primary)]', !mobile && 'studio-meta-dialog-content')}>
       {!mobile ? (
-        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3">
+        <header className="studio-meta-header flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3">
           <h2 className="text-lg font-semibold">作品设置</h2>
           <Button
             variant="ghost"
@@ -71,8 +123,8 @@ export default function MetaPanel({
         </header>
       ) : null}
 
-      <div className={cn('min-h-0 flex-1 space-y-4 overflow-x-hidden overflow-y-auto overscroll-contain py-4', mobile && 'px-4')}>
-        <div className="space-y-4">
+      <div className={cn('studio-meta-body flex min-h-0 flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto overscroll-contain py-4', mobile && 'px-4')}>
+        <div className="studio-meta-main grid min-w-0 shrink-0 content-start gap-4">
           <div className="space-y-1.5">
             <label htmlFor={titleId} className={labelClass}>书名</label>
             <TextInput
@@ -92,21 +144,21 @@ export default function MetaPanel({
               value={novelForm.summary}
               onChange={(event) => onChange({ ...novelForm, summary: event.target.value })}
               rows={4}
-              className="block min-h-24 w-full resize-y rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 py-2.5 text-sm leading-6 text-[var(--text-primary)] outline-none transition focus:border-[var(--accent-border)] focus:ring-2 focus:ring-[var(--focus-ring)]"
+              className="studio-meta-summary block min-h-24 w-full resize-y rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 py-2.5 text-sm leading-6 text-[var(--text-primary)] outline-none transition focus:border-[var(--accent-border)] focus:ring-2 focus:ring-[var(--focus-ring)]"
               placeholder="用几句话说清故事冲突、人物和世界观。"
+            />
+          </div>
+          <div className="border-t border-[var(--border-subtle)] pt-4">
+            <TagPicker
+              value={parseTagsText(novelForm.tagsText)}
+              onChange={(tags) => onChange({ ...novelForm, tagsText: joinTags(tags) })}
             />
           </div>
         </div>
 
-        <div className={sectionClass}>
-          <TagPicker
-            value={parseTagsText(novelForm.tagsText)}
-            onChange={(tags) => onChange({ ...novelForm, tagsText: joinTags(tags) })}
-          />
-        </div>
-
-        <div className={sectionClass}>
-          <div className="grid grid-cols-2 gap-3">
+        <div className="studio-meta-companion grid min-w-0 shrink-0 content-start gap-4">
+          {!mobile ? coverSection : null}
+          <div className="grid grid-cols-2 gap-3 border-t border-[var(--border-subtle)] pt-4">
             <div className="min-w-0 space-y-1.5">
               <label htmlFor={visibilityId} className={labelClass}>可见范围</label>
               <SelectControl
@@ -117,7 +169,7 @@ export default function MetaPanel({
                   const next = event.target.value as NovelFormState['visibility']
                   if (next !== novelForm.visibility) onRequestVisibilityAction(next)
                 }}
-                className="h-10 rounded-lg pl-3 pr-10"
+                className="w-full"
               >
                 <option value="private">仅自己可见</option>
                 <option value="followers">关注者可见</option>
@@ -135,7 +187,7 @@ export default function MetaPanel({
                   const next = event.target.value as NovelFormState['status']
                   if (next !== novelForm.status) onRequestStatusAction(next)
                 }}
-                className="h-10 rounded-lg pl-3 pr-10"
+                className="w-full"
               >
                 <option value="draft">草稿</option>
                 <option value="published">上架中</option>
@@ -145,7 +197,7 @@ export default function MetaPanel({
             </div>
           </div>
 
-          <details className="group">
+          <details className="studio-meta-display-title group">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-md py-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)] [&::-webkit-details-marker]:hidden">
               展示标题<span className="mr-auto text-xs text-[var(--text-tertiary)]">选填</span>
               <ChevronDown aria-hidden="true" className="h-4 w-4 transition-transform motion-reduce:transition-none group-open:rotate-180" />
@@ -160,62 +212,13 @@ export default function MetaPanel({
               className="mt-2 rounded-lg px-3"
             />
           </details>
+          {mobile ? coverSection : null}
         </div>
-
-        <section aria-label="作品封面" className="flex items-center gap-3 border-t border-[var(--border-subtle)] pt-4">
-          {coverUrl ? (
-            <img
-              src={coverUrl}
-              alt="当前作品封面"
-              className="aspect-[3/4] w-14 shrink-0 rounded-md bg-[var(--surface-muted)] object-cover"
-            />
-          ) : (
-            <span aria-hidden="true" className="flex aspect-[3/4] w-14 shrink-0 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[var(--text-tertiary)]">
-              <Image className="h-5 w-5" />
-            </span>
-          )}
-
-          <div className="min-w-0 flex-1">
-            <h3 className={labelClass}>作品封面</h3>
-            {!coverUrl ? <p className="mt-0.5 text-xs text-[var(--text-tertiary)]">未设置</p> : null}
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-              {onCoverFile ? (
-                <input
-                  ref={coverInputRef}
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  aria-label="选择作品封面图片"
-                  className="hidden"
-                  onChange={(event) => {
-                    const file = event.currentTarget.files?.[0]
-                    event.currentTarget.value = ''
-                    if (file) onCoverFile(file)
-                  }}
-                />
-              ) : null}
-              {onCoverFile || onOpenCover ? (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="rounded-lg"
-                  onClick={onCoverFile ? () => coverInputRef.current?.click() : onOpenCover}
-                >
-                  {coverUrl ? '更换封面' : '上传封面'}
-                </Button>
-              ) : null}
-              {onCoverFile && onOpenCover ? (
-                <Button variant="ghost" size="sm" className="rounded-lg" onClick={onOpenCover}>
-                  封面工坊
-                </Button>
-              ) : null}
-            </div>
-          </div>
-        </section>
       </div>
 
-      <footer className={cn('shrink-0 border-t border-[var(--border-subtle)] pt-3', mobile && 'px-4 pb-3')}>
-        {message ? <p role="status" className="mb-2 break-words text-xs leading-5 text-[var(--text-secondary)]">{message}</p> : null}
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      <footer className={cn('studio-meta-footer shrink-0 border-t border-[var(--border-subtle)] pt-3', mobile && 'px-4 pb-3')}>
+        {message ? <p role="status" className="studio-meta-feedback mb-2 break-words text-xs leading-5 text-[var(--text-secondary)]">{message}</p> : null}
+        <div className="studio-meta-footer-actions flex flex-wrap items-center justify-between gap-2">
           {detailPreviewHref ? (
             <Link to={detailPreviewHref} className={linkClass}>
               查看作品页<ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" />

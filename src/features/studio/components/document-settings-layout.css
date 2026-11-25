@@ -1,0 +1,60 @@
+.document-settings-dialog { --studio-tool-width: 42rem; }
+.document-settings-name { font-weight: 450; color: var(--text-secondary); }
+.document-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px;
+}
+.document-settings-field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+  min-width: 0;
+}
+.document-settings-label {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 550;
+}
+.document-settings-note {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.document-settings-select { width: 100%; min-width: 0; }
+.document-settings-textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-default);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.document-settings-textarea { min-height: 76px; line-height: 1.6; resize: vertical; }
+.document-settings-textarea:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+  border-color: var(--accent-border);
+}
+.document-settings-columns { display: grid; gap: 16px; }
+.document-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+}
+.document-settings-dialog .document-settings-delete { color: var(--color-error, #b42338); }
+.document-settings-dialog .document-settings-delete:hover { background: var(--surface-muted); }
+.document-settings-dialog > footer { align-items: center; gap: 12px; }
+.document-settings-dialog > footer:has(.document-settings-error) { flex-wrap: wrap; }
+.document-settings-error { order: -1; flex-basis: 100%; color: var(--color-error, #b42338); font-size: 13px; }
+@media (min-width: 1024px) {
+  .document-settings-body { padding: 22px 24px; }
+  .document-settings-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .document-settings-columns--primary { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+}

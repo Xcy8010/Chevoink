@@ -90,16 +90,47 @@ describe('author-ended run API boundary', () => {
     expect(workspace.items[0].activeAgent).toEqual(full.items[0].activeAgent)
     expect(JSON.stringify(workspace).length).toBeLessThan(JSON.stringify(full).length)
   })
-  it('session listing checks whether one run exists instead of counting a long history', async () => {
+  it('lists one scoped main run in stable order and returns only its author-visible preview', async () => {
     db.agentSession.findMany.mockResolvedValue([{
       id: 'session', userId: 'user', novelId: 'novel', title: '有效任务', status: 'active', lastRunAt: null,
       createdAt: record.createdAt, updatedAt: record.createdAt, pinnedAt: null, toolPolicy: null, sandboxMode: 'workspace',
-      novel: { title: '书', displayTitle: null }, runs: [{ id: 'run' }],
+      novel: { title: '书', displayTitle: null },
+      runs: [{ novelId: 'novel', status: 'completed', inputSummary: '作者的问题', outputSummary: '可见回复。\n\n{"arguments":"HIDDEN_PROTOCOL"}' }],
     }])
     const result = await listAgentSessionsData('user', 'novel')
-    expect(result.items[0].hasAgentHistory).toBe(true)
+    expect(result.items[0]).toMatchObject({ hasAgentHistory: true, latestMessagePreview: '可见回复。' })
+    expect(result.items[0]).not.toHaveProperty('runs')
+    expect(JSON.stringify(result)).not.toContain('HIDDEN_PROTOCOL')
     expect(db.agentSession.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      include: expect.objectContaining({ runs: { where: { incomingChildGrant: { isNot: { kind: 'inline' } } }, take: 1, select: { id: true } } }),
+      where: { userId: 'user', novelId: 'novel', status: 'active' },
+      include: expect.objectContaining({ runs: {
+        where: { userId: 'user', novelId: 'novel', incomingChildGrant: { isNot: { kind: 'inline' } } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1,
+        select: { status: true, novelId: true, outputSummary: true, inputSummary: true, goalExecution: { select: { trigger: true } } },
+      } }),
     }))
+  })
+  it('keeps literal author input on one line and omits missing, automatic or other-work previews', async () => {
+    const session = { userId: 'user', novelId: 'novel', title: '已命名任务', status: 'active', createdAt: record.createdAt, updatedAt: record.createdAt }
+    const input = '  作者原话\t\n{"arguments":"照写"} ' + '⭐'.repeat(200)
+    const latest = { novelId: 'novel', status: 'running', inputSummary: input, outputSummary: null }
+    db.agentSession.findMany.mockResolvedValue([
+      { ...session, id: 'literal', runs: [{ ...latest, status: 'failed', outputSummary: '内部失败原因' }] },
+      { ...session, id: 'emoji', runs: [{ ...latest, inputSummary: '甲'.repeat(159) + '🌙尾' }] },
+      { ...session, id: 'automatic', runs: [{ ...latest, goalExecution: { trigger: 'goal_auto' } }] },
+      { ...session, id: 'other-work', runs: [{ ...latest, novelId: 'other' }] },
+      { ...session, id: 'blank', runs: [{ ...latest, inputSummary: ' \n ' }] },
+      { ...session, id: 'empty', runs: [] },
+    ])
+    const { items } = await listAgentSessionsData('user', undefined, { includeArchived: true, ids: ['literal', 'emoji', 'automatic', 'other-work', 'blank', 'empty'] })
+    expect(items[0].latestMessagePreview).toMatch(/^作者原话 {"arguments":"照写"} /)
+    expect(Array.from(items[0].latestMessagePreview!)).toHaveLength(160)
+    expect(items[1].latestMessagePreview).toBe('甲'.repeat(159) + '🌙')
+    for (const item of items.slice(2)) expect(item).not.toHaveProperty('latestMessagePreview')
+    expect(items.map(item => item.hasAgentHistory)).toEqual([true, true, true, true, true, false])
+    expect(JSON.stringify(items)).not.toContain('内部失败原因')
+    expect(db.agentSession.findMany).toHaveBeenCalledOnce()
+    expect(db.agentSession.findMany.mock.calls[0][0].where).toMatchObject({ userId: 'user', novel: { authorId: 'user' } })
+    expect(db.agentRun.findMany).not.toHaveBeenCalled()
   })
 })
