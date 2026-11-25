@@ -10,7 +10,8 @@ import { chapterRecoveryKey, storeChapterEdits } from './lib/chapter-recovery'
 import ChapterDraftChoice from './components/ChapterDraftChoice'
 import { useShellStore } from '@/store/useShellStore'
 import { BookOpen, BookOpenText, Brain, Bug, FileText, Flag, FolderDown, ImagePlus, Lightbulb, LogOut, MessageSquareText, Network, PanelRightOpen, PenLine, Settings2, SlidersHorizontal, Trash2, Upload, Wrench } from 'lucide-react'
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from 'react-router-dom'
+import { protectWritingTask, readWorkspaceVisit, rememberWorkspaceVisit, type WorkspaceVisit } from './lib/workspace-history'
 import { plainChapterTitle } from '../../../shared/structure/chapter-title'
 
 import { useDialogFocusTrap } from './components/use-dialog-focus-trap'
@@ -125,6 +126,8 @@ export default function StudioWorkspace() {
   const desktopLayout = useDesktopStudioLayout()
   const { novelId } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
+  const navigationType = useNavigationType()
   const toast = useToast()
   const [searchParams, setSearchParams] = useSearchParams()
   const activeNovelId = novelId ?? DEFAULT_NOVEL_ID
@@ -134,6 +137,8 @@ export default function StudioWorkspace() {
   useEffect(() => () => { workspaceOwnerRef.current = { ...workspaceOwnerRef.current, epoch: workspaceOwnerRef.current.epoch + 1 } }, [])
   const taskUiUserId = useShellStore(state => state.sessionUser?.id)
   const queryClient = useQueryClient()
+  const taskScopeOwner = taskUiUserId ?? queryClient.getQueryData<UserMePayload>(['community', 'me'])?.user?.id ?? 'current'
+  const historyVisit = readWorkspaceVisit(location.state, taskScopeOwner, activeNovelId)
 
   const studioQuery = useQuery({
     queryKey: ['studio', activeNovelId],
@@ -284,7 +289,7 @@ export default function StudioWorkspace() {
   const mobilePrimary = mobileView === 'assistant' || mobileView === 'editor'
   function selectMobileView(view: 'assistant' | 'editor' | 'chapters') {
     setMobileView(view)
-    setWorkspacePerspective(view === 'assistant' ? 'work' : 'ide')
+    selectWorkspacePerspective(view === 'assistant' ? 'work' : 'ide')
   }
   const mobileSwipe = useStudioMobileSwipe(mobileMotion, mobileView, mobileMoreOpen, setMobileMoreOpen, selectMobileView)
   const [agentPrompt, setAgentPrompt] = useState('')
@@ -297,7 +302,7 @@ export default function StudioWorkspace() {
     mountSnapshot.current = { novelId: activeNovelId, data: readStoredAgentWorkspace(activeNovelId) }
   }
   const mountData = mountSnapshot.current?.data
-  const mountSession = searchParams.get('session')
+  const mountSession = searchParams.get('session') ?? historyVisit?.taskId ?? null
   const [agentSessionId, setAgentSessionId] = useState<string | null>(() =>
     selectInitialTask(mountData?.tasks ?? [], mountData?.activeTaskId, mountSession)?.sessionId ?? null,
   )
@@ -329,7 +334,6 @@ export default function StudioWorkspace() {
   // 当前任务窗口状态归属的作品：切换作品后状态水合落地前，快照写入效应
   // 不得用旧作品窗口写入/删除（会污染目标作品快照），仅状态归属当前作品时才允许写
   const [agentStateNovelId, setAgentStateNovelId] = useState(activeNovelId)
-  const taskScopeOwner = taskUiUserId ?? queryClient.getQueryData<UserMePayload>(['community', 'me'])?.user?.id ?? 'current'
   const taskUiScope = activeAgentTaskWindowId && agentStateNovelId === activeNovelId
     ? `${taskScopeOwner}:${activeNovelId}:${activeAgentTaskWindowId}` : undefined
   const taskDockId = useId()
@@ -389,6 +393,11 @@ export default function StudioWorkspace() {
   chapterStreamOwnerRef.current = chapterStreamOwner
   const workspaceStreamCursorsRef = useRef(new Map<string, ReviewStreamCursor>())
   const [agentRunState, setAgentRunState] = useState<AgentRunState>(createIdleAgentRunState)
+  useEffect(() => {
+    if (agentRunState.active) return protectWritingTask(() => {
+      setAgentRunState(current => ({ ...current, statusText: 'AI 生成中，暂时无法切换任务窗口。' }))
+    })
+  }, [agentRunState.active, location.key])
   const [agentArtifacts, setAgentArtifacts] = useState<AgentArtifact[]>([])
   const [activeAgentArtifactId, setActiveAgentArtifactId] = useState<string | null>(null)
   // 计划文件夹云端副本：覆盖非活跃任务窗口/历史会话的计划，刷新后不丢失
@@ -880,7 +889,8 @@ export default function StudioWorkspace() {
     setSessionResolutionError(null)
     setAgentStateNovelId(activeNovelId)
 
-    const requestedSessionId = searchParams.get('session')
+    const deepLink = searchParams.get('session')
+    const requestedSessionId = deepLink ?? historyVisit?.taskId ?? null
     // 侧栏在其它作品点「新建对话/新建任务」会带 ?session=new 跳过来：置顶一个干净的新对话窗口
     const requestNewTask = requestedSessionId === 'new'
     const snapshot = mountSnapshot.current?.novelId === activeNovelId
@@ -888,7 +898,10 @@ export default function StudioWorkspace() {
       : readStoredAgentWorkspace(activeNovelId)
     mountSnapshot.current = null
     const storedTasks = initialTaskWindows(snapshot?.tasks ?? [], requestedSessionId, createLocalAgentTaskWindow)
-    const freshTaskWindow = requestNewTask ? createLocalAgentTaskWindow() : null
+    const restoreBlankId = !deepLink && historyVisit?.blankTask && !storedTasks.some(task =>
+      task.id === requestedSessionId || task.sessionId === requestedSessionId) ? requestedSessionId : null
+    const freshTaskWindow = requestNewTask ? createLocalAgentTaskWindow() : restoreBlankId
+      ? createLocalAgentTaskWindow({ id: restoreBlankId }) : null
     const snapshotTasks = freshTaskWindow ? [freshTaskWindow, ...storedTasks] : storedTasks
     setAgentTaskWindows(snapshotTasks)
     setCatalogDocument(snapshot?.catalogDocument ?? null)
@@ -929,13 +942,14 @@ export default function StudioWorkspace() {
         )
 
         if (sessions.length === 0) {
-          if (requestedSessionId && !requestNewTask && !selectInitialTask(aliveSnapshotTasks, null, requestedSessionId)) throw new Error('目标任务暂不可用，请重试。不会自动创建新任务。')
-          if (aliveSnapshotTasks.length === snapshotTasks.length) {
+          if (deepLink && !requestNewTask && !selectInitialTask(aliveSnapshotTasks, null, deepLink)) throw new Error('目标任务暂不可用，请重试。不会自动创建新任务。')
+          if (aliveSnapshotTasks.length === snapshotTasks.length && initialTaskWindow) {
             return
           }
           const fallbackTasks = aliveSnapshotTasks.length > 0 ? aliveSnapshotTasks : [createLocalAgentTaskWindow()]
           setAgentTaskWindows(fallbackTasks)
           applyAgentTaskWindowState(fallbackTasks[0] ?? null)
+          if (historyVisit) rememberWorkspaceVisit(makeVisit(fallbackTasks[0], historyVisit.perspective))
           return
         }
 
@@ -970,7 +984,7 @@ export default function StudioWorkspace() {
         const nextTaskWindow =
           (freshTaskWindow ? mergedTasks.find((taskWindow) => taskWindow.id === freshTaskWindow.id) : null) ??
           (requestedSessionId ? mergedTasks.find((taskWindow) => taskWindow.sessionId === requestedSessionId || taskWindow.id === requestedSessionId) : null) ??
-          (requestedSessionId && !requestNewTask ? null : selectInitialTask(mergedTasks, snapshot?.activeTaskId ?? initialTaskWindow?.id, null))
+          (deepLink && !requestNewTask ? null : selectInitialTask(mergedTasks, snapshot?.activeTaskId ?? initialTaskWindow?.id, null))
 
         if (!nextTaskWindow && requestedSessionId && !requestNewTask) throw new Error('目标任务暂不可用，请重试。不会自动切换到其它任务。')
 
@@ -985,11 +999,14 @@ export default function StudioWorkspace() {
           applyAgentTaskWindowState(nextTaskWindow)
         }
         resolvingTaskId = nextTaskWindow.id
-        // Keep the original target across a retry, even if a server session has since gone away.
-        if (requestedSessionId && (requestNewTask || nextTaskWindow.loaded || !nextTaskWindow.sessionId)) {
-          setSearchParams(current => consumeSessionDeepLink(current, requestedSessionId), { replace: true })
+        if (historyVisit && !deepLink && nextTaskWindow.id !== requestedSessionId && nextTaskWindow.sessionId !== requestedSessionId) {
+          rememberWorkspaceVisit(makeVisit(nextTaskWindow, historyVisit.perspective))
         }
-        void loadTaskArtifacts(nextTaskWindow, requestedSessionId)
+        // Keep the original target across a retry, even if a server session has since gone away.
+        if (deepLink && (requestNewTask || nextTaskWindow.loaded || !nextTaskWindow.sessionId)) {
+          setSearchParams(current => consumeSessionDeepLink(current, deepLink), { replace: true })
+        }
+        void loadTaskArtifacts(nextTaskWindow, deepLink)
       } catch {
         if (stillSelected() && appliedAgentTaskWindowIdRef.current === resolvingTaskId) setSessionResolutionError('任务读取失败，请重试。已保存的对话保留，不会自动创建新任务。')
       } finally {
@@ -3643,12 +3660,8 @@ export default function StudioWorkspace() {
       return
     }
 
-    if (searchParams.has('session')) {
-      const nextParams = new URLSearchParams(searchParams)
-      nextParams.delete('session')
-      setSearchParams(nextParams, { replace: true })
-    }
     const nextTaskWindow = createLocalAgentTaskWindow()
+    pushWorkspaceVisit(nextTaskWindow, workspacePerspective)
     pruneTemporaryTaskWindows(nextTaskWindow.id)
     setAgentTaskWindows((current) => [nextTaskWindow, ...current])
     applyAgentTaskWindowState(nextTaskWindow)
@@ -3683,12 +3696,14 @@ export default function StudioWorkspace() {
     // 回落目标从删除前的列表里算（setState 异步），已排除被删的那个
     const fallbackTaskWindow = pickFallbackAgentTaskWindow(agentTaskWindows, deletedTaskId)
     if (fallbackTaskWindow) {
+      rememberWorkspaceVisit(makeVisit(fallbackTaskWindow, workspacePerspective))
       // 走 loadAgentTaskWindow 而非直接 apply：后者不会补载历史工件，作者会看到空壳任务
       void loadAgentTaskWindow(fallbackTaskWindow.id)
       return
     }
 
     const nextTaskWindow = createLocalAgentTaskWindow()
+    rememberWorkspaceVisit(makeVisit(nextTaskWindow, workspacePerspective))
     setAgentTaskWindows([nextTaskWindow])
     applyAgentTaskWindowState(nextTaskWindow)
   }
@@ -3728,6 +3743,7 @@ export default function StudioWorkspace() {
 
     // 分支已带全量历史，标为未加载让后续补载工件（对话内容由 Agent 面板自己拉）
     const forkedTaskWindow = buildAgentTaskWindowFromSession(session)
+    pushWorkspaceVisit(forkedTaskWindow, workspacePerspective)
     pruneTemporaryTaskWindows(forkedTaskWindow.id)
     setAgentTaskWindows((current) => [
       forkedTaskWindow,
@@ -3768,7 +3784,30 @@ export default function StudioWorkspace() {
     await queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
   }
 
-  async function handleSelectAgentTaskWindow(taskWindowId: string) {
+  function makeVisit(task: AgentTaskWindowState | null, perspective: WorkspaceVisit['perspective']): WorkspaceVisit {
+    return { owner: taskScopeOwner, novelId: activeNovelId, taskId: task?.sessionId ?? task?.id ?? null,
+      blankTask: Boolean(task?.temporary && !task.sessionId), perspective }
+  }
+
+  function pushWorkspaceVisit(task: AgentTaskWindowState | null, perspective: WorkspaceVisit['perspective']) {
+    const prior = makeVisit(activeAgentTaskWindow, workspacePerspective)
+    const target = makeVisit(task, perspective)
+    if (target.taskId === prior.taskId && target.perspective === prior.perspective) return
+    rememberWorkspaceVisit(prior)
+    const params = new URLSearchParams(searchParams)
+    params.delete('session')
+    navigate({ pathname: location.pathname, search: params.toString(), hash: location.hash },
+      { state: { ...location.state, workspaceVisit: target }, preventScrollReset: true })
+  }
+
+  function selectWorkspacePerspective(perspective: WorkspaceVisit['perspective']) {
+    pushWorkspaceVisit(activeAgentTaskWindow, perspective)
+    setWorkspacePerspective(perspective)
+  }
+
+  async function handleSelectAgentTaskWindow(taskWindowId: string, {
+    restore = false, blankTask = false, perspective = workspacePerspective,
+  }: { restore?: boolean; blankTask?: boolean; perspective?: WorkspaceVisit['perspective'] } = {}) {
     if (agentRunState.active) {
       setAgentRunState((current) => ({
         ...current,
@@ -3777,30 +3816,30 @@ export default function StudioWorkspace() {
       return
     }
 
+    if (taskWindowId === activeAgentTaskWindowId || taskWindowId === agentSessionId) {
+      if (!restore) pushWorkspaceVisit(activeAgentTaskWindow, perspective)
+      return
+    }
+
     setSessionResolutionError(null)
     const revision = ++taskSelectionRevision.current
     const owner = workspaceOwnerRef.current
     const selectionIsCurrent = () => revision === taskSelectionRevision.current && workspaceOwnerRef.current === owner
-    // A newer explicit selection supersedes a still-resolving cross-novel deep link.
-    if (searchParams.has('session')) {
-      const nextParams = new URLSearchParams(searchParams)
-      nextParams.delete('session')
-      setSearchParams(nextParams, { replace: true })
-    }
-    if (taskWindowId === activeAgentTaskWindowId) {
-      return
-    }
-
     pruneTemporaryTaskWindows(taskWindowId)
 
     // 已归档任务恢复后本地窗口已被回收：按服务端会话现场补建窗口再打开，
     // 否则从归档内容切回来时点击会没有反应
-    if (!agentTaskWindows.some((taskWindow) => taskWindow.id === taskWindowId || taskWindow.sessionId === taskWindowId)) {
+    const existing = agentTaskWindows.find(task => task.id === taskWindowId || task.sessionId === taskWindowId)
+    if (!existing) {
       try {
-        const sessions = await listWritingAgentSessions(activeNovelId)
-        const session = sessions.find((item) => item.id === taskWindowId)
-        if (!session || !selectionIsCurrent()) return
-        const materializedTaskWindow = buildAgentTaskWindowFromSession(session)
+        const session = blankTask ? null : (await listWritingAgentSessions(activeNovelId)).find(item => item.id === taskWindowId)
+        if (!selectionIsCurrent()) return
+        if (!blankTask && !session) {
+          if (restore) rememberWorkspaceVisit(makeVisit(activeAgentTaskWindow, perspective))
+          return
+        }
+        const materializedTaskWindow = session ? buildAgentTaskWindowFromSession(session) : createLocalAgentTaskWindow({ id: taskWindowId })
+        if (!restore) pushWorkspaceVisit(materializedTaskWindow, perspective)
         setAgentTaskWindows((current) => [
           materializedTaskWindow,
           ...current.filter((taskWindow) => taskWindow.id !== materializedTaskWindow.id),
@@ -3812,8 +3851,33 @@ export default function StudioWorkspace() {
       return
     }
 
-    await loadAgentTaskWindow(taskWindowId)
+    if (!restore) pushWorkspaceVisit(existing, perspective)
+    await loadAgentTaskWindow(taskWindowId, existing)
   }
+
+  const priorEntry = useRef({ key: location.key, novelId: activeNovelId })
+  useEffect(() => {
+    const previous = priorEntry.current
+    priorEntry.current = { key: location.key, novelId: activeNovelId }
+    if (navigationType !== 'POP' || !historyVisit) return
+    setWorkspacePerspective(historyVisit.perspective)
+    if (!desktopLayout) setMobileView(historyVisit.perspective === 'work' ? 'assistant' : 'editor')
+    // On mount and cross-work navigation the hydration effect already resolves this entry.
+    if (previous.key !== location.key && previous.novelId === activeNovelId && historyVisit.taskId) {
+      void handleSelectAgentTaskWindow(historyVisit.taskId, { restore: true, blankTask: historyVisit.blankTask })
+    }
+    // The browser entry drives restoration. Data fetching and read receipts must never replay it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key, taskScopeOwner])
+
+  useEffect(() => {
+    if (!activeAgentTaskWindow || agentStateNovelId !== activeNovelId || agentSessionsResolving || sessionResolutionError || searchParams.has('session')) return
+    const stored = readWorkspaceVisit(window.history.state?.usr, taskScopeOwner, activeNovelId)
+    if (!stored || (stored.taskId === activeAgentTaskWindow.id && activeAgentTaskWindow.sessionId && stored.taskId !== activeAgentTaskWindow.sessionId)) {
+      rememberWorkspaceVisit(makeVisit(activeAgentTaskWindow, workspacePerspective))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key, searchParams, activeAgentTaskWindow, workspacePerspective, activeNovelId, agentStateNovelId, taskScopeOwner, agentSessionsResolving, sessionResolutionError])
 
   async function handleRenameAgentTaskWindow(taskWindowId: string, nextTitle: string) {
     const normalizedTitle = nextTitle.trim().slice(0, 160)
@@ -4051,6 +4115,7 @@ export default function StudioWorkspace() {
       } catch { /* Optional layout persistence. */ }
     }
     if (taskLocationRef.current.novelId === activeNovelId && taskLocationRef.current.taskId === currentTaskWindow?.id) {
+      rememberWorkspaceVisit({ ...makeVisit(currentTaskWindow, workspacePerspective), taskId: sessionId, blankTask: false })
       setAgentSessionId(sessionId)
       activateTaskWindowId(sessionId)
     }
@@ -4091,6 +4156,7 @@ export default function StudioWorkspace() {
       } catch { /* Optional layout persistence. */ }
     }
     if (taskLocationRef.current.novelId === activeNovelId && taskLocationRef.current.taskId === currentTaskWindow?.id) {
+      rememberWorkspaceVisit({ ...makeVisit(currentTaskWindow, workspacePerspective), taskId: createdSession.id, blankTask: false })
       setAgentSessionId(createdSession.id)
       activateTaskWindowId(createdSession.id)
     }
@@ -4150,10 +4216,7 @@ export default function StudioWorkspace() {
           reviewBusy={pendingChapterReviewBusy || pendingPlanReviewBusy}
           onApproveAllReviews={handleApproveAllPendingReviews}
           onRejectAllReviews={handleRequestRejectAllPendingReviews}
-          onSelectSession={(nextSessionId) => {
-            setAgentSessionId(nextSessionId)
-            activateTaskWindowId(nextSessionId)
-          }}
+          onSelectSession={nextSessionId => void handleSelectAgentTaskWindow(nextSessionId)}
           onSessionDeleted={(deletedSessionId) => {
             // 删除会话成功后统一走侧栏同一条善后路径：移除任务窗口（避免僵尸 sessionId 写回快照后反复 404），
             // 删的是当前窗口则回落到最近一个有记录的任务，而不是直接开一个空白对话
@@ -4309,7 +4372,7 @@ export default function StudioWorkspace() {
 
   function openMobileChapters() {
     setMobileView('chapters')
-    setWorkspacePerspective('ide')
+    selectWorkspacePerspective('ide')
   }
 
   const memorySessionId = agentStateNovelId === activeNovelId && currentNovel.id === activeNovelId ? agentSessionId : null
@@ -4498,7 +4561,7 @@ export default function StudioWorkspace() {
               onSelectSession={session => {
                 setMobileView('assistant')
                 setWorkspacePerspective('work')
-                if (session.novelId === activeNovelId) void handleSelectAgentTaskWindow(session.id)
+                if (session.novelId === activeNovelId) void handleSelectAgentTaskWindow(session.id, { perspective: 'work' })
                 else void switchWorkspaceNovel(session.novelId, session.id)
               }}
               onSessionChange={({ action, session }) => {
@@ -4518,9 +4581,9 @@ export default function StudioWorkspace() {
               }}
               onCreateNovel={handleCreateWorkspaceNovel}
               actions={[
-                  { key: 'assistant', sectionLabel: '导航', label: '工作台', icon: MessageSquareText, action: () => { setMobileView('assistant'); setWorkspacePerspective('work') } },
-                  { key: 'editor', label: '写作', icon: PenLine, action: () => { setMobileView('editor'); setWorkspacePerspective('ide') } },
-                  { key: 'chapters', label: '卷章', icon: BookOpenText, action: () => { setMobileView('chapters'); setWorkspacePerspective('ide') } },
+                  { key: 'assistant', sectionLabel: '导航', label: '工作台', icon: MessageSquareText, action: () => { setMobileView('assistant'); selectWorkspacePerspective('work') } },
+                  { key: 'editor', label: '写作', icon: PenLine, action: () => { setMobileView('editor'); selectWorkspacePerspective('ide') } },
+                  { key: 'chapters', label: '卷章', icon: BookOpenText, action: () => { setMobileView('chapters'); selectWorkspacePerspective('ide') } },
                   { key: 'meta', sectionLabel: '本作品', label: novelTitleMissing ? '去命名作品' : '作品设置', icon: Settings2, action: () => setMobileView('meta') },
                   { key: 'cover', label: '封面工坊', icon: ImagePlus, action: () => setMobileView('cover') },
                   ...(featureFlags.memory2
@@ -4566,7 +4629,7 @@ export default function StudioWorkspace() {
             onWorkspaceSidebarToggle={() => workspacePerspective === 'ide' ? setIdeTreeOpen((value) => !value) : setWorkspaceSidebarOpen((value) => !value)}
             perspective={workspacePerspective}
             perspectiveSwitchEnabled={featureFlags.dualWorkspace}
-            onPerspectiveChange={setWorkspacePerspective}
+            onPerspectiveChange={selectWorkspacePerspective}
             currentNovelId={currentNovel.id}
             novelTitle={novelTitle}
             novelOptions={activeNovelOptions}
@@ -4611,7 +4674,7 @@ export default function StudioWorkspace() {
             onWidthChange={setWorkspaceSidebarWidth}
             perspective={workspacePerspective}
             perspectiveSwitchEnabled={featureFlags.dualWorkspace}
-            onPerspectiveChange={setWorkspacePerspective}
+            onPerspectiveChange={selectWorkspacePerspective}
             currentNovelId={activeNovelId}
             currentNovelTitle={novelTitle}
             novels={novelOptions}
@@ -4854,7 +4917,7 @@ export default function StudioWorkspace() {
               }}
               onOpenImportHistory={importHistoryAvailable ? () => { setStudioSettingsOpen(false); openImportHistory() } : undefined}
               perspective={workspacePerspective}
-              onPerspectiveChange={setWorkspacePerspective}
+              onPerspectiveChange={selectWorkspacePerspective}
               autoFollow={autoFollow}
               onAutoFollowChange={setAutoFollow}
               novelId={activeNovelId}

@@ -121,6 +121,7 @@ export function CommunityPageSkeleton() {
         </div>
       )}
     >
+      <span hidden data-route-loading />
       <CommunityFeedSkeleton />
     </CommunityPageLayout>
   )

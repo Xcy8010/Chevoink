@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronRight, Copy, Minus, Square, X } from 'lucide-react'
 import { matchPath, useLocation } from 'react-router-dom'
 import { appRoutes } from '@/app/route-config'
@@ -30,7 +30,7 @@ export default function DesktopWindowFrame({ onContentHost }: { onContentHost?: 
     let disposed = false
     let applied: boolean | undefined
     let switching = false
-    const hasDialog = () => Boolean(document.querySelector('dialog[open]'))
+    const hasDialog = () => Boolean(document.querySelector('dialog[open]:not([data-desktop-notice])'))
     async function syncCaption() {
       if (disposed || switching || !frameActive.current) return
       switching = true
@@ -83,12 +83,18 @@ export default function DesktopWindowFrame({ onContentHost }: { onContentHost?: 
       window.removeEventListener('resize', refresh)
     }
   }, [])
-  const visible = Boolean(state && !state.fullscreen && !systemCaption)
-  useEffect(() => {
-    if (!visible) return
-    document.documentElement.dataset.desktopFrame = studio ? 'studio' : 'site'
-    return () => { delete document.documentElement.dataset.desktopFrame }
-  }, [visible, studio])
+  const desktopLayout = Boolean(state && !state.fullscreen)
+  const visible = desktopLayout && !systemCaption
+  useLayoutEffect(() => {
+    if (!desktopLayout) return
+    const root = document.documentElement
+    root.dataset.desktopFrame = studio ? 'studio' : 'site'
+    root.toggleAttribute('data-system-caption', systemCaption)
+    return () => {
+      delete root.dataset.desktopFrame
+      root.removeAttribute('data-system-caption')
+    }
+  }, [desktopLayout, studio, systemCaption])
   // Announcement dialogs belong to the portaled header. Keep its host
   // mounted while Windows temporarily supplies system controls for the modal.
   const keepHost = systemCaption && hasAttached.current && !state?.fullscreen
@@ -98,9 +104,9 @@ export default function DesktopWindowFrame({ onContentHost }: { onContentHost?: 
   const maximizeLabel = state?.maximized ? '还原窗口' : '最大化窗口'
   return <>
     {visible && !state?.maximized && <div className="desktop-window-outline" aria-hidden="true" />}
-    <div className={keepHost ? 'desktop-system-caption' : 'desktop-caption'} role={visible ? 'region' : undefined} aria-label={visible ? '桌面窗口' : undefined}>
+    <div className={keepHost ? 'desktop-caption desktop-system-caption' : 'desktop-caption'} data-window-maximized={state?.maximized || undefined} role={visible ? 'region' : undefined} aria-label={visible ? '桌面窗口' : undefined}>
       {showNavigation && <DesktopNavigation />}
-      {(!studio || wide) && <div ref={onContentHost} className={studio ? 'desktop-commands studio-workspace' : keepHost ? 'desktop-system-tools' : 'desktop-site-tools'} />}
+      {(!studio || wide) && <div ref={onContentHost} className={studio ? 'desktop-commands studio-workspace' : 'desktop-site-tools'} />}
       <div className="desktop-drag" onMouseDown={event => {
         if (event.button !== 0) return
         event.preventDefault()

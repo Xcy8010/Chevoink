@@ -11,6 +11,9 @@
   }
 
   const root = document.documentElement
+  const android = /\bChevoinkApp\b/.test(navigator.userAgent)
+  if (android) root.dataset.bootPlatform = 'android'
+  else if (/\bChevoinkDesktop\/\d+\.\d+\.\d+\b/.test(navigator.userAgent)) root.dataset.bootPlatform = 'windows'
   root.classList.add(theme)
   const background = getComputedStyle(root).getPropertyValue('--boot-background').trim()
   const meta = document.querySelector('meta[name="theme-color"]')
@@ -20,7 +23,7 @@
 
   // Capacitor injects the bridge before page scripts. Match the loading surface
   // now, while the app bundle/release selection/authentication may still be loading.
-  if (/\bChevoinkApp\b/.test(navigator.userAgent)) {
+  if (android) {
     const appearance = window.Capacitor?.Plugins?.ImmersiveMode
     if (appearance?.setSystemBarAppearance) {
       void appearance.setSystemBarAppearance({ color: background, dark: theme === 'dark' })

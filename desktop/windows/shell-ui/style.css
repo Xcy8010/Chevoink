@@ -1,6 +1,5 @@
-:root { color-scheme: light dark; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
-body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #151515; color: #ededed; }
+:root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #1f2023; color: #ededed; }
 main { max-width: 34rem; padding: 2rem; line-height: 1.8; text-align: center; }
 .boot-splash[hidden] { display: none; }
 h1 { font-size: 1.5rem; } a { color: LinkText; }
-@media (prefers-color-scheme: light) { body { background: #f4f0e8; color: #23252a; } }

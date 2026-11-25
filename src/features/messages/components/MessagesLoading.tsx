@@ -112,7 +112,7 @@ export function MessagesRouteSkeleton() {
   const [params, setParams] = useSearchParams()
   const showChat = params.has('conversationId')
   return (
-    <div className={messagePanelClass} aria-busy="true">
+    <div data-route-loading className={messagePanelClass} aria-busy="true">
       {(!isMobile || !showChat) && (
         <aside className={conversationListPaneClass}>
           <div className={conversationListHeaderClass}>
@@ -158,7 +158,7 @@ export function MessageDetailRouteSkeleton({ variant }: { variant: 'follows' | '
   const [params] = useSearchParams()
   const follows = variant === 'follows'
   return (
-    <div className={detailLayoutClass}>
+    <div data-route-loading className={detailLayoutClass}>
       <div className="lg:sticky lg:top-24 lg:self-start">
         <button type="button" onClick={() => window.history.length > 1 ? navigate(-1) : navigate('/me')} className={detailBackClass}>
           <ChevronLeft className="h-4 w-4" />

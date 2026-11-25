@@ -60,9 +60,32 @@ it('returns window management to the OS while a dialog makes the web caption ine
   await waitFor(() => expect(screen.queryByLabelText('桌面窗口')).toBeNull())
   expect(document.querySelector('.desktop-window-outline')).toBeNull()
   expect(invoke).toHaveBeenCalledWith('desktop_caption', { action: 'system' })
+  expect(document.documentElement.dataset.desktopFrame).toBe('studio')
+  expect(document.documentElement.hasAttribute('data-system-caption')).toBe(true)
   dialog.remove()
   expect(await screen.findByRole('button', { name: '最小化窗口' })).toBeTruthy()
+  expect(document.documentElement.dataset.desktopFrame).toBe('studio')
+  expect(document.documentElement.hasAttribute('data-system-caption')).toBe(false)
   expect(document.querySelector('.desktop-window-outline')).toBeTruthy()
+})
+
+it('keeps Studio commands and window controls attached while a client-area notification is open', async () => {
+  invoke.mockImplementation(async cmd => cmd === 'desktop_get_info' ? { windowCaption: 1 }
+    : { maximized: true, fullscreen: false })
+  mount()
+  const control = await screen.findByRole('button', { name: '还原窗口' })
+  const notice = document.createElement('dialog')
+  notice.dataset.desktopNotice = 'true'
+  document.body.append(notice)
+  try {
+    notice.open = true
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.getByRole('button', { name: '还原窗口' })).toBe(control)
+    expect(document.querySelector('.desktop-commands')).toBeTruthy()
+    expect(invoke).not.toHaveBeenCalledWith('desktop_caption', { action: 'system' })
+  } finally {
+    notice.remove()
+  }
 })
 
 it.each(['/', '/studio'])('keeps the %s toolbar and its open dialog mounted during system caption handover', async path => {
@@ -72,11 +95,13 @@ it.each(['/', '/studio'])('keeps the %s toolbar and its open dialog mounted duri
   render(<MemoryRouter initialEntries={[path]}><DesktopWindowFrame onContentHost={bind} /></MemoryRouter>)
   await screen.findByRole('button', { name: '最小化窗口' })
   const host: HTMLElement = bind.mock.lastCall![0]
+  const toolbarClass = host.className
   const dialog = document.createElement('dialog')
   host.append(dialog)
   dialog.open = true
   await waitFor(() => expect(screen.queryByLabelText('桌面窗口')).toBeNull())
   expect(dialog.isConnected && dialog.open).toBe(true)
+  expect(host.className).toBe(toolbarClass)
   dialog.remove()
   await screen.findByRole('button', { name: '最小化窗口' })
   expect(bind).toHaveBeenCalledTimes(1)

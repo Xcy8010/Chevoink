@@ -17,6 +17,7 @@ import type { AgentSession, Novel, UserMePayload } from '../../../../shared/cont
 import { deleteNovelWorkspace, updateNovelMeta } from '../api'
 import { deleteAgentSession, fetchAgentSessions, fetchSessionsRunStatus, forkAgentSession, renameAgentSession, updateAgentSessionSettings } from '../agent/agentApi'
 import StudioSidebarHeader from './StudioSidebarHeader'
+import { readWorkspaceSidebarWidth, WORKSPACE_SIDEBAR_MIN as MIN_WIDTH, WORKSPACE_SIDEBAR_MAX as MAX_WIDTH } from '../workspace-sidebar-size'
 import { useAgentStore } from '../agent/agentStore'
 import { selectAgentActivityRunActive, selectAgentGoalView } from '../agent/goal-selectors'
 import { formatTaskRelativeTime } from '../lib/relative-time'
@@ -80,14 +81,9 @@ type DangerAction =
 /** 任务悬停信息卡片：侧栏列表横向 overflow 会裁切，改用 fixed 按行坐标渲染 */
 type TaskCard = { task: SidebarTask; x: number; y: number }
 
-const MIN_WIDTH = 216
-const MAX_WIDTH = 392
-const DEFAULT_WIDTH = 280
 const COLLAPSE_AT = MIN_WIDTH
 /** 折叠态悬停peek的横向宽度上限：悬浮预览不需要展开态那么宽 */
 const PEEK_MAX_WIDTH = 288
-/** 旧版默认宽度，仅精确匹配时迁移到新默认，保留用户主动拖拽的值 */
-const LEGACY_DEFAULT_WIDTH = 304
 const VISIBLE_PROJECT_TASKS = 5
 const VISIBLE_RECENT_TASKS = 10
 const workspaceSessionsKey = ['agent', 'sessions', 'workspace-navigation'] as const
@@ -142,20 +138,13 @@ function toggleExpandedId(ids: Set<string>, id: string): Set<string> {
   return next
 }
 
-function initialWidth() {
-  const value = Number(window.localStorage.getItem('chevoink:studio-sidebar-width'))
-  if (!Number.isFinite(value) || value <= MIN_WIDTH + 16) return DEFAULT_WIDTH
-  if (value === LEGACY_DEFAULT_WIDTH) return DEFAULT_WIDTH
-  return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, value))
-}
-
 export default function StudioWorkspaceSidebar(props: Props) {
   const queryClient = useQueryClient()
   const toast = useToast()
   const sessionUser = useShellStore((state) => state.sessionUser)
   const latestProps = useRef(props)
   latestProps.current = props
-  const [width, setWidth] = useState(initialWidth)
+  const [width, setWidth] = useState(readWorkspaceSidebarWidth)
   const onWidthChangeRef = useRef(props.onWidthChange)
   onWidthChangeRef.current = props.onWidthChange
   // 宽度稳定后上报（拖拽中不逐帧上报，避免父级大组件高频重渲染）

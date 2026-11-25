@@ -1,6 +1,6 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { parseHTML } from 'linkedom'
 import { StudioSkeleton } from '@/components/ui/Skeleton'
 import { readFileSync } from 'node:fs'
@@ -20,6 +20,22 @@ describe('StudioSkeleton responsive layout', () => {
   const markup = renderToStaticMarkup(createElement(StudioSkeleton))
   const { document } = parseHTML(markup)
 
+  it('reserves the remembered sidebar and Editor column widths before data arrives', () => {
+    const preferences = new Map([['studio-last-novel-id', 'book'], ['chevoink:studio-sidebar-width', '338']])
+    vi.stubGlobal('window', { innerWidth: 1600, location: { pathname: '/studio' }, localStorage: { getItem: (key: string) => preferences.get(key) ?? null } })
+    function renderLayout() { return parseHTML(renderToStaticMarkup(createElement(StudioSkeleton))).document }
+    try {
+      expect(renderLayout().querySelector('[data-studio-region="desktop-workspace-sidebar"]')?.getAttribute('style')).toContain('338px')
+      preferences.set('chevoink:workspace-sidebar', 'collapsed')
+      expect(renderLayout().querySelector('[data-studio-region="desktop-workspace-sidebar"]')).toBeNull()
+      preferences.set('chevoink:perspective:book', 'ide')
+      preferences.set('studio-panel-widths', JSON.stringify({ tree: 402, agent: 490 }))
+      const editor = renderLayout().querySelector('[data-studio-skeleton="ide"]')!
+      expect(editor.getAttribute('style')).toContain('356px minmax(0,1fr) 490px')
+      expect(editor.querySelector('[data-studio-region="ide-composer"]')).toBeTruthy()
+    } finally { vi.unstubAllGlobals() }
+  })
+
   it('replaces both old stacked activity boxes with two compact capsule segments', () => {
     for (const region of ['mobile-activity', 'desktop-activity']) {
       const activity = document.querySelector(`[data-studio-region="${region}"]`)!
@@ -35,6 +51,9 @@ describe('StudioSkeleton responsive layout', () => {
 
   it('keeps the wide status card vertical with at most five change rows', () => {
     const dock = document.querySelector('[data-studio-region="desktop-activity-dock"]')!
+    const header = document.querySelector('[data-studio-region="desktop-task-header"]')!
+    expect(header.lastElementChild?.children).toHaveLength(4)
+    expect(header.nextElementSibling?.contains(dock)).toBe(true)
     expect(dock.className).toContain('hidden')
     expect(dock.querySelector('[data-studio-dock-changes]')?.children).toHaveLength(5)
     expect(dock.querySelector('[data-studio-activity-capsules]')).toBeNull()

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
-import { WORK_CONVERSATION_WIDTH_LIMITS, useStudioPanelWidths, type ResizablePanel, type StudioPanelWidths } from '../panel-widths'
+import { EDITOR_CENTER_RESERVE, WORK_CONVERSATION_WIDTH_LIMITS, useStudioPanelWidths, type ResizablePanel, type StudioPanelWidths } from '../panel-widths'
 import type { WorkInspectorTab } from './WorkInspector'
+import { readWorkspaceSidebarOpen, readWorkspaceSidebarWidth } from '../workspace-sidebar-size'
 
 // Match the studio's Tailwind lg layout. React only rerenders when crossing
 // the breakpoint, including when rotating a tablet or resizing a desktop.
@@ -19,17 +20,10 @@ export function useWorkspaceLayout(activeNovelId: string) {
     if (typeof window === 'undefined') return 'work'
     return window.localStorage.getItem(`chevoink:perspective:${activeNovelId}`) === 'ide' ? 'ide' : 'work'
   })
-  const [workspaceSidebarOpen, setWorkspaceSidebarOpen] = useState(() => {
-    if (typeof window === 'undefined') return true
-    return window.localStorage.getItem('chevoink:workspace-sidebar') !== 'collapsed'
-  })
+  const [workspaceSidebarOpen, setWorkspaceSidebarOpen] = useState(readWorkspaceSidebarOpen)
   // 左侧创作栏宽度（首帧从持久化读，后续由侧栏稳定后上报）：
   // 侧栏折叠后用它动态收窄聊天区最小宽度，给查看器让出更大的向左拉伸空间
-  const [workspaceSidebarWidth, setWorkspaceSidebarWidth] = useState(() => {
-    if (typeof window === 'undefined') return 280
-    const value = Number(window.localStorage.getItem('chevoink:studio-sidebar-width'))
-    return Number.isFinite(value) && value >= 200 ? value : 280
-  })
+  const [workspaceSidebarWidth, setWorkspaceSidebarWidth] = useState(readWorkspaceSidebarWidth)
   const [workRightOpen, setWorkRightOpen] = useState(false)
   const [workInspectorTab, setWorkInspectorTab] = useState<WorkInspectorTab>('work')
   const [workViewer, setWorkViewer] = useState<'chapter' | 'document' | null>(null)
@@ -47,7 +41,7 @@ export function useWorkspaceLayout(activeNovelId: string) {
     // Persisted IDE tree widths already include the former 46px IDE rail.
     const centerReserve = workspacePerspective === 'work'
       ? 52 + (workspaceSidebarOpen ? workspaceSidebarWidth : 0) + 44 + conversationMinWidth
-      : 520 + (52 - 46)
+      : EDITOR_CENTER_RESERVE
     if (panel === 'tree') {
       return viewportWidth - centerReserve - (ideAgentOpen ? widths.agent : 46)
     }

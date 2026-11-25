@@ -30,7 +30,7 @@ export default function RequireAuthRoute({
 
   if (authStatus === 'checking') {
     return renderState(checkingFallback ?? (
-      <div className="space-y-4 py-2" role="status" aria-label="页面加载中">
+      <div data-route-loading className="space-y-4 py-2" role="status" aria-label="页面加载中">
         <Skeleton className="h-7 w-48" />
         <SkeletonText lines={4} />
         <Skeleton className="h-40 w-full rounded-[var(--radius-xl)]" />

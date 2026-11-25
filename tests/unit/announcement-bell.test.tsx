@@ -47,6 +47,28 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); restoreDialog() })
 
+it('keeps the notification list and detail inside the desktop client area and restores list focus', async () => {
+  document.documentElement.dataset.desktopFrame = 'studio'
+  try {
+    request.mockResolvedValue(inbox(null))
+    mount(<AnnouncementBell placement="site" />)
+    const bell = screen.getByRole('button', { name: '通知中心' })
+    fireEvent.click(bell)
+    const list = await screen.findByRole('dialog', { name: '通知中心' })
+    const row = await within(list).findByRole('button', { name: /最新通知/ })
+    expect(list.closest('.desktop-notice-layer')).toBeTruthy()
+    fireEvent.click(row)
+    const detail = await screen.findByRole('dialog', { name: '最新通知' })
+    expect(detail.closest('.desktop-notice-layer')).toBeTruthy()
+    fireEvent.keyDown(detail, { key: 'Escape' })
+    await waitFor(() => expect(document.activeElement).toBe(row))
+    fireEvent.keyDown(row, { key: 'Escape' })
+    await waitFor(() => expect(document.activeElement).toBe(bell))
+  } finally {
+    delete document.documentElement.dataset.desktopFrame
+  }
+})
+
 it('reads just the closed announcement, syncs the bells and retains the history after reading all', async () => {
   const payload = inbox('author')
   payload.personalItems = [{ id: 'gift', title: '你收到了奖励额度', body: '管理员已发放 500 奖励额度。', publishedAt: '2026-11-08T08:00:00.000Z', unread: true }]

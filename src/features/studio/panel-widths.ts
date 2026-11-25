@@ -8,6 +8,8 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 const STUDIO_PANEL_WIDTHS_STORAGE_KEY = 'studio-panel-widths'
 
 const LEGACY_TREE_PANEL_FALLBACK = 264
+// Preserve the editor's 520px center while accounting for its shared 52px activity rail.
+export const EDITOR_CENTER_RESERVE = 520 + 52 - 46
 export const TREE_PANEL_WIDTH_LIMITS = { min: 240, fallback: 420 }
 export const AGENT_PANEL_WIDTH_LIMITS = { min: 400, fallback: 440 }
 export const WORK_TASK_PANEL_WIDTH_LIMITS = { min: 200, fallback: 232 }
@@ -109,6 +111,15 @@ function readStoredPanelWidths(): StudioPanelWidths {
   } catch {
     return fallback
   }
+}
+
+export function readInitialEditorColumns() {
+  const widths = readStoredPanelWidths()
+  const viewport = typeof window === 'undefined' ? 1920 : window.innerWidth
+  const available = viewport - EDITOR_CENTER_RESERVE
+  const tree = clampPanelWidth(widths.tree, TREE_PANEL_WIDTH_LIMITS, available - widths.agent)
+  const agent = clampPanelWidth(widths.agent, AGENT_PANEL_WIDTH_LIMITS, available - tree)
+  return `${tree - 46}px minmax(0,1fr) ${agent}px`
 }
 
 function storePanelWidths(widths: StudioPanelWidths) {

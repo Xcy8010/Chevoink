@@ -1,9 +1,11 @@
-import { useEffect, useId, useLayoutEffect, useRef } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import artwork from '@/assets/studio-announcement.webp'
 import paper from '@/assets/studio-notice-paper.webp'
 import { useStudioDismiss } from '@/features/studio/components/use-studio-presence'
 import './studio-announcement.css'
+import { useDesktopNoticeLayer } from './desktop-notice-layer'
+import { useDialogFocusTrap } from '@/features/studio/components/use-dialog-focus-trap'
 
 type Props = {
   item: { title: string; body: string }
@@ -28,6 +30,9 @@ function inkCalendarNumber(value: number) {
 
 export default function StudioAnnouncementDialog({ item, coverTitle, publishedAt, onShown, onDismiss, onHistory, onExitStart, invoker }: Props) {
   const dialog = useRef<HTMLDialogElement>(null)
+  const { desktop, layer } = useDesktopNoticeLayer()
+  const [desktopOpen, setDesktopOpen] = useState(false)
+  useDialogFocusTrap({ panel: dialog, open: desktopOpen, onClose: () => close() })
   const cover = useRef<HTMLImageElement>(null)
   const titleId = useId()
   const destination = useRef<'close' | 'history' | null>(null)
@@ -57,7 +62,10 @@ export default function StudioAnnouncementDialog({ item, coverTitle, publishedAt
       }
       observer?.disconnect()
       previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
-      node.showModal()
+      if (desktop) {
+        node.show()
+        setDesktopOpen(true)
+      } else node.showModal()
       node.focus({ preventScroll: true })
       shown.current?.()
     }
@@ -76,7 +84,7 @@ export default function StudioAnnouncementDialog({ item, coverTitle, publishedAt
       const target = origin?.isConnected && origin !== document.body ? origin : document.querySelector<HTMLElement>('[data-studio-content-focus]')
       target?.focus({ preventScroll: true })
     }
-  }, [invoker])
+  }, [desktop, invoker])
 
   function close(viewHistory = false) {
     if (destination.current) return
@@ -88,7 +96,7 @@ export default function StudioAnnouncementDialog({ item, coverTitle, publishedAt
   const year = String(date.getFullYear()).replace(/\d/g, digit => inkDigits[Number(digit)])
   const content = (
     <dialog ref={dialog} tabIndex={-1} className="studio-workspace studio-announcement" data-native-back-dismiss
-      aria-modal="true" aria-labelledby={titleId} data-phase={phase}
+      data-desktop-notice={desktop || undefined} aria-modal="true" aria-labelledby={titleId} data-phase={phase}
       onCancel={event => { event.preventDefault(); close() }}
       onClick={event => {
         if (event.target !== event.currentTarget) return
@@ -112,6 +120,7 @@ export default function StudioAnnouncementDialog({ item, coverTitle, publishedAt
       </footer>
     </dialog>
   )
+  if (desktop) return layer(content, () => close())
   // Keep an explicitly opened notice inside the mobile drawer's focus boundary.
   return invoker ? content : createPortal(content, document.fullscreenElement ?? document.body)
 }

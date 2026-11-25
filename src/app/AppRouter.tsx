@@ -78,26 +78,29 @@ function AppRoutes() {
   return (
     <AccountAccessGate studioPhoneRequired={studioPhoneRequired} closeStudioGate={closeOverlay}>
       <Routes location={background}>
-        {appRoutes.map((route) => (
-          <Route
+        {appRoutes.map((route) => {
+          const content = (
+            <Suspense key={route.path} fallback={<><span hidden data-route-loading />{route.fallback ?? defaultRouteFallback}</>}>
+              {route.element}
+            </Suspense>
+          )
+          return <Route
             key={route.path}
             path={route.path}
             element={
               route.useShell === false ? (
                 <div className="app-standalone-route">
-                  <Suspense fallback={route.fallback ?? defaultRouteFallback}>{route.element}</Suspense>
+                  {content}
                 </div>
               ) : (
                 // Suspense 放在壳内：顶栏/底栏立即可交互，只内容区显示骨架
                 <AppShell title={route.title} description={route.description}>
-                  <Suspense key={route.path} fallback={route.fallback ?? defaultRouteFallback}>
-                    {route.element}
-                  </Suspense>
+                  {content}
                 </AppShell>
               )
             }
           />
-        ))}
+        })}
       </Routes>
       {authMode && !checkingSession && <AuthPage mode={authMode} onClose={closeOverlay} />}
     </AccountAccessGate>

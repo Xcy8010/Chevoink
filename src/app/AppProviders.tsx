@@ -27,8 +27,20 @@ export default function AppProviders({ children }: PropsWithChildren) {
   const syncSessionUser = useShellStore((state) => state.syncSessionUser)
 
   useLayoutEffect(() => {
-    if (authStatus !== 'checking') document.getElementById('app-loading')?.remove()
-  }, [authStatus])
+    const splash = document.getElementById('app-loading')
+    if (!splash || authStatus === 'checking' || splash.hasAttribute('data-revealing')) return
+    if (studioAppearance.reducedMotion || document.documentElement.dataset.bootPlatform === 'android'
+      || !document.querySelector('[data-route-loading]')) {
+      splash.remove()
+      return
+    }
+    // This element belongs to the startup document. Later route and task loads never recreate it.
+    splash.setAttribute('aria-hidden', 'true')
+    splash.setAttribute('data-revealing', '')
+    const reveal = splash.getAnimations?.()[0]
+    if (reveal) void reveal.finished.then(() => splash.remove(), () => splash.remove())
+    else splash.remove()
+  }, [authStatus, studioAppearance.reducedMotion])
 
   useEffect(() => {
     document.documentElement.classList.remove('light', 'dark')

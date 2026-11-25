@@ -1,6 +1,6 @@
 [package]
 name = "chevoink-desktop"
-version = "1.0.10"
+version = "1.0.11"
 description = "Chevoink Windows client"
 edition = "2021"
 rust-version = "1.94"
@@ -30,7 +30,7 @@ reqwest = { version = "0.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "=0.38.2"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Com", "Win32_UI_Controls"] }
 
 [profile.release]
 lto = "thin"

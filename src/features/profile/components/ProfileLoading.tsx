@@ -2,7 +2,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 
 export function ProfileRouteSkeleton() {
   return (
-    <div className="space-y-5 md:space-y-6" role="status" aria-busy="true" aria-label="个人中心加载中">
+    <div data-route-loading className="space-y-5 md:space-y-6" role="status" aria-busy="true" aria-label="个人中心加载中">
       <div>
         <Skeleton className="aspect-[3/1] w-full rounded-[var(--radius-xl)]" />
         <div className="flex items-start justify-between px-1 sm:px-2">

@@ -11,6 +11,8 @@ const { chromium } = await import(process.env.PLAYWRIGHT_CORE_PATH ? pathToFileU
 const browser = await chromium.launch({ executablePath: process.env.CHROME_BIN || undefined })
 const page = await browser.newPage({ viewport: {width: 1600, height: 900}, serviceWorkers: 'block', reducedMotion: 'reduce' })
 await page.addInitScript(() => {
+  // Keep the chapter viewer cold until the test opens it. Normal connections can preload it while idle.
+  Object.defineProperty(navigator, 'connection', { value: { saveData: true }, configurable: true })
   localStorage.setItem('chevoink-shell', JSON.stringify({state: {fullscreenPromptSeen: true}, version: 0}))
   // B was last closed on its memory tab; its chunk has never been opened in this browser.
   localStorage.setItem('chevoink:studio-work-panel-ui', JSON.stringify({

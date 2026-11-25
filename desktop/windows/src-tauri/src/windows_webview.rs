@@ -1,4 +1,5 @@
 use crate::navigation::{is_app_url, is_download_url, opens_in_browser, safe_filename, APP_ORIGIN};
+use std::mem::size_of_val;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -13,6 +14,48 @@ use webview2_com::{
     PermissionRequestedEventHandler, ProcessFailedEventHandler, StateChangedEventHandler,
 };
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
+use windows::Win32::{
+    Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE},
+    UI::Controls::{
+        SetWindowThemeAttribute, WTA_NONCLIENT, WTA_OPTIONS, WTNCA_NODRAWCAPTION, WTNCA_NODRAWICON,
+    },
+};
+
+/// Keep system caption buttons, hit testing and the taskbar identity during WebView handoff.
+pub fn style_system_caption(window: &WebviewWindow) {
+    let Ok(hwnd) = window.hwnd() else { return };
+    let flags = WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON;
+    let options = WTA_OPTIONS {
+        dwFlags: flags,
+        dwMask: flags,
+    };
+    let dark = BOOL(1);
+    // COLORREF for #1f2023.
+    let graphite: u32 = 0x0023_201f;
+
+    // Each API copies its typed value synchronously; older Windows versions may
+    // leave unsupported DWM colors at their system defaults.
+    unsafe {
+        let _ = SetWindowThemeAttribute(
+            hwnd,
+            WTA_NONCLIENT,
+            std::ptr::from_ref(&options).cast(),
+            size_of_val(&options) as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            std::ptr::from_ref(&dark).cast(),
+            size_of_val(&dark) as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            std::ptr::from_ref(&graphite).cast(),
+            size_of_val(&graphite) as u32,
+        );
+    }
+}
 
 /// Windows-specific permission/navigation/crash hooks are kept here, not in the web UI.
 pub fn install(window: &WebviewWindow) -> tauri::Result<()> {

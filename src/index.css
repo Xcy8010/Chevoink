@@ -262,6 +262,15 @@ html[data-desktop-frame='studio'] :is(.studio-canvas-frame, .studio-skeleton-wor
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
 }
+/* The maximized client area already ends at the OS work area. */
+html[data-desktop-frame='studio']:has([data-window-maximized]) :is(.studio-canvas-frame, .studio-skeleton-work, [data-studio-skeleton='ide']) {
+  margin: 0;
+  border-width: 1px 0 0 1px;
+  border-radius: 12px 0 0 12px;
+}
+html[data-desktop-frame='studio']:has([data-window-maximized]) .studio-desktop-rail {
+  padding-bottom: 6px;
+}
 
 /* Dialog interiors and fields use their raised surface with the same ink. */
 html.dark body:has([data-studio-route]) :is(dialog, [role='dialog'], [role='menu'], [role='listbox'], .feedback-dialog):not(.studio-settings-page) {
@@ -713,6 +722,28 @@ body.autohide-scrollbars *:not([data-scrolling='true'])::-webkit-scrollbar-thumb
   animation: unseen-flash 1.8s var(--easing-default) 0.25s 1 both;
 }
 
+#app-loading[data-revealing] { pointer-events: none; }
+@media (prefers-reduced-motion: no-preference) {
+  #app-loading[data-revealing] {
+    animation: boot-handoff 240ms cubic-bezier(.32, 0, .2, 1) both;
+  }
+  #app-loading[data-revealing] ~ #root [data-route-loading]:not([hidden]) {
+    transform-origin: center;
+    animation: boot-content-settle 240ms cubic-bezier(.2, .65, .3, 1) both;
+  }
+}
+#app-loading[data-revealing] ~ #root [data-studio-skeleton].studio-pending {
+  animation-delay: -200ms;
+}
+@keyframes boot-handoff {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes boot-content-settle {
+  from { transform: scale(.995); }
+  to { transform: none; }
+}
+
 @keyframes skeleton-sweep {
   from { background-position: 150% 0; }
   to { background-position: -50% 0; }
@@ -760,20 +791,24 @@ body.autohide-scrollbars *:not([data-scrolling='true'])::-webkit-scrollbar-thumb
 .studio-skeleton-work { container: studio-skeleton-work / inline-size; }
 .studio-skeleton-work, .work-agent-frame { --work-agent-optical-offset: 16px; }
 /* Loading surfaces must match the finished workspace, not inherit the sidebar. */
-html.dark .studio-workspace :is(
+.studio-workspace :is(
   .studio-skeleton-work,
-  [data-studio-region='desktop-command-bar'],
   [data-studio-region='mobile-conversation']
 ) { background-color: var(--surface-default); }
-html.dark .studio-workspace [data-studio-region='desktop-inspector-rail'] {
+.studio-workspace [data-studio-region='desktop-inspector-rail'] {
   background-color: var(--app-bg);
 }
-html.dark .studio-workspace :is(
+.studio-workspace :is(
   [data-studio-region='desktop-composer'],
+  [data-studio-region='ide-composer'],
   [data-studio-region='mobile-composer']
 ) { background-color: var(--studio-composer-bg); }
-@container studio-skeleton-work (min-width: 1304px) {
-  [data-studio-region='desktop-conversation'] { padding-inline: calc(44px + 2 * var(--work-agent-optical-offset)) 12px; }
+.studio-skeleton-work [data-studio-region='desktop-conversation'] {
+  --work-agent-chat-width: calc(100cqw - 90px);
+  --work-agent-rail-width: 44px;
+}
+@container studio-skeleton-work (min-width: 1302px) {
+  [data-studio-region='desktop-conversation'] { --work-agent-dock-reserve: 308px; --work-agent-center-reserve: 308px; }
   .studio-skeleton-activity-dock { display: block; }
   [data-studio-region='desktop-activity'] { display: none; }
 }

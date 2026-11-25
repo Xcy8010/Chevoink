@@ -29,7 +29,7 @@ export function SettingsFrame({ heading, searchBox, children, contentRef, loadin
 }) {
   return (
     <div className="mx-auto w-full max-w-[50rem] pb-5"
-      role={loading ? 'status' : undefined} aria-busy={loading} aria-label={loading ? '设置加载中' : undefined}>
+      data-route-loading={loading || undefined} role={loading ? 'status' : undefined} aria-busy={loading} aria-label={loading ? '设置加载中' : undefined}>
       <header aria-hidden={loading} className="sticky top-0 z-20 mb-5 flex items-center gap-3 border-b border-[var(--border-subtle)] bg-[var(--app-bg)] pb-4 pt-1 md:mb-6 md:gap-4 md:pb-5">
         {heading}
       </header>

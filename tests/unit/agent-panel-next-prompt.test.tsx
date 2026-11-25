@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { ToastProvider } from '../../src/components/ui/Toast'
 import { AgentPanel } from '../../src/features/studio/agent/components/AgentPanel'
 import { WorkConversationContext } from '../../src/features/studio/components/work-conversation-context'
+import WorkPerspective from '../../src/features/studio/components/WorkPerspective'
 import { restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 const remote = vi.hoisted(() => ({ changed: undefined as undefined | ((id: string) => void) }))
@@ -325,19 +326,32 @@ it.each([
     if (url.includes('/messages?runLimit=') && !url.includes('&before=')) return ++reads === 1 ? pending : response({ historyHead: head, activeRunId: null, messages: [message(head.latestRunId)] })
     return response(null)
   }))
-  render(<QueryClientProvider client={client}><ToastProvider>
-    <AgentPanel novelId="opening-book" novelName="Test" sessionId={sessionId} ensureSession={async () => sessionId} />
-  </ToastProvider></QueryClientProvider>)
+  const measure = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 1600, 900))
+  const panel = <AgentPanel novelId="opening-book" novelName="Test" sessionId={sessionId} ensureSession={async () => sessionId} />
+  const workspace = (expanded: boolean) => <QueryClientProvider client={client}><ToastProvider>
+    <WorkPerspective conversation={panel} conversationRail={null} inspector={null} inspectorTab="work" inspectorWidth={320} viewerWidth={600}
+      rightOpen={false} onToggleRight={() => {}} onSelectInspectorTab={() => {}} activityDockExpanded={expanded} />
+  </ToastProvider></QueryClientProvider>
+  const view = render(workspace(true))
+  measure.mockRestore()
   await waitFor(() => expect(client.getQueryData(['agent-queue', sessionId])).toMatchObject(first))
   const loading = () => screen.queryByRole('status', { name: '正在载入对话' })
+  const statusLoading = () => screen.queryByRole('status', { name: '正在载入任务状态' })
   if (cached) {
     expect(useAgentStore.getState().messages[0]?.id).toBe('cached')
     await screen.findByText('cached')
     expect(loading()).toBeNull()
+    expect(statusLoading()).toBeNull()
   } else {
     const delayedLoading = await screen.findByRole('status', { name: '正在载入对话' })
     expect(delayedLoading.closest('.agent-conversation-scroll')).toBeTruthy()
     expect(loading()?.querySelector('.skeleton-shimmer')).toBeTruthy()
+    expect(statusLoading()?.querySelectorAll('[data-studio-dock-changes] > div')).toHaveLength(5)
+    view.rerender(workspace(false))
+    expect(statusLoading()).toBeNull()
+    expect(loading()).toBe(delayedLoading)
+    view.rerender(workspace(true))
+    expect(statusLoading()).toBeTruthy()
   }
   if (concurrent) {
     head = second
@@ -347,6 +361,8 @@ it.each([
   expect(reads).toBe(1)
   await act(async () => release(response({ historyHead: first, activeRunId: null, messages: [message('first')] })))
   await waitFor(() => expect(useAgentStore.getState().messages[0]?.id).toBe(head.latestRunId))
+  expect(loading()).toBeNull()
+  expect(statusLoading()).toBeNull()
   // A later wake for an unchanged head also stays lightweight.
   await act(async () => { remote.changed?.(sessionId); await new Promise(resolve => setTimeout(resolve, 10)) })
   expect(reads).toBe(concurrent ? 2 : 1)

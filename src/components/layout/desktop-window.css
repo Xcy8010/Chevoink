@@ -23,7 +23,7 @@ html[data-desktop-frame] .studio-settings-page { top: var(--caption-height); hei
 .desktop-product, .desktop-history, .desktop-window-controls, .desktop-drag { display: flex; align-items: center; }
 .desktop-product { gap: 8px; margin-inline: 12px; white-space: nowrap; font-size: 12px; font-weight: 600; }
 .desktop-product img { display: block; width: 19px; height: 19px; }
-.desktop-history { gap: 2px; }
+.desktop-history { gap: 2px; color: var(--text-secondary); }
 .desktop-go { position: relative; align-self: center; margin-left: 4px; }
 .desktop-go summary { display: flex; align-items: center; gap: 4px; height: 26px; padding-inline: 8px; border-radius: 5px; font-size: 12px; cursor: default; white-space: nowrap; }
 .desktop-go summary svg { width: 11px; height: 11px; }
@@ -32,9 +32,10 @@ html[data-desktop-frame] .studio-settings-page { top: var(--caption-height); hei
 .desktop-go nav svg { width: 15px; height: 15px; }
 .desktop-go :is(a, summary):hover, .desktop-go[open] summary { background: color-mix(in srgb, currentColor 8%, transparent); }
 .desktop-history button, .desktop-window-controls button { display: grid; place-items: center; }
-.desktop-history button { width: 26px; height: 26px; border-radius: 5px; }
+.desktop-history button { width: 32px; height: 28px; border-radius: 5px; }
 .desktop-history button:disabled { opacity: .3; }
-.desktop-history svg, .desktop-drag svg { width: 14px; height: 14px; }
+.desktop-history svg { width: 16px; height: 16px; stroke-width: 1.65; }
+.desktop-drag svg { width: 14px; height: 14px; }
 .desktop-drag { min-width: 80px; flex: 1; gap: 8px; padding-inline: 9px; font-size: 12px; color: var(--text-secondary); }
 .desktop-drag svg { opacity: .45; }
 .desktop-commands { display: flex; align-items: stretch; min-width: 0; }
@@ -48,8 +49,31 @@ html[data-desktop-frame] .studio-settings-page { top: var(--caption-height); hei
 .desktop-caption button:enabled:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
 .desktop-caption .desktop-window-controls button:last-child:hover { background: #bc2832; color: white; }
 html[data-desktop-frame="site"]:has(.desktop-site-tools [data-site-header]) { --caption-height: 44px; }
-.desktop-system-caption, .desktop-system-tools { display: contents; }
-.desktop-system-caption > :not(.desktop-system-tools) { display: none; }
+html[data-desktop-frame][data-system-caption] { --caption-height: 0px; }
+.desktop-system-caption:not(:has([data-site-header])) { display: contents; }
+.desktop-system-caption:not(:has([data-site-header])) > * { display: none; }
+/* Leave the site navigation and bell in their desktop slots while the OS supplies the window buttons. */
+.desktop-system-caption .desktop-window-controls { visibility: hidden; }
+.desktop-notice-layer { display: none; }
+.desktop-notice-layer:has(> dialog[open]) {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 2147483645;
+}
+.desktop-notice-layer > .studio-announcement { position: fixed; inset: 0; }
+.desktop-notice-layer:has(> :is(.studio-announcement, .site-announcement-inbox--history)[open])::before {
+  content: '';
+  position: absolute;
+  inset: var(--caption-height, 0px) 0 0;
+  background: rgb(9 13 14 / 48%);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+  transition: opacity 150ms ease-out;
+}
+.desktop-notice-layer:has(> [data-phase='closing'])::before { opacity: 0; }
+body:has(.desktop-notice-layer > dialog[open]) .desktop-caption { pointer-events: none; }
+body:has(.desktop-notice-layer > dialog[open]) .desktop-caption :is(.desktop-drag, .desktop-window-controls) { pointer-events: auto; }
 /* The site's own controls become flex items of the caption. Only the space
    between navigation and search handles native dragging. */
 .desktop-site-tools, .desktop-site-tools .site-reveal-header, .desktop-site-tools .site-header-row { display: contents; }
@@ -80,6 +104,17 @@ html[data-desktop-frame="site"]:has(.desktop-site-tools [data-site-header]) { --
   order: 4; flex: none; border-left: 1px solid var(--desktop-chrome-line);
 }
 .desktop-go[open] { z-index: 3; }
+/* Only a full page load replaces the caption navigation. Local lists and
+   chat updates keep their current toolbar and native window controls. */
+html:is([data-boot-platform="windows"], [data-desktop-frame]) .studio-skeleton-command { display: none; }
+html[data-desktop-frame]:has([data-route-loading]) .desktop-caption {
+  border-bottom: 0;
+  background: var(--app-bg);
+  color: var(--text-primary);
+}
+html[data-desktop-frame]:has([data-route-loading]) .desktop-caption > :not(.desktop-drag, .desktop-window-controls),
+html[data-desktop-frame]:has([data-route-loading]) .desktop-drag > * { display: none; }
+html[data-desktop-frame]:has([data-route-loading]) .desktop-caption .desktop-window-controls { border-left: 0; }
 @media (max-width: 1050px) {
   .desktop-site-tools .site-header-search { flex-basis: 190px; }
   .desktop-caption:has(.desktop-site-tools [data-site-header]) .desktop-drag > * { display: none; }

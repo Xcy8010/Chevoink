@@ -7,7 +7,7 @@
     <!-- interactive-widget=resizes-content：Android Chrome 108+ 软键盘弹出时直接缩小布局视口，输入栏自动被顶起；iOS 由 lib/keyboard-inset.ts 兼容 -->
     <!-- maximum-scale=1 + user-scalable=no：APP/手机端按原生应用体验禁用双指缩放与双击放大 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
-    <meta name="theme-color" content="#f4f0e8" />
+    <meta name="theme-color" content="#ffffff" />
     <meta
       name="description"
       content="启创墨域是一个面向创作者与读者的 AI 小说创作与阅读社区。"
@@ -16,7 +16,7 @@
     <!-- 启动和 Agent 对话共用的加载图标样式在首屏直接可用。 -->
     <style>
       :root {
-        --boot-background: #f4f0e8;
+        --boot-background: #ffffff;
         --boot-mark-base: #7b8593;
         --boot-mark-highlight: #111827;
         --boot-mark-image: url('__BOOT_MARK_IMAGE__');
@@ -24,18 +24,21 @@
         color-scheme: light;
       }
       html.dark {
-        --boot-background: #111318;
+        --boot-background: #0e0e0e;
         --boot-mark-base: #8993a2;
         --boot-mark-highlight: #f3f5f7;
         color-scheme: dark;
       }
+      html[data-boot-platform="android"] { --boot-background: #f4f0e8; }
+      html.dark[data-boot-platform="android"] { --boot-background: #111318; }
+      html[data-boot-platform="windows"] { --boot-background: #1f2023; }
       .boot-splash {
         position: fixed;
         inset: 0;
         z-index: 1000;
         display: grid;
         place-items: center;
-        background: var(--app-bg, var(--boot-background));
+        background: var(--boot-background);
       }
       .agent-loading-mark {
         position: relative;
@@ -46,6 +49,12 @@
         background: var(--boot-mark-base);
         -webkit-mask: var(--boot-mark-image) center / contain no-repeat;
         mask: var(--boot-mark-image) center / contain no-repeat;
+      }
+      html[data-boot-platform="windows"] .boot-splash .agent-loading-mark {
+        width: 52px;
+        height: 52px;
+        --boot-mark-base: #babbbe;
+        --boot-mark-highlight: #d1d1d2;
       }
       @media (prefers-reduced-motion: no-preference) {
         .agent-loading-mark::after {

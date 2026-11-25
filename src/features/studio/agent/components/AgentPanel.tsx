@@ -197,7 +197,7 @@ type AgentPanelProps = {
 const taskMenuItem = 'flex min-h-9 w-full items-center gap-2 px-2.5 text-left text-xs text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-45'
 
 function ConversationSkeleton() {
-  return <div role="status" aria-label="正在载入对话" className="studio-pending w-full space-y-7 py-4">
+  return <div role="status" aria-label="正在载入对话" className="w-full space-y-7 py-4">
     <div aria-hidden="true" className="ml-auto w-2/5 max-w-64 rounded-[18px] bg-[var(--surface-muted)] px-4 py-3">
       <Skeleton className="h-2.5 w-4/5" />
     </div>
@@ -581,6 +581,14 @@ export function AgentPanel({
     const timer = window.setTimeout(() => setConversationSkeleton({ sessionId, visible: true }), CONVERSATION_SKELETON_DELAY_MS)
     return () => window.clearTimeout(timer)
   }, [conversationLoading, sessionId])
+  const showConversationSkeleton = conversationLoading && conversationSkeleton.sessionId === sessionId && conversationSkeleton.visible
+  const conversationLoadPhase = showConversationSkeleton ? 'skeleton' : conversationLoading ? 'pending' : 'ready'
+  const reportConversationLoad = workConversation.setConversationLoadPhase
+  useLayoutEffect(() => {
+    reportConversationLoad?.(conversationLoadPhase)
+    return () => reportConversationLoad?.('ready')
+  }, [conversationLoadPhase, reportConversationLoad])
+  const taskStatusAvailable = taskStatus?.available || (showConversationSkeleton && Boolean(voiceScopeKey))
   const composerScopePending = conversationLoading || (sessionResolving && !voiceScopeKey)
   const visibleQuestion = storeLoadedSessionId === sessionId && conversationReady && !conversationLoading && !workConversation.collapsed
     ? pendingQuestion
@@ -1704,8 +1712,8 @@ export function AgentPanel({
           aria-label={dockAction}
           aria-expanded={dockExpanded}
           aria-controls={taskStatus.dockId}
-          title={!taskStatus.available ? '暂无任务状态' : workConversation.activityDock ? dockAction : '当前布局无法展示右侧任务状态栏'}
-          disabled={!taskStatus.available || !workConversation.activityDock}
+          title={!taskStatusAvailable ? '暂无任务状态' : workConversation.activityDock ? dockAction : '当前布局无法展示右侧任务状态栏'}
+          disabled={!taskStatusAvailable || !workConversation.activityDock}
         >
           <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
             <circle cx="5.5" cy="6.5" r="3" /><circle cx="5.5" cy="17.5" r="3" />
@@ -1830,7 +1838,7 @@ export function AgentPanel({
       </div>}
       <div ref={scrollRef} onScroll={handleMessagesScroll} className="agent-conversation-scroll min-h-0 overflow-y-auto">
       <div ref={scrollContentRef} className="agent-conversation-width">
-        {conversationLoading ? (conversationSkeleton.sessionId === sessionId && conversationSkeleton.visible ? <ConversationSkeleton /> : null) : conversationReady ? (
+        {conversationLoading ? (showConversationSkeleton ? <ConversationSkeleton /> : null) : conversationReady ? (
           /* 已有内容直接呈现：切回已加载会话 / 同会话重用 / 直播收尾时不插任何加载态，做到「有缓存直接显示」。
              按会话取 key：跨会话切换重放淡入，同会话流式追加不重挂载 */
           <div className="flex flex-col gap-4 pb-2">

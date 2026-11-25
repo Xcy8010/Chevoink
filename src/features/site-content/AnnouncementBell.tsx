@@ -5,6 +5,8 @@ import { studioInert, useStudioDismiss } from '@/features/studio/components/use-
 import type { AnnouncementNotification, PersonalNotification } from '../../../shared/contracts/site-content'
 import { useAnnouncementInbox } from './announcement-inbox-api'
 import StudioAnnouncementDialog from './StudioAnnouncementDialog'
+import { useDesktopNoticeLayer } from './desktop-notice-layer'
+import { useDialogFocusTrap } from '@/features/studio/components/use-dialog-focus-trap'
 import './announcements.css'
 
 type Placement = 'site' | 'studio' | 'studio-mobile' | 'studio-rail' | 'admin'
@@ -159,14 +161,17 @@ function InboxDialog(props: InboxDialogProps) {
   const { dismiss, phase } = useStudioDismiss(props.onClose)
 
   const { returnFocus } = props
+  const { desktop, layer } = useDesktopNoticeLayer()
   useEffect(() => {
     const node = dialog.current!
-    node.showModal()
+    if (desktop) node.show()
+    else node.showModal()
     return () => {
       node.close()
       if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true })
     }
-  }, [returnFocus])
+  }, [desktop, returnFocus])
+  useDialogFocusTrap({ panel: dialog, open: desktop, onClose: closeList })
   useEffect(() => {
     if (!selectedItem && !archive) lastRow.current?.focus({ preventScroll: true })
   }, [selectedItem, archive])
@@ -183,12 +188,14 @@ function InboxDialog(props: InboxDialogProps) {
     dismiss()
   }
 
-  return <><dialog
+  return <>{layer(<dialog
     ref={dialog}
     id={props.id}
     aria-labelledby={titleId}
     data-native-back-dismiss
     data-announcement-inbox
+    data-desktop-notice={desktop || undefined}
+    aria-modal={desktop || undefined}
     data-covered={covered || undefined}
     data-phase={phase}
     {...studioInert(covered)}
@@ -256,7 +263,7 @@ function InboxDialog(props: InboxDialogProps) {
         </ul>
       </div>
     </div>
-  </dialog>{selectedItem && <StudioAnnouncementDialog key={itemKey(selectedItem)}
+  </dialog>, closeList)}{selectedItem && <StudioAnnouncementDialog key={itemKey(selectedItem)}
     coverTitle={selectedItem.type === 'personal' ? '个人通知' : selectedItem === newestAnnouncement ? '最新公告' : '公告'}
     item={selectedItem} publishedAt={selectedItem.publishedAt} invoker={lastRow.current}
     onExitStart={viewHistory => setReturning(!viewHistory || isHistory)}

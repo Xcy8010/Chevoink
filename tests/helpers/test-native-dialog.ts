@@ -11,10 +11,12 @@ export function mockAnimationSupport() {
 export function mockNativeDialog() {
   const prototype = HTMLDialogElement.prototype
   const originals = {
+    show: Object.getOwnPropertyDescriptor(prototype, 'show'),
     showModal: Object.getOwnPropertyDescriptor(prototype, 'showModal'),
     close: Object.getOwnPropertyDescriptor(prototype, 'close'),
   }
   Object.defineProperties(prototype, {
+    show: { configurable: true, value(this: HTMLDialogElement) { this.setAttribute('open', '') } },
     showModal: { configurable: true, value(this: HTMLDialogElement) { this.setAttribute('open', '') } },
     close: { configurable: true, value(this: HTMLDialogElement) { this.removeAttribute('open') } },
   })

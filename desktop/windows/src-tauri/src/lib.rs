@@ -7,6 +7,7 @@ mod windows_webview;
 use navigation::{is_app_url, is_fallback_url, APP_ORIGIN};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_window_state::{StateFlags, WindowExt};
 
 #[tauri::command]
 fn desktop_get_info(window: tauri::WebviewWindow) -> Result<serde_json::Value, String> {
@@ -118,10 +119,8 @@ pub fn run() {
         }))
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::all()
-                        - tauri_plugin_window_state::StateFlags::DECORATIONS,
-                )
+                .with_state_flags(StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED)
+                .skip_initial_state("main")
                 .build(),
         )
         // WebView2 routes user-initiated popups. The plugin's click interceptor
@@ -153,7 +152,8 @@ pub fn run() {
                             .unwrap_or_else(|| "Chevoink".into()),
                     )
                     .inner_size(1280.0, 800.0)
-                    .background_color(tauri::window::Color(21, 21, 21, 255))
+                    .visible(false)
+                    .background_color(tauri::window::Color(31, 32, 35, 255))
                     .min_inner_size(640.0, 480.0)
                     .data_directory(data)
                     .disable_drag_drop_handler()
@@ -169,7 +169,14 @@ pub fn run() {
                     })
                     .on_navigation(|url| is_app_url(url) || is_fallback_url(url))
                     .build()?;
+            // Restore only the normal bounds before maximizing on their monitor.
+            // A stale/minimized/fullscreen session must never hide the taskbar.
+            let _ = window.restore_state(StateFlags::POSITION | StateFlags::SIZE);
+            #[cfg(windows)]
+            windows_webview::style_system_caption(&window);
             window::install(&window)?;
+            window.maximize()?;
+            window.show()?;
             #[cfg(windows)]
             windows_webview::install(&window)?;
             update::schedule_check(app.handle());

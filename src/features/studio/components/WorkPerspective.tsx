@@ -4,7 +4,8 @@ import { cn } from '@/lib/utils'
 import type { WorkInspectorTab } from './WorkInspector'
 import { WORK_ACTIVITY_DOCK_WIDTH, WORK_ACTIVITY_DOCK_EDGE_GAP, shouldShowWorkActivityDock } from './work-layout'
 import { advanceWorkSplitGesture, fitWorkSplit, resizeWorkSplit, WORK_SPLIT, type WorkSplit, type WorkSplitGesture } from './work-split'
-import { WorkConversationContext } from './work-conversation-context'
+import { WorkConversationContext, type ConversationLoadPhase } from './work-conversation-context'
+import { StudioTaskStatusSkeleton } from '@/components/ui/Skeleton'
 import { useWorkSplitMotion } from './use-work-split-motion'
 import { WORK_OPEN_DOCUMENT } from './work-viewer-events'
 
@@ -57,8 +58,13 @@ export default function WorkPerspective({ conversationRail, conversation, activi
     restoreSeparatorFocus.current = false
     contentHandle.current?.focus()
   }, [viewerOpen])
-  const dockFits = !geometry.chatCollapsed && shouldShowWorkActivityDock({ containerWidth: width, leftWidth: geometry.rail, rightWidth: geometry.inspector, hasActivity: Boolean(activityDock), hasViewer: viewerOpen })
+  const [conversationLoadPhase, setConversationLoadPhase] = useState<ConversationLoadPhase>('ready')
+  const loadingDock = conversationLoadPhase === 'skeleton'
+  const hasActivity = loadingDock || (conversationLoadPhase === 'ready' && Boolean(activityDock))
+  const dockFits = !geometry.chatCollapsed && shouldShowWorkActivityDock({ containerWidth: width, leftWidth: geometry.rail, rightWidth: geometry.inspector, hasActivity, hasViewer: viewerOpen })
   const dockVisible = dockFits && activityDockExpanded
+  const dockContent = loadingDock && dockVisible ? <StudioTaskStatusSkeleton />
+    : conversationLoadPhase === 'ready' ? activityDock : null
   const dockState = dockFits ? (dockVisible ? 'expanded' : 'collapsed') : undefined
   const motion = useWorkSplitMotion({ rail: geometry.rail, chat: geometry.chat, viewer: viewerOpen ? geometry.viewer : 0, inspector: geometry.inspector, dock: dockVisible ? WORK_ACTIVITY_DOCK_WIDTH : 0 }, `${geometry.chatCollapsed}:${viewerOpen}:${inspectorOpen}:${dockVisible}`)
   const update = useCallback((value: WorkSplit) => {
@@ -68,7 +74,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
     }
   }, [])
   const expand = useCallback(() => update({ ...splitRef.current, chatCollapsed: false, viewerCollapsed: true, inspectorCollapsed: true }), [update])
-  const context = useMemo(() => ({ collapsed: geometry.chatCollapsed, expand, activityDock: dockState } as const), [geometry.chatCollapsed, expand, dockState])
+  const context = useMemo(() => ({ collapsed: geometry.chatCollapsed, expand, activityDock: dockState, setConversationLoadPhase } as const), [geometry.chatCollapsed, expand, dockState])
   useEffect(() => {
     const openDocument = (event: Event) => {
       if (!scopeKey || (event as CustomEvent<{ scope?: string }>).detail?.scope !== scopeKey) return
@@ -202,7 +208,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       '--work-agent-dock-reserve': `${dockVisible ? motion.dock + WORK_ACTIVITY_DOCK_EDGE_GAP : 0}px`,
       '--work-agent-center-reserve': `${dockVisible && !inspectorOpen && !viewerOpen ? motion.dock + WORK_ACTIVITY_DOCK_EDGE_GAP : 0}px`,
     } as CSSProperties}>{conversation}</main>
-    <aside id={activityDockId} aria-hidden={!dockVisible} {...(!dockVisible ? { inert: '' } : {})} className={cn('work-activity-dock absolute bottom-0 z-40 min-h-0 overflow-y-auto overflow-x-hidden', dockVisible && 'is-visible')} style={{ top: 'var(--work-chat-header-height, 3.25rem)', width: motion.dock, right: motion.inspector + motion.viewer + WORK_ACTIVITY_DOCK_EDGE_GAP }}><div className="px-3 pt-2 pb-4" style={{ width: WORK_ACTIVITY_DOCK_WIDTH }}>{activityDock}</div></aside>
+    <aside id={activityDockId} aria-hidden={!dockVisible} {...(!dockVisible ? { inert: '' } : {})} className={cn('work-activity-dock absolute bottom-0 z-40 min-h-0 overflow-y-auto overflow-x-hidden', dockVisible && 'is-visible')} style={{ top: 'var(--work-chat-header-height, 3.25rem)', width: motion.dock, right: motion.inspector + motion.viewer + WORK_ACTIVITY_DOCK_EDGE_GAP }}><div className="px-3 pt-2 pb-4" style={{ width: WORK_ACTIVITY_DOCK_WIDTH }}>{dockContent}</div></aside>
     <section data-studio-panel="workViewer" aria-hidden={!viewerOpen} {...(!viewerOpen ? { inert: '' } : {})} className="work-split-column h-full min-h-0 shrink-0 overflow-hidden border-[var(--border-subtle)]" style={{ width: motion.viewer, maxWidth: `calc(100% - ${motion.rail + motion.inspector}px)`, borderLeftWidth: motion.viewer > 0 ? 1 : 0 }}><div className="h-full" style={{ minWidth: WORK_SPLIT.viewer }}>{viewer ?? (retainedViewer.scopeKey === scopeKey ? retainedViewer.viewer : undefined)}</div></section>
     <aside data-studio-panel="workInspector" className="work-split-column work-inspector-column relative ml-auto h-full min-h-0 shrink-0 overflow-hidden border-l border-[var(--border-subtle)] bg-[var(--app-bg)]" style={{ width: motion.inspector, maxWidth: `calc(100% - ${motion.rail}px)` }}>
       <div aria-hidden={!inspectorOpen} {...(!inspectorOpen ? { inert: '' } : {})} className={cn('absolute inset-0 overflow-hidden transition-opacity duration-200', inspectorOpen ? 'opacity-100' : 'pointer-events-none opacity-0')}>{inspector}</div>
