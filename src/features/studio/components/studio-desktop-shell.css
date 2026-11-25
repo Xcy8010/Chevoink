@@ -37,7 +37,6 @@ html[data-desktop-frame="studio"] .desktop-caption {
 html[data-desktop-frame="studio"] .studio-skeleton-command { display: none; }
 .studio-desktop-shell .studio-sidebar-surface { background: var(--studio-sidebar-bg, var(--app-bg)); }
 .studio-desktop-shell [data-workspace-sidebar] { border-right-width: 0; }
-.studio-desktop-shell .site-announcement-strip { border-bottom: 0; }
 .studio-desktop-shell:is(:has([data-workspace-sidebar=collapsed]), :has([data-studio-perspective=ide])) { --studio-rail-divider-color: transparent; }
 .studio-sidebar-peek { isolation: isolate; }
 .studio-desktop-rail {

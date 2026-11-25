@@ -20,7 +20,7 @@ import {
 } from '../personalization-api'
 import PersonalizationMemorySettings from './PersonalizationMemorySettings'
 import PersonalizationRuleSettings from './PersonalizationRuleSettings'
-import { PersonalizationDialog, PersonalizationFeedback, PersonalizationGroup } from './personalization-ui'
+import { PersonalizationDialog, PersonalizationDialogPresence, PersonalizationFeedback, PersonalizationGroup } from './personalization-ui'
 
 const STYLE_LABELS: Record<AgentPersonalizationSettings['style'], string> = {
   natural: '默认', professional: '专业', direct: '直率', partner: '创作搭档',
@@ -166,7 +166,7 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
             <ChevronRight aria-hidden="true" strokeWidth={1.6} className="studio-settings-arrow" />
           </button>
         </PersonalizationGroup>
-        {draft ? (
+        <PersonalizationDialogPresence>{draft ? (
           <PersonalizationDialog title="回答偏好" busy={busy} onClose={() => setDraft(null)} returnFocus={() => replyButton.current}
             footer={<>
               <button type="button" className="studio-settings-button" disabled={busy} onClick={() => setDraft(null)}>取消</button>
@@ -187,7 +187,7 @@ function AccountPersonalizationSettings({ owner }: { owner: string }) {
               {draft.error ? <PersonalizationFeedback error>{draft.error}</PersonalizationFeedback> : null}
             </form>
           </PersonalizationDialog>
-        ) : null}
+        ) : null}</PersonalizationDialogPresence>
       </> : null}
       {settings.isPending ? <PersonalizationFeedback>正在加载个性化设置…</PersonalizationFeedback> : null}
       {settings.isError ? (

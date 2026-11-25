@@ -1,4 +1,5 @@
-import { useId, useLayoutEffect, useRef, type ReactNode } from 'react'
+import { studioInert, useStudioPresence } from './use-studio-presence'
+import { cloneElement, useId, useLayoutEffect, useRef, type ReactElement, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 
@@ -16,7 +17,16 @@ export function PersonalizationFeedback({ error, children }: { error?: boolean; 
   return <p role={error ? 'alert' : 'status'} className={cn('studio-settings-feedback', error && 'error')}>{children}</p>
 }
 
-export function PersonalizationDialog({ title, children, footer, kind, toolbar, busy = false, onClose, returnFocus }: {
+// Native dialogs live in the top layer, so their backdrop and panel receive the same phase.
+export function PersonalizationDialogPresence({ children }: {
+  children: ReactElement<{ phase?: 'open' | 'closing' }> | null
+}) {
+  const { rendered, phase } = useStudioPresence(children)
+  return rendered && cloneElement(rendered, { phase })
+}
+
+export function PersonalizationDialog({ title, children, footer, kind, toolbar, busy = false, phase = 'open', onClose, returnFocus }: {
+  phase?: 'open' | 'closing'
   title: string
   children: ReactNode
   footer: ReactNode
@@ -46,6 +56,7 @@ export function PersonalizationDialog({ title, children, footer, kind, toolbar, 
     <dialog
       ref={ref}
       data-native-back-dismiss
+      data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')}
       aria-labelledby={id}
       onCancel={event => {
         event.preventDefault()

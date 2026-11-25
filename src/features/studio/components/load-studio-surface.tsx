@@ -30,7 +30,7 @@ export function loadStudioSurface<P extends object>(
     const modal = typeof presentation === 'function' ? presentation(props) : undefined
     const visible = modal?.open ?? true
     useEffect(() => { if (visible && current === 'idle') start() }, [current, visible])
-    const pending = visible ? <StudioSurfaceStatus label={label} close={modal?.onClose} shape={typeof presentation === 'string' ? presentation : 'dialog'}
+    const pending = visible || modal ? <StudioSurfaceStatus open={visible} label={label} close={modal?.onClose} shape={typeof presentation === 'string' ? presentation : 'dialog'}
       retry={current === 'failed' ? () => start() : undefined} /> : null
     if (typeof current === 'string') return pending
     const Loaded = current

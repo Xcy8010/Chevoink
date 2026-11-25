@@ -1,10 +1,12 @@
+import { studioInert } from './use-studio-presence'
 import { useId, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { isTopDialog, useDialogFocusTrap } from './use-dialog-focus-trap'
 
 /** One modal at a time. Escape folds the job; only explicit cancellation cancels it. */
-export function ImportDialogShell({ title, description, stage, onClose, children, footer, compact = false }: {
+export function ImportDialogShell({ title, description, stage, onClose, children, footer, compact = false, phase }: {
+  phase?: 'open' | 'closing'
   title: string
   description: string
   stage: string
@@ -23,8 +25,8 @@ export function ImportDialogShell({ title, description, stage, onClose, children
   // before paint or keyboard input can observe a stale dialog-container focus.
   useLayoutEffect(() => { panel.current?.querySelector<HTMLElement>('[data-import-safe-focus]')?.focus() }, [stage])
 
-  return createPortal(<div className="studio-workspace fixed inset-0 z-[200] flex items-center justify-center bg-black/45 sm:p-6">
-    <dialog open data-native-back-dismiss ref={panel} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-description`} tabIndex={-1}
+  return createPortal(<div data-studio-surface="dialog" data-phase={phase ?? 'open'} {...studioInert(phase === 'closing')} className="studio-workspace fixed inset-0 z-[200] flex items-center justify-center bg-black/45 sm:p-6">
+    <dialog open data-studio-motion-panel data-native-back-dismiss ref={panel} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-description`} tabIndex={-1}
       onCancel={event => { event.preventDefault(); if (!composing.current && isTopDialog(panel.current)) onClose() }}
       onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
       onKeyDownCapture={(event) => { if (event.key === 'Enter' && event.repeat) event.preventDefault(); if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)) { event.preventDefault(); event.stopPropagation() } }}

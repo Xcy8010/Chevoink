@@ -2,10 +2,10 @@ import { useState } from 'react'
 import type { ChapterCopy } from '../lib/chapter-recovery'
 import ConfirmDialog from './ConfirmDialog'
 
-export default function ChapterDraftChoice({ copies, choose }: { copies: ChapterCopy[]; choose: (copy: ChapterCopy | null) => void }) {
+export default function ChapterDraftChoice({ copies, choose, open = true }: { open?: boolean; copies: ChapterCopy[]; choose: (copy: ChapterCopy | null) => void }) {
   const [slot, setSlot] = useState(copies[0].slot)
   const selected = copies.find(copy => copy.slot === slot) ?? copies[0]
-  return <ConfirmDialog open title="选择要恢复的章节草稿"
+  return <ConfirmDialog open={open} title="选择要恢复的章节草稿"
     description="此章节有多个未同步的本地副本。可以查看正文后再选择。"
     confirmLabel="恢复所选草稿" cancelLabel="查看已同步正文"
     onConfirm={() => choose(selected)} onCancel={() => choose(null)}>

@@ -1,3 +1,4 @@
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { BookOpen, BookOpenText, Bug, ChevronRight, ExternalLink, FilePlus2, FileText, Flag, FolderDown, FolderPlus, ImagePlus, Lightbulb, NotebookPen, PanelLeftClose, PanelLeftOpen, RotateCcw, Settings2, Trash2, Upload } from 'lucide-react'
@@ -63,7 +64,7 @@ const STUDIO_MENUS: { key: StudioMenuKey; label: string }[] = [
   { key: 'help', label: '帮助' },
 ]
 
-const dropdownClass = 'studio-floating-menu absolute left-0 top-[calc(100%+7px)] z-50 rounded-[12px] border border-[var(--border-subtle)] p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)] motion-safe:origin-top-left motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]'
+const dropdownClass = 'studio-floating-menu absolute left-0 top-[calc(100%+7px)] z-50 rounded-[12px] border border-[var(--border-subtle)] p-1 shadow-[0_18px_50px_rgba(15,23,42,.18)] [--studio-motion-origin:top_left]'
 
 export default function StudioCommandBar(props: Props) {
   const captionHost = useContext(DesktopCaptionHost)
@@ -91,17 +92,17 @@ export default function StudioCommandBar(props: Props) {
   }
   const triggerClass = (active: boolean) => cn('inline-flex h-8 items-center justify-center rounded-[8px] px-2 text-sm font-medium transition-colors', active ? 'bg-[var(--surface-muted)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]')
   const renderDropdown = (key: StudioMenuKey, widthClass: string, children: ReactNode) => (
-    openMenu === key ? <div className={cn(dropdownClass, widthClass)}>
+    <StudioPresence kind="menu">{openMenu === key ? <div className={cn(dropdownClass, widthClass)}>
       {key === 'novel' ? <>
         <div className="studio-novel-actions overflow-y-auto overscroll-contain">{children}</div>
-        {picker && <StudioDocumentPicker key={picker} id={pickerId} kind={picker} data={props.documents} trigger={pickerTrigger.current}
+        <StudioPresence kind="menu">{picker && <StudioDocumentPicker key={picker} id={pickerId} kind={picker} data={props.documents} trigger={pickerTrigger.current}
           onSelect={id => {
             closeMenu()
             if (picker === 'chapter') props.onOpenChapterSettings(id)
             else props.onOpenPlanSettings(id)
-          }} />}
+          }} />}</StudioPresence>
       </> : children}
-    </div> : null
+    </div> : null}</StudioPresence>
   )
   const publishLabel = props.published ? '更新发布' : '发布'
   const novelCompleted = props.novelStatus === 'completed'

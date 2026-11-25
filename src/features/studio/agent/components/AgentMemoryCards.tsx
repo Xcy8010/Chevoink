@@ -1,3 +1,4 @@
+import { useStudioPresence, studioInert } from '@/features/studio/components/use-studio-presence'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -130,6 +131,7 @@ function MemoryShelf({ userId, novelId, sessionId, active }: ShelfProps & { user
     return () => { cancelled = true }
   }, [memorySpotlight, novelId, userId, snapshot?.denied, denyCatalog])
 
+  const { rendered: visibleLocation, phase } = useStudioPresence(location)
   const open = (memoryType: string, button: HTMLButtonElement) => {
     trigger.current = button
     setLocation({ memoryType })
@@ -177,9 +179,9 @@ function MemoryShelf({ userId, novelId, sessionId, active }: ShelfProps & { user
               })}
             </div>}
       {error && <div className="memory-notice"><p role="alert">{error}</p><button type="button" onClick={() => void refetch()}>重试</button></div>}
-      {location && sets && <MemoryCatalog
-        key={JSON.stringify([location.memoryType, location.card?.id])}
-        novelId={novelId} sets={sets} location={location} trigger={trigger.current} feedback={toast}
+      {visibleLocation && sets && <MemoryCatalog phase={phase}
+        key={JSON.stringify([visibleLocation.memoryType, visibleLocation.card?.id])}
+        novelId={novelId} sets={sets} location={visibleLocation} trigger={trigger.current} feedback={toast}
         onClose={() => setLocation(null)}
         onChanged={changed} onQuote={quote} onDenied={denyCatalog}
       />}
@@ -192,6 +194,7 @@ function MemoryShelf({ userId, novelId, sessionId, active }: ShelfProps & { user
 }
 
 type CatalogProps = {
+  phase: 'open' | 'closing'
   novelId: string
   sets: StoryMemorySet[]
   location: CatalogLocation
@@ -203,7 +206,7 @@ type CatalogProps = {
   onDenied: (message: string) => void
 }
 
-function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, onChanged, onQuote, onDenied }: CatalogProps) {
+function MemoryCatalog({ phase, novelId, sets, location, trigger, feedback, onClose, onChanged, onQuote, onDenied }: CatalogProps) {
   const navigate = useAgentStore(state => state.requestToolNavigation)
   const { card: startCard } = location
   const [memoryType, setMemoryType] = useState(location.memoryType)
@@ -215,6 +218,8 @@ function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, on
   const [reading, setReading] = useState(Boolean(startCard))
   const [editing, setEditing] = useState<StoryMemoryCard | null>(null)
   const [deleting, setDeleting] = useState<StoryMemoryCard | null>(null)
+  const editor = useStudioPresence(editing)
+  const deletion = useStudioPresence(deleting)
   const request = useRef({ id: 0 }).current
   const modal = useRef<HTMLDialogElement>(null)
   const catalogHeading = useRef<HTMLHeadingElement>(null)
@@ -344,7 +349,7 @@ function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, on
     ? [{ memoryType, count: page.total }, ...sets] : sets
 
   return <>
-    {createPortal(<dialog ref={modal} aria-labelledby={titleId} data-native-back-dismiss data-reading={reading || undefined}
+    {createPortal(<dialog data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} ref={modal} aria-labelledby={titleId} data-native-back-dismiss data-reading={reading || undefined}
       className="studio-workspace memory-catalog"
       onCancel={event => {
         event.preventDefault()
@@ -443,7 +448,7 @@ function MemoryCatalog({ novelId, sets, location, trigger, feedback, onClose, on
       </div>
       <div role="status" className={feedback ? 'memory-catalog-feedback' : 'sr-only'}>{feedback}</div>
     </dialog>, document.body)}
-    {editing && <MemoryCardEditor key={editing.id} novelId={novelId} card={editing} onClose={() => setEditing(null)} onSaved={onSaved} />}
-    {deleting && <MemoryCardDeleteDialog key={deleting.id} card={deleting} onClose={() => setDeleting(null)} onDeleted={onDeleted} />}
+    {editor.rendered && <MemoryCardEditor key={editor.rendered.id} phase={editor.phase} novelId={novelId} card={editor.rendered} onClose={() => setEditing(null)} onSaved={onSaved} />}
+    {deletion.rendered && <MemoryCardDeleteDialog key={deletion.rendered.id} phase={deletion.phase} card={deletion.rendered} onClose={() => setDeleting(null)} onDeleted={onDeleted} />}
   </>
 }

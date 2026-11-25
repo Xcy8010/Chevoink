@@ -1,3 +1,4 @@
+import { StudioPresence } from './StudioPresence'
 import { useEffect, useMemo, useState } from 'react'
 import { Check, CircleAlert, FolderDown, LoaderCircle, X } from 'lucide-react'
 
@@ -100,7 +101,6 @@ export default function ExportDialog({ open, novelId, novelTitle, chapters, onCl
   const anySectionChecked = Object.values(sections).some(Boolean)
   const canExport = anySectionChecked && (!sections.chapters || customValid) && !exporting
 
-  if (!open) return null
 
   const toggleSection = (key: SectionKey) => {
     setSections((current) => ({ ...current, [key]: !current[key] }))
@@ -153,8 +153,10 @@ export default function ExportDialog({ open, novelId, novelTitle, chapters, onCl
   }
 
   return (
+    <StudioPresence kind="dialog">{open && (
     <div className="studio-workspace fixed inset-0 z-[130] flex items-end justify-center bg-[rgba(15,23,42,0.45)] p-0 sm:items-center sm:p-6" onClick={onClose}>
       <div
+        data-studio-motion-panel
         className="flex max-h-[92vh] w-full max-w-md flex-col overflow-hidden rounded-t-[24px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[var(--shadow-soft)] sm:rounded-[24px]"
         onClick={(event) => event.stopPropagation()}
       >
@@ -266,9 +268,10 @@ export default function ExportDialog({ open, novelId, novelTitle, chapters, onCl
         </div>
       </div>
 
-      {creditsNoticeOpen ? (
+      <StudioPresence kind="dialog">{creditsNoticeOpen ? (
         <div className="fixed inset-0 z-[140] flex items-center justify-center bg-[rgba(15,23,42,0.45)] p-6" onClick={() => { setCreditsNoticeOpen(false); onClose() }}>
           <div
+            data-studio-motion-panel
             role="alertdialog"
             aria-modal="true"
             aria-label="额度提示"
@@ -294,7 +297,8 @@ export default function ExportDialog({ open, novelId, novelTitle, chapters, onCl
             </div>
           </div>
         </div>
-      ) : null}
+      ) : null}</StudioPresence>
     </div>
+    )}</StudioPresence>
   )
 }

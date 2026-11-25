@@ -1,3 +1,4 @@
+import { useStudioPresence, studioInert } from '@/features/studio/components/use-studio-presence'
 import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react'
 import {
   Archive,
@@ -157,10 +158,11 @@ function ScheduleDialog({
   onClose: () => void
   onSubmit: () => void
 }) {
-  if (!open) return null
+  const { rendered, phase } = useStudioPresence(open ? true : null)
+  if (!rendered) return null
   return createPortal(
-    <div className="studio-settings-style studio-settings-popup studio-workspace fixed inset-0 z-[260] flex items-center justify-center p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <section role="dialog" aria-modal="true" aria-label="新建定时计划" className="w-full max-w-xl overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_24px_70px_rgba(15,23,42,.2)]">
+    <div data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} className="studio-settings-style studio-settings-popup studio-workspace fixed inset-0 z-[260] flex items-center justify-center p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <section data-studio-motion-panel role="dialog" aria-modal="true" aria-label="新建定时计划" className="w-full max-w-xl overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_24px_70px_rgba(15,23,42,.2)]">
         <header className="flex items-start gap-4 border-b border-[var(--border-subtle)] px-5 py-4">
           <div className="min-w-0 flex-1"><h3 className="text-base font-semibold">新建定时计划</h3><p className="mt-1 text-xs text-[var(--text-secondary)]">Agent 会在当前任务中按周期执行这项检查。</p></div>
           <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]" aria-label="关闭"><X className="h-4 w-4" /></button>
@@ -267,7 +269,8 @@ export default function AgentOperationsCenter({
   const branchRows = useMemo(() => buildAgentTaskBranchRows(novelTasks), [novelTasks])
   const actualBranchCount = useMemo(() => novelTasks.filter((item) => Boolean(item.forkedFromSessionId)).length, [novelTasks])
 
-  if (!open) return null
+  const { rendered, phase } = useStudioPresence(open ? true : null)
+  if (!rendered) return null
 
   const openTask = (item: AgentSession) => {
     if (item.novelId === novelId) {
@@ -279,8 +282,8 @@ export default function AgentOperationsCenter({
   }
 
   const content = (
-    <div className={cn(!embedded && 'studio-settings-style studio-settings-popup fixed inset-0 z-[155] flex items-end justify-center sm:items-center sm:p-6')} onMouseDown={(event) => { if (!embedded && event.target === event.currentTarget) onClose() }}>
-      <section role={embedded ? 'region' : 'dialog'} aria-modal={embedded ? undefined : 'true'} aria-label="Agent 操作中心" className={cn('flex w-full flex-col', !embedded && 'h-[92dvh] max-w-5xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_28px_90px_rgba(15,23,42,0.28)] sm:h-[78dvh] sm:rounded-[20px]')}>
+    <div data-studio-surface={embedded ? undefined : 'dialog'} data-phase={phase} {...studioInert(phase === 'closing')} className={cn(!embedded && 'studio-settings-style studio-settings-popup fixed inset-0 z-[155] flex items-end justify-center sm:items-center sm:p-6')} onMouseDown={(event) => { if (!embedded && event.target === event.currentTarget) onClose() }}>
+      <section data-studio-motion-panel={embedded ? undefined : true} role={embedded ? 'region' : 'dialog'} aria-modal={embedded ? undefined : 'true'} aria-label="Agent 操作中心" className={cn('flex w-full flex-col', !embedded && 'h-[92dvh] max-w-5xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_28px_90px_rgba(15,23,42,0.28)] sm:h-[78dvh] sm:rounded-[20px]')}>
         <header className={cn('items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-3 sm:px-6', embedded ? 'hidden' : 'flex')}>
           <SlidersHorizontal className="h-4 w-4" />
           <div className="min-w-0 flex-1"><h2 className="text-sm font-semibold">Agent 操作中心</h2><p className="truncate text-xs text-[var(--text-secondary)]">任务、专业助手、计划与安全边界</p></div>

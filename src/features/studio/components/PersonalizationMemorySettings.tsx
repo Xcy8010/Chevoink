@@ -13,7 +13,7 @@ import {
   personalizationMemoriesQueryKey,
   restorePersonalizationMemory,
 } from '../personalization-api'
-import { PersonalizationDialog, PersonalizationFeedback, PersonalizationGroup } from './personalization-ui'
+import { PersonalizationDialog, PersonalizationDialogPresence, PersonalizationFeedback, PersonalizationGroup } from './personalization-ui'
 
 const updatedDate = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' })
 const changeLabels: Record<AgentPersonalizationMemory['lastChange'], string> = {
@@ -157,7 +157,7 @@ export default function PersonalizationMemorySettings({ owner, memoryEnabled, se
         setOpen(true)
       }}>管理</button>
     </div>
-    {open ? (
+    <PersonalizationDialogPresence>{open ? (
       <PersonalizationDialog title="已保存的记忆" kind="manager" busy={busy} onClose={() => setOpen(false)} returnFocus={() => manageButton.current}
         toolbar={<>
           <span>{items.length} / {AGENT_PERSONALIZATION_LIMITS.activeMemories} 条生效记忆</span>
@@ -215,8 +215,8 @@ export default function PersonalizationMemorySettings({ owner, memoryEnabled, se
           {busy && !edit && !removal ? <PersonalizationFeedback>正在更新记忆…</PersonalizationFeedback> : null}
           {feedback ? <PersonalizationFeedback error={feedback.error}>{feedback.text}</PersonalizationFeedback> : null}
       </PersonalizationDialog>
-    ) : null}
-    {edit ? (
+    ) : null}</PersonalizationDialogPresence>
+    <PersonalizationDialogPresence>{edit ? (
       <PersonalizationDialog title={edit.memory ? '编辑记忆' : '添加记忆'} busy={busy} onClose={() => setEdit(null)} returnFocus={managerFocus}
         footer={<>
           <button type="button" className="studio-settings-button" disabled={busy} onClick={() => setEdit(null)}>取消</button>
@@ -240,8 +240,8 @@ export default function PersonalizationMemorySettings({ owner, memoryEnabled, se
           {edit.error ? <PersonalizationFeedback error>{edit.error}</PersonalizationFeedback> : null}
         </form>
       </PersonalizationDialog>
-    ) : null}
-    {removal ? (
+    ) : null}</PersonalizationDialogPresence>
+    <PersonalizationDialogPresence>{removal ? (
       <PersonalizationDialog title={removal.memory ? '删除这条记忆？' : '清空全局记忆？'} kind="confirm" busy={busy} onClose={() => setRemoval(null)} returnFocus={managerFocus}
         footer={<>
           <button type="button" className="studio-settings-button" data-personalization-focus disabled={busy} onClick={() => setRemoval(null)}>取消</button>
@@ -257,7 +257,7 @@ export default function PersonalizationMemorySettings({ owner, memoryEnabled, se
           {removal.error ? <PersonalizationFeedback error>{removal.error}</PersonalizationFeedback> : null}
         </div>
       </PersonalizationDialog>
-    ) : null}
+    ) : null}</PersonalizationDialogPresence>
   </PersonalizationGroup>
 }
 

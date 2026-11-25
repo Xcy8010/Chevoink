@@ -1,0 +1,80 @@
+[data-studio-presence] { display: contents; }
+
+/* Keep the overlay fixed. Only the anchored card or dialog panel moves. */
+[data-studio-presence] > *, [data-studio-surface], [data-studio-motion-panel] {
+  --studio-entry-offset: 0px;
+  --studio-entry-scale: 1;
+  transition-property: opacity, translate, scale;
+  transition-duration: 190ms;
+  transition-timing-function: cubic-bezier(.2,.72,.24,1);
+}
+[data-studio-presence='menu'] > *, [data-studio-surface='menu'] {
+  --studio-entry-offset: -3px;
+  --studio-entry-scale: .978;
+  transform-origin: var(--studio-motion-origin, center top);
+}
+[data-studio-presence='sheet'] > *, [data-studio-surface='sheet'] {
+  --studio-entry-offset: 8px;
+}
+[data-studio-motion-panel], dialog[data-studio-surface='dialog'] {
+  --studio-entry-offset: 5px;
+  --studio-entry-scale: .982;
+}
+[data-studio-surface]::backdrop { transition: opacity 190ms ease-out; }
+[data-studio-presence][data-phase='closing'] > *,
+[data-studio-presence][data-phase='closing'] [data-studio-motion-panel],
+[data-studio-surface][data-phase='closing'],
+[data-studio-surface][data-phase='closing'] [data-studio-motion-panel] {
+  opacity: 0;
+  translate: 0 var(--studio-entry-offset);
+  scale: var(--studio-entry-scale);
+  transition-duration: 150ms;
+  transition-timing-function: ease-in-out;
+  pointer-events: none;
+}
+[data-studio-surface][data-phase='closing']::backdrop { opacity: 0; transition-duration: 150ms; }
+@starting-style {
+  [data-studio-presence][data-phase='open'] > *,
+  [data-studio-presence][data-phase='open'] [data-studio-motion-panel],
+  [data-studio-surface][data-phase='open'],
+  [data-studio-surface][data-phase='open'] [data-studio-motion-panel] {
+    opacity: 0;
+    translate: 0 var(--studio-entry-offset);
+    scale: var(--studio-entry-scale);
+  }
+  [data-studio-surface][data-phase='open']::backdrop { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-studio-presence] > *, [data-studio-surface], [data-studio-motion-panel], [data-studio-surface]::backdrop {
+    transition: none !important;
+  }
+}
+html[data-studio-reduced-motion='true'] :is([data-studio-presence] > *, [data-studio-surface], [data-studio-motion-panel]),
+html[data-studio-reduced-motion='true'] [data-studio-surface]::backdrop { transition: none !important; }
+
+/* Keep native summary keyboard behavior, including programmatic closes after selection. */
+@supports selector(details::details-content) and (transition-behavior: allow-discrete) {
+  @media (prefers-reduced-motion: no-preference) {
+    html:not([data-studio-reduced-motion='true']) [data-studio-disclosure]::details-content {
+      opacity: 0;
+      transition: opacity 140ms ease, content-visibility 140ms allow-discrete;
+    }
+
+    html:not([data-studio-reduced-motion='true']) [data-studio-disclosure][open]::details-content {
+      opacity: 1;
+    }
+
+    html:not([data-studio-reduced-motion='true']) [data-studio-disclosure] > summary + div {
+      translate: 0 3px;
+      transition: translate 140ms cubic-bezier(.2, .75, .25, 1);
+    }
+
+    html:not([data-studio-reduced-motion='true']) [data-studio-disclosure][open] > summary + div {
+      translate: none;
+    }
+
+    [data-studio-disclosure]:not([open]) > summary + div {
+      pointer-events: none;
+    }
+  }
+}

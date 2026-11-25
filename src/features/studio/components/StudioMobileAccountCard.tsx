@@ -39,7 +39,7 @@ export default function StudioMobileAccountCard() {
 
   const nickname = sessionUser?.nickname ?? '创作者'
   return <>
-    <details className="min-w-0 flex-1">
+    <details data-studio-disclosure className="min-w-0 flex-1">
       <summary aria-label={nickname + '，账户与用量'} className="flex min-h-12 cursor-pointer list-none items-center gap-2 rounded-lg pr-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] [&::-webkit-details-marker]:hidden">
         <Avatar name={nickname} src={sessionUser?.avatarUrl} size="sm" className="h-9 w-9 shrink-0" />
         <span className="min-w-0 flex-1">

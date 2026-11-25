@@ -1,3 +1,5 @@
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
+import { useStudioPresence } from '@/features/studio/components/use-studio-presence'
 import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight, FilePlus2, FileText, FolderPlus, FolderTree, GripVertical, NotebookPen, NotebookText, PencilLine, ScrollText, Settings2, Trash2, type LucideIcon } from 'lucide-react'
 
@@ -145,6 +147,7 @@ export default function ChapterSidebar({
   const [draggedItem, setDraggedItem] = useState<{ kind: 'chapter' | 'plan'; id: string } | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ target: TreeContextMenuTarget; anchor: TreeMenuAnchor } | null>(null)
+  const { rendered: visibleMenu, phase: menuPhase } = useStudioPresence(contextMenu)
   const [renameTarget, setRenameTarget] = useState<TreeRenameTarget | null>(null)
   const [renameValue, setRenameValue] = useState('')
 
@@ -666,13 +669,13 @@ export default function ChapterSidebar({
         </div>
       </div>
 
-      {contextMenu ? (
-        <TreeContextMenu title={contextMenu.target.title} anchor={contextMenu.anchor} items={getTreeMenuItems(contextMenu)} onClose={() => setContextMenu(null)} />
+      {visibleMenu ? (
+        <TreeContextMenu phase={menuPhase} title={visibleMenu.target.title} anchor={visibleMenu.anchor} items={getTreeMenuItems(visibleMenu)} onClose={() => setContextMenu(null)} />
       ) : null}
 
-      {renameTarget ? (
+      <StudioPresence kind="dialog">{renameTarget ? (
         <div className="fixed inset-0 z-[195] flex items-center justify-center bg-black/25 p-4" onMouseDown={closeTreeRename}>
-          <form role="dialog" aria-modal="true" aria-label={`重命名${renameTarget.label}`} onSubmit={(event) => { event.preventDefault(); commitTreeRename() }} onMouseDown={(event) => event.stopPropagation()} onKeyDown={handleRenameKeyDown} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-2xl">
+          <form data-studio-motion-panel role="dialog" aria-modal="true" aria-label={`重命名${renameTarget.label}`} onSubmit={(event) => { event.preventDefault(); commitTreeRename() }} onMouseDown={(event) => event.stopPropagation()} onKeyDown={handleRenameKeyDown} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-2xl">
             <h2 className="text-sm font-semibold text-[var(--text-primary)]">重命名{renameTarget.label}</h2>
             <input autoFocus aria-label="名称" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} maxLength={160} className="mt-4 h-10 w-full rounded-[9px] border border-[var(--border-subtle)] bg-transparent px-3 text-sm outline-none focus:border-[var(--border-strong)]" />
             <div className="mt-5 flex justify-end gap-2">
@@ -681,7 +684,7 @@ export default function ChapterSidebar({
             </div>
           </form>
         </div>
-      ) : null}
+      ) : null}</StudioPresence>
     </div>
   )
 }

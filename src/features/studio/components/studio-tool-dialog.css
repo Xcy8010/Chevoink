@@ -67,3 +67,30 @@
   .studio-document-options > section:first-child { border-top: 0; padding-top: 0; }
   .studio-document-grid > [role="alert"] { grid-column: 1 / -1; margin: 0; padding: 0 24px 16px; }
 }
+
+/* Native disclosures and the tag chooser retain their intrinsic content height. */
+@supports (interpolate-size: allow-keywords) {
+  @media (prefers-reduced-motion: no-preference) {
+    html:not([data-studio-reduced-motion="true"]) .studio-tag-choices,
+    html:not([data-studio-reduced-motion="true"]) .studio-tool-overlay details::details-content {
+      interpolate-size: allow-keywords;
+      block-size: auto;
+      overflow: clip;
+      transition: block-size 170ms ease-out, opacity 150ms ease-out, padding-block-start 170ms ease-out,
+        display 170ms allow-discrete, content-visibility 170ms allow-discrete;
+    }
+    html:not([data-studio-reduced-motion="true"]) .studio-tag-choices[hidden],
+    html:not([data-studio-reduced-motion="true"]) .studio-tool-overlay details:not([open])::details-content {
+      block-size: 0;
+      opacity: 0;
+      padding-block-start: 0;
+    }
+    @starting-style {
+      html:not([data-studio-reduced-motion="true"]) .studio-tag-choices:not([hidden]) {
+        block-size: 0;
+        opacity: 0;
+        padding-block-start: 0;
+      }
+    }
+  }
+}

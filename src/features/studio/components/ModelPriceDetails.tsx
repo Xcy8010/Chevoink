@@ -1,3 +1,5 @@
+import { StudioPresence } from './StudioPresence'
+import { studioInert, useStudioPresence } from './use-studio-presence'
 import { formatModelPrice } from '../../../../shared/model-price-format'
 import { modelPublicCopy } from '../../../../shared/model-public-copy'
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
@@ -44,6 +46,7 @@ export function ModelActivityBadge({ model }: { model: CreditModelOption }) {
 type Props = { model: CreditModelOption; children?: ReactNode; className?: string; reasoningEffort?: ModelReasoningEffort; onReasoningChange?: (effort: ModelReasoningEffort) => void }
 export function ModelPriceDetails({ model, children, className = '', reasoningEffort, onReasoningChange }: Props) {
   const [open, setOpen] = useState(false)
+  const { rendered, phase } = useStudioPresence(open ? true : null)
   const [reasoningOpen, setReasoningOpen] = useState(false)
   const anchor = useRef<HTMLDivElement>(null)
   const panel = useRef<HTMLDivElement>(null)
@@ -133,7 +136,8 @@ export function ModelPriceDetails({ model, children, className = '', reasoningEf
     }}
     onClickCapture={event => { if (event.target instanceof Node && anchor.current?.contains(event.target)) close() }}>
     {children ?? <span className="flex items-center justify-between gap-3 text-sm"><span>{model.label}</span><ModelPriceSummary model={model} /></span>}
-    {open && createPortal(<div ref={panel} id={panelId} role="dialog" aria-label={model.label + '模型详情'} tabIndex={0}
+    {rendered && createPortal(<div ref={panel} id={panelId} role="dialog" aria-label={model.label + '模型详情'} tabIndex={0}
+      data-studio-surface="menu" data-phase={phase} {...studioInert(!open)}
       className="studio-workspace fixed z-[250] overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-5 text-left text-[13px] font-normal leading-relaxed text-[var(--text-primary)] shadow-[0_16px_48px_rgba(0,0,0,.18)]"
       style={{ position: 'fixed', backgroundColor: 'color-mix(in srgb, var(--surface-default) 60%, var(--surface-elevated))', ...position }}
       onMouseEnter={keepOpen} onMouseLeave={event => leave(event.relatedTarget)} onFocus={keepOpen} onBlur={event => { if (!contains(event.relatedTarget)) close() }}
@@ -148,10 +152,10 @@ export function ModelPriceDetails({ model, children, className = '', reasoningEf
           <span className="font-medium">思考强度</span><span className="inline-flex items-center gap-1 text-[var(--text-secondary)]">{effortLabels[effort]}<ChevronRight className={'h-3.5 w-3.5 transition-transform ' + (reasoningOpen ? 'rotate-90' : '')} /></span>
         </button> : <div className="flex min-h-12 items-center justify-between gap-4 py-2"><span className="font-medium">思考强度</span><span className="text-[var(--text-secondary)]">{effortLabels[effort]}</span></div>}
       </div>
-      {reasoningOpen && onReasoningChange ? <div role="group" aria-label={model.label + '思考强度选项'} className="mt-2 space-y-1">
+      <StudioPresence kind="fade">{reasoningOpen && onReasoningChange ? <div role="group" aria-label={model.label + '思考强度选项'} className="mt-2 space-y-1">
         {effortOrder.filter(value => model.reasoningEfforts.includes(value)).map(value => <button key={value} type="button" aria-label={'设置' + model.label + '思考强度为' + effortLabels[value]} aria-pressed={value === effort}
           onClick={() => { onReasoningChange(value); setReasoningOpen(false) }} className="flex min-h-9 w-full items-center justify-between rounded-lg px-2.5 text-left hover:bg-[var(--surface-muted)]"><span>{effortLabels[value]}</span>{value === effort ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : null}</button>)}
-      </div> : null}
+      </div> : null}</StudioPresence>
       {model.freePromotion || otherActivityName ? <div className="mt-3 space-y-1 text-xs leading-5 text-[var(--text-secondary)]">
         <p className="flex items-center gap-1.5 font-medium"><Clock3 className="h-3.5 w-3.5 shrink-0" />{otherActivityName ?? '限时免费'}</p>
         {model.freePromotion ? <p>免费至{timestamp(model.freePromotion.endsAt)}（{zoneLabel}），之后为{formatModelPrice(model.freePromotion.afterMultiplier)}x。</p>

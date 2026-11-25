@@ -1,3 +1,4 @@
+import { StudioPresence } from './StudioPresence'
 import { useEffect, useRef, useState } from 'react'
 import { BrainCircuit, Check, LoaderCircle, X } from 'lucide-react'
 
@@ -35,13 +36,14 @@ export default function MemoryReviewDrawer({ open, novelId, onClose }: { open: b
     }
   }
 
-  if (!open) return null
   return (
+    <StudioPresence kind="dialog">{open && (
     <div className="studio-tool-overlay fixed inset-0 z-[125] bg-[rgba(15,23,42,0.3)] md:flex md:justify-end lg:justify-center" onClick={onClose}>
       <section
         ref={panel}
         role="dialog"
         aria-modal="true"
+        data-studio-motion-panel
         aria-label="记忆审核箱"
         tabIndex={-1}
         className="studio-tool-dialog flex h-full min-h-0 w-full flex-col bg-[var(--surface-default)] md:max-w-[34rem] md:border-l md:border-[var(--border-subtle)]"
@@ -82,5 +84,6 @@ export default function MemoryReviewDrawer({ open, novelId, onClose }: { open: b
         </div>
       </section>
     </div>
+    )}</StudioPresence>
   )
 }

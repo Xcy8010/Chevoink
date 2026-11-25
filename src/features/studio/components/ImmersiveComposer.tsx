@@ -1,3 +1,5 @@
+import { StudioPresence } from './StudioPresence'
+import { studioInert, useStudioDismiss } from './use-studio-presence'
 import type { PlanMetadataPatch } from '../../../../shared/contracts/novel-plans'
 import { useEffect, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -147,7 +149,7 @@ export default function ImmersiveComposer({
   saveState,
   saveMessage,
   wordCountLabel,
-  onClose,
+  onClose: finishClose,
   onSave,
   onRetrySave,
   onSelectNovel,
@@ -202,6 +204,7 @@ export default function ImmersiveComposer({
   switchingNovel = false,
   novelsLoading = false,
 }: ImmersiveComposerProps) {
+  const { phase, dismiss: onClose } = useStudioDismiss(finishClose)
   const [isDesktop, setIsDesktop] = useState(() =>
     typeof window !== 'undefined' ? window.matchMedia('(min-width: 1280px)').matches : false,
   )
@@ -390,7 +393,7 @@ export default function ImmersiveComposer({
   }
 
   return createPortal(
-    <div className="studio-workspace fixed inset-0 z-[90] isolate overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]">
+    <div data-studio-surface="fade" data-phase={phase} {...studioInert(phase === 'closing')} className="studio-workspace fixed inset-0 z-[90] isolate overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]">
       <div className="mx-auto flex h-full max-w-[140rem] flex-col px-3 pb-3 pt-[calc(var(--safe-top)+10px)] md:px-6 md:py-5">
         {isDesktop ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
@@ -1158,7 +1161,7 @@ export default function ImmersiveComposer({
         </BottomSheet>
       ) : null}
 
-      {chapterDraft && showChapterSettings ? (
+      <StudioPresence kind="dialog">{chapterDraft && showChapterSettings ? (
         <ChapterSettingsPanel
           chapterDraft={chapterDraft}
           onChange={onChange}
@@ -1168,8 +1171,8 @@ export default function ImmersiveComposer({
           onClose={() => setShowChapterSettings(false)}
           overlayClassName="z-[110]"
         />
-      ) : null}
-      {planSettingsPlan ? (
+      ) : null}</StudioPresence>
+      <StudioPresence kind="dialog">{planSettingsPlan ? (
         <PlanSettingsPanel
           key={`${currentNovelId}:${planSettingsPlan.id}`}
           plan={planSettingsPlan}
@@ -1184,7 +1187,7 @@ export default function ImmersiveComposer({
           onClose={() => setPlanSettingsPlanId(null)}
           overlayClassName="z-[110]"
         />
-      ) : null}
+      ) : null}</StudioPresence>
       <ConfirmDialog
         open={Boolean(confirmDialog)}
         title={confirmDialog?.title ?? ''}

@@ -1,3 +1,4 @@
+import { studioInert, useStudioDismiss, useStudioPresence } from './use-studio-presence'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -35,12 +36,14 @@ function RuleEditor({ job, busy, onChange }: { job: StyleLearningView; busy: boo
   </section>
 }
 
-export default function StyleLearningDialog({ novelId, chapters = [], initialModel, onClose }: {
+export default function StyleLearningDialog({ novelId, chapters = [], initialModel, onClose: finishClose }: {
   novelId: string; chapters?: StudioPayload['chapters']; initialModel?: StyleModelSelection; onClose: () => void
 }) {
+  const { phase, dismiss: onClose } = useStudioDismiss(finishClose)
   const dialog = useRef<HTMLDialogElement>(null)
   const queryClient = useQueryClient()
   const [upload, setUpload] = useState(false)
+  const { rendered: showUpload, phase: uploadPhase } = useStudioPresence(upload ? true : null)
   const [selectedId, setSelectedId] = useState('')
   const [model, setModel] = useState<StyleModelSelection | undefined>(initialModel)
   const [consent, setConsent] = useState(false)
@@ -58,13 +61,13 @@ export default function StyleLearningDialog({ novelId, chapters = [], initialMod
   const mutation = useMutation({ mutationFn: (action: () => Promise<unknown>) => action(), onSuccess: async () => { setError(''); await refresh() }, onError: (cause: Error) => { setError(cause.message); void refresh() } })
   useEffect(() => {
     const node = dialog.current
-    if (upload || !node) return
+    if (!node) return
     const previous = document.activeElement as HTMLElement | null
     const overflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     node.showModal()
     return () => { node.close(); document.body.style.overflow = overflow; previous?.focus({ preventScroll: true }) }
-  }, [upload])
+  }, [])
   const selectedModel = model?.modelTier === 'custom' ? custom.data?.models.find(item => item.id === model.customModelId) : credits.data?.models.find(item => item.tier === model?.modelTier)
   const efforts = selectedModel?.reasoningEfforts ?? []
   const modelLabel = model?.modelTier === 'custom' ? custom.data?.models.find(item => item.id === model.customModelId)?.displayName : credits.data?.models.find(item => item.tier === model?.modelTier)?.label
@@ -83,8 +86,8 @@ export default function StyleLearningDialog({ novelId, chapters = [], initialMod
       return job
     })
   }
-  if (upload) return <StyleDnaDialog chapters={chapters} profile={null} busy={busy} onClose={() => setUpload(false)} onSubmit={(input: StyleSampleRequest) => mutation.mutate(async () => { const saved = await extractAuthorStyleProfileApi(novelId, input); setSelectedId(saved.profileId); setConsent(false); setUpload(false) })} error={error} />
-  return createPortal(<dialog ref={dialog} data-native-back-dismiss onCancel={event => { event.preventDefault(); onClose() }} onClick={event => event.stopPropagation()} className="studio-workspace m-auto h-[min(860px,92dvh)] w-[min(900px,96vw)] overflow-hidden rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-2xl backdrop:bg-black/50" aria-label="样章学习与写作风格">
+  return createPortal(<>
+  <dialog ref={dialog} data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} data-native-back-dismiss onCancel={event => { event.preventDefault(); onClose() }} onClick={event => event.stopPropagation()} className="studio-workspace m-auto h-[min(860px,92dvh)] w-[min(900px,96vw)] overflow-hidden rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-2xl backdrop:bg-black/50" aria-label="样章学习与写作风格">
     <div className="flex h-full flex-col">
       <header className="flex shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] p-4"><Fingerprint className="h-5 w-5" /><div><h2 id="style-learning-title" className="text-base font-semibold">样章学习与写作风格</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">Style DNA · 仅当前作品 · 提炼规则，不训练模型</p></div><button className="ml-auto flex h-11 w-11 items-center justify-center" aria-label="关闭样章学习" onClick={onClose}><X className="h-5 w-5" /></button></header>
       <div className="scrollbar-none min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4 sm:p-6">
@@ -115,5 +118,7 @@ export default function StyleLearningDialog({ novelId, chapters = [], initialMod
       </div>
       <footer className="shrink-0 border-t border-[var(--border-subtle)] p-4 text-xs text-[var(--text-secondary)]">启用后从本作品下一次 Agent 任务开始生效；已开始的任务保留原上下文。当前作品以外不会自动使用。</footer>
     </div>
-  </dialog>, document.body)
+  </dialog>
+  {showUpload && <StyleDnaDialog phase={uploadPhase} chapters={chapters} profile={null} busy={busy} onClose={() => setUpload(false)} onSubmit={(input: StyleSampleRequest) => mutation.mutate(async () => { const saved = await extractAuthorStyleProfileApi(novelId, input); setSelectedId(saved.profileId); setConsent(false); setUpload(false) })} error={error} />}
+  </>, document.body)
 }

@@ -54,7 +54,7 @@ export default function StudioMobileNavigation({ open, push = false, dragging = 
   useEffect(() => {
     if (open || dragging) { setPresent(true); return }
     if (!present) return
-    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const reduced = document.documentElement.dataset.studioReducedMotion === 'true' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
     const timeout = window.setTimeout(() => {
       setPresent(false)
       setSearch('')

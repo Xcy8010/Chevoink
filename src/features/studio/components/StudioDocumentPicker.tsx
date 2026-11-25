@@ -43,30 +43,33 @@ export default function StudioDocumentPicker({ kind, data, id, trigger, onSelect
   useLayoutEffect(() => { (input.current ?? panel.current)?.focus({ preventScroll: true }) }, [])
   useLayoutEffect(() => {
     const card = panel.current
-    const parent = card?.parentElement
-    if (!card || !parent || !trigger) return
+    const parent = card?.offsetParent
+    const list = trigger?.closest<HTMLElement>('.studio-novel-actions')
+    if (!card || !(parent instanceof HTMLElement) || !list || !trigger) return
     const place = () => {
-      const top = parent.getBoundingClientRect().top
-      const anchor = trigger.getBoundingClientRect().top - top - 4
+      const top = parent.getBoundingClientRect().top + parent.clientTop
+      // offsetTop stays in menu coordinates while the popup is scaling in.
+      const anchor = trigger.offsetParent === parent
+        ? trigger.offsetTop - list.scrollTop
+        : trigger.getBoundingClientRect().top - top
       const available = window.innerHeight - top - card.offsetHeight - 8
       card.style.top = Math.max(0, Math.min(anchor, available)) + 'px'
     }
     place()
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null
     observer?.observe(card)
-    const list = trigger.parentElement
-    list?.addEventListener('scroll', place)
+    list.addEventListener('scroll', place)
     window.addEventListener('resize', place)
     return () => {
       observer?.disconnect()
-      list?.removeEventListener('scroll', place)
+      list.removeEventListener('scroll', place)
       window.removeEventListener('resize', place)
     }
   }, [trigger])
 
   return (
     <section id={id} role="region" aria-labelledby={headingId} ref={panel} tabIndex={-1}
-      className="studio-document-picker studio-floating-menu absolute left-[calc(100%+6px)] top-0 flex w-72 flex-col rounded-xl border p-1.5 shadow-[var(--shadow-modal)] outline-none"
+      className="studio-document-picker studio-floating-menu absolute [--studio-motion-origin:top_left] left-[calc(100%+6px)] top-0 flex w-72 flex-col rounded-xl border p-1.5 shadow-[var(--shadow-modal)] outline-none"
       onKeyDown={event => {
         if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
         const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button'))

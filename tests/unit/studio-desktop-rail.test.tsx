@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ComponentProps } from 'react'
 import { MemoryRouter } from 'react-router-dom'
@@ -51,6 +51,22 @@ it('shows the actual available balance on hover and focus, with a daily ring ind
   fireEvent.click(card.getByRole('button', { name: '管理用量' }))
   expect(open).toHaveBeenCalledWith('usage', usage)
   expect(screen.queryByRole('region', { name: '额度概览' })).toBeNull()
+})
+it('draws a continuous closed stroke at full allowance', () => {
+  Object.assign(credits.data!, { dailyRemaining: 450 })
+  const { usage } = fixture()
+  const circle = usage.querySelector('.studio-ring-value')
+  expect(circle).toBeTruthy()
+  expect(circle!.hasAttribute('stroke-dasharray')).toBe(false)
+  fireEvent.focus(usage)
+  expect(screen.getByRole('tooltip').textContent).toContain('100%')
+})
+it('reserves the 100% label for a genuinely full ring', () => {
+  Object.assign(credits.data!, { dailyRemaining: 999, dailyAllowance: 1000 })
+  const { usage } = fixture()
+  fireEvent.focus(usage)
+  expect(screen.getByRole('tooltip').textContent).toContain('99%')
+  expect(usage.querySelector('.studio-ring-value')?.hasAttribute('stroke-dasharray')).toBe(true)
 })
 it('keeps free accounts with bonus-only credits meaningful without a fabricated usage percentage', () => {
   Object.assign(credits.data!, { publicBetaEnabled: false, planLabel: '免费版', totalRemaining: 125, dailyRemaining: 0, dailyAllowance: 0, bonusRemaining: 125 })
@@ -197,7 +213,7 @@ it('exposes every rail icon label on hover and Tab, and restores keyboard focus 
   }
 })
 
-it.each(['work', 'ide'])('keeps the unread indication from public and personal inbox items on the %s More trigger', mode => {
+it.each(['work', 'ide'])('keeps the unread indication from public and personal inbox items on the %s More trigger', async mode => {
   const restoreDialog = mockNativeDialog()
   try {
     const publishedAt = '2026-11-25T00:00:00Z'
@@ -213,8 +229,10 @@ it.each(['work', 'ide'])('keeps the unread indication from public and personal i
     expect(screen.queryByRole('region', { name: '更多入口' })).toBeNull()
     const dialog = screen.getByRole('dialog', { name: '通知中心' })
     fireEvent.click(within(dialog).getByRole('button', { name: /个人奖励/ }))
-    expect(inboxState.read.mutate).toHaveBeenCalledWith({ viewerId: 'writer', action: 'personal', notificationId: 'personal' })
-    expect(within(dialog).getByText('个人通知正文')).toBeTruthy()
+    const detail = await screen.findByRole('dialog', { name: '个人奖励' })
+    expect(within(detail).getByText('个人通知正文')).toBeTruthy()
+    fireEvent.click(within(detail).getByRole('button', { name: '关闭', exact: true }))
+    await waitFor(() => expect(inboxState.read.mutate).toHaveBeenCalledWith({ viewerId: 'writer', action: 'personal', notificationId: 'personal' }))
     personal.unread = false
     announcement.unread = true
     fireEvent.click(within(dialog).getByRole('button', { name: '关闭通知中心' }))
@@ -228,5 +246,5 @@ it.each(['work', 'ide'])('keeps the unread indication from public and personal i
     fireEvent.click(screen.getByRole('button', { name: '关闭通知中心' }))
     expect(more.querySelector('.studio-more-unread')).toBeNull()
     expect(more.hasAttribute('aria-description')).toBe(false)
-  } finally { restoreDialog() }
+  } finally { cleanup(); restoreDialog() }
 })

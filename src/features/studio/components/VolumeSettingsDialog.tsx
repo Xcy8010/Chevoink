@@ -1,3 +1,4 @@
+import { studioInert, useStudioDismiss } from './use-studio-presence'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { DeleteVolumeRequest, StudioPayload } from '../../../../shared/contracts/index.js'
@@ -32,7 +33,8 @@ function Session(props: Props & { volume: StudioPayload['volumes'][number] }) {
   const live = useRef(true)
   const locked = useRef(false)
   useEffect(() => { live.current = true; return () => { live.current = false } }, [])
-  const close = () => { if (live.current && !locked.current) props.onClose() }
+  const { phase, dismiss } = useStudioDismiss(props.onClose)
+  const close = () => { if (live.current && !locked.current) dismiss() }
   const ordered = [...props.volumes].sort((a, b) => a.orderIndex - b.orderIndex)
   const index = ordered.findIndex(item => item.id === initialVolume.id)
   const destination = ordered[index > 0 ? index - 1 : 1]
@@ -100,7 +102,7 @@ function Session(props: Props & { volume: StudioPayload['volumes'][number] }) {
     try { await props.onChanged(); end(); close() } catch (failure) { fail(failure) } finally { end() }
   }
 
-  return createPortal(<div className="studio-workspace">
+  return createPortal(<div className="studio-workspace" data-studio-presence="dialog" data-phase={phase} {...studioInert(phase === 'closing')}>
     <VolumeSettingsPanel
       volume={initialVolume}
       chapterCount={props.chapters.filter(item => item.volumeId === initialVolume.id).length}

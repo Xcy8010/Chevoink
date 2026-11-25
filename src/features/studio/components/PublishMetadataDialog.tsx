@@ -1,3 +1,4 @@
+import { studioInert, useStudioDismiss } from './use-studio-presence'
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ArrowUpRight, Check, Copy, X } from 'lucide-react'
@@ -30,11 +31,16 @@ const GUIDANCE = {
   },
 } as const
 
-export default function PublishMetadataDialog({ missing, onClose, onOpenPanel }: {
+export default function PublishMetadataDialog({ missing, onClose: finishClose, onOpenPanel }: {
   missing: NovelPublishField[]
   onClose: () => void
   onOpenPanel: (panel: 'cover' | 'meta') => void
 }) {
+  const destination = useRef<'cover' | 'meta' | null>(null)
+  const { phase, dismiss: onClose } = useStudioDismiss(() => {
+    if (destination.current) onOpenPanel(destination.current)
+    else finishClose()
+  })
   const [showHelp, setShowHelp] = useState(false)
   const [copyResult, setCopyResult] = useState<{ field: NovelPublishField; success: boolean } | null>(null)
   const titleId = useId()
@@ -68,7 +74,7 @@ export default function PublishMetadataDialog({ missing, onClose, onOpenPanel }:
 
   return createPortal(
     <dialog
-      ref={dialogRef}
+      ref={dialogRef} data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')}
       data-native-back-dismiss
       aria-labelledby={titleId}
       aria-describedby={descriptionId}
@@ -101,7 +107,7 @@ export default function PublishMetadataDialog({ missing, onClose, onOpenPanel }:
               <section key={field} className="py-3">
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="text-sm font-semibold">{label}</h3>
-                  <Button variant="ghost" size="sm" className="-mr-2 gap-1 rounded-lg px-2 text-xs" onClick={() => onOpenPanel(guidance.panel)}>
+                  <Button variant="ghost" size="sm" className="-mr-2 gap-1 rounded-lg px-2 text-xs" onClick={() => { destination.current = guidance.panel; onClose() }}>
                     {guidance.linkLabel}<ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" />
                   </Button>
                 </div>

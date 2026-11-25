@@ -72,6 +72,7 @@ export default function CoverPanel({
   const panel = (
     <section
       ref={panelRef}
+      data-studio-motion-panel={modal || undefined}
       role={modal ? 'dialog' : undefined}
       aria-modal={modal || undefined}
       aria-labelledby={modal ? titleId : undefined}

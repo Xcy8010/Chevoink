@@ -1,0 +1,99 @@
+.studio-announcement {
+  box-sizing: border-box;
+  width: min(640px, calc(100vw - max(32px, env(safe-area-inset-left) * 2, env(safe-area-inset-right) * 2)));
+  max-width: none;
+  max-height: calc(100dvh - max(32px, env(safe-area-inset-top) * 2, env(safe-area-inset-bottom) * 2));
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 20px;
+  color: var(--text-primary);
+  background: var(--studio-canvas, var(--surface-default));
+  font-family: var(--studio-body-font);
+  box-shadow: 0 24px 88px #0004;
+  outline: none;
+}
+.studio-announcement[open] {
+  display: flex;
+  flex-direction: column;
+  opacity: 1;
+  scale: 1;
+  translate: 0 0;
+  transform-origin: 50% 58%;
+  transition: opacity 190ms ease-out, scale 310ms cubic-bezier(.18,.82,.22,1), translate 310ms cubic-bezier(.18,.82,.22,1);
+}
+.studio-announcement::backdrop {
+  opacity: 1;
+  background: rgb(9 13 14 / 48%);
+  backdrop-filter: blur(3px);
+  transition: opacity 190ms ease-out;
+}
+.studio-announcement[open][data-phase='closing'] {
+  pointer-events: none;
+  opacity: 0;
+  scale: .978;
+  translate: 0 5px;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(.32,0,.44,1);
+}
+.studio-announcement[data-phase='closing']::backdrop { opacity: 0; transition-duration: 150ms; }
+@starting-style {
+  .studio-announcement[open] { opacity: 0; scale: .95; translate: 0 10px; }
+  .studio-announcement[open]::backdrop { opacity: 0; }
+}
+.studio-announcement-cover { flex: none; position: relative; container-type: inline-size; background: #f0ebdf; }
+.studio-announcement-cover-title {
+  position: absolute;
+  inset-inline-start: 3%;
+  width: 47%;
+  top: 35%;
+  transform: translateY(-50%);
+  text-align: center;
+  color: #39362e;
+  font: 500 min(10cqw, 17dvh)/1 'STXingkai', 'Xingkai SC', 'Kaiti SC', KaiTi, STKaiti, 'Songti SC', serif;
+  letter-spacing: .06em;
+}
+.studio-announcement-cover img { display: block; width: 100%; height: auto; aspect-ratio: 3 / 1; max-height: 28dvh; object-fit: contain; }
+.studio-announcement-cover time {
+  position: absolute;
+  right: 4%;
+  bottom: 5%;
+  color: #514b40;
+  font: 400 clamp(12px, 2.8vw, 16px)/1.15 'Kaiti SC', STKaiti, KaiTi, 'Songti SC', 'Noto Serif CJK SC', 'Noto Serif SC', serif;
+  letter-spacing: .035em;
+  white-space: nowrap;
+}
+.studio-announcement-cover time span { margin-inline-end: .35em; font-size: .9em; }
+.studio-announcement-copy { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: clamp(18px, 4vw, 32px) clamp(20px, 5vw, 38px) 8px; overflow-wrap: anywhere; }
+.studio-announcement-copy h2 { margin: 0 0 12px; font-size: clamp(19px, 3vw, 24px); font-weight: 650; line-height: 1.45; }
+.studio-announcement-copy p { margin: 0; white-space: pre-wrap; font-size: 15px; line-height: 1.85; }
+.studio-announcement footer { display: grid; flex: none; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); align-items: center; padding: 16px clamp(12px, 3.5vw, 32px) 22px; }
+.studio-announcement-close { grid-column: 2; width: clamp(102px, 32vw, 144px); min-height: 46px; padding: 8px 16px; border: 0; border-radius: 9px; background: var(--text-primary); color: var(--surface-default); box-shadow: none; font-size: 16px; font-weight: 600; }
+.studio-announcement-close:hover { opacity: .88; }
+.studio-announcement-history {
+  grid-column: 3;
+  place-self: end;
+  display: flex;
+  align-items: flex-end;
+  min-height: 44px;
+  padding: 0;
+  font-size: clamp(11px, 3.2vw, 13px);
+  line-height: 1;
+  color: var(--text-secondary);
+}
+.studio-announcement-history:hover { color: var(--text-primary); text-decoration: underline; text-underline-offset: 3px; }
+.studio-announcement :is(button,section):focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 3px; }
+.studio-announcement-copy:focus-visible { outline-offset: -3px; }
+.studio-announcement footer button:focus-visible { outline: 1px dashed currentColor; outline-offset: -5px; }
+@media (max-height: 460px) {
+  .studio-announcement { width: min(530px, 92vw); }
+  .studio-announcement-cover { align-self: stretch; }
+  .studio-announcement-cover img { object-fit: cover; }
+  .studio-announcement-copy { padding-block-start: 12px; }
+  .studio-announcement footer { padding-block: 6px 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .studio-announcement[open], .studio-announcement::backdrop { transition: none; }
+}
+html[data-studio-reduced-motion='true'] .studio-announcement[open], html[data-studio-reduced-motion='true'] .studio-announcement::backdrop { transition: none; }

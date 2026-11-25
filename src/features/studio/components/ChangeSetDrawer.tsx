@@ -1,3 +1,4 @@
+import { StudioPresence } from './StudioPresence'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, RotateCcw, X } from 'lucide-react'
@@ -66,17 +67,18 @@ export default function ChangeSetDrawer({ changeSetId, novelId, chapters, onClos
     },
   })
 
-  if (!changeSetId) return null
   const busy = query.isLoading || applyMutation.isPending || rollbackMutation.isPending
   const canSelect = changeSet && ['draft', 'approved', 'conflicted', 'failed'].includes(changeSet.status)
   const error = applyMutation.error ?? rollbackMutation.error ?? query.error
 
   return (
+    <StudioPresence kind="dialog">{changeSetId && (
     <div className="studio-tool-overlay fixed inset-0 z-[150] bg-black/30 md:left-auto md:w-[36rem] lg:left-0 lg:w-full" onClick={onClose}>
       <section
         ref={panel}
         role="dialog"
         aria-modal="true"
+        data-studio-motion-panel
         tabIndex={-1}
         className="studio-tool-dialog studio-tool-dialog--wide flex h-full min-h-0 w-full flex-col bg-[var(--surface-default)] shadow-2xl md:border-l md:border-[var(--border-subtle)]"
         onClick={(event) => event.stopPropagation()}
@@ -163,5 +165,6 @@ export default function ChangeSetDrawer({ changeSetId, novelId, chapters, onClos
         </footer>
       </section>
     </div>
+    )}</StudioPresence>
   )
 }

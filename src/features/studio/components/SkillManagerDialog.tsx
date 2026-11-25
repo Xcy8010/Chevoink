@@ -1,3 +1,4 @@
+import { studioInert, useStudioDismiss } from './use-studio-presence'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -87,7 +88,7 @@ function payloadFromEditor(editor: EditorState): AgentSkillDraftInput {
 export default function SkillManagerDialog({
   novelId,
   skill,
-  onClose,
+  onClose: finishClose,
   onPayload,
   importMode = false,
 }: {
@@ -97,6 +98,7 @@ export default function SkillManagerDialog({
   onPayload: (payload: NovelSkillsPayload) => void
   importMode?: boolean
 }) {
+  const { phase, dismiss: onClose } = useStudioDismiss(finishClose)
   const toast = useToast()
   const [selectedVersion, setSelectedVersion] = useState(skill?.activeVersion ?? '')
   const [editor, setEditor] = useState<EditorState>(emptyEditor)
@@ -200,8 +202,8 @@ export default function SkillManagerDialog({
   const title = skill ? skill.name : importMode ? '导入第三方技能' : '创建作品技能'
   if (typeof document === 'undefined') return null
   return createPortal(
-    <div className="fixed inset-0 z-[140] flex items-stretch justify-center bg-black/45 md:items-center md:p-6" role="dialog" aria-modal="true" aria-label={title}>
-      <section className="flex h-full w-full flex-col bg-[var(--surface-default)] md:h-[min(820px,90vh)] md:w-[min(920px,calc(100vw-48px))] md:max-w-none md:rounded-[14px] md:border md:border-[var(--border-default)]">
+    <div data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} className="fixed inset-0 z-[140] flex items-stretch justify-center bg-black/45 md:items-center md:p-6" role="dialog" aria-modal="true" aria-label={title}>
+      <section data-studio-motion-panel className="flex h-full w-full flex-col bg-[var(--surface-default)] md:h-[min(820px,90vh)] md:w-[min(920px,calc(100vw-48px))] md:max-w-none md:rounded-[14px] md:border md:border-[var(--border-default)]">
         <header className="flex shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-3 md:px-5">
           <div><h2 className="text-sm font-semibold">{title}</h2><p className="mt-0.5 text-[10px] text-[var(--text-tertiary)]">{importMode ? '只导入明确许可的来源；先留作草稿，再测试发布。' : '把会反复使用的写作规则存为私有草稿；发布前可测试与回滚。'}</p></div>
           <button type="button" onClick={onClose} className="ml-auto flex h-9 w-9 items-center justify-center rounded-[9px] hover:bg-[var(--surface-muted)]" aria-label="关闭"><X className="h-4 w-4" /></button>

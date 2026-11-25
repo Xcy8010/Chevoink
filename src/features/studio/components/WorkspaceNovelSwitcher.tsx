@@ -1,3 +1,4 @@
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { BookOpen, ChevronDown, Plus } from 'lucide-react'
@@ -102,8 +103,8 @@ export default function WorkspaceNovelSwitcher({
         <ChevronDown className={cn('h-4 w-4 shrink-0 text-[var(--text-secondary)] transition', open && 'rotate-180')} />
       </button>
 
-      {open ? createPortal(
-        <div ref={panelRef} role="region" aria-label="我的作品" style={position} className="studio-workspace fixed z-[180] flex flex-col overflow-hidden rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-2 text-[var(--text-primary)] shadow-[0_20px_48px_rgba(15,23,42,0.16)]">
+      {typeof document !== 'undefined' && createPortal(
+        <StudioPresence kind="menu">{open && <div ref={panelRef} role="region" aria-label="我的作品" style={position} className="studio-workspace fixed z-[180] flex flex-col overflow-hidden rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-2 text-[var(--text-primary)] shadow-[0_20px_48px_rgba(15,23,42,0.16)]">
           <div className="flex items-center justify-between gap-3 px-2 py-2">
             <div className="min-w-0">
               <p className="text-xs tracking-[0.08em] text-[var(--text-secondary)]">我的作品</p>
@@ -163,8 +164,8 @@ export default function WorkspaceNovelSwitcher({
               })
             )}
           </div>
-        </div>, document.fullscreenElement ?? document.body
-      ) : null}
+        </div>}</StudioPresence>, document.fullscreenElement ?? document.body
+      )}
     </div>
   )
 }

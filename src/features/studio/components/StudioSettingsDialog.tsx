@@ -1,3 +1,4 @@
+import { StudioPresence } from './StudioPresence'
 import { CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../shared/contracts/agent-window-configuration.js'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -741,7 +742,7 @@ export default function StudioSettingsDialog(props: Props) {
     }
   }, [onClose, open])
 
-  if (!open) return null
+  if (typeof document === 'undefined') return null
 
   const navButton = (item: NavItem) => {
     const Icon = item.icon
@@ -771,6 +772,7 @@ export default function StudioSettingsDialog(props: Props) {
   </>
 
   return createPortal(
+    <StudioPresence kind="fade">{open && (
     <section aria-label="创作区设置" className="studio-settings-page studio-workspace studio-settings-style fixed inset-0 z-[200] flex h-dvh w-screen overflow-hidden">
       <aside className="studio-settings-sidebar h-full shrink-0 flex-col" aria-label="设置侧栏">
         <div className="studio-settings-sidebar-header">
@@ -812,7 +814,8 @@ export default function StudioSettingsDialog(props: Props) {
           </div>
         </main>
       </div>
-    </section>,
+    </section>
+    )}</StudioPresence>,
     document.body,
   )
 }

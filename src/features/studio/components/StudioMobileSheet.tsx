@@ -34,7 +34,7 @@ export default function StudioMobileSheet({ title, label, closeLabel, trigger, b
   const dismiss: Dismiss = afterClose => {
     if (timer.current !== null) return
     const finish = () => { close.current(); afterClose?.() }
-    if (!window.matchMedia || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (document.documentElement.dataset.studioReducedMotion === 'true' || !window.matchMedia || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       finish()
       return
     }

@@ -1,3 +1,4 @@
+import { useStudioPresence, studioInert } from '@/features/studio/components/use-studio-presence'
 import { useCallback, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { ArrowLeft, Check, ChevronLeft, ChevronRight, CornerDownLeft, Info, LoaderCircle, ZoomIn } from 'lucide-react'
@@ -68,10 +69,11 @@ function readAnswer(prompt: AgentQuestionPrompt, draft: Draft) {
   return formatAgentQuestionOption(selected)
 }
 
-function OptionTooltip({ id, anchor, detail, onClose }: { id: string; anchor: HTMLButtonElement; detail: string; onClose: () => void }) {
+function OptionTooltip({ id, anchor, detail, phase, onClose }: { phase: 'open' | 'closing'; id: string; anchor: HTMLButtonElement; detail: string; onClose: () => void }) {
   const tooltip = useRef<HTMLDivElement>(null)
   const [position, setPosition] = useState<{ left: number; top: number; width: number; maxHeight: number; above: boolean }>()
   useLayoutEffect(() => {
+    if (phase === 'closing') return
     const viewport = window.visualViewport
     const options = anchor.closest('[data-agent-question-options]')
     const place = () => {
@@ -113,10 +115,10 @@ function OptionTooltip({ id, anchor, detail, onClose }: { id: string; anchor: HT
       document.removeEventListener('pointerdown', dismissOutside)
       document.removeEventListener('focusin', dismissOutside)
     }
-  }, [anchor, onClose])
+  }, [anchor, onClose, phase])
   if (!position) return null
   return createPortal(
-    <div ref={tooltip} id={id} role="tooltip" tabIndex={-1}
+    <div data-studio-surface="fade" data-phase={phase} {...studioInert(phase === 'closing')} ref={tooltip} id={id} role="tooltip" tabIndex={-1}
       onKeyDown={event => {
         event.stopPropagation()
         if (event.key !== 'Escape') return
@@ -161,6 +163,7 @@ function QuestionForm({ question, onAnswer, coverImages, draftStorageKey, draftE
   const locked = phase !== 'ready'
   const submitting = phase === 'sending' || phase === 'cancelling'
   const activeDetail = openDetail ? prompt.options[openDetail.option]?.detail : undefined
+  const tooltip = useStudioPresence(openDetail && activeDetail ? { ...openDetail, detail: activeDetail } : null)
   const choices: QuestionChoice[] = prompt.options.map((option, index) => ({
     ...option, value: index, image: option.coverAssetId ? coverImages?.get(option.coverAssetId) : undefined,
   }))
@@ -413,8 +416,8 @@ function QuestionForm({ question, onAnswer, coverImages, draftStorageKey, draftE
           </div>
         </div>
       </footer>
-      {openDetail && activeDetail ? <OptionTooltip id={`${id}-${step}-option-${openDetail.option}-detail`} anchor={openDetail.anchor}
-        detail={activeDetail} onClose={closeDetail} /> : null}
+      {tooltip.rendered ? <OptionTooltip phase={tooltip.phase} id={`${id}-${step}-option-${tooltip.rendered.option}-detail`} anchor={tooltip.rendered.anchor}
+        detail={tooltip.rendered.detail} onClose={closeDetail} /> : null}
       {coverPreview ? <ImageLightbox src={coverPreview.image} alt={coverPreview.label} trapFocus onClose={() => setCoverPreview(null)} /> : null}
     </form>
   )

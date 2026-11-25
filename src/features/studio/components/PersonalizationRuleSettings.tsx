@@ -14,7 +14,7 @@ import {
   interpretPersonalizationRule,
   personalizationRuleOperationsQueryKey,
 } from '../personalization-api'
-import { PersonalizationDialog, PersonalizationFeedback, PersonalizationGroup } from './personalization-ui'
+import { PersonalizationDialog, PersonalizationDialogPresence, PersonalizationFeedback, PersonalizationGroup } from './personalization-ui'
 
 const permissionLabels: Record<AgentPersonalizationRule['permission'], string> = {
   allow: '无需询问', ask: '先询问我', deny: '不允许',
@@ -133,7 +133,7 @@ export default function PersonalizationRuleSettings({ owner, saved, disabled, bu
       <span className="studio-settings-rule-count">{saved.rules.length}</span>
       <ChevronRight aria-hidden="true" strokeWidth={1.6} className="studio-settings-arrow" />
     </button>
-    {open ? (
+    <PersonalizationDialogPresence>{open ? (
       <PersonalizationDialog title="自定义规则" kind="manager" busy={busy} onClose={() => setOpen(false)} returnFocus={() => manageButton.current}
         toolbar={<>
           <span title="规则在整个创作区生效。平台要求的确认仍然适用。">在整个创作区生效</span>
@@ -168,8 +168,8 @@ export default function PersonalizationRuleSettings({ owner, saved, disabled, bu
         {feedback ? <PersonalizationFeedback error={feedback.error}>{feedback.text}</PersonalizationFeedback> : null}
         {disabled && !busy ? <PersonalizationFeedback error>个性化设置加载失败，请关闭规则管理后重试加载设置。</PersonalizationFeedback> : null}
       </PersonalizationDialog>
-    ) : null}
-    {draft ? (
+    ) : null}</PersonalizationDialogPresence>
+    <PersonalizationDialogPresence>{draft ? (
       <PersonalizationDialog title={draft.originalToolName ? '编辑规则' : '添加规则'} busy={busy || interpreting}
         onClose={() => setDraft(null)} returnFocus={managerFocus}
         footer={<>
@@ -200,8 +200,8 @@ export default function PersonalizationRuleSettings({ owner, saved, disabled, bu
           </div> : null}
         </form>
       </PersonalizationDialog>
-    ) : null}
-    {removal ? (
+    ) : null}</PersonalizationDialogPresence>
+    <PersonalizationDialogPresence>{removal ? (
       <PersonalizationDialog title="删除这条规则？" kind="confirm" busy={busy} onClose={() => setRemoval(null)} returnFocus={managerFocus}
         footer={<>
           <button type="button" className="studio-settings-button" data-personalization-focus disabled={busy} onClick={() => setRemoval(null)}>取消</button>
@@ -212,6 +212,6 @@ export default function PersonalizationRuleSettings({ owner, saved, disabled, bu
           {removal.error ? <PersonalizationFeedback error>{removal.error}</PersonalizationFeedback> : null}
         </div>
       </PersonalizationDialog>
-    ) : null}
+    ) : null}</PersonalizationDialogPresence>
   </PersonalizationGroup>
 }

@@ -84,7 +84,7 @@ export default function TagPicker({ value, onChange }: TagPickerProps) {
         </div>
       ) : null}
 
-      <div id={chooserId} hidden={!open} className="space-y-2.5 pt-2.5">
+      <div id={chooserId} hidden={!open} className="studio-tag-choices space-y-2.5 pt-2.5">
         <label className="flex h-9 items-center gap-2 rounded-lg border border-[var(--border-subtle)] px-3 focus-within:border-[var(--accent-border)] focus-within:ring-2 focus-within:ring-[var(--focus-ring)]">
           <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
           <input

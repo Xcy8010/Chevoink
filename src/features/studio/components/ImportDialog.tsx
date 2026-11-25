@@ -1,3 +1,4 @@
+import { useStudioDismiss } from './use-studio-presence'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { LoaderCircle, Upload } from 'lucide-react'
 import { registerDesktopSave } from '@/lib/desktop-lifecycle'
@@ -222,7 +223,14 @@ function ImportDialogSession(props: ImportDialogProps) {
     return () => window.clearTimeout(timer)
   }, [acceptStatus, busy, client, dirty, error, job, novelId, run, stage])
 
-  const close = () => { if (lock.current && busy === '正在导入所选内容') return; latest.current.onClose() }
+  const { phase, dismiss } = useStudioDismiss(() => latest.current.onClose())
+  function finishSession() {
+    // Ignore late responses as soon as the visible import session starts closing.
+    epoch.current += 1
+    lock.current = true
+    dismiss()
+  }
+  const close = () => { if (!lock.current || busy !== '正在导入所选内容') finishSession() }
   const selectFile = (files: FileList | File[]) => {
     if (busy || dirty || job && !terminalStatuses.has(job.status)) return
     if (files.length === 0) return // Native picker cancellation leaves previous choice intact.
@@ -316,7 +324,7 @@ function ImportDialogSession(props: ImportDialogProps) {
       if (receipt.novelId !== novelId || receipt.jobId !== job.jobId) throw new Error('导入回执与当前任务不匹配，请查询服务器状态。')
       setJob({ ...currentJob, status: 'succeeded', receipt }); setUncertain(false)
       await latest.current.onImported(receipt)
-      if (alive()) { delivered.current = job.jobId; latest.current.onClose() }
+      if (alive()) { delivered.current = job.jobId; finishSession() }
     })
   }
   const resume = (item: NovelImportJobStatus) => void run('正在恢复持久导入任务', async alive => {
@@ -545,7 +553,7 @@ function ImportDialogSession(props: ImportDialogProps) {
     }}>{busy ? '正在处理…' : '一键导入'}</button>}</>
 
   }
-  return <ImportDialogShell title={title} description={`目标作品：《${novelTitle}》`} compact={stage === 'workspace' && !!summary} stage={stage} onClose={close} footer={footer}>
+  return <ImportDialogShell phase={phase} title={title} description={`目标作品：《${novelTitle}》`} compact={stage === 'workspace' && !!summary} stage={stage} onClose={close} footer={footer}>
     {props.agentAttachment?.callId && <p className="mb-3 text-xs">收起面板不会取消 Agent 等待。尚未创建导入任务时，可回到 Agent 停止任务；已创建后可使用“取消任务”停止后续处理。</p>}
     {busy && <p role="status" className="mb-3 flex items-center gap-2 text-sm"><LoaderCircle className="h-4 w-4 motion-safe:animate-spin" />{busy}</p>}
     {error && <p role="alert" className="mb-3 break-words rounded-lg bg-rose-500/10 p-3 text-sm text-rose-600">{error}</p>}

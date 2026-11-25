@@ -8,6 +8,7 @@ import { DOCS, getAccountDocs } from '../../src/features/account/docs-content'
 import type { AnnouncementInbox, PublicSiteContent, ReadAnnouncementsRequest } from '../../shared/contracts/site-content'
 import AnnouncementBell from '../../src/features/site-content/AnnouncementBell'
 import { useShellStore } from '../../src/store/useShellStore'
+import { mockAnimationSupport } from '../helpers/test-native-dialog'
 const mocks=vi.hoisted(()=>({request:vi.fn()}))
 vi.mock('../../src/app/api-client',()=>({requestJson:mocks.request}))
 function data():PublicSiteContent {
@@ -59,68 +60,72 @@ function mountStudioAnnouncements() {
   return mount(<><SiteAnnouncements scope="studio" /><AnnouncementBell placement="studio" /></>)
 }
 
-it('marks the displayed announcement read from the dock and clears the only bell dot', async () => {
-  const { markRead } = signedInAnnouncements()
-  mountStudioAnnouncements()
-  await screen.findByRole('button', { name: '未读通知' })
-  fireEvent.click(await screen.findByRole('button', { name: '打开公告：服务通知' }))
-  await screen.findByRole('button', { name: '通知中心' })
-  expect(markRead).toHaveBeenCalledExactlyOnceWith({ viewerId: 'author', action: 'one', versionId: 'notice-v1' })
-  expect(screen.getByRole('dialog', { name: '服务通知' })).toBeTruthy()
-})
-
-it('marks the exact dock version even if the inbox request has not finished', async () => {
-  const { markRead, respond } = signedInAnnouncements()
-  let firstInbox = true
-  let finishInbox: (() => void) | undefined
-  mocks.request.mockImplementation((url: string, init?: RequestInit) => {
-    if (firstInbox && url.endsWith('/announcements')) {
-      firstInbox = false
-      return new Promise(resolve => { finishInbox = () => resolve(respond(url, init)) })
-    }
-    return respond(url, init)
-  })
-  mountStudioAnnouncements()
-  fireEvent.click(await screen.findByRole('button', { name: '打开公告：服务通知' }))
-  await waitFor(() => expect(markRead).toHaveBeenCalledExactlyOnceWith({ viewerId: 'author', action: 'one', versionId: 'notice-v1' }))
-  await act(async () => finishInbox?.())
-  expect(screen.getByRole('button', { name: '通知中心' })).toBeTruthy()
-  expect(screen.getByRole('dialog', { name: '服务通知' })).toBeTruthy()
-})
-
-it('closes the dock batch after the bell reads its displayed announcement and preserves other unread notifications', async () => {
-  const { site, inbox, markRead } = signedInAnnouncements(true)
-  const client = mountStudioAnnouncements()
-  await screen.findByRole('button', { name: '打开公告：服务通知' })
-  fireEvent.click(await screen.findByRole('button', { name: '未读通知' }))
-  const bell = screen.getByRole('dialog', { name: '通知中心' })
-  fireEvent.click(await within(bell).findByRole('button', { name: /服务通知.*未读/ }))
-  await waitFor(() => expect(screen.queryByLabelText('站点公告')).toBeNull())
-  expect(inbox.items.find(item => item.id === 'older')?.unread).toBe(true)
-  expect(markRead).toHaveBeenCalledExactlyOnceWith({ viewerId: 'author', action: 'one', versionId: 'notice-v1' })
-  expect(screen.getByRole('button', { name: '未读通知' }).querySelector('.site-announcement-bell-dot')).toBeTruthy()
-
-  const newVersion = { ...site.announcements[0], contentVersion: 2, versionId: 'notice-v2', title: '新发布公告' }
-  await act(async () => client.setQueryData(['site-content', 'public'], { ...site, announcements: [newVersion, site.announcements[1]] }))
-  expect(await screen.findByRole('button', { name: '打开公告：新发布公告' })).toBeTruthy()
-  expect(screen.queryByRole('button', { name: '打开公告：较早公告' })).toBeNull()
-})
-
-it('uses announcement id and content version for dismissal and shows a newly published version',async()=>{
-  const current=data();mocks.request.mockResolvedValue(current)
-  const client=mount(<SiteAnnouncements scope="studio"/>)
-  fireEvent.click(await screen.findByRole('button',{name:'打开公告：服务通知'}))
-  await screen.findByText('正文第一版')
-  expect(screen.getByRole('dialog').classList.contains('studio-workspace')).toBe(true)
-  fireEvent.click(screen.getByRole('button',{name:'关闭本条公告'}))
-  expect(screen.queryByText('正文第一版')).toBeNull()
-  const next={...current,announcements:[{...current.announcements[0],contentVersion:2,body:'正文第二版'}]}
-  mocks.request.mockResolvedValue(next)
-  await act(async()=>{client.setQueryData(['site-content','public'],next)})
+it('automatically opens after workspace readiness and marks only the displayed version read', async ({ onTestFinished }) => {
+  onTestFinished(mockAnimationSupport())
+  const { inbox, markRead } = signedInAnnouncements(true)
+  const view = render(<QueryClientProvider client={new QueryClient()}><SiteAnnouncements scope="studio" ready={false}/></QueryClientProvider>)
+  await waitFor(() => expect(mocks.request).toHaveBeenCalled())
   expect(screen.queryByRole('dialog')).toBeNull()
-  fireEvent.click(await screen.findByRole('button',{name:'打开公告：服务通知'}))
-  expect(await screen.findByText('正文第二版')).toBeTruthy()
-  expect(dismissalKey('notice',1)).not.toBe(dismissalKey('notice',2))
+  expect(markRead).not.toHaveBeenCalled()
+  view.unmount()
+  mountStudioAnnouncements()
+  const dialog = await screen.findByRole('dialog', { name: '服务通知' })
+  expect(within(dialog).getByAltText('启创墨域 Chevoink 最新公告')).toBeTruthy()
+  expect(dialog.querySelector('time')?.dateTime).toBe(inbox.items[0].publishedAt)
+  expect(markRead).not.toHaveBeenCalled()
+  fireEvent.click(within(dialog).getByRole('button', { name: '关闭' }))
+  expect(dialog.dataset.phase).toBe('closing')
+  fireEvent(dialog, new Event('cancel', { cancelable: true }))
+  expect(markRead).not.toHaveBeenCalled()
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  await waitFor(() => expect(markRead).toHaveBeenCalledExactlyOnceWith({ viewerId: 'author', action: 'one', versionId: 'notice-v1' }))
+  expect(inbox.items[1].unread).toBe(true)
+  expect(screen.getByRole('button', { name: '未读通知' })).toBeTruthy()
+})
+
+it('waits for the inbox before choosing a notice and skips a version already read elsewhere', async () => {
+  const { inbox, respond, markRead } = signedInAnnouncements(true)
+  inbox.items[0].unread = false
+  let release: (() => void) | undefined
+  mocks.request.mockImplementationOnce(respond).mockImplementationOnce((url: string) => new Promise(resolve => {
+    release = () => resolve(respond(url))
+  })).mockImplementation(respond)
+  mountStudioAnnouncements()
+  await waitFor(() => expect(release).toBeDefined())
+  expect(screen.queryByRole('dialog')).toBeNull()
+  await act(async () => release!())
+  const dialog = await screen.findByRole('dialog', { name: '较早公告' })
+  expect(within(dialog).getByAltText('启创墨域 Chevoink 公告')).toBeTruthy()
+  fireEvent.click(within(dialog).getByRole('button', { name: '关闭' }))
+  await waitFor(() => expect(markRead).toHaveBeenCalledExactlyOnceWith({ viewerId: 'author', action: 'one', versionId: 'older-v1' }))
+})
+
+it('clears the last unread indicator on dismissal and restores it if the receipt fails', async () => {
+  const { respond } = signedInAnnouncements()
+  let rejectReceipt: ((reason: Error) => void) | undefined
+  mocks.request.mockImplementation((url: string, init?: RequestInit) => url.endsWith('/read')
+    ? new Promise((_resolve, reject) => { rejectReceipt = reject })
+    : respond(url, init))
+  mountStudioAnnouncements()
+  const notice = await screen.findByRole('dialog', { name: '服务通知' })
+  expect(screen.getByRole('button', { name: '未读通知' })).toBeTruthy()
+  fireEvent.click(within(notice).getByRole('button', { name: '关闭' }))
+  const bell = await screen.findByRole('button', { name: '通知中心' })
+  expect(bell.querySelector('.site-announcement-bell-dot')).toBeNull()
+  await act(async () => rejectReceipt!(new Error('offline')))
+  expect(await screen.findByRole('button', { name: '未读通知' })).toBeTruthy()
+})
+
+it('remembers a closed version but presents newly published content', async () => {
+  const current = data()
+  mocks.request.mockResolvedValue(current)
+  const client = mount(<SiteAnnouncements scope="studio" />)
+  fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '关闭' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(localStorage.getItem('site-announcement-dismissals')).toContain(dismissalKey('notice', 1))
+  const next = { ...current, announcements: [{ ...current.announcements[0], contentVersion: 2, body: '正文第二版' }] }
+  await act(async () => client.setQueryData(['site-content', 'public'], next))
+  expect(within(await screen.findByRole('dialog')).getByText('正文第二版')).toBeTruthy()
 })
 it('honors scope and expiration while keeping a failed public fetch non-blocking',async()=>{
   const current=data();current.announcements[0].scope='home';mocks.request.mockResolvedValue(current)
@@ -169,51 +174,20 @@ it('reuses help keys/groups/section identity while preserving current policy-der
   expect(doc.sections.find(section=>section.id==='first-chapter')!.paragraphs).toEqual(['管理员编辑的段落'])
   expect(docs.find(item=>item.key==='credits')!.sections.some(section=>section.id==='reset')).toBe(false)
 })
-it('keeps a server-resolved unlimited announcement visible and preserves per-version dismissal',async()=>{
- const current=data();current.announcements[0].endsAt=null;mocks.request.mockResolvedValue(current)
- mount(<SiteAnnouncements scope="studio"/>);fireEvent.click(await screen.findByRole('button',{name:'打开公告：服务通知'}));await screen.findByText('正文第一版')
- fireEvent.click(screen.getByRole('button',{name:'关闭本条公告'}))
- expect(screen.queryByText('正文第一版')).toBeNull()
-})
-it('keeps multiple studio notices in one collapsed launcher and switches or dismisses only the selected item',async()=>{
- const current=data();current.announcements.push({...current.announcements[0],id:'notice-two',title:'第二条公告',body:'第二条正文'})
- mocks.request.mockResolvedValue(current)
- mount(<SiteAnnouncements scope="studio"/>)
- const open=await screen.findByRole('button',{name:'打开公告：服务通知'})
- expect(screen.queryByText('正文第一版')).toBeNull();expect(screen.queryByText('第二条正文')).toBeNull()
- expect(screen.getByLabelText('站点公告').querySelectorAll('aside')).toHaveLength(1)
- expect(screen.getByText('2条')).toBeTruthy()
- fireEvent.click(open);expect(screen.getByRole('dialog',{name:'服务通知'}).getAttribute('aria-modal')).toBe('true')
- expect(HTMLDialogElement.prototype.showModal).toHaveBeenCalledOnce()
- fireEvent.click(screen.getByRole('button',{name:'下一条公告'}))
- expect(screen.getByRole('dialog',{name:'第二条公告'})).toBeTruthy()
- expect(screen.getByText('第二条正文')).toBeTruthy()
- fireEvent.click(screen.getByRole('button',{name:'关闭本条公告'}))
- expect(localStorage.getItem('site-announcement-dismissals')).toContain('notice-two:1')
- expect(localStorage.getItem('site-announcement-dismissals')).not.toContain('"notice:1"')
- expect(screen.getByRole('dialog',{name:'服务通知'})).toBeTruthy()
- expect(HTMLDialogElement.prototype.showModal).toHaveBeenCalledOnce()
- fireEvent.click(screen.getByRole('button',{name:'关闭公告弹窗'}))
- expect(screen.queryByRole('dialog')).toBeNull()
- expect(screen.getByRole('button',{name:'打开公告：服务通知'})).toBeTruthy()
-})
-it('closes the modal with its close button or native Escape without dismissing the notice and restores focus',async()=>{
- mocks.request.mockResolvedValue(data());mount(<SiteAnnouncements scope="studio"/>)
- const open=await screen.findByRole('button',{name:'打开公告：服务通知'})
- open.focus();fireEvent.click(open)
- expect(document.body.style.overflow).toBe('hidden')
- expect(document.activeElement).toBe(screen.getByRole('button',{name:'关闭公告弹窗'}))
- fireEvent.click(screen.getByRole('button',{name:'关闭公告弹窗'}))
- expect(screen.queryByRole('dialog')).toBeNull();expect(document.activeElement).toBe(open)
- expect(document.body.style.overflow).toBe('')
- expect(localStorage.getItem('site-announcement-dismissals')).toBeNull()
- fireEvent.click(open);fireEvent(screen.getByRole('dialog'),new Event('cancel',{bubbles:true,cancelable:true}))
- expect(screen.queryByRole('dialog')).toBeNull();expect(document.activeElement).toBe(open)
- expect(sessionStorage.getItem('site-announcement-dismissals')).toBeNull()
+it('supports an unlimited publication and Escape, then restores focus to the workspace', async () => {
+  const current = data()
+  current.announcements[0].endsAt = null
+  mocks.request.mockResolvedValue(current)
+  mount(<><button data-studio-content-focus>创作内容</button><SiteAnnouncements scope="studio" /></>)
+  const dialog = await screen.findByRole('dialog')
+  expect(document.activeElement).toBe(dialog)
+  fireEvent(dialog, new Event('cancel', { cancelable: true }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: '创作内容' }))
 })
 it('removes an open modal when the published version expires without opening another notice',async()=>{
  const current=data();mocks.request.mockResolvedValue(current);const client=mount(<SiteAnnouncements scope="studio"/>)
- fireEvent.click(await screen.findByRole('button',{name:'打开公告：服务通知'}));expect(screen.getByRole('dialog')).toBeTruthy()
+ expect(await screen.findByRole('dialog')).toBeTruthy()
  const now=Date.now()
  await act(async()=>client.setQueryData(['site-content','public'],{...current,serverNow:new Date(now).toISOString(),announcements:[{...current.announcements[0],endsAt:new Date(now-1).toISOString()}]}))
  await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull())
@@ -223,13 +197,14 @@ it('removes an open modal when the published version expires without opening ano
 it('persists a TTL close across remounts and makes the exact expiry boundary visible again',async()=>{
  const start=Date.now(),clock=vi.spyOn(Date,'now').mockReturnValue(start),current=data()
  current.announcements[0].dismissal={mode:'ttl',seconds:60};mocks.request.mockResolvedValue(current)
- mount(<SiteAnnouncements scope="studio"/>);fireEvent.click(await screen.findByRole('button',{name:'关闭公告：服务通知'}))
+ mount(<SiteAnnouncements scope="studio"/>);fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button',{name:'关闭'}))
+ await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull())
  expect(localStorage.getItem('site-announcement-dismissals')).toContain('notice:1');cleanup()
  clock.mockReturnValue(start+59999);mocks.request.mockResolvedValue({...current,serverNow:new Date(start+59999).toISOString()})
  const client=mount(<SiteAnnouncements scope="studio"/>);await waitFor(()=>expect(client.getQueryData(['site-content','public'])).toBeDefined())
- expect(screen.queryByRole('button',{name:'打开公告：服务通知'})).toBeNull();cleanup()
+ expect(screen.queryByRole('dialog')).toBeNull();cleanup()
  clock.mockReturnValue(start+60000);mocks.request.mockResolvedValue({...current,serverNow:new Date(start+60000).toISOString()})
- mount(<SiteAnnouncements scope="studio"/>);expect(await screen.findByRole('button',{name:'打开公告：服务通知'})).toBeTruthy()
+ mount(<SiteAnnouncements scope="studio"/>);expect(await screen.findByRole('dialog')).toBeTruthy()
 })
 it('keeps a close effective in the current view even when browser storage is unavailable',async()=>{
  mocks.request.mockResolvedValue(data());mount(<SiteAnnouncements scope="home"/>)
@@ -240,7 +215,7 @@ it('keeps a close effective in the current view even when browser storage is una
 
 it('cycles Tab inside the centered dialog without reaching background controls',async()=>{
   mocks.request.mockResolvedValue(data())
-  mount(<SiteAnnouncements scope="studio"/>)
+  mount(<SiteAnnouncements scope="home"/>)
   fireEvent.click(await screen.findByRole('button',{name:'打开公告：服务通知'}))
   const close=screen.getByRole('button',{name:'关闭公告弹窗'}),dismiss=screen.getByRole('button',{name:'关闭本条公告'})
   dismiss.focus();fireEvent.keyDown(dismiss,{key:'Tab'})

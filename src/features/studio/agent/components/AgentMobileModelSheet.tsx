@@ -1,3 +1,4 @@
+import { studioInert } from '@/features/studio/components/use-studio-presence'
 import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../components/ModelPriceDetails'
 import { useEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -7,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { ReasoningSlider } from './ReasoningSlider'
 
 type Props = {
+  phase?: 'open' | 'closing'
   modelOptions: CreditModelOption[]
   customModels: CustomModelView[]
   modelTier: CreditModelTier
@@ -24,6 +26,7 @@ type Props = {
 
 /** A single viewport-bound surface, never positioned relative to a narrow toolbar. */
 export function AgentMobileModelSheet(props: Props) {
+  const { phase = 'open' } = props
   const ref = useRef<HTMLDialogElement>(null)
   const close = useRef(props.onClose)
   close.current = props.onClose
@@ -62,7 +65,7 @@ export function AgentMobileModelSheet(props: Props) {
   )
 
   return createPortal(
-    <dialog ref={ref} data-native-back-dismiss aria-label="模型与思考设置" onCancel={props.onClose} onClick={event => { if (event.target === event.currentTarget) props.onClose() }} className="studio-workspace fixed inset-x-0 bottom-0 top-auto m-0 w-full max-w-none overflow-hidden rounded-t-2xl border-0 bg-[var(--surface-solid)] p-0 text-[var(--text-primary)] backdrop:bg-black/35">
+    <dialog data-studio-surface="sheet" data-phase={phase} {...studioInert(phase === 'closing')} ref={ref} data-native-back-dismiss aria-label="模型与思考设置" onCancel={event => { event.preventDefault(); props.onClose() }} onClick={event => { if (event.target === event.currentTarget) props.onClose() }} className="studio-workspace fixed inset-x-0 bottom-0 top-auto m-0 w-full max-w-none overflow-hidden rounded-t-2xl border-0 bg-[var(--surface-solid)] p-0 text-[var(--text-primary)] backdrop:bg-black/35">
       <div className="flex max-h-[inherit] flex-col pb-[max(12px,env(safe-area-inset-bottom))]">
         <header className="flex shrink-0 items-center justify-between border-b border-[var(--border-subtle)] px-4 py-2">
           <h2 className="text-base font-semibold">模型与思考</h2>

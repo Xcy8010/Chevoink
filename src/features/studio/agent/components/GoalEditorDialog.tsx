@@ -1,3 +1,4 @@
+import { useStudioPresence, studioInert } from '@/features/studio/components/use-studio-presence'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { CheckCircle2, History, LoaderCircle, RefreshCw, Save, Target, X } from 'lucide-react'
@@ -44,9 +45,10 @@ export function GoalEditorDialog({ open, goal, initialObjective, busy, error, de
     setValidationError('')
   }, [goal, initialObjective, open])
 
-  useDialogFocusTrap({ panel, open, onClose: () => { if (!busy) onClose() } })
+  const { rendered, phase } = useStudioPresence(open ? true : null)
+  useDialogFocusTrap({ panel, open: Boolean(rendered), onClose: () => { if (open && !busy) onClose() } })
 
-  if (!open) return null
+  if (!rendered) return null
 
   const save = () => {
     if (updating) return
@@ -57,8 +59,8 @@ export function GoalEditorDialog({ open, goal, initialObjective, busy, error, de
   const hasNewVersion = goal && base && goal.id === base.id && goal.stateVersion > base.stateVersion
 
   return createPortal(
-    <div className="studio-workspace fixed inset-0 z-[160] flex min-h-0 items-center justify-center overflow-hidden bg-[rgba(15,23,42,0.32)] px-3 py-3 backdrop-blur-[2px] sm:px-4 sm:py-6" role="presentation" onClick={onClose}>
-      <section ref={panel} role="dialog" aria-modal="true" aria-label="编辑目标" tabIndex={-1} className="flex max-h-[calc(100dvh-24px)] min-h-0 w-full max-w-xl flex-col overflow-hidden rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_28px_80px_rgba(15,23,42,0.28)] sm:max-h-[calc(100dvh-48px)]" onClick={event => event.stopPropagation()}>
+    <div data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} className="studio-workspace fixed inset-0 z-[160] flex min-h-0 items-center justify-center overflow-hidden bg-[rgba(15,23,42,0.32)] px-3 py-3 backdrop-blur-[2px] sm:px-4 sm:py-6" role="presentation" onClick={onClose}>
+      <section data-studio-motion-panel ref={panel} role="dialog" aria-modal="true" aria-label="编辑目标" tabIndex={-1} className="flex max-h-[calc(100dvh-24px)] min-h-0 w-full max-w-xl flex-col overflow-hidden rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_28px_80px_rgba(15,23,42,0.28)] sm:max-h-[calc(100dvh-48px)]" onClick={event => event.stopPropagation()}>
         <header className="flex shrink-0 items-center gap-2.5 border-b border-[var(--border-subtle)] px-4 py-3.5 sm:px-5">
           <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[11px] bg-[var(--surface-muted)] text-[var(--text-secondary)]"><Target aria-hidden="true" className="h-4 w-4" /></span>
           <h2 className="min-w-0 flex-1 text-sm font-semibold text-[var(--text-primary)]">{readOnly ? '目标详情' : goal ? '修改目标' : '新建目标'}</h2>

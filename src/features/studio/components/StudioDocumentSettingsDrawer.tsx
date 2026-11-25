@@ -76,6 +76,7 @@ export default function StudioDocumentSettingsDrawer({
       }}
     >
       <section
+        data-studio-motion-panel
         ref={panelRef}
         role="dialog"
         aria-modal="true"

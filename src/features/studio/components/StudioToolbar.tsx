@@ -1,3 +1,4 @@
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { useEffect, useRef, useState } from 'react'
 import { BookOpenText, FileText, FolderDown, ImagePlus, MoreHorizontal, Save, Settings2, Sparkles, Trash2, Upload, WandSparkles } from 'lucide-react'
 import { Link } from 'react-router-dom'
@@ -182,8 +183,8 @@ export default function StudioToolbar({
               >
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
-              {moreOpen ? (
-                <div className="absolute right-0 top-[calc(100%+6px)] z-40 w-44 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[var(--shadow-soft)]">
+              <StudioPresence kind="menu">{moreOpen ? (
+                <div className="absolute right-0 top-[calc(100%+6px)] z-40 [--studio-motion-origin:top_right] w-44 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[var(--shadow-soft)]">
                   <button
                     type="button"
                     className={moreItemClass}
@@ -239,7 +240,7 @@ export default function StudioToolbar({
                     删除作品
                   </button>
                 </div>
-              ) : null}
+              ) : null}</StudioPresence>
             </div>
           </div>
           <SaveStatusPill state={saveState} message={saveMessage} onRetry={onRetrySave} />

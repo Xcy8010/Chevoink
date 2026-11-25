@@ -1,3 +1,4 @@
+import { StudioPresence } from './StudioPresence'
 import StudioPaneSkeleton from './StudioPaneSkeleton'
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronDown, FilePenLine, FolderPlus, MessageSquarePlus, MoreHorizontal, RefreshCcw, Settings2, Upload } from 'lucide-react'
@@ -406,7 +407,7 @@ export default function EditorCanvas({
             >
               <MoreHorizontal className="h-4 w-4" />
             </button>
-            {mobileMenuOpen ? (
+            <StudioPresence kind="menu">{mobileMenuOpen ? (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setMobileMenuOpen(false)} aria-hidden />
                 <div className="absolute right-0 top-full z-40 mt-1 max-h-[50dvh] w-52 overflow-y-auto overscroll-contain rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] py-1 shadow-[var(--shadow-modal)]">
@@ -443,7 +444,7 @@ export default function EditorCanvas({
                   ) : null}
                 </div>
               </>
-            ) : null}
+            ) : null}</StudioPresence>
           </div>
         </div>
         {pendingChapterReview ? (

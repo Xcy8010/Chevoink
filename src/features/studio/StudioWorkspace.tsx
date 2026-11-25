@@ -1,3 +1,5 @@
+import { useStudioPresence } from './components/use-studio-presence'
+import { StudioPresence } from './components/StudioPresence'
 import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ComponentProps } from 'react'
@@ -49,6 +51,7 @@ import PublishNovelDialog from './components/PublishNovelDialog'
 import StudioCommandBar from './components/StudioCommandBar'
 import StudioDesktopRail from './components/StudioDesktopRail'
 import StudioDesktopContent from './components/StudioDesktopContent'
+import { SiteAnnouncements } from '@/features/site-content/public'
 import StudioDesktopInvite from './components/StudioDesktopInvite'
 import StudioMobileAccountCard from './components/StudioMobileAccountCard'
 import StudioMobileHeader from './components/StudioMobileHeader'
@@ -1201,6 +1204,9 @@ export default function StudioWorkspace() {
     hydratedScope: workPanelScope, draftRef: chapterDraftStateRef, dirtyRef: chapterDirtyRef,
     setDraft: setChapterDraft, setDirty: setChapterDirty, setSaveState: setChapterSaveState,
     setLastSavedAt: setChapterLastSavedAt, setSaveMessage: setChapterSaveMessage })
+  const { rendered: visibleDraftChoice } = useStudioPresence(chapterDraftChoice && {
+    choice: chapterDraftChoice, scope: taskUiScope, chapterId: selectedChapterId,
+  })
   // 切章守卫与编辑器 blur flush 可能几乎同时触发保存，in-flight 期间直接跳过，避免并发写同一章节。
   const selectedChapterIdStateRef = useRef(selectedChapterId)
   selectedChapterIdStateRef.current = selectedChapterId
@@ -4321,6 +4327,7 @@ export default function StudioWorkspace() {
         data-platform={platformCapabilities.native ? 'app' : 'web'}
         data-visual-viewport={platformCapabilities.visualViewport ? 'supported' : 'fallback'}
       >
+        <SiteAnnouncements scope="studio" ready={workPanelReady && !switchingWork && !agentSessionsResolving && !studioSettingsOpen} />
         {studioQuery.isRefetchError ? <AppStateRefreshNotice retry={studioQuery.refetch} busy={studioQuery.isFetching} /> : null}
         {chapterDirty && chapterSaveState === 'error' && !activeWorkspaceDocument && (
           <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-4 py-2 text-sm">
@@ -4330,6 +4337,7 @@ export default function StudioWorkspace() {
         )}
         {!desktopLayout && <div
           ref={mobileSwipe.root}
+          data-studio-content-focus tabIndex={-1}
           className={cn('flex min-h-0 flex-1 flex-col lg:hidden', mobileMotion && 'studio-mobile-motion')}
           data-primary-view={mobileMotion && mobilePrimary ? mobileView : undefined}
           data-drawer-open={mobileMotion ? mobileMoreOpen : undefined}
@@ -4833,7 +4841,7 @@ export default function StudioWorkspace() {
             </StudioDesktopContent>
           </div>
         </div>}
-        {desktopInviteOpen && <StudioDesktopInvite onClose={() => setDesktopInviteOpen(false)} />}
+        <StudioDesktopInvite open={desktopInviteOpen} onClose={() => setDesktopInviteOpen(false)} />
         {studioSettingsOpen !== null && (
             <StudioSettingsDialog
               open={studioSettingsOpen}
@@ -4864,9 +4872,9 @@ export default function StudioWorkspace() {
               onTaskArchived={handleAgentTaskArchived}
             />
         )}
-        {desktopLayout && activeToolPanel === 'meta' && novelForm && (
+        <StudioPresence kind="dialog">{desktopLayout && activeToolPanel === 'meta' && novelForm && (
           <div className="studio-tool-overlay fixed inset-0 z-[90]" onClick={event => { if (event.target === event.currentTarget) setActiveToolPanel(null) }}>
-            <div className="studio-tool-dialog studio-tool-dialog--wide" role="dialog" aria-modal="true" aria-label="作品设置" ref={metaDialog} tabIndex={-1}>
+            <div data-studio-motion-panel className="studio-tool-dialog studio-tool-dialog--wide" role="dialog" aria-modal="true" aria-label="作品设置" ref={metaDialog} tabIndex={-1}>
               <MetaPanel
                 novelForm={novelForm}
                 coverUrl={currentNovel?.coverUrl}
@@ -4883,11 +4891,11 @@ export default function StudioWorkspace() {
               />
             </div>
           </div>
-        )}
-        {activeToolPanel === 'cover' ? renderCoverToolPanel(true) : null}
+        )}</StudioPresence>
+        <StudioPresence kind="dialog">{activeToolPanel === 'cover' ? renderCoverToolPanel(true) : null}</StudioPresence>
       </div>
 
-      {editorChapterSettingsOpen && chapterDraft ? (
+      <StudioPresence kind="dialog">{editorChapterSettingsOpen && chapterDraft ? (
         <ChapterSettingsPanel
           chapterDraft={chapterDraft}
           onChange={handleChapterDraftChange}
@@ -4896,10 +4904,11 @@ export default function StudioWorkspace() {
           onRequestDelete={handleRequestDeleteChapterFromEditor}
           onClose={() => setEditorChapterSettingsOpen(false)}
         />
-      ) : null}
-      {chapterDraftChoice && <ChapterDraftChoice {...chapterDraftChoice} />}
-      {planCreateOwner === workspaceOwnerRef.current ? <CreatePlanDialog onClose={() => setPlanCreateOwner(current => current === planCreateOwner ? null : current)} onCreate={handleCreatePlanFile} /> : null}
-      {planSettingsPlan ? (
+      ) : null}</StudioPresence>
+      {visibleDraftChoice && visibleDraftChoice.scope === taskUiScope && visibleDraftChoice.chapterId === selectedChapterId
+        && <ChapterDraftChoice {...visibleDraftChoice.choice} open={Boolean(chapterDraftChoice)} />}
+      <StudioPresence kind="dialog">{planCreateOwner === workspaceOwnerRef.current ? <CreatePlanDialog onClose={() => setPlanCreateOwner(current => current === planCreateOwner ? null : current)} onCreate={handleCreatePlanFile} /> : null}</StudioPresence>
+      <StudioPresence kind="dialog">{planSettingsPlan ? (
         <PlanSettingsPanel
           key={`${activeNovelId}:${planSettingsPlan.id}`}
           plan={planSettingsPlan}
@@ -4913,7 +4922,7 @@ export default function StudioWorkspace() {
           }}
           onClose={() => setPlanSettingsPlanId(null)}
         />
-      ) : null}
+      ) : null}</StudioPresence>
       <ConfirmDialog
         open={Boolean(workspaceDialog)}
         title={workspaceDialog?.title ?? ''}

@@ -1,3 +1,4 @@
+import { studioInert, useStudioDismiss } from './use-studio-presence'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, LoaderCircle, X } from 'lucide-react'
@@ -17,7 +18,8 @@ type ImageLightboxProps = {
 }
 
 /** 图片查看器：全屏放大预览封面图，支持下载，Esc / 点击遮罩关闭 */
-export default function ImageLightbox({ src, alt, downloadName, onClose, trapFocus = false }: ImageLightboxProps) {
+export default function ImageLightbox({ src, alt, downloadName, onClose: finishClose, trapFocus = false }: ImageLightboxProps) {
+  const { phase, dismiss: onClose } = useStudioDismiss(finishClose)
   const [downloading, setDownloading] = useState(false)
   const panel = useRef<HTMLDivElement>(null)
   useDialogFocusTrap({ panel, open: trapFocus, onClose })
@@ -44,7 +46,7 @@ export default function ImageLightbox({ src, alt, downloadName, onClose, trapFoc
   }
 
   return createPortal(
-    <div
+    <div data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')}
       ref={panel}
       tabIndex={trapFocus ? -1 : undefined}
       className="fixed inset-0 z-[140] flex items-center justify-center bg-[rgba(15,23,42,0.72)] px-4 py-8 backdrop-blur-[4px]"
@@ -76,7 +78,7 @@ export default function ImageLightbox({ src, alt, downloadName, onClose, trapFoc
           <X className="h-4 w-4" />
         </Button>
       </div>
-      <img
+      <img data-studio-motion-panel
         src={src}
         alt={alt ?? '图片预览'}
         className="max-h-[86vh] max-w-full rounded-[18px] object-contain shadow-[0_24px_64px_rgba(0,0,0,0.45)]"

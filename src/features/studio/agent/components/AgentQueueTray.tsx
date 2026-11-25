@@ -1,3 +1,4 @@
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { CornerDownRight, GitBranch, ListEnd, MoreHorizontal, Pencil, SquarePlus, Trash2 } from 'lucide-react'
@@ -67,12 +68,12 @@ export function AgentQueueTray({ items, onAction }: Props) {
       <textarea autoFocus aria-label="编辑待发需求" maxLength={20000} disabled={busy} value={editing.text} onChange={event => setEditing({ ...editing, text: event.target.value })} className="max-h-32 min-h-20 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-default)] p-2 text-sm" onKeyDown={event => { if (event.key === 'Escape' && !busy) setEditing(null) }} />
       <div className="flex justify-end gap-3"><button type="button" disabled={busy} className="min-h-11 px-2" onClick={() => setEditing(null)}>取消</button><button type="submit" disabled={busy || !editing.text.trim()} className="min-h-11 px-2 font-medium disabled:opacity-40">保存修改</button></div>
     </form> : null}
-    {menu && selected ? createPortal(<div ref={menuRef} role="menu" aria-label="待发操作" style={{ position: 'fixed', left: menu.left, top: menu.top, width: 208 }} className="studio-workspace z-[200] rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 text-xs text-[var(--text-primary)] shadow-xl">
+    {typeof document !== 'undefined' && createPortal(<StudioPresence kind="menu">{menu && selected ? <div ref={menuRef} role="menu" aria-label="待发操作" style={{ position: 'fixed', left: menu.left, top: menu.top, width: 208 }} className="studio-workspace z-[200] rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 text-xs text-[var(--text-primary)] shadow-xl">
       {(['edit', 'new', 'fork'] as const).map(action => <button key={action} type="button" role="menuitem" className="flex min-h-11 w-full items-center rounded-lg px-3 text-left hover:bg-[var(--surface-muted)]" onClick={() => {
         setMenu(null)
         if (action === 'edit') setEditing({ item: selected, text: selected.prompt })
         else void act(selected, action)
       }}>{action === 'edit' ? <Pencil className="mr-2 h-4 w-4 shrink-0" /> : action === 'new' ? <SquarePlus className="mr-2 h-4 w-4 shrink-0" /> : <GitBranch className="mr-2 h-4 w-4 shrink-0" />}{action === 'edit' ? '编辑' : action === 'new' ? '在新任务窗口发送' : '创建分支并发送'}</button>)}
-    </div>, document.fullscreenElement ?? document.body) : null}
+    </div> : null}</StudioPresence>, document.fullscreenElement ?? document.body)}
   </section>
 }

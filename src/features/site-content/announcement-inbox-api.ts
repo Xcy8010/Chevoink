@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useMutation, useMutationState, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { requestJson } from '@/app/api-client'
 import { refreshConfigurationQueries } from '@/app/live-configuration'
 import { useShellStore } from '@/store/useShellStore'
@@ -28,6 +28,11 @@ export function useAnnouncementInbox(enabled = true, includeGuest = false, verif
   const sessionViewerId = useShellStore(state => state.authStatus === 'authenticated' ? state.sessionUser?.id ?? null : null)
   const viewerId = verifiedViewerId ?? sessionViewerId
   const queryKey = [...inboxKey, viewerId] as const
+  const readKey = [...queryKey, 'read'] as const
+  const pending = useMutationState({
+    filters: { mutationKey: readKey, exact: true, status: 'pending' },
+    select: mutation => mutation.state.variables as ReadAnnouncementsRequest,
+  }).filter(request => request.viewerId === viewerId)
   const client = useQueryClient()
   useEffect(() => {
     if (!enabled || typeof BroadcastChannel === 'undefined') return
@@ -39,6 +44,13 @@ export function useAnnouncementInbox(enabled = true, includeGuest = false, verif
   }, [client, enabled])
   const query = useQuery({
     queryKey,
+    select: pending.length ? (data: AnnouncementInbox): AnnouncementInbox => ({
+      ...data,
+      items: data.items.map(item => pending.some(read => read.action === 'one' && read.versionId === item.versionId)
+        ? { ...item, unread: false } : item),
+      personalItems: data.personalItems?.map(item => pending.some(read => read.action === 'personal' && read.notificationId === item.id)
+        ? { ...item, unread: false } : item),
+    }) : undefined,
     queryFn: async ({ signal }) => {
       const inbox = await requestJson<AnnouncementInbox>(endpoint, { signal, cache: 'no-store' })
       if (inbox.viewerId !== viewerId) throw new Error('登录状态已变更，请刷新后重试。')
@@ -55,6 +67,7 @@ export function useAnnouncementInbox(enabled = true, includeGuest = false, verif
     },
   })
   const read = useMutation({
+    mutationKey: readKey,
     mutationFn: (input: ReadAnnouncementsRequest) => requestJson<ReadAnnouncementsResult>(endpoint + '/read', {
       method: 'POST',
       body: JSON.stringify(input),

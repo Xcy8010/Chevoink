@@ -1,3 +1,5 @@
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
+import { useStudioPresence } from '@/features/studio/components/use-studio-presence'
 import { CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../../shared/contracts/agent-window-configuration.js'
 import { TIER_LABELS } from '../../../account/ledger-label'
 import { PUBLIC_WEB_QUESTION_LIMIT } from '../../../../../shared/contracts/public-web-research.js'
@@ -334,6 +336,7 @@ export function AgentComposer({
   // 点击「模型」行进入模型列表、返回或选中后回到根视图；桌面端仍走 hover/focus 行为完全不变
   const [mobileModelsOpen, setMobileModelsOpen] = useState(false)
   const [mobileModelSheetOpen, setMobileModelSheetOpen] = useState(false)
+  const openSettingsAfterSheet = useRef(false)
   const { info: voiceNotice } = useToast()
   const editorRef = useRef<HTMLDivElement | null>(null)
   const imageInputRef = useRef<HTMLInputElement | null>(null)
@@ -364,6 +367,13 @@ export function AgentComposer({
     },
   })
   const voiceActive = voice.state !== 'idle' && voice.state !== 'checking'
+  const modelSheet = useStudioPresence(mobileModelSheetOpen && !disabled && !voiceActive ? true : null)
+  useEffect(() => {
+    if (!modelSheet.rendered && openSettingsAfterSheet.current) {
+      openSettingsAfterSheet.current = false
+      onOpenModelSettings()
+    }
+  }, [modelSheet.rendered, onOpenModelSettings])
   const editorLocked = draftReadOnly || voiceActive || sending
 
   useEffect(() => {
@@ -1054,15 +1064,15 @@ export function AgentComposer({
       onDrop={(event) => void handleDrop(event)}
       className={`agent-composer-glass ${goalMode ? 'agent-composer-goal' : ''} relative rounded-[20px] border bg-[var(--studio-composer-bg,var(--surface-default))] p-2.5 shadow-sm transition-colors ${dragActive ? 'border-[var(--text-primary)]' : 'border-[var(--border-subtle)]'}`}
     >
-      {slashVisible ? <div
+      <StudioPresence kind="menu">{slashVisible ? <div
         ref={slashCardRef}
         tabIndex={-1}
         id={slashListId}
         role={slashSubmenu ? 'region' : 'listbox'}
         aria-label="工具"
         onKeyDown={event => { if (!event.nativeEvent.isComposing && event.key === 'Escape') { event.preventDefault(); dismissSlashMenu() } }}
-        className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-[min(32rem,60dvh)] overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] py-1 shadow-[0_14px_34px_rgba(15,23,42,0.16)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&_*]:[scrollbar-width:none] [&_*::-webkit-scrollbar]:hidden"
-      >{renderToolMenu(true)}</div> : null}
+        className="absolute bottom-full left-0 right-0 z-50 mb-2 [--studio-motion-origin:bottom_center] max-h-[min(32rem,60dvh)] overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] py-1 shadow-[0_14px_34px_rgba(15,23,42,0.16)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&_*]:[scrollbar-width:none] [&_*::-webkit-scrollbar]:hidden"
+      >{renderToolMenu(true)}</div> : null}</StudioPresence>
       {dragActive ? <div className="pointer-events-none absolute inset-1 z-20 flex items-center justify-center rounded-[16px] bg-[var(--surface-default)]/95 text-xs font-medium text-[var(--text-primary)]">松开即可添加引用、图片或文件</div> : null}
       {publicSearch ? <div className="mb-2 flex items-center gap-2 rounded-md border border-[var(--border-subtle)] px-2">
         <Globe2 aria-hidden className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
@@ -1198,12 +1208,12 @@ export function AgentComposer({
       {pendingVoice?.scope === scope ? <div className="px-1.5 py-2 text-xs text-[var(--text-secondary)]" role="status">草稿已变化，转写文字尚未插入。<div className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap">{pendingVoice.text}</div><button type="button" disabled={disabled || running || sending || voiceActive} className="mr-3 min-h-11 underline disabled:opacity-50" onClick={() => { if (!disabled && !running && !sending && !voiceActive) applyVoiceText(pendingVoice.text) }}>插入到末尾</button><button type="button" className="min-h-11" onClick={() => setPendingVoice(null)}>放弃</button></div> : null}
       {voiceActive ? <AgentVoiceInputBar voice={voice} /> : null}
       {styleLearningOpen ? <StyleLearningDialog key={novelId} novelId={novelId} initialModel={modelTier === 'basic' ? undefined : { modelTier, customModelId, reasoningEffort: activeReasoningEffort }} onClose={() => setStyleLearningOpen(false)} /> : null}
-      {mobileModelSheetOpen && !disabled && !voiceActive ? <AgentMobileModelSheet
+      {modelSheet.rendered ? <AgentMobileModelSheet phase={modelSheet.phase}
         modelOptions={modelOptions} customModels={customModels} modelTier={modelTier} customModelId={customModelId}
         activeModelLabel={activeModelLabel} activeReasoningEffort={activeReasoningEffort} activeReasoningEfforts={activeReasoningEfforts}
         onTier={onModelTierChange} onCustom={id => { onCustomModelChange(id); onModelTierChange('custom') }}
         onReasoning={effort => onReasoningEffortChange(activeModelKey, effort)}
-        onSettings={() => { setMobileModelSheetOpen(false); onOpenModelSettings() }} onClose={() => setMobileModelSheetOpen(false)}
+        onSettings={() => { openSettingsAfterSheet.current = true; setMobileModelSheetOpen(false) }} onClose={() => setMobileModelSheetOpen(false)}
       /> : null}
       <div className={cn('mt-1.5 flex items-center justify-between gap-1', voiceActive && 'hidden')}>
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
@@ -1223,7 +1233,7 @@ export function AgentComposer({
             className="hidden"
             onChange={(event) => void handlePickFiles(event)}
           />
-          <details ref={attachmentMenuRef} className="group/attach relative" data-disabled={disabled || undefined}>
+          <details data-studio-disclosure ref={attachmentMenuRef} className="group/attach relative" data-disabled={disabled || undefined}>
             <summary
               onClick={(event) => { if (disabled) event.preventDefault(); else { setSlashToken(null); setSlashSubmenu(null) } }}
               className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] group-data-[disabled=true]/attach:pointer-events-none group-data-[disabled=true]/attach:opacity-40 [&::-webkit-details-marker]:hidden"
@@ -1236,7 +1246,7 @@ export function AgentComposer({
               {renderToolMenu(false)}
             </div>
           </details>
-          <details ref={creativeModeRef} className="group/mode relative" data-disabled={disabled || undefined}>
+          <details data-studio-disclosure ref={creativeModeRef} className="group/mode relative" data-disabled={disabled || undefined}>
             <summary
               onClick={(event) => { if (disabled) event.preventDefault() }}
               aria-label="创作模式"
@@ -1247,7 +1257,7 @@ export function AgentComposer({
               <span className="max-w-16 truncate mobile:hidden">{CREATIVE_MODES.find((item) => item.value === creativeFreedom)?.label}</span>
               <ChevronDown className="h-3 w-3 transition-transform group-open/mode:rotate-180" />
             </summary>
-            <div className="absolute bottom-full left-0 z-50 mb-2 max-h-[60dvh] w-64 overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-[0_14px_34px_rgba(15,23,42,0.16)] motion-safe:origin-bottom-left motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(0.2,0.8,0.2,1)]">
+            <div className="absolute bottom-full left-0 z-50 mb-2 max-h-[60dvh] w-64 overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-[0_14px_34px_rgba(15,23,42,0.16)] motion-safe:origin-bottom-left">
               {CREATIVE_MODES.map((mode) => (
                 <button
                   key={mode.value}
@@ -1267,7 +1277,7 @@ export function AgentComposer({
             </div>
           </details>
           {canUseGoalEntry ? <GoalModeChip active={goalActive} draft={goalMode} busy={sending || voiceActive || disabled} onOpen={() => onGoalOpen?.()} onCancel={() => setGoalMode(false)} /> : null}
-          <details ref={modelMenuRef} className="group/model relative z-[120] ml-auto min-w-0" data-disabled={(disabled || modelLoading) || undefined} onToggle={(event) => { if (!(event.currentTarget as HTMLDetailsElement).open) { setMobileModelsOpen(false) } }}>
+          <details data-studio-disclosure ref={modelMenuRef} className="group/model relative z-[120] ml-auto min-w-0" data-disabled={(disabled || modelLoading) || undefined} onToggle={(event) => { if (!(event.currentTarget as HTMLDetailsElement).open) { setMobileModelsOpen(false) } }}>
             <summary
               onClick={(event) => {
                 if (disabled || modelLoading) { event.preventDefault(); return }
@@ -1292,7 +1302,7 @@ export function AgentComposer({
               </>}
               <ChevronDown className="h-3 w-3 transition-transform group-open/model:rotate-180" />
             </summary>
-            <div className={cn('absolute bottom-full right-0 z-[140] mb-2 w-[248px] overflow-visible rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1.5 shadow-[0_18px_46px_rgba(15,23,42,0.18)] motion-safe:origin-bottom-right motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(0.2,0.8,0.2,1)]', mobileModelsOpen && 'mobile:invisible mobile:pointer-events-none')}>
+            <div className={cn('absolute bottom-full right-0 z-[140] mb-2 w-[248px] overflow-visible rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1.5 shadow-[0_18px_46px_rgba(15,23,42,0.18)] motion-safe:origin-bottom-right', mobileModelsOpen && 'mobile:invisible mobile:pointer-events-none')}>
               <div className="group/models relative">
                 <button type="button" onClick={() => setMobileModelsOpen(true)} className="flex h-9 w-full items-center justify-between rounded-[9px] px-2.5 text-xs hover:bg-[var(--surface-muted)]"><span className="font-medium text-[var(--text-primary)]">模型</span><span className="inline-flex max-w-36 items-center gap-1 truncate text-[var(--text-secondary)]">{activeModelLabel}<ChevronRight className="h-3 w-3" /></span></button>
                 <div className={cn('invisible absolute bottom-0 right-[calc(100%-1px)] z-[150] w-60 translate-x-1 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1.5 opacity-0 shadow-[0_18px_46px_rgba(15,23,42,0.2)] transition-[opacity,transform,visibility] duration-150 ease-out group-hover/models:visible group-hover/models:translate-x-0 group-hover/models:opacity-100 group-focus-within/models:visible group-focus-within/models:translate-x-0 group-focus-within/models:opacity-100 group-has-[[data-model-price-open]]/models:visible group-has-[[data-model-price-open]]/models:translate-x-0 group-has-[[data-model-price-open]]/models:opacity-100 mobile:left-0 mobile:right-0 mobile:w-auto mobile:translate-x-0 mobile:overflow-y-auto mobile:max-h-72 mobile:transition-none mobile:pointer-events-auto', mobileModelsOpen ? 'mobile:visible mobile:opacity-100' : 'mobile:hidden')}>

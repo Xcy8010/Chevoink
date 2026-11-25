@@ -1,3 +1,4 @@
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown, Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -44,8 +45,8 @@ export function StudioPerspectiveMenu({ perspective, enabled, onChange }: MenuPr
       {perspective === 'work' ? 'Studio' : 'Editor'}
       <ChevronDown aria-hidden="true" className={cn('h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)] motion-safe:transition-transform', open && 'rotate-180')} />
     </button>
-    {open && <div id={id} role="group" aria-label="工作模式"
-      className="studio-floating-menu absolute left-0 top-[calc(100%+5px)] z-50 w-60 rounded-[14px] border border-[var(--border-subtle)] p-1.5 shadow-[0_12px_32px_rgba(0,0,0,.2)]">
+    <StudioPresence kind="menu">{open && <div id={id} role="group" aria-label="工作模式"
+      className="studio-floating-menu absolute left-0 [--studio-motion-origin:top_left] top-[calc(100%+5px)] z-50 w-60 rounded-[14px] border border-[var(--border-subtle)] p-1.5 shadow-[0_12px_32px_rgba(0,0,0,.2)]">
       {modes.map(mode => <button key={mode.value} type="button" disabled={!enabled}
         aria-label={mode.title + ' ' + mode.description} aria-pressed={perspective === mode.value} onClick={() => {
           setOpen(false)
@@ -57,7 +58,7 @@ export function StudioPerspectiveMenu({ perspective, enabled, onChange }: MenuPr
           <span className="mt-0.5 block text-xs text-[var(--text-secondary)]">{mode.description}</span></span>
         {perspective === mode.value && <Check className="h-4 w-4 shrink-0" aria-hidden="true" />}
       </button>)}
-    </div>}
+    </div>}</StudioPresence>
   </div>
 }
 

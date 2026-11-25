@@ -1,3 +1,4 @@
+import { StudioPresence } from './StudioPresence'
 import { useRef, type ReactNode } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
@@ -36,13 +37,12 @@ export default function ConfirmDialog({
 }: ConfirmDialogProps) {
   const panel = useRef<HTMLDivElement>(null)
   useDialogFocusTrap({ panel, open, onClose: () => { if (!busy) onCancel() } })
-  if (!open) {
-    return null
-  }
+  if (typeof document === 'undefined') return null
 
   return createPortal(
+    <StudioPresence kind="dialog">{open && (
     <div ref={panel} tabIndex={-1} data-workspace-confirm-dialog role="dialog" aria-modal="true" aria-label={title} className={cn('studio-workspace fixed inset-0 z-[120] flex items-center justify-center bg-[rgba(15,23,42,0.28)] px-4 py-8 backdrop-blur-[2px]', overlayClassName)}>
-      <div className="scrollbar-none max-h-[calc(100dvh-4rem)] w-full max-w-md overflow-y-auto overscroll-contain rounded-[28px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.18)]">
+      <div data-studio-motion-panel className="scrollbar-none max-h-[calc(100dvh-4rem)] w-full max-w-md overflow-y-auto overscroll-contain rounded-[28px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.18)]">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-start gap-3">
             <span
@@ -86,7 +86,8 @@ export default function ConfirmDialog({
           </Button>
         </div>
       </div>
-    </div>,
+    </div>
+    )}</StudioPresence>,
     document.body,
   )
 }

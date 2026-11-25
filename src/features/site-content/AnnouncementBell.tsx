@@ -1,8 +1,10 @@
 import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { ArrowLeft, Bell, CheckCheck, ChevronRight, X } from 'lucide-react'
+import { Bell, CheckCheck, ChevronRight, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { studioInert, useStudioDismiss } from '@/features/studio/components/use-studio-presence'
 import type { AnnouncementNotification, PersonalNotification } from '../../../shared/contracts/site-content'
 import { useAnnouncementInbox } from './announcement-inbox-api'
+import StudioAnnouncementDialog from './StudioAnnouncementDialog'
 import './announcements.css'
 
 type Placement = 'site' | 'studio' | 'studio-mobile' | 'studio-rail' | 'admin'
@@ -64,7 +66,6 @@ export function AnnouncementInboxControl({ placement, viewerId: adminViewerId, c
       placement={placement}
       anchor={anchor}
       items={items}
-      unread={items.filter(item => item.unread).length}
       viewerId={viewerId}
       loading={query.isFetching && !query.data}
       loadError={query.isError && !query.data}
@@ -72,7 +73,7 @@ export function AnnouncementInboxControl({ placement, viewerId: adminViewerId, c
       readError={read.isError}
       onRetry={() => { void query.refetch() }}
       onClose={() => setAnchor(null)}
-      onMarkAll={() => { if (viewerId) read.mutate({ viewerId, action: 'allNotifications' }) }}
+      onMarkAll={action => { if (viewerId) read.mutate({ viewerId, action }) }}
       onMarkRead={item => {
         if (viewerId) read.mutate(item.type === 'personal'
           ? { viewerId, action: 'personal', notificationId: item.id }
@@ -111,7 +112,6 @@ export function AnnouncementHistoryDialog({ returnFocus, onClose }: {
     returnFocus={returnFocus}
     placement="history"
     items={items}
-    unread={items.filter(item => item.unread).length}
     viewerId={viewerId}
     loading={query.isPending}
     loadError={query.isError && !query.data}
@@ -130,7 +130,6 @@ type InboxDialogProps = {
   placement: Placement | 'history'
   anchor?: InboxAnchor
   items: InboxItem[]
-  unread: number
   viewerId: string | null
   loading: boolean
   loadError: boolean
@@ -138,20 +137,26 @@ type InboxDialogProps = {
   readError: boolean
   onRetry: () => void
   onClose: () => void
-  onMarkAll: () => void
+  onExitStart?: () => void
+  onMarkAll: (action: 'all' | 'allNotifications') => void
   onMarkRead: (item: InboxItem) => void
 }
 
 function InboxDialog(props: InboxDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null)
   const lastRow = useRef<HTMLButtonElement | null>(null)
-  const detailHeading = useRef<HTMLHeadingElement>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const titleId = useId()
-  const detail = props.items.find(item => itemKey(item) === selected)
-  const detailKey = detail ? itemKey(detail) : null
+  const [archive, setArchive] = useState(false)
+  const [returning, setReturning] = useState(false)
   const isHistory = props.placement === 'history'
+  const items = isHistory ? props.items.filter(item => item.type === 'announcement') : props.items
+  const unread = items.filter(item => item.unread).length
+  const selectedItem = items.find(item => itemKey(item) === selected)
+  const covered = Boolean(selectedItem || archive) && !returning
+  const newestAnnouncement = items.find(item => item.type === 'announcement')
   const listTitle = isHistory ? '全部公告' : '通知中心'
+  const { dismiss, phase } = useStudioDismiss(props.onClose)
 
   const { returnFocus } = props
   useEffect(() => {
@@ -163,20 +168,34 @@ function InboxDialog(props: InboxDialogProps) {
     }
   }, [returnFocus])
   useEffect(() => {
-    if (detailKey) detailHeading.current?.focus({ preventScroll: true })
-    else lastRow.current?.focus({ preventScroll: true })
-  }, [detailKey])
+    if (!selectedItem && !archive) lastRow.current?.focus({ preventScroll: true })
+  }, [selectedItem, archive])
 
-  return <dialog
+  function closeItem(viewAll = false) {
+    if (selectedItem?.unread) props.onMarkRead(selectedItem)
+    setSelected(null)
+    setReturning(false)
+    if (viewAll && !isHistory) setArchive(true)
+  }
+  function closeList() {
+    if (covered || phase === 'closing') return
+    props.onExitStart?.()
+    dismiss()
+  }
+
+  return <><dialog
     ref={dialog}
     id={props.id}
     aria-labelledby={titleId}
     data-native-back-dismiss
     data-announcement-inbox
+    data-covered={covered || undefined}
+    data-phase={phase}
+    {...studioInert(covered)}
     className={cn(
       'site-announcement-inbox',
-      props.placement === 'studio-mobile' && 'site-announcement-inbox--mobile',
-      props.placement === 'studio-rail' && 'site-announcement-inbox--rail studio-workspace',
+      !isHistory && props.placement === 'studio-mobile' && 'site-announcement-inbox--mobile',
+      !isHistory && props.placement === 'studio-rail' && 'site-announcement-inbox--rail studio-workspace',
       isHistory && 'site-announcement-inbox--history',
     )}
     style={props.anchor && {
@@ -185,42 +204,39 @@ function InboxDialog(props: InboxDialogProps) {
       '--announcement-bottom': props.anchor.bottom + 'px',
       '--announcement-left': props.anchor.left === undefined ? undefined : props.anchor.left + 'px',
     } as CSSProperties}
-    onCancel={event => { event.preventDefault(); props.onClose() }}
+    onCancel={event => { event.preventDefault(); closeList() }}
     onClick={event => {
       if (event.target !== event.currentTarget) return
       const rect = event.currentTarget.getBoundingClientRect()
-      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) props.onClose()
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeList()
     }}
   >
     <div className="site-announcement-inbox-frame">
       <header className="site-announcement-inbox-header">
-        {detail
-          ? <button type="button" className="site-announcement-dialog-close" aria-label={isHistory ? '返回公告列表' : '返回通知列表'} onClick={() => setSelected(null)}><ArrowLeft aria-hidden="true" size={18} /></button>
-          : <Bell aria-hidden="true" size={18} className="shrink-0 text-[var(--text-secondary)]" />}
-        <h2 id={titleId} className="mr-auto text-sm font-semibold">{detail ? (detail.type === 'personal' ? '个人通知详情' : '公告详情') : listTitle}</h2>
-        {!detail && props.unread > 0 && <span className="site-announcement-inbox-count">{props.unread} 条未读</span>}
-        {!detail && props.viewerId && <button type="button" className="site-announcement-inbox-action" disabled={!props.unread || props.readPending} onClick={props.onMarkAll}>
+        <Bell aria-hidden="true" size={18} className="shrink-0 text-[var(--text-secondary)]" />
+        <h2 id={titleId} className="mr-auto text-sm font-semibold">{listTitle}</h2>
+        {unread > 0 && <span className="site-announcement-inbox-count">{unread} 条未读</span>}
+        {props.viewerId && <button type="button" className="site-announcement-inbox-action" disabled={!unread || props.readPending} onClick={() => props.onMarkAll(isHistory ? 'all' : 'allNotifications')}>
           <CheckCheck aria-hidden="true" size={16} />全部已读
         </button>}
-        <button type="button" className="site-announcement-dialog-close" aria-label={'关闭' + listTitle} onClick={props.onClose}><X aria-hidden="true" size={18} /></button>
+        <button type="button" className="site-announcement-dialog-close" aria-label={'关闭' + listTitle} onClick={closeList}><X aria-hidden="true" size={18} /></button>
       </header>
       {props.readError && <p role="alert" className="site-announcement-inbox-error">未能更新已读状态，请重试。</p>}
-      <div className="site-announcement-inbox-scroll" hidden={Boolean(detail)}>
+      <div className="site-announcement-inbox-scroll">
         {props.loading && <p role="status" className="site-announcement-inbox-empty">正在加载…</p>}
         {props.loadError && <div className="site-announcement-inbox-empty">
           <p role="alert">暂时无法加载</p>
           <button type="button" className="site-announcement-inbox-action mt-2" onClick={props.onRetry}>重试</button>
         </div>}
-        {!props.loading && !props.loadError && !props.items.length && <div className="site-announcement-inbox-empty">
+        {!props.loading && !props.loadError && !items.length && <div className="site-announcement-inbox-empty">
           <Bell aria-hidden="true" size={23} className="mx-auto mb-2 opacity-60" />
           <p>{isHistory ? '暂无公告' : '暂无通知'}</p>
         </div>}
         <ul className="site-announcement-inbox-list">
-          {props.items.map((item, index) => <li key={itemKey(item)}>
-            <button type="button" className="site-announcement-inbox-row" data-unread={item.unread || undefined} onClick={event => {
+          {items.map((item, index) => <li key={itemKey(item)}>
+            <button type="button" aria-haspopup="dialog" className="site-announcement-inbox-row" data-unread={item.unread || undefined} onClick={event => {
               lastRow.current = event.currentTarget
               setSelected(itemKey(item))
-              if (item.unread) props.onMarkRead(item)
             }}>
               <span className="site-announcement-inbox-row-dot" aria-hidden="true" />
               <span className="min-w-0 flex-1">
@@ -239,12 +255,15 @@ function InboxDialog(props: InboxDialogProps) {
           </li>)}
         </ul>
       </div>
-      {detail && <article className="site-announcement-inbox-scroll site-announcement-inbox-detail" key={detailKey}>
-        <h3 tabIndex={-1} ref={detailHeading} className="break-words text-base font-semibold">{detail.title}</h3>
-        <p className="mt-1 text-xs text-[var(--text-secondary)]"><PublishedTime value={detail.publishedAt} /> · UTC+8</p>
-        <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-7">{detail.body}</p>
-        {props.readError && detail.unread && <button type="button" className="site-announcement-inbox-action mt-4" onClick={() => props.onMarkRead(detail)}>重试标记已读</button>}
-      </article>}
     </div>
-  </dialog>
+  </dialog>{selectedItem && <StudioAnnouncementDialog key={itemKey(selectedItem)}
+    coverTitle={selectedItem.type === 'personal' ? '个人通知' : selectedItem === newestAnnouncement ? '最新公告' : '公告'}
+    item={selectedItem} publishedAt={selectedItem.publishedAt} invoker={lastRow.current}
+    onExitStart={viewHistory => setReturning(!viewHistory || isHistory)}
+    onDismiss={() => closeItem()} onHistory={selectedItem.type === 'announcement' ? () => closeItem(true) : undefined}
+  />}{archive && <InboxDialog {...props}
+    id={props.id + '-archive'} placement="history" anchor={undefined} returnFocus={lastRow.current}
+    onExitStart={() => setReturning(true)}
+    onClose={() => { setArchive(false); setReturning(false) }}
+  />}</>
 }

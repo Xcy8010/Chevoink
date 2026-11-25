@@ -10,7 +10,7 @@ type DialogFocusTrapOptions = {
 }
 
 export function isTopDialog(panel: HTMLElement | null): boolean {
-  return panel !== null && modalStack.at(-1) === panel
+  return panel !== null && modalStack.filter(item => !item.closest('[inert]')).at(-1) === panel
 }
 
 /** Keeps keyboard focus inside an open dialog and restores the trigger on close. */
@@ -64,8 +64,16 @@ export function useDialogFocusTrap({ panel, open, onClose }: DialogFocusTrapOpti
         event.preventDefault(); first.focus({ preventScroll: true })
       }
     }
+    let lastFocused: HTMLElement | null = null
     const focusin = (event: FocusEvent) => {
-      if (ownsEvent(event) && !currentPanel.contains(event.target as Node)) focus()
+      if (!ownsEvent(event) || !(event.target instanceof HTMLElement)) return
+      if (currentPanel.contains(event.target)) {
+        lastFocused = event.target
+      } else if (lastFocused?.isConnected && currentPanel.contains(lastFocused) && !lastFocused.matches(':disabled')) {
+        lastFocused.focus({ preventScroll: true })
+      } else {
+        focus()
+      }
     }
     document.addEventListener('keydown', keydown, true)
     document.addEventListener('focusin', focusin)
@@ -73,10 +81,16 @@ export function useDialogFocusTrap({ panel, open, onClose }: DialogFocusTrapOpti
       document.removeEventListener('keydown', keydown, true)
       document.removeEventListener('focusin', focusin)
       const index = modalStack.indexOf(currentPanel)
+      const wasTop = index >= 0 && index === modalStack.length - 1
       if (index >= 0) modalStack.splice(index, 1)
-      modalStack.at(-1)?.removeAttribute('aria-hidden')
+      const active = modalStack.at(-1)
+      if (wasTop) active?.removeAttribute('aria-hidden')
       if (modalStack.length === 0) document.body.style.overflow = originalOverflow
-      if (previous?.isConnected) previous.focus({ preventScroll: true })
+      // A replacement dialog may already own focus while this one's exit finishes.
+      if (wasTop && previous?.isConnected && (!active || active.contains(previous)) && !previous.closest('[inert]')
+        && (document.activeElement === document.body || currentPanel.contains(document.activeElement))) {
+        previous.focus({ preventScroll: true })
+      }
     }
   }, [open, panel])
 }

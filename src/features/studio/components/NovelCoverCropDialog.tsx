@@ -1,3 +1,4 @@
+import { StudioPresence } from './StudioPresence'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { LoaderCircle, Move, Search, X } from 'lucide-react'
 
@@ -116,14 +117,12 @@ export default function NovelCoverCropDialog({
     return getNovelCoverPreviewMetrics(source.image, crop)
   }, [crop, source])
 
-  if (!open || !file) {
-    return null
-  }
 
   return (
+    <StudioPresence kind="dialog">{open && file && (
     <div ref={panel} tabIndex={trapFocus ? -1 : undefined} className="studio-workspace fixed inset-0 z-[95] flex min-h-0 items-center justify-center overflow-hidden bg-[rgba(15,23,42,0.45)] p-4 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label="裁切作品封面">
       <div className="absolute inset-0" onClick={() => !busy && onClose()} />
-      <div className="relative z-[1] flex max-h-[calc(100dvh-2rem)] min-h-0 w-full max-w-[920px] flex-col overflow-hidden rounded-[24px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 shadow-[var(--shadow-soft)] sm:max-h-[calc(100dvh-3rem)] sm:p-6">
+      <div data-studio-motion-panel className="relative z-[1] flex max-h-[calc(100dvh-2rem)] min-h-0 w-full max-w-[920px] flex-col overflow-hidden rounded-[24px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 shadow-[var(--shadow-soft)] sm:max-h-[calc(100dvh-3rem)] sm:p-6">
         <div className="flex shrink-0 items-start justify-between gap-4 px-6 pt-6 sm:px-0 sm:pt-0">
           <div className="space-y-2">
             <h3 className="text-2xl font-semibold text-[var(--text-primary)]">裁切作品封面</h3>
@@ -285,5 +284,6 @@ export default function NovelCoverCropDialog({
         </div>
       </div>
     </div>
+    )}</StudioPresence>
   )
 }

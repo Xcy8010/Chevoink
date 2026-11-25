@@ -1,6 +1,7 @@
 import { Check, Copy, Gift, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
 
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import Button from '@/components/ui/Button'
 import type { ReferralPayload } from '../../../shared/contracts'
 import { formatCreditAmount } from './credit-format'
@@ -20,11 +21,9 @@ export default function InviteCreditsDialog({
   onCopy,
   onClose,
 }: InviteCreditsDialogProps) {
-  if (!open) return null
-
   return createPortal(
-    <div className="fixed inset-0 z-[260] flex items-end justify-center bg-black/30 px-0 backdrop-blur-[2px] sm:items-center sm:px-5">
-      <section
+    <StudioPresence kind="dialog">{open && <div className="fixed inset-0 z-[260] flex items-end justify-center bg-black/30 px-0 backdrop-blur-[2px] sm:items-center sm:px-5">
+      <section data-studio-motion-panel
         role="dialog"
         aria-modal="true"
         aria-labelledby="invite-credits-title"
@@ -69,7 +68,7 @@ export default function InviteCreditsDialog({
           </Button>
         </div>
       </section>
-    </div>,
+    </div>}</StudioPresence>,
     document.body,
   )
 }

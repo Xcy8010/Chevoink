@@ -1,3 +1,4 @@
+import { StudioPresence } from './StudioPresence'
 import { useEffect, useState } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
@@ -62,14 +63,15 @@ export default function DangerConfirmDialog({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [open, onCancel])
 
-  if (!open) return null
+  if (typeof document === 'undefined') return null
 
   const matched = !requiredText || value.trim() === requiredText
   const canConfirm = matched && !busy
 
   return createPortal(
+    <StudioPresence kind="dialog">{open && (
     <div className="studio-workspace fixed inset-0 z-[200] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 py-8 backdrop-blur-[2px]">
-      <div className="w-full max-w-md rounded-[28px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.18)]">
+      <div data-studio-motion-panel className="w-full max-w-md rounded-[28px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.18)]">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-start gap-3">
             <span
@@ -142,7 +144,8 @@ export default function DangerConfirmDialog({
           </Button>
         </div>
       </div>
-    </div>,
+    </div>
+    )}</StudioPresence>,
     document.body,
   )
 }

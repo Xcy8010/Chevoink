@@ -1232,13 +1232,15 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
   scrollbar-width: thin;
 }
 @media (prefers-reduced-motion: no-preference) {
-  .studio-mobile-sheet[open] { animation: studio-sheet-in 320ms cubic-bezier(.22, 1, .36, 1) both; }
-  .studio-mobile-sheet[open]::backdrop { animation: studio-backdrop-in 240ms ease-out both; }
-  .studio-mobile-sheet[data-state='closing'] { pointer-events: none; animation: studio-sheet-out 200ms cubic-bezier(.4, 0, 1, 1) both; }
-  .studio-mobile-sheet[data-state='closing']::backdrop { animation: studio-backdrop-out 200ms ease-in both; }
+  html:not([data-studio-reduced-motion='true']) .studio-mobile-sheet[open] { transition: translate 280ms cubic-bezier(.22, 1, .36, 1); }
+  html:not([data-studio-reduced-motion='true']) .studio-mobile-sheet[open]::backdrop { transition: opacity 200ms ease-out; }
+  html:not([data-studio-reduced-motion='true']) .studio-mobile-sheet[open][data-state='closing'] { pointer-events: none; translate: 0 100%; transition-duration: 200ms; }
+  .studio-mobile-sheet[data-state='closing']::backdrop { opacity: 0; }
+  @starting-style {
+    .studio-mobile-sheet[open] { translate: 0 100%; }
+    .studio-mobile-sheet[open]::backdrop { opacity: 0; }
+  }
 }
-@keyframes studio-sheet-in { from { transform: translateY(100%); } to { transform: translateY(0); } }
-@keyframes studio-sheet-out { from { transform: translateY(0); } to { transform: translateY(100%); } }
 html.dark .studio-mobile-drawer-search { background: var(--surface-muted); }
 html.dark .studio-mobile-backdrop { background: rgb(0 0 0 / 65%); }
 

@@ -1,3 +1,4 @@
+import { studioInert } from '@/features/studio/components/use-studio-presence'
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
@@ -8,10 +9,12 @@ import { registerDesktopSave } from '@/lib/desktop-lifecycle'
 import { MemoryMarkdown } from './MemoryMarkdown'
 import './memory-catalog.css'
 
+type MemoryDialogPhase = { phase?: 'open' | 'closing' }
+
 const button = 'min-h-11 rounded-xl border border-[var(--border-subtle)] px-4 py-2 text-sm disabled:opacity-40'
 
 /** Native top-layer focus trap keeps card editor shortcuts within the editor. */
-export function MemoryModal({ title, onClose, children, footer, busy = false }: {
+export function MemoryModal({ title, onClose, children, footer, busy = false, phase = 'open' }: MemoryDialogPhase & {
   title: string
   onClose: () => void
   children: ReactNode
@@ -44,7 +47,7 @@ export function MemoryModal({ title, onClose, children, footer, busy = false }: 
       if (focus?.isConnected) focus.focus({ preventScroll: true })
     }
   }, [])
-  return createPortal(<dialog ref={ref} aria-label={title} aria-busy={busy || undefined} data-native-back-dismiss
+  return createPortal(<dialog data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} ref={ref} aria-label={title} aria-busy={busy || undefined} data-native-back-dismiss
     onCancel={event => { event.preventDefault(); event.stopPropagation(); if (!busy) onClose() }}
     onKeyDown={event => event.stopPropagation()}
     className="studio-workspace fixed inset-x-0 bottom-auto top-[calc(var(--memory-viewport-top,0px)+var(--memory-viewport-height,100dvh)/2)] m-auto max-h-[min(90dvh,calc(var(--memory-viewport-height,100dvh)-16px))] w-[calc(100%-1.5rem)] max-w-lg -translate-y-1/2 overflow-hidden rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-xl backdrop:bg-black/40 open:flex open:flex-col">
@@ -70,7 +73,7 @@ function readDraft(key: string, card: StoryMemoryCard): Draft {
 }
 function removeDraft(key: string) { try { sessionStorage.removeItem(key) } catch { /* no storage */ } }
 
-export function MemoryCardDeleteDialog({ card, onClose, onDeleted }: { card: StoryMemoryCard; onClose: () => void; onDeleted: () => void }) {
+export function MemoryCardDeleteDialog({ card, onClose, onDeleted, phase }: MemoryDialogPhase & { card: StoryMemoryCard; onClose: () => void; onDeleted: () => void }) {
   const [busy, setBusy] = useState(false)
   const pending = useRef(false)
   const [error, setError] = useState('')
@@ -82,7 +85,7 @@ export function MemoryCardDeleteDialog({ card, onClose, onDeleted }: { card: Sto
     catch (reason) { setError(reason instanceof Error ? reason.message : '删除失败，请重试。') }
     finally { pending.current = false; setBusy(false) }
   }
-  return <MemoryModal title="删除记忆卡片" busy={busy} onClose={() => { if (!pending.current) onClose() }} footer={
+  return <MemoryModal phase={phase} title="删除记忆卡片" busy={busy} onClose={() => { if (!pending.current) onClose() }} footer={
     <div className="flex flex-wrap justify-end gap-2"><button type="button" className={button} disabled={busy} onClick={onClose}>取消</button>
       <button type="button" className={`${button} text-[var(--color-error)]`} disabled={busy} onClick={() => void remove()}>{busy ? '删除中…' : '确认删除'}</button></div>
   }>
@@ -91,7 +94,7 @@ export function MemoryCardDeleteDialog({ card, onClose, onDeleted }: { card: Sto
   </MemoryModal>
 }
 
-export default function MemoryCardEditor({ card, novelId, onClose, onSaved }: { card: StoryMemoryCard; novelId: string; onClose: () => void; onSaved: (card: StoryMemoryCard) => void }) {
+export default function MemoryCardEditor({ card, novelId, onClose, onSaved, phase }: MemoryDialogPhase & { card: StoryMemoryCard; novelId: string; onClose: () => void; onSaved: (card: StoryMemoryCard) => void }) {
   const userId = useShellStore(state => state.sessionUser?.id ?? 'anonymous')
   const key = `chevoink:memory-draft:${userId}:${novelId}:${card.id}`
   const [draft, setDraft] = useState(() => readDraft(key, card))
@@ -135,7 +138,7 @@ export default function MemoryCardEditor({ card, novelId, onClose, onSaved }: { 
     } catch (reason) { setError(reason instanceof Error ? reason.message : '保存失败，你的草稿仍保留。') }
     finally { pending.current = false; setSaving(false) }
   }
-  return <MemoryModal title="编辑记忆卡片" busy={saving} onClose={requestClose} footer={
+  return <MemoryModal phase={phase} title="编辑记忆卡片" busy={saving} onClose={requestClose} footer={
     <>
       {error && <p role="alert" className="mb-2 text-sm text-[var(--color-error)]">{error}</p>}
       {confirmClose ? <section aria-label="未保存修改">

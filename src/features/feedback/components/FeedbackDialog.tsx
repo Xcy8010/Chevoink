@@ -1,5 +1,6 @@
 import { Bug, ImagePlus, Lightbulb, LoaderCircle, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { createPortal } from 'react-dom'
 
 import Button from '@/components/ui/Button'
@@ -184,14 +185,11 @@ export default function FeedbackDialog({ open, kind, source, onClose }: Feedback
     }
   }
 
-  if (!open) {
-    return null
-  }
-
+  const studio = source?.startsWith('studio')
+  if (!studio && !open) return null
   const reachedLimit = images.length >= MAX_FEEDBACK_IMAGE_COUNT
 
-  return createPortal(
-    <div
+  const dialog = open && <div
       {...{ [FEEDBACK_CAPTURE_IGNORE_ATTR]: '' }}
       className={`${source?.startsWith('studio') ? 'studio-workspace ' : ''}feedback-dialog fixed inset-0 z-[140] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 py-6 backdrop-blur-[2px]`}
       onClick={(event) => {
@@ -200,7 +198,7 @@ export default function FeedbackDialog({ open, kind, source, onClose }: Feedback
         }
       }}
     >
-      <div
+      <div data-studio-motion-panel={studio || undefined}
         className="flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-[24px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_24px_64px_rgba(15,23,42,0.22)]"
         onPaste={(event) => {
           const files = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith('image/'))
@@ -370,7 +368,6 @@ export default function FeedbackDialog({ open, kind, source, onClose }: Feedback
           </Button>
         </div>
       </div>
-    </div>,
-    document.body,
-  )
+    </div>
+  return createPortal(studio ? <StudioPresence kind="dialog">{dialog}</StudioPresence> : dialog, document.body)
 }

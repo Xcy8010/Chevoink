@@ -1,3 +1,4 @@
+import { useStudioDismiss, studioInert } from '@/features/studio/components/use-studio-presence'
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ArchiveRestore, FileClock, Layers, LoaderCircle, MessageSquareText, X } from 'lucide-react'
@@ -83,7 +84,8 @@ function CheckpointCard({ checkpoint }: { checkpoint: ContextCheckpoint }) {
  * 上下文详情弹窗：上下文记录 / 压缩记录 / 最终上下文三视图。
  * 大量数据一律分页拉取（每页 20 条，底部「加载更多」追加），final 视图与占用卡同 token 口径。
  */
-export default function ContextDetailDialog({ sessionId, onClose }: Props) {
+export default function ContextDetailDialog({ sessionId, onClose: finishClose }: Props) {
+  const { dismiss: onClose, phase } = useStudioDismiss(finishClose)
   const [view, setView] = useState<DetailView>('records')
   const [records, setRecords] = useState<ContextDetailRecord[]>([])
   const [checkpoints, setCheckpoints] = useState<ContextCheckpoint[]>([])
@@ -143,19 +145,15 @@ export default function ContextDetailDialog({ sessionId, onClose }: Props) {
   return createPortal(
     <div
       className="studio-workspace fixed inset-0 z-[150] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 backdrop-blur-[3px]"
-      style={{ animation: 'ctx-detail-fade-in 180ms ease-out' }}
+      data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')}
       onClick={onClose}
     >
-      <style>{`
-        @keyframes ctx-detail-fade-in { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes ctx-detail-pop-in { from { opacity: 0; transform: scale(0.97) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
-      `}</style>
       <section
         role="dialog"
         aria-modal="true"
         aria-label="上下文详情"
         className="flex h-[min(700px,88dvh)] w-full max-w-3xl flex-col overflow-hidden rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_28px_80px_rgba(15,23,42,0.28)]"
-        style={{ animation: 'ctx-detail-pop-in 220ms cubic-bezier(0.16,1,0.3,1)' }}
+        data-studio-motion-panel
         onClick={(event) => event.stopPropagation()}
       >
         <header className="flex shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] px-5 py-4">

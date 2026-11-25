@@ -1,3 +1,4 @@
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { useQuery } from '@tanstack/react-query'
 import { Bug, ChevronDown, Gauge, Gift, Lightbulb, MoreHorizontal, Settings2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -78,7 +79,7 @@ export default function StudioMoreMenu(props: Props) {
           open ? 'bg-[var(--surface-muted)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]',
         )}
       ><MoreHorizontal className="h-4 w-4" /></button>
-      {open ? <div className="absolute right-0 top-[calc(100%+7px)] z-[70] w-[268px] overflow-hidden rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[0_20px_55px_rgba(15,23,42,.22)] motion-safe:origin-top-right motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]">
+      <StudioPresence kind="menu">{open ? <div className="absolute right-0 top-[calc(100%+7px)] z-[70] [--studio-motion-origin:top_right] w-[268px] overflow-hidden rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[0_20px_55px_rgba(15,23,42,.22)] motion-safe:origin-top-right motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]">
         {betaEnabled ? <div className="mb-1 flex items-center gap-2 rounded-[10px] bg-emerald-600 px-3 py-2.5 text-[11px] text-white shadow-[0_5px_16px_rgba(5,150,105,.18)]">
           <Gift className="h-3.5 w-3.5" />
           <span className="font-medium">公测期间，每日送 450 Credits！</span>
@@ -88,7 +89,7 @@ export default function StudioMoreMenu(props: Props) {
           <span className="flex-1">剩余用量</span>
           <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', usageExpanded && 'rotate-180')} />
         </button>
-        {usageExpanded ? <div className="mx-1 mb-1 rounded-[10px] bg-[var(--surface-muted)] px-3 py-2.5 text-[11px]">
+        <StudioPresence kind="fade">{usageExpanded ? <div className="mx-1 mb-1 rounded-[10px] bg-[var(--surface-muted)] px-3 py-2.5 text-[11px]">
           <div className="flex items-end justify-between">
             <div>
               <p className="text-[var(--text-tertiary)]">当前可用</p>
@@ -104,12 +105,12 @@ export default function StudioMoreMenu(props: Props) {
           </div>
           {/* 新窗口打开账户页，创作区界面原样保留，看完直接切回来 */}
           <button type="button" onClick={() => window.open('/account/usage', '_blank', 'noopener,noreferrer')} className="mt-2 text-[10px] font-medium hover:underline">查看详细记录 →</button>
-        </div> : null}
+        </div> : null}</StudioPresence>
         <button type="button" onClick={openInvite} className={item}><Gift className="h-3.5 w-3.5" />邀请好友</button>
         {props.onOpenStudioSettings ? <button type="button" onClick={() => { setOpen(false); props.onOpenStudioSettings?.('general') }} className={item}><Settings2 className="h-3.5 w-3.5" />创作区设置</button> : null}
         <button type="button" onClick={() => { setOpen(false); setFeedbackKind('suggestion') }} className={item}><Lightbulb className="h-3.5 w-3.5" />提交建议</button>
         <button type="button" onClick={() => { setOpen(false); setFeedbackKind('bug') }} className={item}><Bug className="h-3.5 w-3.5" />问题反馈</button>
-      </div> : null}
+      </div> : null}</StudioPresence>
     </div>
     <InviteCreditsDialog open={inviteOpen} referral={referralQuery.data ?? null} copied={inviteCopied} onCopy={() => void copyInvite()} onClose={() => { autoCopyRef.current = false; setInviteOpen(false) }} />
     <FeedbackDialog open={feedbackKind !== null} kind={feedbackKind ?? 'bug'} source="studio-ide" onClose={() => setFeedbackKind(null)} />

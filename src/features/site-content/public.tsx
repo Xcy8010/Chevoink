@@ -1,7 +1,8 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronLeft, ChevronRight, Megaphone, X } from 'lucide-react'
 import type { PublicSiteContent } from '../../../shared/contracts/site-content'
+import StudioAnnouncementDialog from './StudioAnnouncementDialog'
 import './announcements.css'
 import { dismissalIsActive, dismissalKey, usePublicSiteContent } from './public-api'
 import { useAnnouncementInbox } from './announcement-inbox-api'
@@ -43,7 +44,7 @@ function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNex
     </div>
   </dialog>,document.fullscreenElement??document.body)
 }
-export function SiteAnnouncements({ scope, focusAfterDismiss }: { scope: 'home' | 'studio'; focusAfterDismiss?: RefObject<HTMLElement> }) {
+export function SiteAnnouncements({ scope, ready = true }: { scope: 'home' | 'studio'; ready?: boolean }) {
   const query=usePublicSiteContent()
   const { query: inbox, read, viewerId } = useAnnouncementInbox(scope === 'studio')
   const [dismissed,setDismissed]=useState<Record<string,number>>({})
@@ -51,13 +52,14 @@ export function SiteAnnouncements({ scope, focusAfterDismiss }: { scope: 'home' 
   const [openedKey,setOpenedKey]=useState<string|null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const origin=useRef<HTMLElement|null>(null)
-  const focusContent = useRef(false)
-  const previousUnreadCard = useRef<{ viewerId: string; key: string; batch: string[] } | null>(null)
   const dialogId=useId()
   const history = historyOpen && <AnnouncementHistoryDialog returnFocus={origin.current} onClose={() => setHistoryOpen(false)} />
   const data=query.data
   const now=data ? Date.parse(data.serverNow)+Date.now()-query.dataUpdatedAt : 0
-  const items=(data?.announcements ?? []).filter(item=>{
+  const published = data?.announcements ?? []
+  const ordered = scope === 'studio' ? [...published].sort((a, b) =>
+    b.startsAt.localeCompare(a.startsAt) || (b.versionId ?? b.id).localeCompare(a.versionId ?? a.id)) : published
+  const items=ordered.filter(item=>{
     const key=dismissalKey(item.id,item.contentVersion)
     const stored=readDismissals(item.dismissal.mode==='session' ? sessionStorage : localStorage)
     const suppressed = key in dockSuppressed || (viewerId !== null && dockReadKey(viewerId, key) in dockSuppressed)
@@ -66,9 +68,8 @@ export function SiteAnnouncements({ scope, focusAfterDismiss }: { scope: 'home' 
   const receipts = new Map((inbox.data?.items ?? []).map(item => [dismissalKey(item.id, item.contentVersion), item]))
   const eligible = new Map(items.map(item => [dismissalKey(item.id, item.contentVersion), item]))
   const newestUnread = scope === 'studio' ? [...receipts].find(([key, item]) => item.unread && eligible.has(key)) : undefined
-  const first = (newestUnread && eligible.get(newestUnread[0])) || items[0]
-  const firstKey = first ? dismissalKey(first.id, first.contentVersion) : null
-  const isNew = scope === 'studio' && firstKey !== null && receipts.get(firstKey)?.unread === true
+  const first = (newestUnread && eligible.get(newestUnread[0])) || items.find(item =>
+    scope === 'home' || receipts.get(dismissalKey(item.id, item.contentVersion))?.unread !== false)
   const index = items.findIndex(item => dismissalKey(item.id, item.contentVersion) === openedKey)
   const active = index < 0 ? null : items[index]
 
@@ -79,55 +80,47 @@ export function SiteAnnouncements({ scope, focusAfterDismiss }: { scope: 'home' 
     try { sessionStorage.setItem(studioDockSuppressionKey, JSON.stringify(suppressed)) } catch { /* In-memory suppression still applies. */ }
   }
 
-  useLayoutEffect(() => {
-    const previous = previousUnreadCard.current
-    previousUnreadCard.current = viewerId && firstKey && isNew
-      ? { viewerId, key: firstKey, batch: [...eligible.keys()] }
-      : null
-    // A receipt from the inbox closes the displayed batch before another card can flash.
-    // A read from the open dock detail must leave that dialog in place.
-    if (previous && previous.viewerId === viewerId && previous.key !== openedKey && receipts.get(previous.key)?.unread === false) {
-      suppressDock(previous.batch.map(key => dockReadKey(previous.viewerId, key)))
-    }
-  })
-
-  useLayoutEffect(() => {
-    if (!firstKey && focusContent.current) {
-      focusContent.current = false
-      focusAfterDismiss?.current?.focus({ preventScroll: true })
-    }
-  }, [firstKey, focusAfterDismiss])
-
-  if (!first) return history || null
 
   function openItem(item: PublicAnnouncement) {
-    const key = dismissalKey(item.id, item.contentVersion)
-    setOpenedKey(key)
-    const receipt = receipts.get(key)
-    const versionId = item.versionId ?? receipt?.versionId
-    if (scope === 'studio' && viewerId && versionId && receipt?.unread !== false) read.mutate({ viewerId, action: 'one', versionId })
+    setOpenedKey(dismissalKey(item.id, item.contentVersion))
   }
   function dismiss(item:PublicAnnouncement, collapseDock = false) {
-    focusContent.current = collapseDock || items.length === 1
     const key=dismissalKey(item.id,item.contentVersion)
     const storage=item.dismissal.mode==='session' ? sessionStorage : localStorage
     const entries={...readDismissals(storage),[key]:now}
     try { storage.setItem('site-announcement-dismissals',JSON.stringify(Object.fromEntries(Object.entries(entries).sort((a,b)=>b[1]-a[1]).slice(0,100)))) } catch { /* The current view still dismisses when browser storage is unavailable. */ }
     setDismissed(current=>({...current,[key]:now}))
     if (collapseDock) {
+      const receipt = receipts.get(key)
+      const versionId = item.versionId ?? receipt?.versionId
+      if (viewerId && versionId && receipt?.unread !== false) read.mutate({ viewerId, action: 'one', versionId })
       // Dismiss the card once. Other items in this batch remain in the bell inbox.
-      suppressDock([...eligible.keys()].filter(candidateKey => candidateKey !== key))
+      suppressDock([...eligible.keys()].filter(candidateKey => candidateKey !== key).map(key => viewerId ? dockReadKey(viewerId, key) : key))
       setOpenedKey(null)
     } else if (openedKey === key) {
       const next = items.find(candidate => dismissalKey(candidate.id, candidate.contentVersion) !== key)
       setOpenedKey(next ? dismissalKey(next.id, next.contentVersion) : null)
     }
   }
-  return <div aria-label="站点公告" data-studio-region={scope === 'studio' ? 'announcement-banner' : undefined} className={scope==='studio'?'site-announcements-studio':'site-announcements-home'}>
-    <aside className={'site-announcement-card '+(scope==='studio'?'site-announcement-strip':'site-announcement-banner')}>
-      <button type="button" aria-label={'打开公告：'+first.title} title={scope === 'studio' ? first.title : undefined} aria-haspopup="dialog" aria-expanded={Boolean(active)} aria-controls={dialogId} className="site-announcement-open" onClick={event=>{origin.current=event.currentTarget;openItem(first)}}>
+  if (scope === 'studio') {
+    const item = active ?? first
+    if (historyOpen) return history
+    if (!item || (!active && (!ready || (viewerId && inbox.isPending)))) return null
+    const receipt = receipts.get(dismissalKey(item.id, item.contentVersion))
+    return <StudioAnnouncementDialog
+      key={dismissalKey(item.id, item.contentVersion)}
+      coverTitle={(receipt ? receipt.versionId === inbox.data?.items[0]?.versionId : item === ordered[0]) ? '最新公告' : '公告'}
+      item={item} publishedAt={receipt?.publishedAt ?? item.startsAt}
+      onShown={() => openItem(item)}
+      onDismiss={() => dismiss(item, true)}
+      onHistory={() => { dismiss(item, true); setHistoryOpen(true) }}
+    />
+  }
+  if (!first) return history || null
+  return <div aria-label="站点公告" className="site-announcements-home">
+    <aside className="site-announcement-card site-announcement-banner">
+      <button type="button" aria-label={'打开公告：'+first.title} aria-haspopup="dialog" aria-expanded={Boolean(active)} aria-controls={dialogId} className="site-announcement-open" onClick={event=>{origin.current=event.currentTarget;openItem(first)}}>
         <Megaphone aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]" />
-        {isNew && <span className="site-announcement-strip-new">NEW</span>}
         <span className="min-w-0 flex-1 text-left">
           <span className="block truncate text-sm font-medium">{first.title}</span>
           {scope === 'home' && <span className="block truncate text-xs text-[var(--text-secondary)]">{first.body}</span>}
@@ -138,7 +131,7 @@ export function SiteAnnouncements({ scope, focusAfterDismiss }: { scope: 'home' 
       <button
         type="button"
         aria-label={'关闭公告：'+first.title}
-        onClick={() => dismiss(first, scope === 'studio')}
+        onClick={() => dismiss(first)}
         className="site-announcement-dismiss"
       >
         <X aria-hidden="true" size={16} />

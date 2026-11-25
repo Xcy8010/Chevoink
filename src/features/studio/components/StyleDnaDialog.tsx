@@ -1,3 +1,4 @@
+import { studioInert } from './use-studio-presence'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { FileText, Fingerprint, LoaderCircle, Upload, X } from 'lucide-react'
@@ -7,10 +8,11 @@ import { STYLE_SAMPLE_UPLOAD_MAX_BYTES, STYLE_SAMPLE_UPLOAD_MAX_CHARS } from '..
 
 type UploadedSample = NonNullable<StyleSampleRequest['uploadedFile']>
 
-export default function StyleDnaDialog({ chapters, profile, busy, onClose, onSubmit, error }: {
+export default function StyleDnaDialog({ chapters, profile, busy, phase, onClose, onSubmit, error }: {
   chapters: StudioPayload['chapters']
   profile: AuthorStyleProfileView | null
   busy: boolean
+  phase: 'open' | 'closing'
   error?: string
   onClose: () => void
   onSubmit: (input: StyleSampleRequest) => void
@@ -59,7 +61,7 @@ export default function StyleDnaDialog({ chapters, profile, busy, onClose, onSub
 
   const valid = Boolean(title.trim() && (selectedChapterIds.length > 0 || uploadedFile) && consent && !fileError)
   return createPortal(
-    <dialog ref={dialogRef} data-native-back-dismiss onCancel={event => { event.preventDefault(); if (!busy) onClose() }} className="studio-workspace m-auto h-[94dvh] max-h-[94dvh] w-[min(760px,96vw)] overflow-hidden rounded-2xl border-0 bg-transparent p-0 text-[var(--text-primary)] backdrop:bg-black/45 md:h-auto" aria-label="添加写作样章">
+    <dialog ref={dialogRef} data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} data-native-back-dismiss onCancel={event => { event.preventDefault(); if (!busy) onClose() }} className="studio-workspace m-auto h-[94dvh] max-h-[94dvh] w-[min(760px,96vw)] overflow-hidden rounded-2xl border-0 bg-transparent p-0 text-[var(--text-primary)] backdrop:bg-black/45 md:h-auto" aria-label="添加写作样章">
       <section className="flex h-full w-full flex-col bg-[var(--surface-default)] md:h-auto md:max-h-[86vh] md:w-[min(760px,calc(100vw-48px))] md:rounded-[14px] md:border md:border-[var(--border-default)]">
         <header className="flex shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-3 md:px-5">
           <Fingerprint className="h-4 w-4 text-[var(--text-secondary)]" />

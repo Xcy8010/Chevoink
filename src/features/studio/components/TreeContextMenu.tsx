@@ -1,3 +1,5 @@
+import { StudioPresence } from '@/features/studio/components/StudioPresence'
+import { studioInert } from '@/features/studio/components/use-studio-presence'
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronRight, Ellipsis, type LucideIcon } from 'lucide-react'
@@ -33,7 +35,7 @@ function menuButtons(menu: HTMLDivElement | null) {
   return Array.from(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
 }
 
-export default function TreeContextMenu({ title, anchor, items, onClose }: { title: string; anchor: TreeMenuAnchor; items: TreeMenuItem[]; onClose: () => void }) {
+export default function TreeContextMenu({ title, anchor, items, onClose, phase = 'open' }: { phase?: 'open' | 'closing'; title: string; anchor: TreeMenuAnchor; items: TreeMenuItem[]; onClose: () => void }) {
   const menu = useRef<HTMLDivElement>(null)
   const submenu = useRef<HTMLDivElement>(null)
   const submenuTrigger = useRef<HTMLButtonElement>(null)
@@ -86,13 +88,14 @@ export default function TreeContextMenu({ title, anchor, items, onClose }: { tit
   }, [submenuOpen])
 
   useEffect(() => {
+    if (phase === 'closing') return
     function closeOnOutsidePress(event: PointerEvent) {
       const target = event.target as Node
       if (!menu.current?.contains(target) && !submenu.current?.contains(target) && !anchor.trigger.contains(target)) onClose()
     }
     document.addEventListener('pointerdown', closeOnOutsidePress)
     return () => document.removeEventListener('pointerdown', closeOnOutsidePress)
-  }, [anchor, onClose])
+  }, [anchor, onClose, phase])
 
   function openSubmenuWithFocus() {
     if (submenuOpen) menuButtons(submenu.current)[0]?.focus()
@@ -160,7 +163,7 @@ export default function TreeContextMenu({ title, anchor, items, onClose }: { tit
 
   return createPortal(
     <div className="studio-workspace" onKeyDown={handleKeyDown} onContextMenu={(event) => event.preventDefault()}>
-      <div ref={menu} role="menu" aria-label={`${title}的操作`} className={cardClass}>
+      <div data-studio-surface="menu" data-phase={phase} {...studioInert(phase === 'closing')} ref={menu} role="menu" aria-label={`${title}的操作`} className={cardClass}>
         {items.map((item) => 'children' in item ? (
           <button
             key={item.label}
@@ -181,11 +184,11 @@ export default function TreeContextMenu({ title, anchor, items, onClose }: { tit
           </button>
         ) : renderAction(item))}
       </div>
-      {branch && submenuOpen ? (
+      <StudioPresence kind="menu">{branch && submenuOpen && phase === 'open' ? (
         <div ref={submenu} id={submenuId} role="menu" aria-label={branch.label} className={cardClass}>
           {branch.children.map((item) => renderAction(item, true))}
         </div>
-      ) : null}
+      ) : null}</StudioPresence>
     </div>,
     document.body,
   )

@@ -1,3 +1,4 @@
+import { useStudioPresence, studioInert } from '@/features/studio/components/use-studio-presence'
 import { useCallback, useEffect, useMemo, useState, type ComponentType } from 'react'
 import {
   BadgeCheck,
@@ -83,7 +84,7 @@ function editorFor(item?: AgentSubtaskView): EditorState {
 }
 
 function SubAgentEditorDialog({
-  state,
+  state: currentState,
   busy,
   onChange,
   onClose,
@@ -95,13 +96,14 @@ function SubAgentEditorDialog({
   onClose: () => void
   onSubmit: () => void
 }) {
+  const { rendered: state, phase } = useStudioPresence(currentState)
   if (!state) return null
   const valid = state.draft.name.trim() && state.draft.triggerCondition.trim() && state.draft.prompt.trim()
   const updateDraft = (patch: Partial<Draft>) => onChange({ ...state, draft: { ...state.draft, ...patch } })
 
   return createPortal(
-    <div className="studio-settings-style studio-settings-popup studio-workspace fixed inset-0 z-[270] flex items-center justify-center p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <section role="dialog" aria-modal="true" aria-label={state.mode === 'create' ? '新建子 Agent' : '编辑子 Agent'} className="flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_26px_80px_rgba(15,23,42,.22)]">
+    <div data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} className="studio-settings-style studio-settings-popup studio-workspace fixed inset-0 z-[270] flex items-center justify-center p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <section data-studio-motion-panel role="dialog" aria-modal="true" aria-label={state.mode === 'create' ? '新建子 Agent' : '编辑子 Agent'} className="flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_26px_80px_rgba(15,23,42,.22)]">
         <header className="flex items-start gap-4 border-b border-[var(--border-subtle)] px-5 py-4 sm:px-6">
           <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--text-secondary)]"><Bot className="h-5 w-5" /></span>
           <div className="min-w-0 flex-1"><h3 className="text-base font-semibold">{state.mode === 'create' ? '新建子 Agent' : '编辑子 Agent'}</h3><p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">主 Agent 命中触发条件后会在当前任务内调用它，并负责审查与整合结果。</p></div>
@@ -124,11 +126,12 @@ function SubAgentEditorDialog({
   )
 }
 
-function DeleteDialog({ item, busy, onClose, onConfirm }: { item: AgentSubtaskView | null; busy: boolean; onClose: () => void; onConfirm: () => void }) {
+function DeleteDialog({ item: currentItem, busy, onClose, onConfirm }: { item: AgentSubtaskView | null; busy: boolean; onClose: () => void; onConfirm: () => void }) {
+  const { rendered: item, phase } = useStudioPresence(currentItem)
   if (!item) return null
   return createPortal(
-    <div className="studio-workspace fixed inset-0 z-[275] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <section role="alertdialog" aria-modal="true" aria-label="删除子 Agent" className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-[0_24px_70px_rgba(15,23,42,.2)]">
+    <div data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} className="studio-workspace fixed inset-0 z-[275] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <section data-studio-motion-panel role="alertdialog" aria-modal="true" aria-label="删除子 Agent" className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-[0_24px_70px_rgba(15,23,42,.2)]">
         <h3 className="text-base font-semibold">删除“{item.name}”？</h3>
         <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">此操作会同时删除它的调用记录，主 Agent 之后也无法再调用它。</p>
         <div className="mt-6 flex justify-end gap-2"><Button variant="ghost" onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" className="bg-rose-700 hover:bg-rose-800" onClick={onConfirm} disabled={busy}>{busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}删除</Button></div>
@@ -138,11 +141,12 @@ function DeleteDialog({ item, busy, onClose, onConfirm }: { item: AgentSubtaskVi
   )
 }
 
-function LogsDialog({ logs, onClose }: { logs: AgentSubtaskLogsView | null; onClose: () => void }) {
+function LogsDialog({ logs: currentLogs, onClose }: { logs: AgentSubtaskLogsView | null; onClose: () => void }) {
+  const { rendered: logs, phase } = useStudioPresence(currentLogs)
   if (!logs) return null
   return createPortal(
-    <div className="studio-workspace fixed inset-0 z-[270] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <section role="dialog" aria-modal="true" aria-label={`${logs.name} 使用日志`} className="flex max-h-[82dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_24px_70px_rgba(15,23,42,.2)]">
+    <div data-studio-surface="dialog" data-phase={phase} {...studioInert(phase === 'closing')} className="studio-workspace fixed inset-0 z-[270] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <section data-studio-motion-panel role="dialog" aria-modal="true" aria-label={`${logs.name} 使用日志`} className="flex max-h-[82dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_24px_70px_rgba(15,23,42,.2)]">
         <header className="flex items-start gap-4 border-b border-[var(--border-subtle)] px-5 py-4"><div className="min-w-0 flex-1"><h3 className="truncate text-base font-semibold">{logs.name} · 使用日志</h3><p className="mt-1 text-xs text-[var(--text-secondary)]">{statusLabel[logs.status] ?? logs.status} · 记录每次内嵌调用</p></div><button type="button" className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]" onClick={onClose} aria-label="关闭使用日志"><X className="h-4 w-4" /></button></header>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {logs.entries.length > 0 ? <ol className="divide-y divide-[var(--border-subtle)]">{logs.entries.map((entry) => <li key={entry.id} className="flex gap-3 py-4 first:pt-0 last:pb-0"><span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', entry.tone === 'danger' ? 'bg-rose-500' : entry.tone === 'warning' ? 'bg-amber-500' : entry.tone === 'success' ? 'bg-[#71857c]' : 'bg-[var(--border-strong)]')} /><div className="min-w-0 flex-1"><div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between"><p className="text-xs font-medium">{entry.title}</p><time className="shrink-0 text-[10px] text-[var(--text-tertiary)]">{new Date(entry.time).toLocaleString()}</time></div><p className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">{entry.detail}</p></div></li>)}</ol> : <div className="py-16 text-center text-xs text-[var(--text-tertiary)]">还没有调用记录</div>}
