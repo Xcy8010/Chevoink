@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
 import type { CreditAccountSummary, CreditActivityPayload, CreditLedgerItem } from '../../shared/contracts/credits'
 import { fetchCreditActivity, fetchCreditSummary, fetchCreditUsage } from '@/features/account/credits-api'
 import StudioSettingsDialog, { type StudioSettingsSection } from '@/features/studio/components/StudioSettingsDialog'
@@ -34,6 +34,8 @@ const row: CreditLedgerItem = {
 }
 let client: QueryClient
 
+beforeAll(async () => { await import('@/features/studio/components/StudioSettingsPanels') })
+
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   vi.mocked(fetchCreditSummary).mockResolvedValue(account)
@@ -57,8 +59,11 @@ function openSettings(initialSection: StudioSettingsSection, withRail = false) {
 }
 
 it('shares the rail balance request, shows only the actual allowance denominator, and reads seven recorded days', async () => {
+  let resolveSummary!: (value: CreditAccountSummary) => void
+  vi.mocked(fetchCreditSummary).mockImplementationOnce(() => new Promise(resolve => { resolveSummary = resolve }))
   openSettings('usage', true)
-  expect(screen.getByText('正在读取额度余额…')).toBeTruthy()
+  expect(await screen.findByText('正在读取额度余额…')).toBeTruthy()
+  resolveSummary(account)
   const balance = await screen.findByRole('region', { name: '额度余额' })
   expect(balance.textContent).toContain('335 Credits')
   expect(balance.textContent).toContain('账面余额 350 · 待结算预留 15 Credits')
@@ -84,7 +89,7 @@ it('searches categories and reads the ledger on demand, preserving positive, neg
   expect(within(desktop).getAllByRole('button')).toHaveLength(1)
   fireEvent.click(within(desktop).getByRole('button', { name: '使用情况' }))
   expect(await screen.findByRole('heading', { level: 1, name: '使用情况' })).toBeTruthy()
-  fireEvent.click(screen.getByRole('button', { name: '额度流水' }))
+  fireEvent.click(await screen.findByRole('button', { name: '额度流水' }))
   const search = await screen.findByText('联网搜索')
   expect(search.closest('li')?.textContent).toContain('−2')
   const select = screen.getByRole('combobox', { name: '流水类型' })

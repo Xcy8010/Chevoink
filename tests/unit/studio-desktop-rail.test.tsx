@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ComponentProps } from 'react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mockNativeDialog } from '../helpers/test-native-dialog'
 import type { AnnouncementInbox } from '../../shared/contracts/site-content'
@@ -25,11 +25,14 @@ beforeEach(() => {
   credits.isError = false
 })
 afterEach(cleanup)
+function CurrentPath() {
+  return <span aria-label="当前页面">{useLocation().pathname}</span>
+}
+
 function fixture(ide?: ComponentProps<typeof StudioDesktopRail>['ide']) {
   const open = vi.fn()
-  const returnFromSettings = vi.fn()
-  render(<MemoryRouter initialEntries={['/studio/example']}><StudioDesktopRail ide={ide} onReturnToWorkspace={returnFromSettings} onOpenSettings={open} onInvite={vi.fn()} /></MemoryRouter>)
-  return { open, returnFromSettings, usage: screen.getByRole('button', { name: '查看剩余额度' }), profile: screen.getByRole('button', { name: /^个人菜单/ }) }
+  render(<MemoryRouter initialEntries={['/studio/example']}><StudioDesktopRail ide={ide} onOpenSettings={open} onInvite={vi.fn()} /><CurrentPath /></MemoryRouter>)
+  return { open, usage: screen.getByRole('button', { name: '查看剩余额度' }), profile: screen.getByRole('button', { name: /^个人菜单/ }) }
 }
 it('shows the actual available balance on hover and focus, with a daily ring independent of bonuses', () => {
   const { open, usage, profile } = fixture()
@@ -113,7 +116,7 @@ it('offers a retry on unavailable credits without displaying a zero balance', ()
 
 
 it.each(['work', 'ide'])('opens an ordered two-item settings card in %s without prematurely leaving the current page', mode => {
-  const { open, returnFromSettings } = fixture(mode === 'ide' ? { tab: 'work', open: true, onSelect: vi.fn(), onToggle: vi.fn() } : undefined)
+  const { open } = fixture(mode === 'ide' ? { tab: 'work', open: true, onSelect: vi.fn(), onToggle: vi.fn() } : undefined)
   const gear = screen.getByRole('button', { name: '设置' })
   fireEvent.click(gear)
   const card = screen.getByRole('region', { name: '设置入口' })
@@ -124,10 +127,10 @@ it.each(['work', 'ide'])('opens an ordered two-item settings card in %s without 
   fireEvent.click(gear)
   fireEvent.click(screen.getByRole('button', { name: '创作区设置' }))
   expect(open).toHaveBeenCalledWith('general', gear)
-  expect(returnFromSettings).not.toHaveBeenCalled()
+  expect(screen.getByLabelText('当前页面').textContent).toBe('/studio/example')
   fireEvent.click(gear)
   fireEvent.click(screen.getByRole('link', { name: '账号设置' }))
-  expect(returnFromSettings).toHaveBeenCalledOnce()
+  expect(screen.getByLabelText('当前页面').textContent).toBe('/settings')
 })
 it('keeps discovery beside the four site links and moves the archived work entry into More', () => {
   const { open } = fixture()

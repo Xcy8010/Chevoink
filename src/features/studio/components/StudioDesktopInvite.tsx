@@ -4,12 +4,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchReferral } from '@/features/account/credits-api'
 import InviteCreditsDialog from '@/features/account/InviteCreditsDialog'
 
-export default function StudioDesktopInvite({ open = true, onClose }: { open?: boolean; onClose: () => void }) {
+export default function StudioDesktopInvite({ open = true, autoCopy = true, onClose }: { open?: boolean; autoCopy?: boolean; onClose: () => void }) {
   const { rendered } = useStudioPresence(open ? true : null)
-  return rendered ? <DesktopInviteContent open={open} onClose={onClose} /> : null
+  return rendered ? <DesktopInviteContent open={open} autoCopy={autoCopy} onClose={onClose} /> : null
 }
 
-function DesktopInviteContent({ open, onClose }: { open: boolean; onClose: () => void }) {
+function DesktopInviteContent({ open, autoCopy, onClose }: { open: boolean; autoCopy: boolean; onClose: () => void }) {
   const referral = useQuery({ queryKey: ['credits', 'referral'], queryFn: fetchReferral, staleTime: 60_000 })
   const [copied, setCopied] = useState(false)
   const autoCopied = useRef(false)
@@ -22,10 +22,10 @@ function DesktopInviteContent({ open, onClose }: { open: boolean; onClose: () =>
     } catch { /* The link stays visible for manual copying. */ }
   }, [url])
   useEffect(() => {
-    if (open && url && !autoCopied.current) {
+    if (open && autoCopy && url && !autoCopied.current) {
       autoCopied.current = true
       void copy()
     }
-  }, [copy, open, url])
+  }, [autoCopy, copy, open, url])
   return <InviteCreditsDialog open={open} referral={referral.data ?? null} copied={copied} onCopy={() => void copy()} onClose={onClose} />
 }

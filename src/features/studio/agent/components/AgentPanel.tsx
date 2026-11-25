@@ -91,6 +91,7 @@ import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
 import { activityAnswerText, activityReportVisibility, hasVisibleActivityText, projectActivityGroups } from '../lib/activity-groups'
+import MobileConversationScrollbar from './MobileConversationScrollbar'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -130,6 +131,7 @@ const AuthorProgressText = lazy(async () => ({ default: (await loadAuthorActivit
 type AgentPanelProps = {
   voiceScopeKey?: string
   voiceDisabled?: boolean
+  mobileScrollbar?: boolean
   /** 未建会话时为 null，首次发送前通过 ensureSession 懒创建 */
   sessionId: EntityId | null
   novelId: EntityId
@@ -213,6 +215,7 @@ function ConversationSkeleton() {
 export function AgentPanel({
   voiceScopeKey,
   voiceDisabled = false,
+  mobileScrollbar = false,
   sessionId,
   novelId,
   novelName,
@@ -1836,7 +1839,7 @@ export function AgentPanel({
         <span>{readNotice.message}</span>
         <button type="button" onClick={readNotice.retry} className="shrink-0 underline underline-offset-2">重试</button>
       </div>}
-      <div ref={scrollRef} onScroll={handleMessagesScroll} className="agent-conversation-scroll min-h-0 overflow-y-auto">
+      <div ref={scrollRef} onScroll={handleMessagesScroll} className={cn('agent-conversation-scroll min-h-0 overflow-y-auto', mobileScrollbar && 'agent-conversation-scroll--mobile')}>
       <div ref={scrollContentRef} className="agent-conversation-width">
         {conversationLoading ? (showConversationSkeleton ? <ConversationSkeleton /> : null) : conversationReady ? (
           /* 已有内容直接呈现：切回已加载会话 / 同会话重用 / 直播收尾时不插任何加载态，做到「有缓存直接显示」。
@@ -2177,6 +2180,7 @@ export function AgentPanel({
       </div>
       </div>
       </div>
+      {mobileScrollbar && !workConversation.collapsed ? <MobileConversationScrollbar scrollRef={scrollRef} contentRef={scrollContentRef} footerRef={floatingFooterRef} /> : null}
       </div>
       <GoalEditorDialog
         open={goalEditorOpen}

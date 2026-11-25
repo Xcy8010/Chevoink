@@ -1,3 +1,10 @@
+import type { StudioSettingsSection } from '../components/StudioSettingsDialog'
+
+export type StudioSurface =
+  | { kind: 'settings'; section: StudioSettingsSection; depth: number }
+  | { kind: 'invite' | 'export' | 'meta' | 'cover' }
+  | { kind: 'context'; sessionId: string }
+
 export type WorkspaceVisit = {
   owner: string
   novelId: string

@@ -11,6 +11,7 @@ import type { FeedbackKind, Novel } from '../../../../shared/contracts/index.js'
 import { DesktopHistory } from '@/components/layout/DesktopNavigation'
 import { StudioPerspectiveMenu } from './StudioSidebarHeader'
 import WorkspaceNovelSwitcher from './WorkspaceNovelSwitcher'
+import { studioInert } from './use-studio-presence'
 import StudioDocumentPicker, { type DocumentKind, type DocumentPickerData } from './StudioDocumentPicker'
 
 type Props = {
@@ -18,7 +19,9 @@ type Props = {
   onWorkspaceSidebarToggle?: () => void
   workspaceControls?: boolean
   switchingWork?: boolean
-  onReturnToWorkspace?: () => void
+  surfaceOpen?: boolean
+  onDismissTransient?: () => void
+  historyBlocked?: boolean
   perspective: 'work' | 'ide'
   perspectiveSwitchEnabled: boolean
   onPerspectiveChange: (value: 'work' | 'ide') => void
@@ -172,18 +175,19 @@ export default function StudioCommandBar(props: Props) {
   }
 
   const commands = (
-    <div onClickCapture={captionHost ? props.onReturnToWorkspace : undefined} ref={element => { if (element) element.inert = Boolean(props.switchingWork) }} data-studio-command-bar={props.perspective} className="flex h-[52px] shrink-0 items-center gap-2 border-b border-[var(--border-subtle)] bg-[var(--surface-default)] px-3">
+    <div ref={element => { if (element) element.inert = Boolean(props.switchingWork) }} data-studio-command-bar={props.perspective} className="flex h-[52px] shrink-0 items-center gap-2 border-b border-[var(--border-subtle)] bg-[var(--surface-default)] px-3">
       {props.onWorkspaceSidebarToggle ? <button
         type="button"
+        disabled={props.surfaceOpen}
         onClick={props.onWorkspaceSidebarToggle}
         className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
         aria-label={props.workspaceSidebarOpen ? '折叠左侧栏' : '展开左侧栏'}
         title={props.workspaceSidebarOpen ? '折叠左侧栏' : '展开左侧栏'}
       >{props.workspaceSidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}</button> : null}
-      <DesktopHistory />
+      <DesktopHistory onDismiss={props.onDismissTransient} blocked={props.historyBlocked} />
       <div className="h-4 w-px shrink-0 bg-[var(--border-subtle)]" />
       {/* 任务标题与其「更多」按钮已移至 Agent 面板顶栏：它只作用于当前任务，与顶栏全局菜单无关 */}
-      <div ref={menuRef} onKeyDown={event => {
+      <div ref={menuRef} {...studioInert(Boolean(props.surfaceOpen))} onKeyDown={event => {
         if (event.nativeEvent.isComposing) return
         if (picker && (event.key === 'Escape' || (event.key === 'ArrowLeft' && !(event.target instanceof HTMLInputElement)))) {
           event.preventDefault()
@@ -205,16 +209,16 @@ export default function StudioCommandBar(props: Props) {
           ))}
         </div>
       </div>
-      {props.workspaceControls !== false && props.perspectiveSwitchEnabled && <>
+      {!props.surfaceOpen && props.workspaceControls !== false && props.perspectiveSwitchEnabled && <>
         <StudioPerspectiveMenu perspective={props.perspective} enabled onChange={props.onPerspectiveChange} />
         <div className="h-4 w-px shrink-0 bg-[var(--border-subtle)]" />
       </>}
-      {props.workspaceControls !== false ? <div className="w-fit min-w-0 max-w-[220px] shrink-0">
+      {!props.surfaceOpen && props.workspaceControls !== false ? <div className="w-fit min-w-0 max-w-[220px] shrink-0">
         <WorkspaceNovelSwitcher compactTrigger currentNovelId={props.currentNovelId} currentNovelTitle={props.novelTitle} novels={props.novelOptions} busy={props.switchingNovel} loading={props.novelsLoading} onSelectNovel={props.onSelectNovel} onCreateNovel={props.onCreateNovel} />
       </div> : null}
     </div>
   )
-  return <>{captionHost ? createPortal(commands, captionHost) : <header onClickCapture={props.onReturnToWorkspace} className="studio-web-caption" aria-label="创作区菜单栏"><div className="desktop-commands">{commands}</div></header>}
+  return <>{captionHost ? createPortal(commands, captionHost) : <header data-surface-open={props.surfaceOpen || undefined} className="studio-web-caption" aria-label="创作区菜单栏"><div className="desktop-commands">{commands}</div></header>}
     <FeedbackDialog open={feedbackKind !== null} kind={feedbackKind ?? 'suggestion'} source={`studio-${props.perspective}`} onClose={() => setFeedbackKind(null)} />
   </>
 }

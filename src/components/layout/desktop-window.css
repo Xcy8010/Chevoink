@@ -34,6 +34,29 @@ html[data-desktop-frame] .studio-settings-page { top: var(--caption-height); hei
 .desktop-history button, .desktop-window-controls button { display: grid; place-items: center; }
 .desktop-history button { width: 32px; height: 28px; border-radius: 5px; }
 .desktop-history button:disabled { opacity: .3; }
+.desktop-history-action { position: relative; display: flex; }
+.desktop-history-action button:not(:disabled):is(:hover, :focus-visible) { background: color-mix(in srgb, currentColor 10%, transparent); }
+.desktop-history-tip {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  z-index: 210;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px 4px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-primary);
+  background: var(--surface-elevated);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-50%);
+}
+.desktop-history-tip kbd { padding: 1px 6px; border-radius: inherit; background: var(--surface-muted); font: inherit; }
+.desktop-history-action:is(:hover, :has(button:focus-visible)) .desktop-history-tip { opacity: 1; }
 .desktop-history svg { width: 16px; height: 16px; stroke-width: 1.65; }
 .desktop-drag svg { width: 14px; height: 14px; }
 .desktop-drag { min-width: 80px; flex: 1; gap: 8px; padding-inline: 9px; font-size: 12px; color: var(--text-secondary); }

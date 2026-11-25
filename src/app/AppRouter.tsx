@@ -1,7 +1,8 @@
 import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { BrowserRouter, Route, Routes, useLocation, useNavigate, type Location } from 'react-router-dom'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate, useNavigationType, type Location } from 'react-router-dom'
 
+import { AppNavigationTypeContext } from '@/app/navigation-type'
 import { appRoutes } from '@/app/route-config'
 import AccountAccessGate from '@/app/routes/AccountAccessGate'
 import AuthPage from '@/app/routes/AuthPage'
@@ -27,6 +28,7 @@ const defaultRouteFallback = (
 function AppRoutes() {
   const location = useLocation()
   const navigate = useNavigate()
+  const navigationType = useNavigationType()
   const previousPage = useRef<Location | null>(null)
   const client = useQueryClient()
   const viewer = useShellStore(state => state.authStatus === 'authenticated' ? state.sessionUser?.id : null)
@@ -77,31 +79,34 @@ function AppRoutes() {
 
   return (
     <AccountAccessGate studioPhoneRequired={studioPhoneRequired} closeStudioGate={closeOverlay}>
-      <Routes location={background}>
-        {appRoutes.map((route) => {
-          const content = (
-            <Suspense key={route.path} fallback={<><span hidden data-route-loading />{route.fallback ?? defaultRouteFallback}</>}>
-              {route.element}
-            </Suspense>
-          )
-          return <Route
-            key={route.path}
-            path={route.path}
-            element={
-              route.useShell === false ? (
-                <div className="app-standalone-route">
-                  {content}
-                </div>
-              ) : (
-                // Suspense 放在壳内：顶栏/底栏立即可交互，只内容区显示骨架
-                <AppShell title={route.title} description={route.description}>
-                  {content}
-                </AppShell>
-              )
-            }
-          />
-        })}
-      </Routes>
+      {/* Routes supplies a fixed location to preserve the page under an auth overlay, which masks the router action. */}
+      <AppNavigationTypeContext.Provider value={hasOverlay ? null : navigationType}>
+        <Routes location={background}>
+          {appRoutes.map((route) => {
+            const content = (
+              <Suspense key={route.path} fallback={<><span hidden data-route-loading />{route.fallback ?? defaultRouteFallback}</>}>
+                {route.element}
+              </Suspense>
+            )
+            return <Route
+              key={route.path}
+              path={route.path}
+              element={
+                route.useShell === false ? (
+                  <div className="app-standalone-route">
+                    {content}
+                  </div>
+                ) : (
+                  // Suspense 放在壳内：顶栏/底栏立即可交互，只内容区显示骨架
+                  <AppShell title={route.title} description={route.description}>
+                    {content}
+                  </AppShell>
+                )
+              }
+            />
+          })}
+        </Routes>
+      </AppNavigationTypeContext.Provider>
       {authMode && !checkingSession && <AuthPage mode={authMode} onClose={closeOverlay} />}
     </AccountAccessGate>
   )

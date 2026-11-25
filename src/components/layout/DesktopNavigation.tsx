@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useId, useRef } from 'react'
 import { ChevronLeft, ChevronRight, ChevronDown, Compass, Feather, House, MessageCircle, Settings } from 'lucide-react'
-import { Link, NavLink, useLocation, useNavigate, useNavigationType } from 'react-router-dom'
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { useAppNavigationType } from '@/app/navigation-type'
 import { agentMarkUrl } from '@/lib/brand-assets'
 
 const desktopDestinations = [
@@ -29,18 +30,54 @@ export function DesktopDestinationLinks({ compact = false, onSelect }: {
   )}</>
 }
 
-export function DesktopHistory() {
-  const action = useNavigationType()
+function HistoryButton({ direction, disabled, mac, onClick }: {
+  direction: 'back' | 'forward'
+  disabled: boolean
+  mac: boolean
+  onClick: () => void
+}) {
+  const id = useId()
+  const back = direction === 'back'
+  const label = back ? '后退' : '前进'
+  const key = back ? '[' : ']'
+  const Icon = back ? ChevronLeft : ChevronRight
+  return <span className="desktop-history-action">
+    <button type="button" disabled={disabled} aria-label={label} aria-describedby={id}
+      aria-keyshortcuts={`${mac ? 'Meta' : 'Control'}+${key}`} onClick={onClick}><Icon /></button>
+    <span className="desktop-history-tip" id={id} role="tooltip">{label} <kbd>{mac ? '⌘' : 'Ctrl+'}{key}</kbd></span>
+  </span>
+}
+
+export function DesktopHistory({ onDismiss, blocked = false }: { onDismiss?: () => void; blocked?: boolean } = {}) {
+  const action = useAppNavigationType()
   const navigate = useNavigate()
   const index = window.history.state?.idx ?? 0
   const lastIndex = action === 'PUSH' ? index : Math.max(index, historyTails.get(window.history) ?? index)
   historyTails.set(window.history, lastIndex)
   const navigation = (window as Window & { navigation?: { canGoForward: boolean } }).navigation
-  const forward = navigation?.canGoForward ?? index < lastIndex
+  const back = !blocked && (Boolean(onDismiss) || index > 0)
+  const forward = !blocked && !onDismiss && (navigation?.canGoForward ?? index < lastIndex)
+  const mac = /Mac/.test(navigator.platform)
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || event.altKey || event.shiftKey) return
+      if (event.key !== '[' && event.key !== ']') return
+      if (mac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey) return
+      const target = event.target
+      if (target instanceof HTMLElement && (target.isContentEditable || target.closest('input, textarea, select, dialog[open]'))) return
+      event.preventDefault()
+      if (event.key === '[' && back) { if (onDismiss) onDismiss(); else navigate(-1) }
+      if (event.key === ']' && forward) navigate(1)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [back, forward, mac, navigate, onDismiss])
+
   return (
     <div className="desktop-history">
-      <button type="button" disabled={index < 1} aria-label="后退" title="后退" onClick={() => navigate(-1)}><ChevronLeft /></button>
-      <button type="button" disabled={!forward} aria-label="前进" title="前进" onClick={() => navigate(1)}><ChevronRight /></button>
+      <HistoryButton direction="back" disabled={!back} mac={mac} onClick={onDismiss ?? (() => navigate(-1))} />
+      <HistoryButton direction="forward" disabled={!forward} mac={mac} onClick={() => navigate(1)} />
     </div>
   )
 }

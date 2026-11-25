@@ -9,6 +9,7 @@ import { useShellStore } from '@/store/useShellStore'
 import { useStudioCredits } from '../hooks/useStudioCredits'
 import { useAgentStore } from '../agent/agentStore'
 import IdeNavigationRail, { type IdeRailProps } from './IdeNavigationRail'
+import StudioPersonalizationIcon from './StudioPersonalizationIcon'
 import type { StudioSettingsSection } from './StudioSettingsDialog'
 import { studioInert, useStudioPresence } from './use-studio-presence'
 import './studio-desktop-shell.css'
@@ -17,7 +18,6 @@ type Props = {
   ide?: IdeRailProps
   onOpenSettings: (section: StudioSettingsSection, trigger: HTMLButtonElement | null) => void
   onInvite: () => void
-  onReturnToWorkspace?: () => void
 }
 
 function RailCard({ open, alignTop = false, id, label, className, children }: {
@@ -54,7 +54,7 @@ function RailCard({ open, alignTop = false, id, label, className, children }: {
     {...studioInert(!open)} data-studio-surface="menu" data-phase={phase}>{children}</section> : null
 }
 
-export default function StudioDesktopRail({ ide, onOpenSettings, onInvite, onReturnToWorkspace }: Props) {
+export default function StudioDesktopRail({ ide, onOpenSettings, onInvite }: Props) {
   const user = useShellStore(state => state.sessionUser)
   const credits = useStudioCredits(60_000)
   const autoFollow = useAgentStore(state => state.autoFollow)
@@ -120,7 +120,6 @@ export default function StudioDesktopRail({ ide, onOpenSettings, onInvite, onRet
 
   const navigateFromRail = () => {
     setPanel(null)
-    onReturnToWorkspace?.()
   }
 
   const hintBox = hint?.getBoundingClientRect()
@@ -203,9 +202,7 @@ export default function StudioDesktopRail({ ide, onOpenSettings, onInvite, onRet
           <div><strong>{name}</strong>{user?.emailAuthEnabled && user.email && <span title={user.email}>{user.email}</span>}{summary && <small>{summary.planLabel}</small>}</div>
         </div>
         <button type="button" onClick={() => openSettings('personalization')}>
-          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="9.5" /><path d="m11 7.5-2.5 5h3M12.5 16a5 5 0 0 0 4-3" />
-          </svg>个性化
+          <StudioPersonalizationIcon />个性化
         </button>
         <button type="button" onClick={() => openSettings('profile')}><CircleUserRound />个人资料</button>
         <button type="button" onClick={() => openSettings('general')}><Settings />创作区设置</button>

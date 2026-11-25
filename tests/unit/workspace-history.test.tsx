@@ -15,7 +15,7 @@ function NavigationFixture() {
   const visit = readWorkspaceVisit(location.state, 'author', 'book')
   return <><DesktopHistory /><output>{visit?.taskId}</output>
     <Link to="/book" replace={false} state={{ workspaceVisit: second }}>任务 B</Link>
-    <Link to="/other">其它页面</Link></>
+    <Link to="/other">其它页面</Link><textarea aria-label="草稿" /></>
 }
 
 it('scopes restored task and perspective to the same user and work', () => {
@@ -47,6 +47,21 @@ it('retains the original task on native back and truncates forward after a new r
   fireEvent.click(screen.getByText('其它页面'))
   expect(forward.disabled).toBe(true)
   expect(window.location.pathname).toBe('/other')
+})
+
+it('uses bracket shortcuts outside editors and stays put while composing', async () => {
+  window.history.replaceState({ idx: 0, key: 'start', usr: { workspaceVisit: first } }, '', '/book')
+  render(<BrowserRouter><NavigationFixture /></BrowserRouter>)
+  const key = /Mac/.test(navigator.platform) ? { metaKey: true } : { ctrlKey: true }
+  fireEvent.click(screen.getByText('任务 B'))
+  expect(screen.getByRole('status').textContent).toBe('b')
+  expect(fireEvent.keyDown(screen.getByRole('textbox'), { key: '[', ...key })).toBe(true)
+  expect(fireEvent.keyDown(document.body, { key: '[', ...key, isComposing: true })).toBe(true)
+  expect(screen.getByRole('status').textContent).toBe('b')
+  fireEvent.keyDown(document.body, { key: '[', ...key })
+  await waitFor(() => expect(screen.getByRole('status').textContent).toBe('a'))
+  fireEvent.keyDown(document.body, { key: ']', ...key })
+  await waitFor(() => expect(screen.getByRole('status').textContent).toBe('b'))
 })
 
 it('restores the native cursor before the router can unmount a writing task', () => {

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
 import { useState } from 'react'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
@@ -162,12 +162,14 @@ afterEach(() => {
   vi.resetAllMocks()
 })
 
+beforeAll(async () => { await import('@/features/studio/components/StudioSettingsPanels') })
+
 it('shares the settings shell across sections and saves tone immediately', async () => {
   renderSettings('general')
   const [desktop, mobile] = screen.getAllByRole('navigation', { name: '设置导航' })
   expect(within(desktop).getByRole('button', { name: /个性化/ })).toBeTruthy()
   expect(screen.getByRole('heading', { level: 1, name: '通用' })).toBeTruthy()
-  expect(within(screen.getByRole('main')).getByRole('combobox', { name: '工作模式' })).toBeTruthy()
+  expect(await within(screen.getByRole('main')).findByRole('combobox', { name: '工作模式' })).toBeTruthy()
   fireEvent.click(within(mobile).getByRole('button', { name: '个性化' }))
   expect(within(desktop).getByRole('button', { name: '个性化' }).getAttribute('aria-current')).toBe('page')
   const style = await screen.findByRole<HTMLSelectElement>('combobox', { name: '基础风格和语气' })

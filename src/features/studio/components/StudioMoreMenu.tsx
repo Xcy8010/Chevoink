@@ -1,6 +1,6 @@
 import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { useQuery } from '@tanstack/react-query'
-import { Bug, ChevronDown, Gauge, Gift, Lightbulb, MoreHorizontal, Settings2 } from 'lucide-react'
+import { Bug, ChevronDown, Gauge, Gift, Lightbulb, MoreHorizontal, Settings } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { formatCreditAmount, formatCreditResetLabel } from '@/features/account/credit-format'
@@ -107,7 +107,7 @@ export default function StudioMoreMenu(props: Props) {
           <button type="button" onClick={() => window.open('/account/usage', '_blank', 'noopener,noreferrer')} className="mt-2 text-[10px] font-medium hover:underline">查看详细记录 →</button>
         </div> : null}</StudioPresence>
         <button type="button" onClick={openInvite} className={item}><Gift className="h-3.5 w-3.5" />邀请好友</button>
-        {props.onOpenStudioSettings ? <button type="button" onClick={() => { setOpen(false); props.onOpenStudioSettings?.('general') }} className={item}><Settings2 className="h-3.5 w-3.5" />创作区设置</button> : null}
+        {props.onOpenStudioSettings ? <button type="button" onClick={() => { setOpen(false); props.onOpenStudioSettings?.('general') }} className={item}><Settings className="h-3.5 w-3.5" />创作区设置</button> : null}
         <button type="button" onClick={() => { setOpen(false); setFeedbackKind('suggestion') }} className={item}><Lightbulb className="h-3.5 w-3.5" />提交建议</button>
         <button type="button" onClick={() => { setOpen(false); setFeedbackKind('bug') }} className={item}><Bug className="h-3.5 w-3.5" />问题反馈</button>
       </div> : null}</StudioPresence>

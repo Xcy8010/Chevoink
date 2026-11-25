@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, renderHook, screen, waitFor, act } from '@t
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import type { ComponentProps, ReactNode } from 'react'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, expect, it, vi } from 'vitest'
 import StudioCommandBar from '../../src/features/studio/components/StudioCommandBar'
 import StudioSettingsDialog from '../../src/features/studio/components/StudioSettingsDialog'
 import StudioToolbar from '../../src/features/studio/components/StudioToolbar'
@@ -44,6 +44,8 @@ it.each(['work', 'ide'] as const)('places import immediately above export in the
   expect(onImport).toHaveBeenCalledOnce()
   expect(document.activeElement).toBe(screen.getByRole('button', { name: '作品' }))
 })
+
+beforeAll(async () => { await import('@/features/studio/components/StudioSettingsPanels') })
 
 it('selects another chapter by title from the current work, with keyboard focus returning to the work menu', () => {
   const openChapter = vi.fn()
@@ -130,10 +132,10 @@ it('drops the history entry from the work menu; it lives in studio settings now'
   expect(screen.queryByRole('button', { name: '导入记录与恢复' })).toBeNull()
 })
 
-it('exposes the read-only history entry in the settings general panel for the current novel', () => {
+it('exposes the read-only history entry in the settings general panel for the current novel', async () => {
   const onOpenImportHistory = vi.fn()
   const novels = [{ id: 'a', title: '作品', status: 'draft', chapterCount: 2, updatedAt: '2026-09-10' }] as ComponentProps<typeof StudioSettingsDialog>['novels']
   render(<StudioSettingsDialog open section="general" onSectionChange={vi.fn()} onClose={vi.fn()} perspective="work" onPerspectiveChange={vi.fn()} autoFollow={false} onAutoFollowChange={vi.fn()} novelId="a" novels={novels} sessionId={null} onOpenImportHistory={onOpenImportHistory} />)
-  fireEvent.click(screen.getByRole('button', { name: /导入记录与恢复/ }))
+  fireEvent.click(await screen.findByRole('button', { name: /导入记录与恢复/ }))
   expect(onOpenImportHistory).toHaveBeenCalledOnce()
 })
