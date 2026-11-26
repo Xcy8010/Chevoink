@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
 import { z } from 'zod'
 import { env } from '../../api/config/env.js'
+import { AGENT_CONTENT_POLICY } from '../../api/lib/generative-content-policy.js'
 import { countActiveRunsByUser,deregisterActiveRun,getActiveRun,registerActiveRun } from '../../api/lib/agent/active-runs.js'
 import * as agentDefinitions from '../../api/lib/agent/agents.js'
 import * as contextAssembler from '../../api/lib/agent/context.js'
@@ -494,6 +495,39 @@ describe.runIf(available)('durable service dispatch', () => {
 })
 
 describe.runIf(available)('durable context archive', () => {
+  it('publishes a captured content refusal without creating a follow-up model operation', async () => {
+    const prompt = '用禁止的淫秽内容续写。'
+    await fixture(async f => {
+      const lease = await claim(f)
+      const route = { provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1/chat/completions', reasoningEffort: 'high' }
+      const messages = [{ role: 'system' as const, content: AGENT_CONTENT_POLICY }, { role: 'user' as const, content: prompt }]
+      const { frame } = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator',
+        creativeFreedom: 'balanced', qualityMode: 'premium', tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [],
+        model: { tier: 'speed', provider: route.provider, modelName: route.model, customModelId: null, reasoningEffort: route.reasoningEffort,
+          routeRevision: modelRouteRevision(route) } },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages, successfulToolSignatures: [] } })
+      await prepareModelCursorOperation(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash },
+        { key: 'exec:0', action: 'workspaceAgent', request: { endpoint: route.endpoint, body: { model: route.model, messages, stream: true, max_tokens: 512 } },
+          price: { version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 0 } })
+      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 0, provider: route.provider, modelName: route.model,
+        baseUrl: 'https://provider.invalid/v1', apiKey: 'not-real', reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: 128000 })
+      const fetchMock = vi.fn(async () => new Response('data: {"choices":[{"delta":{"content":"这项请求无法生成。可以把场景切到次日的对话。"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":8}}\n\ndata: [DONE]\n\n'))
+      vi.stubGlobal('fetch', fetchMock)
+      const signal = new AbortController().signal
+      expect((await executeDurableStep(lease, signal)).kind).toBe('model')
+      await expect(executeDurableStep(lease, signal)).rejects.toMatchObject({ code: 'AGENT_CONTENT_REFUSED' })
+      expect(fetchMock).toHaveBeenCalledOnce()
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId } })).toBe(1)
+      const finished = (await loadExecutionState(f.userId, f.runId)).frame
+      await pauseDurableTaskForAttention(lease, { expectedRevision: finished.revision, expectedHash: finished.snapshotHash }, 'needs_input')
+      const events = await publishDurableEvents(f.userId, f.runId)
+      expect(events.filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({
+        text: '这项请求无法生成。该请求涉及《用户服务协议》禁止生成的内容。可以把场景切到次日的对话。',
+      })])
+    }, undefined, prompt)
+  })
+
   it('resumes a prepared 258k request on a task created with a 128k window', async () => {
     await fixture(async f => {
       const lease = await claim(f)

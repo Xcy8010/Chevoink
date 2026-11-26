@@ -4,6 +4,7 @@ import type { AgentExecutionOutbox } from '@prisma/client'
 import type { AgentStreamEventBody, AgentToolDisplayPayload, AgentMessagePart, AgentRollbackSnapshot } from '../../../shared/contracts/index.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
 import { normalizeAgentFinalText, prependAgentActivityTitle, readAgentActivityTitle, visibleAgentActivityTitle } from '../../../shared/agent-activity-title.js'
+import { formatFullContentRefusal, isFullContentRefusal, usesAgentContentPolicy } from '../generative-content-policy.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
@@ -125,6 +126,9 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
       if (followup.length) return runtimeError('RUNTIME_RECEIPT_INVALID', '模型归约事件不符合消息追加合同。')
       const events: AgentStreamEventBody[] = []
       const raw = appended.content ?? ''
+      if (!appended.toolCalls?.length && usesAgentContentPolicy(previous.state.messages) && isFullContentRefusal(raw)) {
+        return [{ type: 'text.final', messageId, text: formatFullContentRefusal(raw), asReasoning: false }]
+      }
       const toolCall = appended.toolCalls?.find(call => call.name !== 'task_respond')
       const metadata = toolCall ? readAgentActivityTitle(raw) : { text: normalizeAgentFinalText(raw) }
       const title = metadata.title && visibleAgentActivityTitle(metadata.title)

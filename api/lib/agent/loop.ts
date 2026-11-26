@@ -50,6 +50,7 @@ import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, governedP
 import { deregisterActiveRun, registerActiveRun, getActiveRun } from './active-runs.js'
 import { clearRunBaselines, getLastTouchedChapter } from './baseline.js'
 import { assembleContext, insertSubagentCatalog } from './context.js'
+import { formatFullContentRefusal, isFullContentRefusal, usesAgentContentPolicy } from '../generative-content-policy.js'
 import { readWritingCollaborationDigest, COLLABORATION_MARKER } from './writing-collaboration.js'
 import { captureUserDirectives } from './context-engine.js'
 import { syncNovelMemoryProjection } from './story-memory.js'
@@ -741,6 +742,9 @@ export async function handleToolCall(
     if (error instanceof DataAccessError && ['REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED'].includes(error.code)) {
       return fail('自动修订已停止', error.message, 'failed')
     }
+    if (error instanceof DataAccessError && error.code === 'COVER_CONTENT_REFUSED') {
+      return fail('封面请求已拒绝', error.message, 'failed')
+    }
     if (error instanceof DataAccessError && ['RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) {
       return fail('原任务状态或授权不匹配', `工具 ${call.name} 未执行（${error.code}）：${error.message} 停止后续写入并核对原任务状态和授权；不得调整参数重试、换工具绕过或自行恢复权限。`, 'failed')
     }
@@ -760,7 +764,7 @@ export async function handleToolCall(
   }
 }
 
-type LocalTerminalNoticeKind = 'question_timeout' | 'question_cancelled' | 'novel_setup' | 'attachment_stage'
+type LocalTerminalNoticeKind = 'question_timeout' | 'question_cancelled' | 'novel_setup' | 'attachment_stage' | 'content_refused'
 
 async function finalizeLegacyRun(
   runId: string,
@@ -1622,6 +1626,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     console.info('[agent-context-timing]', { runId, ...assembledContext.timings })
     console.info('[agent-context-input]', assembledContext.inputEstimates ?? {})
     const messages: ChatMessage[] = assembledContext.messages
+    const contentPolicyEnabled = usesAgentContentPolicy(messages)
     offerCompletedNextPrompt = Boolean(params.predictNextPrompt && !ownedGoalExecution && (params.agentType ?? 'orchestrator') === 'orchestrator'
       && allowsNextPrompt(params.prompt))
     const nextPromptMarker = offerCompletedNextPrompt && !taskSpec.scope.writing?.titleAndBodyOnly && allowsModelNextPrompt(params.prompt)
@@ -1938,6 +1943,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
     const publicWebQuestion = params.publicWebQuestion === taskSpec.publicWebQuestion ? params.publicWebQuestion : undefined
     const toolContext: ToolContext = {
+      contentPolicyEnabled,
       get attachmentInputBudgetTokens() { return contextBudget.hardRequestTokens },
       publicWebSearchQuestion: taskSpec.networkAccess !== 'denied' && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId
         ? publicWebQuestion : undefined,
@@ -2471,7 +2477,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const resultText = result?.content ?? ''
       const modelText = toolBearing ? readAgentActivityTitle(resultText) : { text: normalizeAgentFinalText(resultText) }
       const activityTitle = modelText.title && visibleAgentActivityTitle(modelText.title)
-      if (result) publishAuthorDelta(activityTextStream.finish(toolBearing))
+      const refusal = contentPolicyEnabled && result?.finishReason === 'stop' && !result.toolCalls.length && isFullContentRefusal(modelText.text)
+        ? formatFullContentRefusal(modelText.text) : undefined
+      if (result && !refusal) publishAuthorDelta(activityTextStream.finish(toolBearing))
       if (activityTitle) bus.emit({ type: 'activity.title', messageId, title: activityTitle })
       // A generated proposal may be replaced, restricted or served from cache.
       // End all parameter previews before admission/preflight can wait on other work.
@@ -2485,6 +2493,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       if (!bootstrapCall) observeTurnUsage(result.usage)
       await persistCheckpoint()
+      if (refusal) {
+        controller.signal.throwIfAborted()
+        bus.emit({ type: 'step.finish', turn, usage: result.usage })
+        await finalizeRun(runId, bus, 'failed', usage, turn, refusal, refusal, false, undefined, undefined, undefined,
+          false, undefined, 'user_stop', undefined, undefined, undefined, {
+            kind: 'content_refused', text: refusal, messageId, sessionId: params.sessionId,
+            parts: [{ type: 'text', text: refusal }], signal: controller.signal,
+          })
+        return
+      }
       if (attachmentPause) {
         const findings = result.finishReason === 'stop' && !result.toolCalls.length && !containsAgentProtocolInvocation(modelText.text)
           ? attachmentStageFindings(humanizeAgentVisibleText(stripAgentProtocolArtifacts(modelText.text))) : ''

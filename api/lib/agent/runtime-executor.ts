@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { creditModelTierSchema } from '../../../shared/contracts/credits.js'
 import { env } from '../../config/env.js'
 import { chatWithTools, type ChatMessage } from '../ai-service.js'
+import { formatFullContentRefusal, isFullContentRefusal, usesAgentContentPolicy } from '../generative-content-policy.js'
 import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
 import { getModelTierRuntime } from '../credits.js'
 import { DataAccessError } from '../prisma.js'
@@ -284,9 +285,13 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   // A resumed goal may have an explicitly selected model. Update only the
   // frozen route while retaining the original root, frame history and budget.
   if (!lease.parent) await refreshDurableGoalModel(lease)
-  await wakeDurableChildren(lease)
   const prepared = await withRunLease(lease, async tx => {
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
+    const last = state.frame.state.messages.at(-1)
+    if (state.frame.state.phase === 'idle' && usesAgentContentPolicy(state.frame.state.messages)
+      && last?.role === 'assistant' && !last.toolCalls?.length && isFullContentRefusal(last.content)) {
+      throw new DataAccessError(422, 'AGENT_CONTENT_REFUSED', formatFullContentRefusal(last.content))
+    }
     if (state.frame.state.phase !== 'awaiting_operation') return null
     const operation = await tx.agentOperation.findUniqueOrThrow({ where: { id: state.frame.state.pendingOperationId! } })
     if (isDurablePublicWebOperation(operation)) return { publicWeb: operation }
@@ -317,6 +322,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     return { state: { ...state, frame: source }, preparedTools: readFrozenModelToolViews(operation.inputSnapshot),
       request: readPreparedModelRequest(operation.inputSnapshot), admittedContext: usage?.data }
   })
+  await wakeDurableChildren(lease)
   if (prepared && 'refreshed' in prepared) return { kind: 'context' as const, frame: prepared.refreshed! }
   if (prepared && 'publicWeb' in prepared) return executeDurablePublicWeb(lease, prepared.publicWeb!, signal)
   if (!prepared) {

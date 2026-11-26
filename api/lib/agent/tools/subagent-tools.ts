@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { isFullContentRefusal } from '../../generative-content-policy.js'
 
 import type { AgentMessagePart, AgentSubtaskRole } from '../../../../shared/contracts/index.js'
 import { getModelTierRuntime } from '../../credits.js'
@@ -128,7 +129,9 @@ async function executeSubagentDefinition(
       '—— 子 Agent 工作报告（开始）——',
       result.report,
       '—— 子 Agent 工作报告（结束）——',
-      '主 Agent 审查要求：核对报告与工作区实际状态是否一致；发现遗漏、错误或风格不符时直接修正或补充执行；完成后用自己的话向作者简要汇报（不要原样粘贴报告全文，除非作者要求细节）。',
+      ctx.contentPolicyEnabled && isFullContentRefusal(result.report)
+        ? '把拒绝理由和可继续写的方向告知作者。不要补写或再次派发已拒绝的内容。'
+        : '主 Agent 审查要求：核对报告与工作区实际状态是否一致；发现遗漏、错误或风格不符时直接修正或补充执行；完成后用自己的话向作者简要汇报（不要原样粘贴报告全文，除非作者要求细节）。',
     ].join('\n')
 
     return {

@@ -1,4 +1,5 @@
 import { modelRouteRevision } from './runtime-model-cursor.js'
+import { formatFullContentRefusal, isFullContentRefusal, usesAgentContentPolicy } from '../generative-content-policy.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
@@ -288,11 +289,14 @@ export async function executeDurableChildTool(parent: RunLeaseToken, cursor: Too
       }))
       const last = state.frame.state.messages.at(-1)
       const interrupted = z.object({ version: z.literal(1), grantId: z.literal(grant.id), code: z.string() }).safeParse(interruption?.payload)
-      const reason = interrupted.success ? ['RUNTIME_CHILD_BUDGET_EXHAUSTED', 'RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED'].includes(interrupted.data.code)
+      const reason = interrupted.success ? interrupted.data.code === 'AGENT_CONTENT_REFUSED'
+        ? '请把拒绝理由及合规替代方向告诉作者。不得补写或再次派发已拒绝的内容。'
+        : ['RUNTIME_CHILD_BUDGET_EXHAUSTED', 'RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED'].includes(interrupted.data.code)
         ? '完整原始上下文与配置输出空间超过本子任务冻结额度，供应商尚未派发。原上下文、执行位置和已保存内容均保留；主 Agent 可以继续自己已获授权的工作，指定子 Agent 的交付要求仍未完成。'
         : interrupted.data.code === 'RUNTIME_CHILD_DEFINITION_REQUIRED' ? '原子 Agent 已停用或定义身份不匹配，供应商尚未派发。请核对原定义后继续。'
           : '原子任务执行被中断，已保留原始进度和回执；未确认的供应商结果需核对，不能自动重复派发。' : ''
-      return { grant, report: [last?.role === 'assistant' ? last.content ?? '' : '', reason].filter(Boolean).join('\n'), completed: grant.status === 'completed' && grant.childRun.status === 'completed' }
+      const text = last?.role === 'assistant' ? last.content ?? '' : ''
+      return { grant, report: [usesAgentContentPolicy(state.frame.state.messages) && isFullContentRefusal(text) ? formatFullContentRefusal(text) : text, reason].filter(Boolean).join('\n'), completed: grant.status === 'completed' && grant.childRun.status === 'completed' }
     }))
     const completed = summaries.every(item => item.completed) && (!ids || ids.every(id => summaries.some(item => item.grant.childRun.sessionId === id)))
     result = { output: summaries.map(item => `${verifyChildGrant(item.grant).name}：${item.completed ? '已完成，需审查' : '未完成，需处理'}\n${item.report}`).join('\n\n') || '没有本任务授权的子任务交付。',

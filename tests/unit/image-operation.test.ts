@@ -1,6 +1,7 @@
 import { withGoalExecutionContext, type GoalExecutionContext } from '../../api/lib/agent/goal-context.js'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { executeImageOperation } from '../../api/lib/image-operation.js'
+import { contentPolicyEnabledForUser } from '../../api/lib/generative-content-policy.js'
 
 const m = vi.hoisted(() => ({ operation: null as Record<string, unknown> | null, runtime: {} as Record<string, unknown>, rows: new Map<string, Record<string, unknown>>(), responses: new Map<string, unknown>(),
   dispatch: vi.fn(), resolve: vi.fn(), debit: vi.fn(), intent: vi.fn(), reconcile: vi.fn(), assets: vi.fn(), storage: vi.fn(), goalAdmission: vi.fn(), reserveGoal: vi.fn(), syncGoal: vi.fn(), goalFence: vi.fn(), logs: new Map<string, Record<string, unknown>>(), goalUsages: new Map<string, string>(), goalStopped: false, goalStopCode: 'GOAL_EXECUTION_FENCED', nextId: 0, tx: {} as Record<string, unknown> }))
@@ -9,6 +10,7 @@ vi.mock('../../api/lib/credit-policy.js', () => ({ creditTransaction: async (wor
 vi.mock('../../api/lib/credits.js', () => ({ consumeCreditsInTransaction: (...args: unknown[]) => m.debit(...args), recordImageRefundIntentInTransaction: (...args: unknown[]) => m.intent(...args), reconcileCreditRefunds: (...args: unknown[]) => m.reconcile(...args) }))
 vi.mock('../../api/lib/data-access.js', () => ({ createCoverAssetsInTransaction: (...args: unknown[]) => m.assets(...args), recoverCoverAssetStorageData: async (_user: string, id: string) => ({ id, imageUrl: 'https://owned.invalid/' + id, modelName: '图片生成' }) }))
 vi.mock('../../api/lib/ai-service.js', async original => ({ ...await original<object>(), resolveCoverImageRuntime: (...args: unknown[]) => m.resolve(...args), requestCoverImages: (...args: unknown[]) => m.dispatch(...args) }))
+vi.mock('../../api/lib/generative-content-policy.js', async original => ({ ...await original<object>(), contentPolicyEnabledForUser: vi.fn() }))
 vi.mock('../../api/lib/agent/goal-budget.js', async original => ({ ...await original<object>(), assertGoalProviderAdmission: (...args: unknown[]) => m.goalAdmission(...args), reserveGoalUsageInTransaction: (...args: unknown[]) => m.reserveGoal(...args), syncGoalLegacyUsage: (...args: unknown[]) => m.syncGoal(...args) }))
 vi.mock('../../api/lib/agent/goal-fence.js', async original => ({ ...await original<object>(), assertGoalFence: (...args: unknown[]) => m.goalFence(...args) }))
 vi.mock('../../api/lib/agent/provider-image-storage.js', async original => ({ ...await original<object>(), prepareImageResponseStorage: async () => undefined,
@@ -20,6 +22,7 @@ const input = { operationId: 'fixed-operation', prompt: '书名与画面', size:
 const copy = <T,>(value: T): T => structuredClone(value)
 beforeEach(async () => {
   vi.resetAllMocks(); m.operation = null; m.rows.clear(); m.responses.clear(); m.logs.clear(); m.goalUsages.clear(); m.goalStopped = false; m.goalStopCode = 'GOAL_EXECUTION_FENCED'
+  vi.mocked(contentPolicyEnabledForUser).mockResolvedValue(true)
   m.runtime = { apiKey: 'never-persist-this-key', route }
   const { DataAccessError } = await import('../../api/lib/prisma.js')
   m.goalAdmission.mockImplementation(async (goal: unknown) => { if (goal && m.goalStopped) throw new DataAccessError(409, m.goalStopCode, 'Goal stopped') })
@@ -55,11 +58,39 @@ beforeEach(async () => {
 it('persists the original admission and replays one paid request without keys or upstream names in the DTO', async () => {
   const first = await executeImageOperation('owner', input), second = await executeImageOperation('owner', input)
   expect(second).toEqual(first); expect(m.dispatch).toHaveBeenCalledOnce(); expect(m.debit).toHaveBeenCalledOnce()
+  expect(contentPolicyEnabledForUser).toHaveBeenCalledOnce()
   expect(m.resolve).toHaveBeenCalledTimes(2)
   expect(JSON.stringify(m.operation)).not.toContain('never-persist-this-key')
   expect(JSON.stringify(first)).not.toMatch(/private-provider|private-model|image_call/)
   await expect(executeImageOperation('owner', { ...input, prompt: 'different' })).rejects.toMatchObject({ code: 'IMAGE_OPERATION_CONFLICT' })
   expect(m.dispatch).toHaveBeenCalledOnce()
+})
+it('keeps a known content refusal terminal and refunds the original debit even when the client aborts', async () => {
+  m.runtime = { ...m.runtime, fallbackRuntimes: [{ apiKey: 'fallback-key', route: { ...route, routeId: '22222222-2222-4222-8222-222222222222' } }] }
+  const controller = new AbortController()
+  m.dispatch.mockImplementationOnce(async () => {
+    controller.abort()
+    return { status: 400, body: JSON.stringify({ error: { code: 'content_policy_violation' } }) }
+  })
+  const refusal = { status: 422, code: 'COVER_CONTENT_REFUSED', message: expect.stringContaining('环境构图') }
+  await expect(executeImageOperation('owner', input, controller.signal)).rejects.toMatchObject(refusal)
+  vi.mocked(contentPolicyEnabledForUser).mockResolvedValue(false)
+  await expect(executeImageOperation('owner', input)).rejects.toMatchObject(refusal)
+  expect(m.dispatch).toHaveBeenCalledOnce()
+  expect(m.debit).toHaveBeenCalledOnce()
+  expect(m.intent).toHaveBeenCalledOnce()
+  expect([...m.rows.values()].filter(row => row.kind === 'refund')).toHaveLength(1)
+  expect(m.operation).toMatchObject({ state: 'failed', errorCode: 'COVER_CONTENT_REFUSED', routeIndex: 0 })
+  expect(m.assets).not.toHaveBeenCalled()
+})
+
+it('keeps the old error response for an account on the stable release', async () => {
+  vi.mocked(contentPolicyEnabledForUser).mockResolvedValue(false)
+  m.dispatch.mockResolvedValueOnce({ status: 400, body: JSON.stringify({ error: { code: 'content_policy_violation' } }) })
+  await expect(executeImageOperation('owner', input)).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR' })
+  expect(m.dispatch).toHaveBeenCalledOnce()
+  expect(m.operation).toMatchObject({ state: 'failed', errorCode: 'AI_PROVIDER_ERROR' })
+  expect(m.intent).toHaveBeenCalledOnce()
 })
 it('keeps an unknown dispatch unresolved and never redraws or dispatches on replay', async () => {
   m.dispatch.mockRejectedValue(new Error('connection lost'))

@@ -5,6 +5,7 @@ import { toolTurnHistory } from '../../api/lib/agent/tool-turn-history.js'
 import { addNextPromptInstruction } from '../../api/lib/agent/next-prompt.js'
 import type { ChatMessage } from '../../api/lib/ai-service.js'
 import { env } from '../../api/config/env.js'
+import { AGENT_CONTENT_POLICY, AGENT_PROVIDER_REFUSAL_MESSAGE } from '../../api/lib/generative-content-policy.js'
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), reserveTokenCredits: vi.fn(), consumeTokenCredits: vi.fn(async () => ({ chargedMilli: 0 })) }))
 vi.mock('../../api/lib/agent/personalization.js', () => ({ getPersonalizationMemoryEpoch: vi.fn(async () => 2) }))
 vi.mock('../../api/lib/app-releases.js', () => ({ hasAgentPersonalizationCapability: vi.fn(async () => false) }))
@@ -31,6 +32,61 @@ function stream(text: string) {
   } }))))
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+
+it('keeps reported usage and prevents content or tools from a filtered Chat turn from being delivered', async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response([
+    { choices: [{ delta: { content: 'Partial answer', reasoning_content: 'Partial reasoning' } }] },
+    delta('{}', true),
+    ending('content_filter'),
+    { choices: [], usage: { prompt_tokens: 32, completion_tokens: 7, total_tokens: 39 } },
+  ].map(frame => 'data: ' + JSON.stringify(frame) + '\n\n').join('')))
+  vi.stubGlobal('fetch', fetch)
+  const result = await chatWithTools({ messages: [{ role: 'system', content: AGENT_CONTENT_POLICY }],
+    tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+  expect(result).toMatchObject({ content: AGENT_PROVIDER_REFUSAL_MESSAGE, reasoning: '', toolCalls: [], finishReason: 'stop',
+    usage: { promptTokens: 32, completionTokens: 7, totalTokens: 39 } })
+  expect(fetch).toHaveBeenCalledOnce()
+})
+
+it.each(['incomplete', 'refusal'] as const)('normalizes a Responses %s without delivering provider text or pending tools', async scenario => {
+  const output = [{ type: 'message', role: 'assistant', content: [{ type: 'refusal', refusal: 'Raw provider explanation' }] }]
+  const usage = { input_tokens: 14, output_tokens: 0 }
+  const terminal = scenario === 'incomplete'
+    ? { type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'content_filter' }, usage } }
+    : { type: 'response.completed', response: { status: 'completed', output, usage } }
+  const frames = [{ type: 'response.output_text.delta', delta: 'Discarded partial text' },
+    { type: 'response.refusal.delta', delta: 'Raw provider explanation' }, terminal]
+  const fetch = vi.fn().mockResolvedValue(new Response(frames.map(frame => 'data: ' + JSON.stringify(frame) + '\n\n').join('')))
+  vi.stubGlobal('fetch', fetch)
+  const chunks: unknown[] = []
+  const result = await chatWithTools({ messages: [{ role: 'system', content: AGENT_CONTENT_POLICY }],
+    provider: 'custom', model: 'gpt-6.1-terra', providerBaseUrl: 'https://yunshu.chevolink.com/v1',
+    tools: [{ type: 'function', function: { name: 'inspect', description: 'Synthetic', parameters: { type: 'object' } } }],
+    providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' }, onChunk: chunk => chunks.push(chunk) })
+  expect(result).toMatchObject({ content: AGENT_PROVIDER_REFUSAL_MESSAGE, toolCalls: [], finishReason: 'stop',
+    usage: { promptTokens: 14, completionTokens: 0 } })
+  expect(chunks).not.toContainEqual(expect.objectContaining({ delta: 'Raw provider explanation' }))
+  expect(fetch).toHaveBeenCalledExactlyOnceWith('https://yunshu.chevolink.com/v1/responses', expect.anything())
+})
+
+it('maps the existing cover prompt completion filter to 422 without forwarding partial content', async () => {
+  const frames = [{ choices: [{ delta: { content: 'Synthetic partial cover prompt' } }] }, ending('content_filter'),
+    { usage: { prompt_tokens: 18, completion_tokens: 3 } }]
+  const fetch = vi.fn().mockResolvedValue(new Response(frames.map(frame => 'data: ' + JSON.stringify(frame) + '\n\n').join(''),
+    { headers: { 'content-type': 'text/event-stream' } }))
+  vi.stubGlobal('fetch', fetch)
+  const onObservedCompletion = vi.fn()
+  const modelRuntime = { tier: 'custom' as const, multiplierBps: 0, provider: 'fixture', modelName: 'image-prompt', baseUrl: 'https://image.example/v1',
+    apiKey: 'fake-test-key', reasoningEffort: 'none' as const, reasoningEfforts: ['none' as const], visionEnabled: false, contextWindowTokens: 16000 }
+  await expect(generateTextCompletion('Synthetic cover policy', 'Synthetic cover description',
+    { userId: 'test', action: 'generateCoverPrompt', explicitModelSelection: true, coverContentPolicy: true, modelRuntime, onObservedCompletion }))
+    .rejects.toMatchObject({ status: 422, code: 'COVER_CONTENT_REFUSED' })
+  expect(fetch).toHaveBeenCalledOnce()
+  expect(onObservedCompletion).not.toHaveBeenCalled()
+  expect(prisma.aiUsageLog.update).toHaveBeenCalledWith(expect.objectContaining({
+    data: expect.objectContaining({ usageSource: 'reported', requestTokens: 18, responseTokens: 3 }),
+  }))
+})
 
 it('sends the isolated summary once on the selected route at its advertised low effort and keeps missing usage unknown', async () => {
   const fetch = vi.fn().mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"摘要"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'))

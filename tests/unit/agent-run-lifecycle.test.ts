@@ -18,6 +18,8 @@ import { persistedContentHash } from '../../api/lib/agent/semantic-progress.js'
 import { toolFailureInputHash } from '../../api/lib/agent/tool-local-failure.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { assembleContext } from '../../api/lib/agent/context.js'
+import { AGENT_CONTENT_POLICY } from '../../api/lib/generative-content-policy.js'
 import { BOOTSTRAP_NOVEL_SUMMARY } from '../../shared/contracts/novel-publish.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 
@@ -3063,6 +3065,35 @@ describe('persisted legacy checkpoint budgets', () => {
 })
 
 describe('tool execution authority (real dispatch, mocked global registry)', () => {
+  it('relays an inline child’s refusal without calling the writer', async () => {
+    const writer = tool('chapter_write', async () => ({ output: '不应执行' }), false)
+    mocks.tools = [writer]
+    const parent = context()
+    parent.contentPolicyEnabled = true
+    parent.toolAuthority = new Map([['chapter_write', { permission: 'allow', alwaysConfirm: false, dangerous: false }]])
+    const refusal = '这项请求无法生成。可以改写为非露骨的情感冲突。'
+    queue(response(refusal))
+    const result = await runSubagentInline({
+      subagentCallId: 'child', subtaskRunId: 'subrun', name: '写作', role: 'continuity',
+      triggerCondition: '', prompt: '写作任务', task: '生成淫秽色情内容', mode: 'build', parentRunId: 'run',
+      sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: null, messageId: 'message',
+      modelRuntime: await (await import('../../api/lib/credits.js')).getModelTierRuntime(),
+      bus: { emit: mocks.emit }, toolContextBase: parent, sessionPolicy: null,
+    })
+    expect(mocks.chat.mock.calls[0][0].messages[0].content).toContain('不播报或展示内容审核进度及通过信息')
+    expect(writer.execute).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ ok: false, report: '这项请求无法生成。该请求涉及《用户服务协议》禁止生成的内容。可以改写为非露骨的情感冲突。', toolCallCount: 0 })
+  })
+
+  it('passes a cover refusal to the Agent without inviting another tool or retry', async () => {
+    const refusal = '无法生成这张封面。请求涉及《用户服务协议》禁止生成的内容。可以改用原创人物。'
+    const cover = tool('cover_generate', async () => { throw new DataAccessError(422, 'COVER_CONTENT_REFUSED', refusal) }, false)
+    const result = await handleToolCall(call('cover-refusal', cover.name), [cover], context(), { emit: mocks.emit }, 'message', 'run')
+    expect(result.part).toMatchObject({ status: 'failed', summary: '封面请求已拒绝' })
+    expect(result.observation).toContain(refusal)
+    expect(result.observation).not.toMatch(/重试|换用其他工具/)
+  })
+
   it('closes a resolved failure with a failed terminal event, without claiming an effect', async () => {
     const admitted = tool('chapter_write', async () => ({ outcome: 'failed', output: '正文已由作者修改，未覆盖。', summary: '正文变更未执行' }), false)
     const result = await handleToolCall(call('conflict', admitted.name), [admitted], context(), { emit: mocks.emit }, 'message', 'run')
@@ -3170,6 +3201,32 @@ describe('tool execution authority (real dispatch, mocked global registry)', () 
 })
 
 describe('Agent run admission and completion lifecycle (real loop, mocked provider/persistence)', () => {
+  it('ends a refused chapter request without another model turn or manuscript write', async () => {
+    const assemble = vi.mocked(assembleContext).getMockImplementation()!
+    vi.mocked(assembleContext).mockImplementationOnce(async input => ({
+      ...await assemble(input), messages: [{ role: 'system', content: AGENT_CONTENT_POLICY }],
+    }))
+    const refusal = '这项请求无法生成。可以保留人物矛盾，把镜头切到次日的对话。'
+    const writer = tool('chapter_write', async () => ({ output: '不应执行' }), false)
+    mocks.tools = [writer]
+    queue(response(refusal))
+    await run('续写下一章，要求将情节写成淫秽色情内容。')
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(writer.execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')?.status).toBe('failed')
+    expect(events()).toContainEqual(expect.objectContaining({
+      type: 'text.final', text: '这项请求无法生成。该请求涉及《用户服务协议》禁止生成的内容。可以保留人物矛盾，把镜头切到次日的对话。',
+    }))
+  })
+
+  it('delivers a lawful historical fiction discussion normally', async () => {
+    const answer = '使臣的座次可以参考公开史料，再按虚构王朝的外交关系调整。'
+    queue(response(answer))
+    await run('虚构王朝的使臣谈判可以参考哪些历史礼仪？只讨论，别改正文。')
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: answer }))
+  })
+
   it.each(['corrected', 'duplicate-read', 'wrong-target', 'already-used', 'unproven'] as const)(
     'continues the legacy turn21 checkpoint through current CAS, final reports and actual commit without one-shot input authority (%s)', async scenario => {
       const hash = 'a'.repeat(64)

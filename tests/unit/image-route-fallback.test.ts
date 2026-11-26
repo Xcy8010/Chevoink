@@ -32,6 +32,27 @@ it('uses only the primary when it succeeds', async () => {
   expect(mocks.refund).not.toHaveBeenCalled()
 })
 
+it.each([
+  { code: 'moderation_blocked' },
+  { code: 'content_policy_violation' },
+  { code: 'invalid_request_error', inner_error: { code: 'ResponsibleAIPolicyViolation' } },
+])('refunds an explicit image content refusal without calling the backup', async error => {
+  mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ error }), { status: 400 }))
+  await expect(generateCoverImageData('owner', input)).rejects.toMatchObject({
+    status: 422, code: 'COVER_CONTENT_REFUSED', message: expect.stringContaining('《用户服务协议》'),
+  })
+  expect(mocks.fetch).toHaveBeenCalledOnce()
+  expect(mocks.charge).toHaveBeenCalledOnce()
+  expect(mocks.refund).toHaveBeenCalledWith('owner', expect.any(String), { outcome: 'rejected', deliveredImages: 0 })
+  expect(mocks.assets).not.toHaveBeenCalled()
+})
+
+it('keeps free-form provider messages out of the content decision', async () => {
+  mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'content_policy_violation' } }), { status: 400 }))
+  await expect(generateCoverImageData('owner', input)).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR' })
+  expect(mocks.fetch).toHaveBeenCalledOnce()
+})
+
 it.each([429, 500, 502, 503, 200])('routes a complete %s failure to the next account and charges the logical call once', async status => {
   mocks.fetch.mockResolvedValueOnce(new Response(status === 200 ? '{"data":[]}' : 'upstream unavailable', { status })).mockResolvedValueOnce(success())
   await generateCoverImageData('owner', input)

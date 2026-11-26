@@ -2,9 +2,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { FIXED_NOVEL_COVER_SIZE } from '../../../../shared/contracts/index.js'
 import { coverImageFailureMayRetry, parseCoverImageResponse, requestCoverImages, resolveCoverImageRuntime } from '../../ai-service.js'
+import { COVER_PROVIDER_REFUSAL_MESSAGE, contentPolicyEnabledForUser } from '../../generative-content-policy.js'
 import { consumeCreditsInTransaction, recordImageRefundIntentInTransaction, reconcileCreditRefunds } from '../../credits.js'
 import { createCoverAssetsInTransaction, recoverCoverAssetStorageData } from '../../data-access.js'
-import { prisma } from '../../prisma.js'
+import { DataAccessError, prisma } from '../../prisma.js'
 import { withoutGoalEffects } from '../goal-context.js'
 import { syncGoalDurableUsage } from '../goal-budget.js'
 import { coverChargeKey, coverChildSchema, coverProjection, coverRequest, coverRouteWork, coverWorkSchema, type CoverWork } from '../runtime-cover-contract.js'
@@ -15,8 +16,8 @@ import { runtimeError, runtimeJson } from '../runtime-common.js'
 import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from '../runtime-lease.js'
 import { prepareToolCursorOperation, readAdmittedToolOperation } from '../runtime-tool-cursor.js'
 import { assertCurrentToolPolicy, prepareOperationInTransaction, prepareProviderAttempt, markProviderDispatchedInTransaction,
-  recordProviderResult, lockOwnedAttempt, commitOperationEffect } from '../runtime-operations.js'
-import { reduceExecutionReceipt } from '../runtime-reducer.js'
+  recordProviderResult, lockOwnedAttempt, commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
+import { failedToolResultSchema, readFailedToolResult, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { coverGenerateTool } from './cover-tools.js'
 import { enforceCoverTitleInPrompt } from './cover-prompt.js'
 import { normalizeToolInput } from './input-validation.js'
@@ -143,10 +144,13 @@ async function generateRoute(ctx: ToolContext, lease: RunLeaseToken, parentId: s
   }
   if (!saved) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原图片响应尚未恢复。')
   let urls: string[] = [], outcome: 'images' | 'empty' | 'rejected' | 'invalid' = 'images'
-  try { urls = parseCoverImageResponse(saved.pointer.httpStatus, saved.body).slice(0, work.count) }
+  let failureCode: string | undefined
+  try { urls = parseCoverImageResponse(saved.pointer.httpStatus, saved.body, work.contentPolicy).slice(0, work.count) }
   catch (error) {
+    if (!(error instanceof DataAccessError)) throw error
+    failureCode = error.code
     outcome = saved.pointer.httpStatus < 200 || saved.pointer.httpStatus >= 300 ? 'rejected'
-      : error instanceof Error && 'code' in error && error.code === 'AI_PROVIDER_EMPTY_RESPONSE' ? 'empty' : 'invalid'
+      : failureCode === 'AI_PROVIDER_EMPTY_RESPONSE' ? 'empty' : 'invalid'
   }
   await withoutGoalEffects(() => prisma.$transaction(async tx => {
     await lockOwnedAttempt(tx, ctx.userId, identity.attemptId, identity.requestHash)
@@ -157,7 +161,7 @@ async function generateRoute(ctx: ToolContext, lease: RunLeaseToken, parentId: s
   await syncGoalDurableUsage(identity.attemptId)
   if (outcome !== 'images') {
     await withoutGoalEffects(() => reconcileCreditRefunds({ userId: ctx.userId, limit: 10 })).catch(() => undefined)
-    return { failure: true as const, retryable: coverImageFailureMayRetry(saved.pointer.httpStatus, outcome === 'empty' ? 'AI_PROVIDER_EMPTY_RESPONSE' : undefined) }
+    return { failure: true as const, retryable: coverImageFailureMayRetry(saved.pointer.httpStatus, failureCode), refused: failureCode === 'COVER_CONTENT_REFUSED' }
   }
   ctx.signal.throwIfAborted()
   const imageIds = work.assetIds.slice(0, urls.length)
@@ -211,11 +215,14 @@ export async function executeDurableCover(ctx: ToolContext, tool: AgentTool, raw
   if (!work) {
     const novel = await prisma.novel.findFirst({ where: { id: ctx.novelId, authorId: ctx.userId }, select: { title: true, displayTitle: true } })
     if (!novel) return runtimeError('RUNTIME_SCOPE_MISMATCH', '作品不存在或无权访问。')
+    const parsed = coverGenerateTool.parameters.parse(args), count = parsed.count ?? 1
+    const prompt = enforceCoverTitleInPrompt(parsed.prompt.trim(), novel.title, novel.displayTitle)
     const runtime = await resolveCoverImageRuntime(); assertPublicRoute(runtime.route)
     for (const candidate of runtime.fallbackRuntimes ?? []) assertPublicRoute(candidate.route)
-    const parsed = coverGenerateTool.parameters.parse(args), count = parsed.count ?? 1
-    work = coverWorkSchema.parse({ ...(runtime.price ? { version: 2, tariff: runtime.price.tariff, amountMilli: runtime.price.amountMilli, price: runtime.price } : { version: 1, tariff: 'image_call_6000_v1', amountMilli: 6000 }), novelId: ctx.novelId, ...novel, prompt: enforceCoverTitleInPrompt(parsed.prompt.trim(), novel.title, novel.displayTitle),
+    const contentPolicy = await contentPolicyEnabledForUser(ctx.userId)
+    work = coverWorkSchema.parse({ ...(runtime.price ? { version: 2, tariff: runtime.price.tariff, amountMilli: runtime.price.amountMilli, price: runtime.price } : { version: 1, tariff: 'image_call_6000_v1', amountMilli: 6000 }), novelId: ctx.novelId, ...novel, prompt,
       count, size: FIXED_NOVEL_COVER_SIZE, assetIds: Array.from({ length: count }, () => randomUUID()), route: runtime.route,
+      ...(contentPolicy ? { contentPolicy: true } : {}),
       ...(runtime.fallbackRuntimes?.length ? { fallbackRoutes: runtime.fallbackRuntimes.map(candidate => candidate.route) } : {}) })
   }
   const prepared = await prepareToolCursorOperation(lease, capability.cursor, { key: capability.operationKey, action: tool.name, callId: ctx.callId,
@@ -226,11 +233,17 @@ export async function executeDurableCover(ctx: ToolContext, tool: AgentTool, raw
   if (!receipt) {
     const generated = await generate(ctx, lease, prepared.operation.id, frozen)
     ctx.signal.throwIfAborted()
-    const result: ToolResult = generated.failure ? { outcome: 'failed', failureCode: 'IMAGE_GENERATION_FAILED', output: '封面生成未得到可用图片，原响应及退款记录已保留；未重复生成。', summary: '封面生成未完成' }
-      : coverProjection(generated.images)
-    receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async () => runtimeJson({ toolResult: result }).value)
+    if (generated.failure && generated.refused) {
+      receipt = await recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
+        code: 'COVER_CONTENT_REFUSED', output: COVER_PROVIDER_REFUSAL_MESSAGE, summary: '封面请求已拒绝' })
+    } else {
+      const result: ToolResult = generated.failure ? { outcome: 'failed', failureCode: 'IMAGE_GENERATION_FAILED', output: '封面生成未得到可用图片，原响应及退款记录已保留；未重复生成。', summary: '封面生成未完成' }
+        : coverProjection(generated.images)
+      receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async () => runtimeJson({ toolResult: result }).value)
+    }
   }
   if (runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '封面投影回执损坏。')
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+  if (failedToolResultSchema.safeParse(receipt.result).success) return readFailedToolResult(receipt.result)
   return z.object({ toolResult: z.object({ output: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
 }

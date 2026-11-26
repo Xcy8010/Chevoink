@@ -3,7 +3,7 @@ import type { AppRelease, AppReleaseChannel, AppReleaseOperation, AppReleaseReti
 import type { Request, Response } from 'express'
 import { env } from '../../api/config/env.js'
 import { accountEmailAuthEnabled, withAccountEmailAuthPreview, writeAccountEmailAuthPreviewGrant } from '../../api/lib/account-email-auth-scope.js'
-import { executeAppRelease, hasAgentPersonalizationCapability, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, resolveEmailAuthPreview, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../../api/lib/app-releases.js'
+import { executeAppRelease, hasAgentPersonalizationCapability, hasGenerativeContentPolicyCapability, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, resolveEmailAuthPreview, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../../api/lib/app-releases.js'
 import type { AppReleaseManifest, AppReleaseAction } from '../../shared/contracts/app-release.js'
 const state=vi.hoisted(()=>({releases:[] as AppRelease[],channels:[] as AppReleaseChannel[],operations:[] as AppReleaseOperation[],retirements:[] as AppReleaseRetirement[],audits:[] as unknown[],artifacts:new Map<string,{manifest:AppReleaseManifest;artifactSha256:string}>(),superAdmin:true,testers:new Set<string>(),policy:true,terms:'terms' as string|null,privacy:'privacy' as string|null,failAudit:false,serial:Promise.resolve<unknown>(undefined)}))
 const db={
@@ -72,6 +72,18 @@ it('authorizes only a fresh signed preview for the assigned revision, guest, or 
 })
 async function operation(action:AppReleaseAction,releaseId:string){const view=await previewAppRelease('admin',action,releaseId);return{action,releaseId,expectedRevision:view.expectedRevision,previewHash:view.previewHash,operationId:`00000000-0000-4000-8000-${String(++sequence).padStart(12,'0')}`}}
 beforeEach(()=>{vi.clearAllMocks();state.releases=[];state.channels=[];state.operations=[];state.retirements=[];state.audits=[];state.artifacts.clear();state.superAdmin=true;state.testers.clear();state.policy=true;state.terms='terms';state.privacy='privacy';state.failAudit=false;state.serial=Promise.resolve()})
+it('limits the generative content policy to accounts assigned the verified capable release',async()=>{
+ expect(await hasGenerativeContentPolicyCapability('tester')).toBe(false)
+ release('stable-version');release('test-version',['generativeContentPolicy'])
+ channel('stable','stable-version');channel('test','test-version')
+ state.testers.add('tester')
+ expect(await hasGenerativeContentPolicyCapability('ordinary')).toBe(false)
+ expect(await hasGenerativeContentPolicyCapability('tester')).toBe(true)
+ state.channels[1].enabled=false
+ expect(await hasGenerativeContentPolicyCapability('tester')).toBe(false)
+ state.channels[0].releaseId='test-version'
+ expect(await hasGenerativeContentPolicyCapability('ordinary')).toBe(true)
+})
 it('selects real assigned artifacts from server tester qualification, never a URL or header',async()=>{release('stable-version');release('test-version');channel('stable','stable-version');channel('test','test-version');state.testers.add('tester');expect((await selectAppRelease(req('ordinary',{'x-release-channel':'test','x-release-id':'test-version'}))).release!.id).toBe('stable-version');expect((await selectAppRelease(req('tester'))).release).toMatchObject({id:'test-version',activatedAt:state.channels.find(row=>row.channel==='test')!.updatedAt.toISOString()});state.testers.delete('tester');expect((await selectAppRelease(req('tester'))).release!.id).toBe('stable-version');await expect(requireAppReleaseCapability(req('ordinary'),'siteContent')).rejects.toMatchObject({code:'APP_RELEASE_CAPABILITY_DISABLED'})})
 it('gates personalization by the effective account assignment and allows legacy development', async () => {
  await expect(hasAgentPersonalizationCapability('ordinary')).resolves.toBe(true)

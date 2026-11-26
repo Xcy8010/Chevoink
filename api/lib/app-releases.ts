@@ -58,6 +58,12 @@ export async function hasAgentPersonalizationCapability(userId:string,tx:Transac
  const {manifest}=await readVerifiedRelease(tx,selected.releaseId)
  return manifest.capabilities.includes('agentPersonalization')
 }
+export async function hasGenerativeContentPolicyCapability(userId:string,tx:Transaction=prisma):Promise<boolean>{
+ const {selected}=await selectAccountAssignment(tx,userId)
+ if(!selected)return false
+ const {manifest}=await readVerifiedRelease(tx,selected.releaseId)
+ return manifest.capabilities.includes('generativeContentPolicy')
+}
 async function selectAssignedRelease(tx:Transaction,selected:AppReleaseChannel,channel:'stable'|'test'):Promise<AppReleaseBootstrap>{
  const {row,manifest}=await readVerifiedRelease(tx,selected.releaseId)
  await installedRelease(row)

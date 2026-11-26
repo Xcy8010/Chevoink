@@ -107,7 +107,7 @@ type ChatDelta = { content?: string; reasoning_content?: string; tool_calls?: Ch
 type ChatFrame = {
   error?: unknown
   usage?: ChatUsage
-  choices?: { finish_reason?: 'stop' | 'length' | 'tool_calls'; delta: ChatDelta }[]
+  choices?: { finish_reason?: 'stop' | 'length' | 'tool_calls' | 'content_filter'; delta: ChatDelta }[]
 }
 type Call = { itemId: string; callId: string; name: string; args: string; argumentsDone: boolean; incomplete?: true }
 type Adapter = ((value: unknown) => ChatFrame | null) & { completed(): boolean; reasoningItems(): ResponsesReasoningItem[] }
@@ -121,7 +121,7 @@ function objectArguments(args: string): boolean {
   try { return object(JSON.parse(args)) !== null } catch { return false }
 }
 
-export function createResponsesToolFrameAdapter(): Adapter {
+export function createResponsesToolFrameAdapter(contentPolicy = false): Adapter {
   const calls = new Map<number, Call>()
   const itemIds = new Set<string>(), callIds = new Set<string>()
   let terminal = false, completed = false
@@ -172,6 +172,7 @@ export function createResponsesToolFrameAdapter(): Adapter {
       || event.type === 'response.reasoning_summary_text.delta') {
       if (typeof event.delta !== 'string') return protocolError()
       if (event.type === 'response.reasoning_summary_text.delta') return chunk({ reasoning_content: event.delta })
+      if (contentPolicy && event.type === 'response.refusal.delta') return null
       streamedText += event.delta
       return chunk({ content: event.delta })
     }
@@ -225,9 +226,15 @@ export function createResponsesToolFrameAdapter(): Adapter {
     const response = object(event.response)
     const usage = responsesUsageToChat(response?.usage)
     if (event.type === 'response.incomplete') {
-      if (response?.status !== 'incomplete' || response.error || object(response.incomplete_details)?.reason !== 'max_output_tokens') {
+      if (response?.status !== 'incomplete' || response.error) {
         return { error: response?.error || fallbackError, usage }
       }
+      const reason = object(response.incomplete_details)?.reason
+      if (contentPolicy && reason === 'content_filter') {
+        completed = true
+        return { usage, choices: [{ finish_reason: 'content_filter', delta: {} }] }
+      }
+      if (reason !== 'max_output_tokens') return { error: fallbackError, usage }
       // The caller treats every call from a length-limited turn as incomplete.
       completed = true
       return { usage, choices: [{ finish_reason: 'length', delta: {} }] }
@@ -238,6 +245,17 @@ export function createResponsesToolFrameAdapter(): Adapter {
     try {
       if (response?.status !== 'completed' || response.error || !Array.isArray(response.output)) return protocolError()
       const output = response.output
+      if (contentPolicy && output.some((raw: unknown) => {
+        const item = object(raw)
+        return item?.type === 'message' && item.role === 'assistant' && Array.isArray(item.content)
+          && item.content.some(rawPart => {
+            const part = object(rawPart)
+            return part?.type === 'refusal' && typeof part.refusal === 'string' && Boolean(part.refusal.trim())
+          })
+      })) {
+        completed = true
+        return { usage, choices: [{ finish_reason: 'content_filter', delta: {} }] }
+      }
       for (const [index, raw] of output.entries()) {
         const item = object(raw)
         if (!item || typeof item.type !== 'string' || (calls.has(index) && item.type !== 'function_call')) return protocolError()

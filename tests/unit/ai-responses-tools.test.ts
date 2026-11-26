@@ -207,6 +207,27 @@ describe('Responses stream frames', () => {
     expect(rejected.completed()).toBe(false)
   })
 
+  it('permits only an authoritative policy refusal as a complete filtered Responses turn', () => {
+    const partial = createResponsesToolFrameAdapter(true)
+    partial(added(0, functionItem('a')))
+    partial(argumentDelta(0, 'a', '{"partial":'))
+    expect(partial({ type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'content_filter' },
+      usage: measured } })).toMatchObject({
+      choices: [{ finish_reason: 'content_filter', delta: {} }], usage: { prompt_tokens: 50, completion_tokens: 12 },
+    })
+    expect(partial.completed()).toBe(true)
+
+    const completed = createResponsesToolFrameAdapter(true)
+    const refusal = { type: 'message', role: 'assistant', content: [{ type: 'refusal', refusal: 'Raw provider explanation' }] }
+    expect(completed({ type: 'response.refusal.delta', delta: 'Raw provider explanation' })).toBeNull()
+    expect(completed(terminal([refusal], measured))).toMatchObject({
+      choices: [{ finish_reason: 'content_filter', delta: {} }], usage: { prompt_tokens: 50, completion_tokens: 12 },
+    })
+    expect(createResponsesToolFrameAdapter()(terminal([refusal]))).toMatchObject({
+      choices: [{ finish_reason: 'stop', delta: { content: 'Raw provider explanation' } }],
+    })
+  })
+
   it('retains nested error and observed usage or emits a fixed error for missing detail', () => {
     const rejected = createResponsesToolFrameAdapter()
     const error = { code: 'insufficient_quota' }

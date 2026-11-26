@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+
 import { z } from 'zod'
 import { FIXED_NOVEL_COVER_SIZE } from '../../shared/contracts/index.js'
 import * as ai from '../../api/lib/ai-service.js'
@@ -39,7 +40,7 @@ async function resumeOriginalPause(lease: Awaited<ReturnType<typeof claim>>) {
 }
 
 describe.runIf(available)('fixed-price cover generation genuine PG admission and recovery', () => {
-  it.each(['primary-success', 'rejected-fallback', 'empty-fallback', 'all-failed', 'unknown', 'partial-body', 'cancelled', 'refund-pending', 'fallback-result-recovery', 'nonretryable'] as const)(
+  it.each(['primary-success', 'content-refused', 'content-refusal-recovery', 'rejected-fallback', 'empty-fallback', 'all-failed', 'unknown', 'partial-body', 'cancelled', 'refund-pending', 'fallback-result-recovery', 'nonretryable'] as const)(
     '%s preserves physical route receipts and only advances after confirmed failure and refund', scenario => fixture(async f => {
       const parentDirectory = path.resolve(os.tmpdir()), directory = await mkdtemp(path.join(parentDirectory, 'chevoink-cover-pg-'))
       if (path.dirname(directory) !== parentDirectory || !path.basename(directory).startsWith('chevoink-cover-pg-')) throw Error('Unexpected fixture cleanup target')
@@ -59,6 +60,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
         const backup = { apiKey: 'isolated-backup-key', route: { ...runtime.route, routeId: randomUUID(), provider: 'backup-fixture', modelName: 'backup-cover', baseUrl: 'https://backup.invalid/generate' } }
         vi.spyOn(ai, 'resolveCoverImageRuntime').mockResolvedValue({ ...runtime, fallbackRuntimes: [backup] })
         vi.spyOn(novelData, 'normalizeCoverImageUrl').mockResolvedValue('/api/uploads/novel-covers/fixture.png')
+        const refusesContent = scenario === 'content-refused' || scenario === 'content-refusal-recovery'
         const transport = vi.spyOn(ai, 'requestCoverImages').mockImplementation(async (selected, input) => {
           expect(input).toMatchObject({ count: 1, size: FIXED_NOVEL_COVER_SIZE })
           expect(input.prompt).toContain('持久执行测试')
@@ -67,6 +69,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
             stream.enqueue(new TextEncoder().encode('{"data":[')); stream.error(Error('body disconnected'))
           } })) as unknown as Awaited<ReturnType<typeof ai.requestCoverImages>>
           const primary = selected.route.modelName === runtime.route.modelName
+          if (primary && refusesContent) return new Response(JSON.stringify({ error: { code: 'content_policy_violation' } }), { status: 400 }) as unknown as Awaited<ReturnType<typeof ai.requestCoverImages>>
           if (primary && scenario === 'cancelled') signal.abort(Error('author cancelled'))
           const status = primary && scenario === 'nonretryable' ? 401
             : scenario === 'all-failed' || primary && scenario !== 'primary-success' && scenario !== 'empty-fallback' ? 503 : 200
@@ -82,6 +85,13 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
           })
         }
         const step = () => executeDurableToolStep(lease, signal.signal)
+        if (scenario === 'content-refusal-recovery') {
+          const original = operations.recordProviderResult
+          vi.spyOn(operations, 'recordProviderResult').mockImplementationOnce(async () => { throw Error('refusal response DB reply lost') })
+          await expect(step()).rejects.toThrow('refusal response DB reply lost')
+          vi.mocked(operations.recordProviderResult).mockImplementation(original)
+          lease = await resumeOriginalPause(lease)
+        }
         if (scenario === 'fallback-result-recovery') {
           await expect(step()).rejects.toThrow('backup response DB reply lost')
           expect(transport).toHaveBeenCalledTimes(2)
@@ -103,10 +113,14 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
           }
           return
         }
-        const failed = scenario === 'all-failed' || scenario === 'nonretryable'
-        expect(await step()).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { display: { kind: 'coverImages' } } })
+        const failed = scenario === 'all-failed' || scenario === 'nonretryable' || refusesContent
+        const result = await step()
+        expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { display: { kind: 'coverImages' } } })
+        if (refusesContent) expect(result).toMatchObject({ result: {
+          failureCode: 'COVER_CONTENT_REFUSED', output: expect.stringContaining('《用户服务协议》'),
+        } })
         const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }, include: { operation: true, usageReceipt: true } })
-        const calls = scenario === 'primary-success' || scenario === 'nonretryable' ? 1 : 2
+        const calls = scenario === 'primary-success' || scenario === 'nonretryable' || refusesContent ? 1 : 2
         expect(transport).toHaveBeenCalledTimes(calls)
         expect(attempts).toHaveLength(calls)
         for (const attempt of attempts) {

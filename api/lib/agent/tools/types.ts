@@ -17,6 +17,8 @@ import type { RunLeaseToken } from '../runtime-lease.js'
 
 /** 工具执行上下文：身份与作用域由服务端注入，绝不信任模型给出的 ID */
 export type ToolContext = {
+  /** Actual server policy attached to this Agent invocation. */
+  contentPolicyEnabled?: boolean
   /** Server-resolved input allowance after reserving the model's output and safety margin. */
   attachmentInputBudgetTokens?: number
   /** Exact public question supplied separately by the authenticated author. */

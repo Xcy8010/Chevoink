@@ -4,6 +4,7 @@ import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTra
 import type { AgentExecutionMode, AgentMessagePart, AgentStreamEventBody, AgentTokenUsage } from '../../../shared/contracts/index.js'
 import { recoverAgentProtocolToolCalls, stripAgentProtocolArtifacts } from '../../../shared/agent-output.js'
 import { chatWithTools, type ChatMessage } from '../ai-service.js'
+import { AGENT_CONTENT_POLICY, formatFullContentRefusal, isFullContentRefusal } from '../generative-content-policy.js'
 import type { getModelTierRuntime } from '../credits.js'
 import { readWeightedRoutes } from '../model-weighted-config.js'
 import { decryptSecret } from '../secret-box.js'
@@ -90,6 +91,7 @@ function buildSubagentMessages(params: SubagentInlineParams): ChatMessage[] {
   const definition = getAgentDefinition(params.role)
   const systemPrompt = [
     `你是「${params.name}」，写作主控 Agent 内嵌调用的专业子 Agent（角色：${definition.title}）。`,
+    ...(params.toolContextBase.contentPolicyEnabled ? [AGENT_CONTENT_POLICY] : []),
     `你的职责边界：${params.prompt}`,
     `主控的调用依据（触发条件）：${params.triggerCondition}`,
     '执行纪律：',
@@ -216,6 +218,10 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         },
       })
       addUsage(usage, result.usage)
+      if (params.toolContextBase.contentPolicyEnabled && result.finishReason === 'stop' && !result.toolCalls.length && isFullContentRefusal(result.content)) {
+        report = formatFullContentRefusal(result.content)
+        break
+      }
 
       const recoveredToolCalls = result.finishReason !== 'length' && result.toolCalls.length === 0
         ? recoverAgentProtocolToolCalls(result.content).map((call, index) => ({

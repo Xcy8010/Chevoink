@@ -14,12 +14,13 @@ import { imagePriceSchema } from './billing/image-price.js'
 import { imageBlobSchema, prepareImageResponseStorage, readImageResponse, storeImageResponse } from './agent/provider-image-storage.js'
 import { coverImageFailureMayRetry, parseCoverImageResponse, requestCoverImages, resolveCoverImageRuntime } from './ai-service.js'
 import { env } from '../config/env.js'
+import { COVER_PROVIDER_REFUSAL_MESSAGE, contentPolicyEnabledForUser } from './generative-content-policy.js'
 import type { GenerateCoverImageRequest, GenerateCoverImageResponse } from '../../shared/contracts/index.js'
 
 const inputSchema = z.object({ prompt: z.string(), size: z.string(), count: z.number().int().min(1).max(4), novelId: z.string().nullable(), negativePrompt: z.string().nullable() }).strict()
 const goalSchema = z.object({ goalId: z.string(), revision: z.number().int(), epoch: z.string().regex(/^\d+$/), userId: z.string(), novelId: z.string(), sessionId: z.string(), runId: z.string() }).strict()
 const snapshotSchema = z.object({ version: z.literal(1), request: inputSchema, routes: z.array(coverRouteSchema).min(1).max(8),
-  goal: goalSchema.optional(),
+  goal: goalSchema.optional(), contentPolicy: z.literal(true).optional(),
   attempts: z.array(z.string().uuid()).min(1).max(8), assetIds: z.array(z.string().uuid()).min(1).max(4), price: imagePriceSchema.optional(), amountMilli: z.number().int().min(0).max(2147483647),
 }).strict().refine(value => value.routes.length === value.attempts.length && value.assetIds.length === value.request.count && value.amountMilli === (value.price?.amountMilli ?? 6000))
 const reconciliation = () => new DataAccessError(409, 'IMAGE_RECONCILIATION_REQUIRED', '原图片请求需要核对，未重新生成。')
@@ -51,8 +52,9 @@ export async function executeImageOperation(userId: string, input: GenerateCover
     }
     const runtime = await resolveCoverImageRuntime()
     const routes = [runtime, ...(runtime.fallbackRuntimes ?? [])].map(value => publicRoute(value.route))
+    const contentPolicy = await contentPolicyEnabledForUser(userId, tx)
     const snapshot = snapshotSchema.parse({ version: 1, request, routes, ...(originalGoal ? { goal: originalGoal } : {}), attempts: routes.map(() => randomUUID()), assetIds: Array.from({ length: input.count }, () => randomUUID()),
-      ...(runtime.price ? { price: runtime.price } : {}), amountMilli: runtime.price?.amountMilli ?? 6000 })
+      ...(runtime.price ? { price: runtime.price } : {}), ...(contentPolicy ? { contentPolicy: true } : {}), amountMilli: runtime.price?.amountMilli ?? 6000 })
     return tx.imageOperation.create({ data: { userId, operationId, requestHash, inputSnapshot: runtimeJson({ work: snapshot, hash: runtimeJson(snapshot).hash }).value } })
   }).catch(async error => {
     if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error
@@ -67,6 +69,7 @@ export async function executeImageOperation(userId: string, input: GenerateCover
   if (runtimeJson(work).hash !== envelope.hash) throw reconciliation()
   if (runtimeJson(work.request).hash !== requestHash) throw reconciliation()
   if (operation.state === 'succeeded') return operation.result as GenerateCoverImageResponse['data']
+  if (operation.state === 'failed' && operation.errorCode === 'COVER_CONTENT_REFUSED') throw new DataAccessError(422, 'COVER_CONTENT_REFUSED', COVER_PROVIDER_REFUSAL_MESSAGE)
   if (operation.state === 'failed') throw new DataAccessError(502, operation.errorCode ?? 'IMAGE_GENERATION_FAILED', '图片生成未得到可用结果，原费用及退款已保留。')
   try {
   while (operation.routeIndex < work.routes.length) {
@@ -137,7 +140,7 @@ export async function executeImageOperation(userId: string, input: GenerateCover
     }
     if (!saved) throw reconciliation()
     let urls: string[] = [], failure: DataAccessError | null = null
-    try { urls = parseCoverImageResponse(saved.pointer.httpStatus, saved.body).slice(0, request.count) }
+    try { urls = parseCoverImageResponse(saved.pointer.httpStatus, saved.body, work.contentPolicy).slice(0, request.count) }
     catch (error) { if (!(error instanceof DataAccessError)) throw error; failure = error }
     if (failure) {
       const retryable = coverImageFailureMayRetry(saved.pointer.httpStatus, failure.code), empty = failure.code === 'AI_PROVIDER_EMPTY_RESPONSE'
@@ -153,6 +156,7 @@ export async function executeImageOperation(userId: string, input: GenerateCover
       })
       if (goal) await syncGoalLegacyUsage(work.attempts[index])
       await reconcileCreditRefunds({ userId, limit: 10 }).catch(() => undefined)
+      if (failure.code === 'COVER_CONTENT_REFUSED') throw failure
       signal?.throwIfAborted()
       if (unknown) throw reconciliation()
       if (terminal) throw failure
@@ -203,6 +207,7 @@ export async function executeImageOperation(userId: string, input: GenerateCover
         const current = await tx.imageOperation.findUniqueOrThrow({ where: { id: operation.id } })
         if (['succeeded', 'assets_saved'].includes(current.state)) return
         if (current.state === 'unknown') return
+        if (current.state === 'failed' && current.errorCode === 'COVER_CONTENT_REFUSED') return
         await tx.imageOperation.update({ where: { id: operation.id }, data: { state: 'failed', errorCode: 'IMAGE_CANCELLED' } })
         const key = chargeKey(operation.id), debit = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: key } })
         if (debit && work.amountMilli > 0) await recordImageRefundIntentInTransaction(tx, userId, key, { outcome: 'unknown', deliveredImages: 0 })

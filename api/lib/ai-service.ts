@@ -1,4 +1,5 @@
 import { publicImagePrice } from './billing/public-model-price.js'
+import { AGENT_PROVIDER_REFUSAL_MESSAGE, COVER_PROMPT_CONTENT_POLICY, COVER_PROVIDER_REFUSAL_MESSAGE, contentPolicyEnabledForUser, coverRefusalMessage, usesAgentContentPolicy } from './generative-content-policy.js'
 import { resolveSystemModelConfig } from './model-lifecycle.js'
 import { decryptSecret } from './secret-box.js'
 import { createHmac, randomUUID } from 'node:crypto'
@@ -66,6 +67,7 @@ import {
 type TextCompletionOptions = {
   /** Internal structured review contract; capability checked at the final route. */
   responseFormat?: ReviewResponseFormat
+  coverContentPolicy?: boolean
   signal?: AbortSignal
   userId: string
   action: string
@@ -293,7 +295,7 @@ async function saveOutputEvidence(id: string, inputEstimate: number, output: str
 /** Accept SSE when supported and JSON from compatible non-streaming gateways.
  * Persist only counts, never manuscript text or credentials, for interruption billing. */
 async function readAuxiliaryResponse(response: Response, usageId: string, inputEstimate: number, custom: boolean, authorizationHeld = false,
-  onObservedCompletion?: TextCompletionOptions['onObservedCompletion'], routeEvidence?: Prisma.InputJsonObject): Promise<JsonProviderPayload> {
+  onObservedCompletion?: TextCompletionOptions['onObservedCompletion'], routeEvidence?: Prisma.InputJsonObject, coverContentPolicy = false): Promise<JsonProviderPayload> {
   if (!response.headers.get('content-type')?.includes('text/event-stream') || !response.body) return { ...await parseJsonResponse(response, env.aiTextStreamIdleMs), localOutputEstimate: undefined }
   let content = '', reasoning = '', done = false, truncated = false, lastSaved = 0
   let finishReason: string | null = null
@@ -324,6 +326,15 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
     }
     if (frame.error) throw isProviderQuotaError(frame.error) ? providerQuotaError(custom)
       : new DataAccessError(502, 'AI_PROVIDER_ERROR', '模型服务返回错误。')
+    if (coverContentPolicy && finishReason === 'content_filter') return
+    if (coverContentPolicy && frame.choices?.[0]?.finish_reason === 'content_filter') {
+      finishReason = 'content_filter'
+      done = true
+      content = ''
+      reasoning = ''
+      toolCalls.length = 0
+      return
+    }
     if (typeof frame.choices?.[0]?.finish_reason === 'string') finishReason = frame.choices[0].finish_reason
     if (frame.choices?.[0]?.finish_reason === 'length') truncated = true
     if (frame.choices?.[0]?.finish_reason === 'stop') done = true
@@ -1273,6 +1284,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
   let content = ''
   let reasoning = ''
   let finishReason: ChatCompletionResult['finishReason'] = 'stop'
+  const contentPolicy = usesAgentContentPolicy(params.messages)
+  let providerRefused = false
   const nextPromptStream = params.nextPromptMarker && params.onChunk ? createNextPromptStream(params.nextPromptMarker) : null
   const usage: ChatTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null }
   let promptUsageObserved = false
@@ -1367,7 +1380,14 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
       : new Error('模型在流式生成中返回错误，未执行工具；请重试当前任务。')
 
     const choice = parsed.choices?.[0]
-    if (!choice) {
+    if (!choice || providerRefused) return
+    if (contentPolicy && choice.finish_reason === 'content_filter') {
+      providerRefused = true
+      finishReason = 'stop'
+      streamFinished = true
+      content = ''
+      reasoning = ''
+      toolCallsByIndex.clear()
       return
     }
 
@@ -1426,7 +1446,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     }
   }
 
-  const responsesFrame = useResponses ? createResponsesToolFrameAdapter() : null
+  const responsesFrame = useResponses ? createResponsesToolFrameAdapter(contentPolicy) : null
   const frames = new SseDataDecoder(data => {
     if (data.trim() === '[DONE]') {
       if (!responsesFrame) streamFinished = true
@@ -1455,7 +1475,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     }
     frames.push(decoder.decode(), true)
     if (!streamFinished) throw new Error('模型连接提前结束，未执行未确认完整的工具；请继续当前任务。')
-    const visibleTail = nextPromptStream?.finish()
+    const visibleTail = providerRefused ? undefined : nextPromptStream?.finish()
     if (visibleTail) params.onChunk?.({ type: 'text-delta', delta: visibleTail })
     await persistObservation(true)
   } catch (error) {
@@ -1496,16 +1516,16 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     finishReason = 'tool_calls'
   }
 
-  if (!promptUsageObserved) {
+  if (!providerRefused && !promptUsageObserved) {
     usage.promptTokens = estimateTokenCount(JSON.stringify({ messages: frozenMain
       ? frozenMain.body.messages ?? frozenMain.body.input : toProviderMessages(projectedMessages), tools: params.tools }))
   }
-  if (!completionUsageObserved) {
+  if (!providerRefused && !completionUsageObserved) {
     usage.completionTokens = estimateTokenCount(JSON.stringify({ content, reasoning, toolCalls }))
   }
   if (usage.totalTokens <= 0) usage.totalTokens = usage.promptTokens + usage.completionTokens
 
-  const delivery = params.nextPromptMarker
+  const delivery = providerRefused ? { content: AGENT_PROVIDER_REFUSAL_MESSAGE } : params.nextPromptMarker
     ? splitNextPrompt(content, params.nextPromptMarker, finishReason === 'stop' && toolCalls.length === 0)
     : { content }
   const reasoningItems = responsesFrame?.reasoningItems()
@@ -1515,7 +1535,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
       ? { responsesContinuation: { binding: responsesBinding, items: reasoningItems } } : {}) }
   if (durable) return durable.finish(result)
 
-  await recordStreamUsage(!params.semanticCompaction)
+  await recordStreamUsage(!params.semanticCompaction && !providerRefused)
 
   if (params.usageLog.action === 'agentLoopTurn' && toolCalls.length === 0 && prepared) {
     // Reuse the single-use bounded-review proof. A returned stream alone does
@@ -1677,7 +1697,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   } finally { clearTimeout(firstResponseTimer) }
 
   const payload = response.ok
-    ? await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion, routeEvidence)
+    ? await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion, routeEvidence, options.coverContentPolicy)
     : { ...await readProviderHttpRejection(response, options, env.aiTextStreamIdleMs), localOutputEstimate: undefined }
   if (payload.reasoningTokens != null) console.info('[ai-reasoning-usage]', {
     action: options.action, model: modelRuntime.modelName ?? env.aiTextModel,
@@ -1686,7 +1706,8 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
 
   const content = payload.choices?.[0]?.message?.content
   const quotaRejected = isProviderQuotaError(payload.error ?? (!response.ok ? payload : undefined))
-  const validContent = response.ok && !quotaRejected && typeof content === 'string' && Boolean(content.trim())
+  const contentRefused = options.coverContentPolicy && payload.choices?.[0]?.finish_reason === 'content_filter'
+  const validContent = response.ok && !quotaRejected && !contentRefused && typeof content === 'string' && Boolean(content.trim())
   if (validContent) options.onObservedCompletion?.({ usageId: prepared.id, content: content as string,
     finishReason: typeof payload.choices?.[0]?.finish_reason === 'string' ? payload.choices[0].finish_reason : null,
     toolCalls: payload.choices?.[0]?.message?.tool_calls ?? [] })
@@ -1748,6 +1769,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     }
     throw new DataAccessError(502, [408, 504].includes(response.status) ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR', '模型服务暂时不可用。')
   }
+  if (contentRefused) throw new DataAccessError(422, 'COVER_CONTENT_REFUSED', COVER_PROVIDER_REFUSAL_MESSAGE)
   if (typeof content !== 'string' || !content.trim()) {
     throw new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', '模型未返回有效内容。')
   }
@@ -1827,12 +1849,17 @@ export async function resolveCoverImageRuntime(frozenRoute?: CoverImageRuntime['
         providerMode: env.aiProviderMode, ...((route.imageQuality ? route.imageQuality.defaultValue : configured.imageQuality?.defaultValue) != null ? { quality: (route.imageQuality ? route.imageQuality.defaultValue : configured.imageQuality?.defaultValue) ?? undefined } : {}) } })) } : {}) }
 }
 
-export function parseCoverImageResponse(httpStatus: number, body: string) {
+export function parseCoverImageResponse(httpStatus: number, body: string, contentPolicy = false) {
   let payload: unknown
   try { payload = JSON.parse(body) } catch {
     if (httpStatus >= 200 && httpStatus < 300) throw new DataAccessError(502, 'AI_PROVIDER_INVALID_RESPONSE', '图片模型返回了无法解析的响应。')
   }
-  const decoded = payload && typeof payload === 'object' ? payload as { data?: unknown; error?: { message?: unknown } } : {}
+  const decoded = payload && typeof payload === 'object' ? payload as { data?: unknown; error?: { code?: unknown; inner_error?: { code?: unknown } } } : {}
+  if (contentPolicy && [400, 403, 422].includes(httpStatus)
+    && (decoded.error?.code === 'moderation_blocked' || decoded.error?.code === 'content_policy_violation'
+      || decoded.error?.inner_error?.code === 'ResponsibleAIPolicyViolation')) {
+    throw new ImageProviderFailure(httpStatus, 422, 'COVER_CONTENT_REFUSED', COVER_PROVIDER_REFUSAL_MESSAGE)
+  }
   if (httpStatus < 200 || httpStatus >= 300) throw new ImageProviderFailure(httpStatus, 502, [408, 504].includes(httpStatus) ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR',
     '图片模型服务暂时不可用。')
   const images: unknown[] = Array.isArray(decoded.data) ? decoded.data : []
@@ -1846,6 +1873,7 @@ export function parseCoverImageResponse(httpStatus: number, body: string) {
 
 /** Complete rejected/empty responses only. Transport, partial bodies and storage failures remain unknown. */
 export function coverImageFailureMayRetry(httpStatus: number, code?: string) {
+  if (code === 'COVER_CONTENT_REFUSED') return false
   return [429, 500, 502, 503].includes(httpStatus) || httpStatus >= 200 && httpStatus < 300 && code === 'AI_PROVIDER_EMPTY_RESPONSE'
 }
 
@@ -1861,7 +1889,7 @@ async function generateImageUrls(
   prompt: string,
   size: string,
   count: number,
-  options: { signal?: AbortSignal; beforeDispatch?: (runtime: CoverImageRuntime) => Promise<void>;
+  options: { signal?: AbortSignal; contentPolicy?: boolean; beforeDispatch?: (runtime: CoverImageRuntime) => Promise<void>;
     onKnownFailure?: (runtime: CoverImageRuntime, status: number, empty: boolean) => Promise<void> } = {},
 ) {
   const pool = await resolveCoverImageRuntime()
@@ -1874,7 +1902,7 @@ async function generateImageUrls(
     // Read the complete body before classifying it. Partial bodies are unknown.
     const body = await response.text()
     let imageUrls: string[]
-    try { imageUrls = parseCoverImageResponse(response.status, body) }
+    try { imageUrls = parseCoverImageResponse(response.status, body, options.contentPolicy) }
     catch (error) {
       if (!coverImageFailureMayRetry(response.status, error instanceof DataAccessError ? error.code : undefined)) throw error
       await options.onKnownFailure?.(runtime, response.status, error instanceof DataAccessError && error.code === 'AI_PROVIDER_EMPTY_RESPONSE')
@@ -1971,7 +1999,8 @@ export async function chapterAssistData(userId: string, input: ChapterAssistRequ
 export async function generateCoverPromptData(userId: string, input: GenerateCoverPromptRequest) {
   if (input.novelId && !await prisma.novel.findFirst({ where: { id: input.novelId, authorId: userId }, select: { id: true } }))
     throw new DataAccessError(404, 'NOT_FOUND', '作品不存在或无权访问。')
-  const systemPrompt = '你是一名小说封面提示词设计师，请输出适合图像模型的中文封面提示词。平台规定书封必须带作品名：提示词必须要求画面包含书名标题文字，严禁输出「无文字/没有文字/no text」类负向约束。'
+  const contentPolicy = await contentPolicyEnabledForUser(userId)
+  const systemPrompt = `${contentPolicy ? COVER_PROMPT_CONTENT_POLICY + '\n\n' : ''}你是一名小说封面提示词设计师，请输出适合图像模型的中文封面提示词。平台规定书封必须带作品名：提示词必须要求画面包含书名标题文字，严禁输出「无文字/没有文字/no text」类负向约束。`
   const userPrompt = [
     `作品名：${input.novelTitle}`,
     `简介：${input.summary}`,
@@ -1988,9 +2017,12 @@ export async function generateCoverPromptData(userId: string, input: GenerateCov
   const prompt = await generateTextCompletion(systemPrompt, userPrompt, {
     userId,
     action: 'generateCoverPrompt',
+    coverContentPolicy: contentPolicy,
     novelId: input.novelId,
     targetType: 'coverPrompt',
   })
+  const refusal = contentPolicy ? coverRefusalMessage(prompt) : undefined
+  if (refusal) throw new DataAccessError(422, 'COVER_CONTENT_REFUSED', refusal)
 
   const visualKeywords = prompt
     .split(/[，,\n]/)
@@ -2021,6 +2053,7 @@ export async function generateCoverImageData(
   if (input.novelId) await ensureNovelOwner(userId, input.novelId)
   if (input.operationId) return (await import('./image-operation.js')).executeImageOperation(userId, input, options.signal)
   options.signal?.throwIfAborted()
+  const contentPolicy = await contentPolicyEnabledForUser(userId)
   const goal = currentGoalExecution()
   const chargeKey = `image:${randomUUID()}`
   let amountMilli = IMAGE_CALL_MILLI
@@ -2036,7 +2069,7 @@ export async function generateCoverImageData(
   try {
   await assertGoalProviderAdmission()
   options.signal?.throwIfAborted()
-    generated = await generateImageUrls(input.prompt, input.size, input.count, { signal: options.signal,
+    generated = await generateImageUrls(input.prompt, input.size, input.count, { signal: options.signal, contentPolicy,
       onKnownFailure: async (runtime, httpStatus, empty) => {
         if (!observation) await withoutGoalEffects(() => prisma.aiUsageLog.create({ data: { userId, novelId: input.novelId ?? null, agentRunId: goal?.runId,
           providerType: 'image', providerMode: runtime.route.providerMode, providerName: runtime.route.provider, modelName: runtime.route.modelName,
@@ -2086,7 +2119,7 @@ export async function generateCoverImageData(
     }
     if (!charged || amountMilli === 0) throw error
     const outcome = error instanceof DataAccessError && error.code === 'AI_PROVIDER_EMPTY_RESPONSE' ? 'empty'
-      : !dispatched || error instanceof DataAccessError && error.code === 'AI_PROVIDER_ERROR' ? 'rejected' : 'unknown'
+      : !dispatched || error instanceof DataAccessError && ['AI_PROVIDER_ERROR', 'COVER_CONTENT_REFUSED'].includes(error.code) ? 'rejected' : 'unknown'
     await withoutGoalEffects(() => recordImageRefundIntent(userId, chargeKey, { outcome, deliveredImages: 0 }))
     // The obligation is durable before attempting the wallet update. The
     // existing bounded server reconciler retries any failed immediate attempt.

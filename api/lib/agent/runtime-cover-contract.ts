@@ -11,6 +11,7 @@ const coverCommonSchema = z.object({ novelId: z.string().min(1), title: z.string
   prompt: z.string().min(4), count: z.number().int().min(1).max(2), size: z.literal(FIXED_NOVEL_COVER_SIZE),
   assetIds: z.array(z.string().uuid()).min(1).max(2),
   route: coverRouteSchema,
+  contentPolicy: z.literal(true).optional(),
   fallbackRoutes: z.array(coverRouteSchema).min(1).max(7).optional(),
 }).strict()
 export const coverWorkSchema = z.discriminatedUnion('version', [

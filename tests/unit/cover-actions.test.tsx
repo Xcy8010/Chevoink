@@ -66,6 +66,26 @@ it('keeps the fixed image size and clears generation state after a failed reques
   expect(state.setCoverAssets).not.toHaveBeenCalled()
 })
 
+it('keeps the existing cover loading state and only shows the refusal after the request settles', async () => {
+  const refusal = '无法生成这张封面。请求涉及《用户服务协议》禁止生成的内容。可以改用环境构图。'
+  let rejectRequest!: (reason: Error) => void
+  api.images.mockImplementation(() => new Promise((_resolve, reject) => { rejectRequest = reject }))
+  const { result, state, toast } = fixture()
+  let settled!: Promise<unknown>
+  await act(async () => { settled = result.current.coverImageMutation.mutateAsync().catch(() => undefined) })
+  expect(state.setCoverGenerationBusy).toHaveBeenCalledExactlyOnceWith(true)
+  expect(state.setCoverMessage).not.toHaveBeenCalled()
+  expect(toast.error).not.toHaveBeenCalled()
+
+  await act(async () => {
+    rejectRequest(new Error(refusal))
+    await settled
+  })
+  expect(state.setCoverGenerationBusy).toHaveBeenLastCalledWith(false)
+  expect(state.setCoverMessage).toHaveBeenCalledExactlyOnceWith(refusal)
+  expect(state.setWorkspaceDialog).not.toHaveBeenCalled()
+})
+
 it('does not call the provider before the prompt form exists', async () => {
   const { result } = fixture({ coverForm: null })
   await act(async () => { await expect(result.current.coverPromptMutation.mutateAsync()).rejects.toThrow('封面参数尚未准备完成') })

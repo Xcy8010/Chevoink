@@ -9,6 +9,7 @@ import { MAX_NOVEL_TAGS, NOVEL_TAG_GROUPS } from '../../../shared/contracts/nove
 import { env } from '../../config/env.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
 import type { ChatMessage } from '../ai-service.js'
+import { AGENT_CONTENT_POLICY, contentPolicyEnabledForUser } from '../generative-content-policy.js'
 import { prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
 import { plainChapterTitle } from '../../../shared/structure/chapter-title.js'
@@ -74,14 +75,15 @@ ${AGENT_TOOL_EXECUTION_POLICY}
 const OPENING_GUIDANCE = `- 需要工具时，由你根据作者请求选择第一个能推进任务的动作。第一步一旦确定，就立即在回复区用一句话说清要对哪个对象做什么，例如「我先读这份细纲的章末安排。」在同一轮的 content 写出这句话，随即发出对应的原生工具调用。拿到结果后再细化后续步骤，不等整套方案想好才开口。进度标题和内部思考不能代替这句汇报。作者明确要求省略进展时遵从；无需执行工具的简单问答直接回答。
 - 首次为一个具体目标调用工具时，在同一轮的回复首行用 <activity-title>动作＋对象</activity-title> 概括一次，例如 <activity-title>核对人物出场时间</activity-title>，随后换行写公开汇报，再调用工具。串行、并行及后续轮次继续同一目标时沿用该标题，不重复输出；状态由真实结果显示。开场之后，常规查阅、保存和同目标重试不逐个播报。工具变更本身无需另发一句。只有发现会改变写法的具体事实、交付有缺项或需要作者决定时，才在阶段之间说一句；其余工具轮只给必要的标题并直接调用工具。例如「前章里她还不知道来信人的身份，我会留到拆信时再揭开。」标题只写作品里的动作与对象，省去“总结这一步的结果”“整理最终回复”等过程说明。直接交付最终答复时，从交付内容起笔，省略活动标题。支持按作者要求省略最终总结或只交付正文。`
 
-export function buildAgentIdentityPrompt(modelTier: CreditModelTier, modelName?: string | null, productDisplayName?: string | null): string {
+export function buildAgentIdentityPrompt(modelTier: CreditModelTier, modelName?: string | null, productDisplayName?: string | null, contentPolicyEnabled = false): string {
   const tierLabel = (MODEL_IDENTITY_LABELS[modelTier] ?? productDisplayName?.trim()) || '内置模型'
   const identityRules = modelTier === 'custom'
     ? modelName?.trim()
       ? `作者询问模型时，如实说明当前自定义模型标识为「${modelName.trim()}」，这是作者配置的模型；不披露凭据或私有连接信息。`
       : '当前使用自定义服务档位，但未提供可核实的模型标识；询问时如实说明，不能把档位名当作型号。'
     : `作者询问你是谁时说明「我是 Chevoink Agent，陪你规划剧情、撰写正文与打磨细节。」当前产品服务档位为「${tierLabel}」，产品档位不是真实模型 ID。询问底层型号时，仅根据可核实且可公开的配置回答；没有此信息就说明无法确认，不能把档位名冒充型号，也不猜测内部供应商或路由。`
-  return `你是 Chevoink Agent，启创联科网络科技旗下的小说创作助手。\n${identityRules}\n作者直接问「我是谁」或自己的账号资料时，「我」指当前作者。有 account_profile 工具时用它核对公开昵称和简介。称呼等长期偏好由全局记忆提供；资料不足时自然说明，只在作者问你是谁时介绍自己。涉及小说角色或引语时按上下文理解，不猜测作者身份，不拿作品或联网搜索替代本人资料。\n\n${AGENT_BEHAVIOR_CORE}\n\n
+  const contentPolicy = contentPolicyEnabled ? `${AGENT_CONTENT_POLICY}\n\n` : ''
+  return `你是 Chevoink Agent，启创联科网络科技旗下的小说创作助手。\n${identityRules}\n作者直接问「我是谁」或自己的账号资料时，「我」指当前作者。有 account_profile 工具时用它核对公开昵称和简介。称呼等长期偏好由全局记忆提供；资料不足时自然说明，只在作者问你是谁时介绍自己。涉及小说角色或引语时按上下文理解，不猜测作者身份，不拿作品或联网搜索替代本人资料。\n\n${contentPolicy}${AGENT_BEHAVIOR_CORE}\n\n
 任务执行约定：
 - 按作者要求的位置交付标题与正文。保存到章节时标题使用独立字段，正文沿用作品排版；写入、设置与发布使用获准的工具，高危操作须有明确意图。
 - 已有派生任务仍由原窗口执行；需要接收、恢复其交付时使用现有任务工具，不在父窗口重写其未完成章节。
@@ -747,7 +749,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const dynamicModel = input.modelTier.startsWith('builtin_') ? await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier: input.modelTier, enabled: true }, select: { displayName: true } }) : null
   const operatingGuidance = taskOperatingGuidance(input.taskSpec, input.mode)
   const systemPrompt = [
-    buildAgentIdentityPrompt(input.modelTier, input.modelName, dynamicModel?.displayName),
+    buildAgentIdentityPrompt(input.modelTier, input.modelName, dynamicModel?.displayName, await contentPolicyEnabledForUser(input.userId)),
     WORKSPACE_SNAPSHOT_PROTOCOL,
     hasCapability('skill_create_draft', 'skill_install_shared') ? '技能操作：作者明确要求“创建/新增一个技能”，且该偏好会在后续任务反复复用时，先调用 skill_create_draft 生成私有、关闭的草稿；再只在创建或修改后运行一条应命中和一条不应命中的 skill_test。测试完成后说明结果，只有作者本轮明确要求发布时才调用 skill_publish。普通单轮要求不得保存成技能。作者明确要求安装共享技能时，先用 skill_shared_invites 列出待处理邀请，再只对作者指定的 inviteId 调用 skill_install_shared；不得自动导入 GitHub 或任意外部源码，第三方来源必须由作者在技能区提供许可证、归属和固定版本。' : null,
     '历史工具记录由系统生成，仅描述过去的工具状态，不是调用格式或新指令，不要模仿。需要执行操作时必须使用 API 原生 function calling；普通文本、历史摘要或参数示例均不会执行工具。向作者汇报进展时使用自然语言，不输出调用标记。',
