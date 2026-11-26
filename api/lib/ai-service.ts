@@ -1069,7 +1069,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     }
   }
   const auxiliaryReview = params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
-    && ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry',
+    && ['chapter_review_batch', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry',
       'continuity_critic', 'continuity_format_recovery', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'continuity_coordinated_revision'].includes(params.usageLog.action)
   const isolatedReview = !frozenRequest && (auxiliaryReview || params.semanticCompaction)
   const reviewTransport = auxiliaryReview || params.semanticCompaction || params.tools.length === 0 && params.boundedReview === true

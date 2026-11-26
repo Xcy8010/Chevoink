@@ -38,6 +38,7 @@ const groups: Array<[AgentAuthorPhase, string, readonly string[]]> = [
   ['revise', '恢复作品修改', ['changeset_rollback']],
   ['review', '章节衔接复查', ['continuity_validate']],
   ['review', '行文自然度复查', ['quality_analyze']],
+  ['review', '批量复查章节', ['chapter_review_batch']],
   ['review', '查看复查报告', ['quality_report_get']],
   ['review', '检查作品结构', ['structure_validate']],
   ['review', '检查创作建议', ['creative_critique', 'creative_revision_draft', 'quality_finding_feedback']],

@@ -1,3 +1,4 @@
+import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
 import { createHash } from 'node:crypto'
 import { DataAccessError } from '../prisma.js'
@@ -205,7 +206,7 @@ export function localEditGuidance(spec: unknown): string | null {
   return (boundary.kind === 'needs_input'
     ? '原局部请求尚无可证明的精确范围，正文未获写入授权。请通过既有反馈入口请作者补充准确原文片段或编辑器选区，并重新发起任务；模型摘要、继续或子任务不能补授权。'
     : boundary.version === 4 ? '目标章节已明确，本次授权按作者要求作章内局部修改。先 chapter_read 读取当前正文，自行定位需要调整的位置，再用 chapter_edit_range 的逐字唯一 oldText 修改；保留其他正文和明确保护句。无需作者再次复制原文；只有读后仍有多个真实目标或冲突时才问清。不得整体覆盖正文、追加、改名、新建或自动 critic 改文；多处补丁也不能合并覆盖整章。'
-    : boundary.version === 3 ? '目标章节已经确认。先准备并读取本章，完成当前正文的必要连续性与人类感检查；没有确证问题时无需改文，直接按真实报告提交。只有当前任务、当前版本完整检查中逐字定位的真实问题才允许 chapter_edit_range 局部修订，每批最多8处；使用逐字唯一 oldText，保留其他正文。整章覆盖、追加、改名、新建和自动 critic 改文不获授权。修改后重新检查并提交，报告、重新准备和子任务不能扩大范围或重置原长度上限。'
+    : boundary.version === 3 ? chapterReviewWorkflowEnabled(spec) ? '目标章节已经确认。先准备并读取本章，完成当前正文的必要连续性与人类感检查；没有确证问题时无需改文，直接按真实报告提交。只有当前任务、当前版本完整检查中逐字定位的真实问题才允许 chapter_edit_range 局部修订，每批最多8处；使用逐字唯一 oldText，保留其他正文。整章覆盖、追加、改名、新建和自动 critic 改文不获授权。修改后回读相关原文并交付，作者要求终稿独立复核时按原要求检查。报告、重新准备和子任务不能扩大范围或重置原长度上限。' : '目标章节已经确认。先准备并读取本章，完成当前正文的必要连续性与人类感检查；没有确证问题时无需改文，直接按真实报告提交。只有当前任务、当前版本完整检查中逐字定位的真实问题才允许 chapter_edit_range 局部修订，每批最多8处；使用逐字唯一 oldText，保留其他正文。整章覆盖、追加、改名、新建和自动 critic 改文不获授权。修改后重新检查并提交，报告、重新准备和子任务不能扩大范围或重置原长度上限。'
     : '原任务只授权冻结的局部正文范围。读取当前正文，用 chapter_edit_range 的逐字唯一 oldText 连续修改，每批最多8处，保留冻结范围外原文。不得整章覆盖、坐标猜定位、追加、改名、创建、变更集或自动 critic 修订。最后修改后完成当前版本必要报告；报告与子任务不能扩大范围。') + intersection
 }
 

@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest'
+import { env } from '../../api/config/env.js'
 import { COMPLETED_WORK_FOLLOWUP_GUIDANCE, SAVED_WORK_CLOSING_GUIDANCE, taskOperatingGuidance } from '../../api/lib/agent/task-guidance.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { enableAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
@@ -42,12 +43,31 @@ it('distinguishes local edits from whole chapters while retaining version, recei
   expect(text).not.toContain('同一份产物')
 })
 
-it('keeps complete chapter review and truthful partial completion without a fixed per-tool retry ritual', () => {
+it('uses saved prose for review and scoped readback without blocking delivery on optional follow-ups', () => {
   const spec = task('写下一章。')
   const text = taskOperatingGuidance(spec, 'build')!
-  expect(text).toContain('核验当前最终版本')
-  expect(text).toContain('缺少必要检查时保留正文并报告未完成')
+  expect(text).toContain('同一版已保存正文取得只读报告')
+  expect(text).toContain('修改保存后，用 chapter_read 按需回读改动范围')
+  expect(text).toContain('只有作者要求独立检查最终版本')
+  expect(text).toContain('优先用已获准的 chapter_review_batch')
   expect(text).not.toMatch(/重试 2 次|预算 3 次|只落盘一次/)
+})
+
+it('uses the frozen review workflow only for admitted production tasks', () => {
+  const previous = env.appEnv
+  env.appEnv = 'production'
+  try {
+    const stable = taskOperatingGuidance(task('写下一章。'), 'build')
+    const admitted = task('写下一章。')
+    admitted.scope.chapterReviewWorkflow = 1
+    const test = taskOperatingGuidance(admitted, 'build')
+    expect(stable).toContain('先处理相关意见并集中修订，再核验当前最终版本')
+    expect(stable).not.toContain('chapter_review_batch')
+    expect(test).toContain('修改保存后，用 chapter_read 按需回读改动范围')
+    expect(test).toContain('chapter_review_batch')
+  } finally {
+    env.appEnv = previous
+  }
 })
 
 it('separates direct manuscript replies from workspace writes before an unbound Agent decides the target', () => {
@@ -95,7 +115,8 @@ it.each(['把第三章修好并保存。', '详细解释每处修改，完整列
   const spec = task(prompt), before = structuredClone(spec), text = taskOperatingGuidance(spec, 'build')!
   expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('简单改动用短段落即可')
   expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('可用 Markdown 短列表')
-  expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('聊天交代值得关注的变化和影响使用的缺项')
+  expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('作者明确要求的检查未完成时，说明哪项及具体原因')
+  expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('例行复查、旧报告版本和可选建议留在工具卡')
   expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('作者明确要求在聊天中交付正文、完整计划或报告、详细解释或具体改动时，按原请求完整提供')
   expect(text).toContain('作者指定仅交付标题正文时直接交付所需内容')
   expect(spec).toEqual(before)

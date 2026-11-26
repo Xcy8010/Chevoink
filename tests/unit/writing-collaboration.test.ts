@@ -46,6 +46,23 @@ it('includes a review-only target without requiring a body mutation', async () =
   const db = database(); db.agentMessage.findMany.mockResolvedValue([{ parts: [{ type: 'tool-call', toolName: 'continuity_validate', status: 'success', display: { chapterId: 'chapter' } }] }])
   expect(await read(db)).toContain('"chapterId":"chapter"')
 })
+
+it('retains completed batch review version and status during restore without suggesting it was never checked', async () => {
+  const db = database()
+  db.agentMessage.findMany.mockResolvedValue([{ parts: [{
+    type: 'tool-call', toolName: 'chapter_review_batch', status: 'success',
+    display: { kind: 'reviewBatch', reviewType: 'continuity', chapters: [{ chapterId: 'chapter', revision: 2, status: 'complete' }] } as never,
+  }, {
+    type: 'tool-call', toolName: 'chapter_read', status: 'success',
+    display: { kind: 'chapterRef', chapterId: 'chapter', title: '目标章', wordCount: 50, revision: 3, range: { start: 10, end: 20 } },
+  }] }])
+  const digest = await read(db)
+  expect(digest).toContain('"revision":3')
+  expect(digest).toContain('"batchReviewReceipts":{"continuity":{"version":2,"status":"complete"}}')
+  expect(digest).toContain('"lastRead":{"revision":3,"range":{"start":10,"end":20}}')
+  expect(digest).not.toContain('"continuity":"未调用"')
+  expect(digest).toContain('"humanity":"未调用"')
+})
 it('reports empty native creations from durable evidence even when UI projection has not run', async () => {
   const db = database(); db.agentRun.findFirst.mockResolvedValue({ taskRootId: 'root' })
   native.evidence.mockResolvedValue({ effects: [{ operationId: 'effect', action: 'chapter_create', outcome: 'succeeded' }] })
@@ -85,7 +102,7 @@ it('does not swallow real receipt or ownership corruption as advisory staleness'
   await expect(read(db)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
 })
 it('states collaboration responsibilities without creating a save or review permission gate', () => {
-  expect(WRITING_COLLABORATION_GUIDANCE).toContain('不构成普通保存的阶段门')
-  expect(WRITING_COLLABORATION_GUIDANCE).toContain('首轮遗漏')
+  expect(WRITING_COLLABORATION_GUIDANCE).toContain('部分检查失败时保留可用结果，其他正文与章节继续')
+  expect(WRITING_COLLABORATION_GUIDANCE).toContain('局部回读只能说明实际核对的位置')
   expect(WRITING_COLLABORATION_GUIDANCE).toContain('人类感')
 })

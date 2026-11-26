@@ -1,3 +1,4 @@
+import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import { planAlignmentSchema, readPlanAlignment, renderPlanAlignmentInstructions, type PlanAlignment } from './plan-alignment.js'
 import { assertWritingPlanContextCurrent, writingPlanContextHash } from './writing-plan-context.js'
 import { Prisma } from '@prisma/client'
@@ -104,11 +105,11 @@ export function correctContinuitySourceIds(opinions: ContinuityOpinion[], invali
 }
 
 export async function buildContinuitySnapshot(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId' | 'chapterId'>,
-  args: ContinuityReviewArgs, db: Prisma.TransactionClient = prisma) {
+  args: ContinuityReviewArgs, db: Prisma.TransactionClient = prisma, readOnlyBatchChapterId?: string) {
   const original = await readOriginalTaskRequest(db, ctx), runIds = await originalTaskRunIds(db, ctx, original)
   const compilationScope = { ...await qualityCompilationScope(db, ctx.userId, ctx.novelId, original.sourceRunId),
     run: { id: { in: runIds }, userId: ctx.userId, novelId: ctx.novelId } }
-  const chapterId = await resolveQualityChapterTarget({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...args, fallbackChapterId: ctx.chapterId }, db, compilationScope)
+  const chapterId = readOnlyBatchChapterId ?? await resolveQualityChapterTarget({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...args, fallbackChapterId: ctx.chapterId }, db, compilationScope)
   if (!chapterId) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '没有可检查的当前章节正文。')
   const chapter = await db.chapter.findFirst({ where: { id: chapterId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } })
   if (!chapter?.content.trim()) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '没有可检查的当前章节正文。')
@@ -633,9 +634,12 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
       novelId: ctx.novelId, chapterId: updated.id, chapterRevision: updated.revision, before: snapshot.chapter.content, after }, tx)
     const { repairFailure: _failure, ...appliedReport } = report
     const checked = continuityReviewResult(snapshot, appliedReport)
+    const reviewWorkflow = ctx.chapterReviewWorkflowEnabled ?? chapterReviewWorkflowEnabled(snapshot.original.spec)
     const result: ToolResult = { reviewCompleted: false, reviewOutcome: 'stale', reviewRequestFinished: checked.reviewRequestFinished,
-      summary: `连续性检查完成 · 已局部修订至 r${updated.revision}，需复查`,
-      output: `已局部修订 ${ranges.length} 处至 r${updated.revision}，需复查最终版的连续性与人类感质量。以下为改前 r${report.revision} 报告：\n${checked.output}`,
+      summary: reviewWorkflow ? `连续性检查完成 · 已局部修订至 r${updated.revision}`
+        : `连续性检查完成 · 已局部修订至 r${updated.revision}，需复查`,
+      output: reviewWorkflow ? `已局部修订 ${ranges.length} 处至 r${updated.revision}，用 chapter_read 核对修改处及相关前文。作者要求终稿独立检查时调用对应工具。以下为改前 r${report.revision} 报告：\n${checked.output}`
+        : `已局部修订 ${ranges.length} 处至 r${updated.revision}，需复查最终版的连续性与人类感质量。以下为改前 r${report.revision} 报告：\n${checked.output}`,
       display: { kind: 'chapterDiff', chapterId: updated.id, chapterTitle: updated.title, before: snapshot.chapter.content, after,
         appliedDirectly: true, revision: updated.revision }, snapshot: { target: 'chapter', targetId: updated.id, field: 'content', previousValue: snapshot.chapter.content } }
     await tx.agentArtifact.update({ where: { id: report.id }, data: { metadata: runtimeJson({ contextHash: snapshot.contextHash, callId: ctx.callId,

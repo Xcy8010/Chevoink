@@ -1,3 +1,4 @@
+import { chapterReviewWorkflowEnabled } from '../chapter-review-rollout.js'
 import { CREATIVE_FREEDOM_LABELS } from '../../../../shared/contracts/agent-window-configuration.js'
 import type { AgentExecutionMode, TaskIntent } from '../../../../shared/contracts/index.js'
 
@@ -361,10 +362,11 @@ const legacySkillAliases: Record<string, string> = {
   'story-shaping.v2': 'cn-long-outline.v3',
 }
 
-function freedomGuidance(freedom: CreativeFreedom): string {
+function freedomGuidance(freedom: CreativeFreedom, reviewWorkflow = chapterReviewWorkflowEnabled()): string {
   if (freedom === 'stable') return `创作模式：${CREATIVE_FREEDOM_LABELS.stable}。兼顾情节推进、表达和一致性。按作者要求建立新作品的基调，或延续已有作品的文风、人物轨迹与段落节奏。`
   if (freedom === 'bold') return `创作模式：${CREATIVE_FREEDOM_LABELS.bold}。主动尝试更鲜明的场景、视角和结构，核心设定和不可逆剧情仍服从作者与故事事实。作者要求写正文时交付完整正文，质量报告只提示不自动改写。`
-  return '创作模式：严谨创作。守住人物知识、因果、时空和已确立世界规则，服从本次作者类型与情绪承诺；严谨不等于克制。按原写作请求完成最终版本的连续性与人类感检查；使用付费修订工具时集中做一次有界自动修订，普通正文工具可在原授权内连续修改，可写章节内直接应用有明确依据的局部修法，无需逐项确认；只看不改和改后只读复核时传 readOnly=true。相关修法优先合并，保留真实剩余意见，不扩大任务范围。'
+  if (!reviewWorkflow) return '创作模式：严谨创作。守住人物知识、因果、时空和已确立世界规则，服从本次作者类型与情绪承诺；严谨不等于克制。按原写作请求完成最终版本的连续性与人类感检查；使用付费修订工具时集中做一次有界自动修订，普通正文工具可在原授权内连续修改，可写章节内直接应用有明确依据的局部修法，无需逐项确认；只看不改和改后只读复核时传 readOnly=true。相关修法优先合并，保留真实剩余意见，不扩大任务范围。'
+  return '创作模式：严谨创作。守住人物知识、因果、时空和已确立世界规则，服从本次作者类型与情绪承诺；严谨不等于克制。先对保存稿取得所需的只读检查报告（readOnly=true），在原授权内合并有明确依据的局部修法，无需逐项确认。保存后回读改动和受影响的前文，明确要求终稿独立复查时再调用对应工具。可选建议留在报告中。'
 }
 
 export function inferSkillPhase(intent: TaskIntent): SkillPhase {
@@ -543,6 +545,7 @@ export function buildSkillManifestDigest(skills: AgentSkill[], freedom: Creative
 }
 
 export type SkillDigestOptions = {
+  chapterReviewWorkflowEnabled?: boolean
   /** 当前作品已启用的全部技能；传入后会向模型公开“本轮未加载”的技能清单。 */
   availableSkills?: readonly AgentSkill[]
   /** 作者本轮手动指定的技能 id。 */
@@ -605,7 +608,7 @@ export function buildSkillExecutionDigest(decision: SkillRouteDecision, freedom:
     return `[Skill ${skill.id}@${skill.version} / ${phaseLabel} / soft${pinnedMark}]\n${resource}`
   }).filter((item): item is string => Boolean(item)).join('\n\n')
 
-  const head = `${freedomGuidance(freedom)}
+  const head = `${freedomGuidance(freedom, options.chapterReviewWorkflowEnabled)}
 以下 Skill 已由服务端确定性路由并完整加载。它们是本轮工作方法，不是可忽略的候选，也不是逐项照抄到正文的检查表：
 ${loaded}
 共同边界：不得覆盖作者硬约束、故事事实、权限与版本校验；发生冲突时作者要求与有来源的故事证据优先。${sharedBoundary}`
@@ -613,11 +616,11 @@ ${loaded}
   return [head, unloadedGuide].filter((block): block is string => Boolean(block)).join('\n\n')
 }
 
-export function loadSkill(skillId: string, phase: SkillPhase, freedom: CreativeFreedom, catalog: readonly AgentSkill[] = skillCatalog): string | null {
+export function loadSkill(skillId: string, phase: SkillPhase, freedom: CreativeFreedom, catalog: readonly AgentSkill[] = skillCatalog, reviewWorkflow?: boolean): string | null {
   const resolvedId = legacySkillAliases[skillId] ?? skillId
   const skill = catalog.find((item) => item.id === resolvedId)
   if (!skill) return null
   const resolved = resolveSkillResource(skill, phase)
   if (!resolved) return null
-  return `[Skill ${skill.id}@${skill.version} / ${resolved.phase} / soft]\n${freedomGuidance(freedom)}\n${resolved.resource}\n边界：不得覆盖用户硬约束、故事证据、权限和版本校验；不要把本说明原样写入小说。`
+  return `[Skill ${skill.id}@${skill.version} / ${resolved.phase} / soft]\n${freedomGuidance(freedom, reviewWorkflow)}\n${resolved.resource}\n边界：不得覆盖用户硬约束、故事证据、权限和版本校验；不要把本说明原样写入小说。`
 }

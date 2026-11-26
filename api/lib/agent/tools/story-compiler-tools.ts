@@ -445,7 +445,7 @@ ${renderWritingContinuityReference(continuityReference) ?? ''}
 场景任务（计划）：${JSON.stringify(compilation.sceneTasks.map(task => ({ ordinal: task.ordinal, purpose: task.purpose, goal: task.goal, obstacle: task.obstacle, choice: task.choice, cost: task.cost, turn: task.turn })))}
 场景任务记录拟定选择及后果；实际发生的事以已保存正文为准。
 当前报告意见：${JSON.stringify(review?.decisionDetails ?? [])}
-明确保留意见：${JSON.stringify(retained)}\n${review ? chapterReviewDecisionGuidance(review) : ''}`,
+明确保留意见：${JSON.stringify(retained)}\n${review ? chapterReviewDecisionGuidance(review, ctx.chapterReviewWorkflowEnabled) : ''}`,
       display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: review?.terminalCommitted ? '章节已提交' : '章节桥', detail: items[1], items } }
 },
 })
@@ -500,7 +500,7 @@ export const chapterBridgeCommitTool = defineTool({
       expectedContentHash: persistedContentHash(chapter.content), retainedFindings: args.retainedFindings }, ctx.transaction) } catch (error) {
       if (!(error instanceof DataAccessError) || !['CONTINUITY_ERRORS_REMAIN', 'REVIEW_DECISION_REQUIRED', 'QUALITY_CHECK_REQUIRED', 'CONTINUITY_CHECK_REQUIRED', 'COMPILATION_STAGE_CONFLICT'].includes(error.code)) throw error
       const current = await readChapterReviewReadiness(db, ctx, compilation.id)
-      return { outcome: 'failed', failureCode: error.code, summary: error.code === 'COMPILATION_STAGE_CONFLICT' ? '章节编译已被后续准备替代' : '章节尚未提交', output: `${error.message}\n${current ? chapterReviewDecisionGuidance(current) : ''}\n当前真实意见：${JSON.stringify(current?.decisionDetails ?? [])}\n需明确处置：${JSON.stringify(current?.requiredDecisions ?? [])}\n保留原文时请引用这些当前 source/reportId/findingId 并说明具体理由；真实硬通过要求不能以保留代替。` }
+      return { outcome: 'failed', failureCode: error.code, summary: error.code === 'COMPILATION_STAGE_CONFLICT' ? '章节编译已被后续准备替代' : '章节尚未提交', output: `${error.message}\n${current ? chapterReviewDecisionGuidance(current, ctx.chapterReviewWorkflowEnabled) : ''}\n当前真实意见：${JSON.stringify(current?.decisionDetails ?? [])}\n需明确处置：${JSON.stringify(current?.requiredDecisions ?? [])}\n保留原文时请引用这些当前 source/reportId/findingId 并说明具体理由；真实硬通过要求不能以保留代替。` }
     }
     const final = await readAdvisoryChapterReviewReadiness(db, ctx, result.compilationId)
     const remaining = final?.decisionEntries?.length ?? 0, retainedCount = final?.retainedDecisions?.length ?? 0

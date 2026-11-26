@@ -11,7 +11,7 @@ const writing = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'c
   'story_compiler_prepare', 'scene_task_build', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit',
   'quality_report_get', 'quality_finding_feedback', 'character_voice_get', 'experience_anchor_get', 'craft_search',
   'style_profile_get', 'retrieval_trace_read', 'style_leakage_check', 'memory_review_list', 'reader_promise_save', 'reader_promise_update',
-  'creative_critique', 'creative_revision_draft', 'skill_catalog', 'skill_load', 'skill_run_explain', 'todo_write'])
+  'creative_critique', 'creative_revision_draft', 'chapter_review_batch', 'skill_catalog', 'skill_load', 'skill_run_explain', 'todo_write'])
 const research = new Set(['web_search', 'web_read', 'platform_novel_search', 'platform_novel_read',
   'research_report_save', 'research_report_read', 'read_file', 'view_image', 'todo_write'])
 export function taskToolRelevance(name: string): 'common' | 'writing' | 'research' | 'extension' {

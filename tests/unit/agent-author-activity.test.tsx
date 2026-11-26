@@ -178,7 +178,7 @@ it('keeps a failed review in details until an actual current-version report exis
   expect(screen.getByRole('button', { name: `${goalTitle}未完成`, expanded: true })).toBe(button)
   view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4), saved('revision')])} />)
   expect(screen.getByRole('button', { name: `${goalTitle}未完成`, expanded: true })).toBe(button)
-  expect(screen.getByText('章节衔接复查 · 正文有新改动')).toBeTruthy()
+  expect(screen.getAllByRole('region', { name: '章节衔接报告' }).some(card => within(card).queryByText('修改前的记录'))).toBe(true)
   view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4), saved('revision'), review('verify', chapterId, 5)])} />)
   expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(button)
   expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(5)
@@ -868,7 +868,7 @@ it('combines writing and appending on one chapter but separates a different chap
   expect(projection?.get('other')?.calls.map(item => item.callId)).toEqual(['other'])
 })
 
-it('names review types and groups consecutive matching checks without exposing finding totals', () => {
+it('names review types, groups matching checks, and keeps optional details inside the report', () => {
   const continuity = call('continuity', 'continuity_validate', { display: {
     kind: 'storyCompiler', phase: 'check', title: '章节衔接复查', detail: '已检查', items: ['检查项仍可展开'], errorCount: 2, warningCount: 3,
   } })
@@ -886,15 +886,65 @@ it('names review types and groups consecutive matching checks without exposing f
   const continuityRow = screen.getByRole('button', { name: '章节衔接复查完成', exact: true })
   fireEvent.click(continuityRow)
   expect(continuityRow.closest('[data-author-activity]')?.querySelectorAll('[data-activity-tool="continuity_validate"]')).toHaveLength(2)
-  fireEvent.click(screen.getAllByRole('button', { name: '展开检查详情' })[0])
-  expect(screen.getByText('检查项仍可展开')).toBeTruthy()
+  const continuityReports = screen.getAllByRole('region', { name: '章节衔接报告' })
+  expect(continuityReports).toHaveLength(2)
+  expect(within(continuityReports[0]).getByText('检查项仍可展开')).toBeTruthy()
+  expect(within(continuityReports[0]).getByText('2 个问题 · 3 条需核对')).toBeTruthy()
   view.rerender(<Transcript messages={[
     message('a', [continuity]), message('b', [{ ...continuity, callId: 'continuity-again' }, quality]),
   ]} />)
-  fireEvent.click(screen.getByRole('button', { name: '行文自然度复查完成', exact: true }))
-  fireEvent.click(screen.getByRole('button', { name: '展开质量报告' }))
+  const qualityRow = screen.getByRole('button', { name: '行文自然度复查完成', exact: true })
+  fireEvent.click(qualityRow)
+  fireEvent.click(screen.getByText('1 条建议'))
   expect(screen.getByText('人物表达')).toBeTruthy()
-  expect(view.container.textContent).not.toMatch(/\d+\s*(?:条建议|条需关注|处待核对|错误)/)
+  expect(qualityRow.textContent).not.toMatch(/\d+\s*(?:条建议|条需关注|处待核对|错误)/)
+})
+
+it('opens one batch report with per-chapter states and independently navigable cross-chapter evidence', () => {
+  const batch = call('batch', 'chapter_review_batch', { display: {
+    kind: 'reviewBatch', reviewType: 'continuity', chapters: [
+      { chapterId: 'internal-chapter-id', title, orderIndex: 1, revision: 3, status: 'complete', findings: [
+        { id: 'wording', severity: 'advisory', label: '保留章末停顿', evidence: '她听见雨。', explanation: '', suggestion: '可保留。' },
+      ] },
+      { chapterId: 'other-chapter', title: '雨停以后', orderIndex: 2, revision: 2, status: 'complete', findings: [
+        { id: 'ownership', severity: 'error', label: '钥匙归属', evidence: '钥匙还在她手里。', explanation: '交付动作已发生。', suggestion: '在下文沿用交付后的状态。',
+          related: { chapterId: 'internal-chapter-id', title, evidence: '她把钥匙交给老陈。' } },
+      ] },
+      { chapterId: 'third-chapter', title: '灯下', orderIndex: 3, revision: 1, status: 'incomplete', detail: '检查超时，尚未取得报告。' },
+    ],
+  } })
+  const messages = [message('review-batch', [batch])]
+  const view = render(<Transcript messages={messages} />)
+  const row = screen.getByRole('button', { name: /第 1–3 章 · 章节衔接复查 · 2 章完成 · 1 章未完成/ })
+  expect(row.getAttribute('aria-expanded')).toBe('false')
+  expect(screen.queryByText('钥匙归属')).toBeNull()
+  fireEvent.click(row)
+  expect(row.getAttribute('aria-expanded')).toBe('true')
+  expect(screen.getByText('钥匙归属')).toBeTruthy()
+  expect(screen.getByText('第 2 章 · 雨停以后 · 「钥匙还在她手里。」')).toBeTruthy()
+  expect(screen.getByText('检查超时，尚未取得报告。')).toBeTruthy()
+  const chapterTwo = screen.getByRole('region', { name: '第 2 章 · 雨停以后' })
+  fireEvent.click(within(chapterTwo).getByRole('button', { name: `${title}：她把钥匙交给老陈。` }))
+  expect(useAgentStore.getState().toolNavigationRequest?.args).toEqual({ chapterId: 'internal-chapter-id', evidence: '她把钥匙交给老陈。' })
+  useAgentStore.getState().clearToolNavigationRequest()
+
+  view.rerender(<Transcript messages={[...messages, message('revised', [saved('chapter-write')])]} />)
+  expect(screen.getByRole('button', { name: /1 章完成 · 1 章未完成 · 1 章有新版正文/ })).toBe(row)
+  expect(within(screen.getByRole('region', { name: `第 1 章 · ${title}` })).getByText('修改前 · 1 条建议')).toBeTruthy()
+  expect(chapterTwo.dataset.reviewChapterStatus).toBe('complete')
+  expect(within(chapterTwo).queryByText('已检查')).toBeNull()
+})
+
+it('keeps different chapter batch checks openable under their own headlines even with a shared activity title', () => {
+  const review = (reviewType: 'continuity' | 'quality') => call(reviewType, 'chapter_review_batch', {
+    display: { kind: 'reviewBatch', reviewType, chapters: [
+      { chapterId: 'chapter-a', title: '雨后', orderIndex: 4, revision: 1, status: 'complete' },
+      { chapterId: 'chapter-b', title: '窗台', orderIndex: 5, revision: 1, status: 'complete' },
+    ] },
+  })
+  render(<Transcript active="r" messages={[message('batch-checks', [activity, review('continuity'), review('quality')])]} />)
+  expect(screen.getByRole('button', { name: '第 4–5 章 · 章节衔接复查完成' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: '第 4–5 章 · 行文自然度复查完成' }).querySelector('.agent-processing-shimmer')).toBeNull()
 })
 
 it('uses completion labels for saved actions while keeping all grouped receipts available', () => {
@@ -938,7 +988,7 @@ it('opens useful cover, plan and report details without displaying their interna
   ])]} />)
   view.container.querySelectorAll('[data-author-activity] > button').forEach(button => fireEvent.click(button))
   expect(screen.getByText('后续大纲')).toBeTruthy()
-  fireEvent.click(screen.getByRole('button', { name: '展开质量报告' }))
+  fireEvent.click(screen.getByText('1 条建议'))
   expect(screen.getByText('表达建议')).toBeTruthy()
   expect(view.container.textContent).not.toMatch(/PRIVATE_|internal-chapter-id|r222|已允许|INTERNAL_FAILURE_CODE/)
 })

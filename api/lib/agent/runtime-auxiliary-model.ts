@@ -21,6 +21,7 @@ const steps = {
   research_dossier_synthesis: { parent: 'research_dossier_build', previous: null },
   creative_critique: { parent: 'creative_critique', previous: null },
   creative_revision: { parent: 'creative_revision_draft', previous: null },
+  chapter_review_batch: { parent: 'chapter_review_batch', previous: null },
   continuity_critic: { parent: 'continuity_validate', previous: null },
   continuity_evidence_correction: { parent: 'continuity_validate', previous: null },
   continuity_format_recovery: { parent: 'continuity_validate', previous: null },
@@ -32,7 +33,7 @@ const steps = {
   quality_repair_retry: { parent: 'quality_analyze', previous: 'quality_repair' },
 } as const
 export type AuxiliaryModelStep = keyof typeof steps
-const stepSchema = z.enum(['publish_advice', 'research_dossier_synthesis', 'creative_critique', 'creative_revision', 'continuity_critic', 'continuity_evidence_correction', 'continuity_format_recovery', 'continuity_repair', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
+const stepSchema = z.enum(['publish_advice', 'research_dossier_synthesis', 'creative_critique', 'creative_revision', 'chapter_review_batch', 'continuity_critic', 'continuity_evidence_correction', 'continuity_format_recovery', 'continuity_repair', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
 const parentInput = z.object({ input: z.object({ callId: z.string(), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }) })
 const isolatedRequest = z.object({ body: z.object({
   messages: z.array(z.object({ role: z.enum(['system', 'user']), content: z.string() })).min(1),
@@ -102,7 +103,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
     const grant = admitted?.grant ?? state.configuration.toolAuthority.find(item => item.name === parent.action)
     const modeAllowed = parent.action === 'continuity_validate' ? ['plan', 'build', 'review'].includes(state.configuration.mode) : parent.action === 'novel_export' ? ['plan', 'build', 'review'].includes(state.configuration.mode)
       : parent.action === 'research_dossier_build' ? ['plan', 'build'].includes(state.configuration.mode)
-      : parent.action === 'creative_critique' ? ['build', 'review'].includes(state.configuration.mode) : state.configuration.mode === 'build'
+      : parent.action === 'creative_critique' || parent.action === 'chapter_review_batch' ? ['build', 'review'].includes(state.configuration.mode) : state.configuration.mode === 'build'
     if (!modeAllowed || !grant || grant.permission === 'deny'
       || !(admitted || state.configuration.tools.some(tool => tool.function.name === parent.action))) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务不允许独立检查或修订。')
     if (!service && (grant.permission === 'ask' || grant.alwaysConfirm)) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
@@ -151,6 +152,23 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         || runtimeJson(request.body.messages).hash !== runtimeJson([{ role: 'system', content: frozen.data.input.work.review.system }, { role: 'user', content: frozen.data.input.work.review.content }]).hash) {
         return runtimeError('RUNTIME_RECEIPT_INVALID', '创作辅助请求必须使用原操作冻结的正文、技能和价目，不能借用其他上下文。')
       }
+    }
+    if (captured.step === 'chapter_review_batch') {
+      const { batchReviewAdmissionSchema } = await import('./tools/durable-batch-review.js')
+      const { batchReviewArgsSchema } = await import('./tools/batch-review.js')
+      const input = z.object({ input: z.object({ novelId: z.string(), work: batchReviewAdmissionSchema }) }).parse(parent.inputSnapshot).input
+      const frozen = input.work
+      const args = batchReviewArgsSchema.parse(original.args)
+      const request = z.object({ endpoint: z.string(), body: z.record(z.string(), z.unknown()) }).parse(captured.request)
+      if (frozen.kind !== 'review' || !frozen.route || !frozen.price || args.reviewType !== frozen.review.reviewType
+        || runtimeJson(captured.price).hash !== runtimeJson(frozen.price).hash
+        || request.endpoint !== frozen.route.baseUrl.replace(/\/$/u, '') + '/chat/completions'
+        || request.body.model !== frozen.route.model || (request.body.max_tokens ?? request.body.max_completion_tokens) !== frozen.route.maxOutputTokens
+        || runtimeJson(request.body.messages).hash !== runtimeJson([
+          { role: 'system', content: frozen.review.system }, { role: 'user', content: frozen.review.content }]).hash) {
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '批量章节审阅必须使用原批次、模型与价格。')
+      }
+
     }
     let frozenFormatClaim = false
     if (captured.step === 'quality_format_recovery') {
@@ -229,5 +247,5 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原连续性请求的用量或费用尚未确认，未追加请求。')
     }
     return preparePricedProviderOperationInTransaction(tx, lease, captured)
-  }, captured.step.startsWith('continuity_') ? { timeoutMs: 20_000 } : undefined)
+  }, captured.step.startsWith('continuity_') || captured.step === 'chapter_review_batch' ? { timeoutMs: 20_000 } : undefined)
 }

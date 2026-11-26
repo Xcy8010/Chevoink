@@ -51,7 +51,7 @@ function assertUniqueJsonKeys(text: string) {
 /** Mechanical extraction only: quoted braces and escaped quotes are data.
  * Never splice separate objects, select one of conflicting reports, close a
  * truncated container, or invent missing review fields. */
-export function parseQualityJsonObject(raw: string, envelope: 'findings' | 'corrections' | 'patches' | 'continuity', parserVersion: 1 | 2 | 3 = 1): unknown {
+export function parseQualityJsonObject(raw: string, envelope: 'findings' | 'corrections' | 'patches' | 'continuity' | 'chapters', parserVersion: 1 | 2 | 3 = 1): unknown {
   if (parserVersion >= 2) return parseMechanicalQualityJson(raw, envelope)
   const candidates: Record<string, unknown>[] = []
   let sawJson = false
@@ -108,7 +108,7 @@ function repairCompleteJsonSyntax(text: string) {
   return result
 }
 
-function parseMechanicalQualityJson(raw: string, envelope: 'findings' | 'corrections' | 'patches' | 'continuity') {
+function parseMechanicalQualityJson(raw: string, envelope: 'findings' | 'corrections' | 'patches' | 'continuity' | 'chapters') {
   const candidates: Record<string, unknown>[] = []
   let sawJson = false
   for (let start = 0; start < raw.length; start++) {

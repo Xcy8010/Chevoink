@@ -70,6 +70,7 @@ import {
 } from './changeset-tools.js'
 import { directiveListTool, directiveSaveTool, directiveSupersedeTool } from './directive-tools.js'
 import { memoryEventSaveTool, memoryRelationSaveTool, memoryReviewListTool } from './memory-tools.js'
+import { chapterReviewBatchTool } from './durable-batch-review.js'
 import {
   creativeCritiqueTool,
   creativeRevisionDraftTool,
@@ -219,6 +220,7 @@ export const allTools: AgentTool<any>[] = [
   directiveSupersedeTool,
   memoryRelationSaveTool,
   memoryEventSaveTool,
+  chapterReviewBatchTool,
   creativeCritiqueTool,
   creativeRevisionDraftTool,
   skillCreateDraftTool,

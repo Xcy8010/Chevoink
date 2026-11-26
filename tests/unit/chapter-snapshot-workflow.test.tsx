@@ -20,6 +20,26 @@ const base = { title: '章', summary: '', status: 'draft' as const, visibility: 
 const saved = (id: string, content: string, novelId = 'novel', revision = 1) => ({ ...base, id, content, novelId, revision, updatedAt: '2026-10-03T00:00:00Z', wordCount: content.length } as unknown as Chapter)
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done }); return { promise, resolve } }
 
+it('selects review evidence only when it uniquely matches the visible chapter text', () => {
+  const onCommit = vi.fn()
+  const onSelectionChange = vi.fn()
+  const text = '钥匙交给老陈。钥匙放在门边。'
+  const update = (quote: string) => <LocalFirstTextarea aria-label="审阅正文" value={text} onCommit={onCommit}
+    onSelectionChange={onSelectionChange} reviewEvidence={{ text: quote }} />
+  const view = render(update('钥匙交给老陈。'))
+  const textarea = screen.getByRole<HTMLTextAreaElement>('textbox', { name: '审阅正文' })
+  expect(textarea.selectionStart).toBe(0)
+  expect(textarea.selectionEnd).toBe(7)
+  expect(onSelectionChange).toHaveBeenLastCalledWith({ start: 0, end: 7, text: '钥匙交给老陈。' })
+  textarea.setSelectionRange(2, 2)
+  view.rerender(update('钥匙'))
+  view.rerender(update('没有这句原文。'))
+  expect(textarea.selectionStart).toBe(2)
+  expect(textarea.selectionEnd).toBe(2)
+  expect(textarea.value).toBe(text)
+  expect(onCommit).not.toHaveBeenCalled()
+})
+
 function Workflow({ novelId = 'novel', userId, scope = 'task-a', hydratedScope = scope }: { novelId?: string; userId?: string; scope?: string; hydratedScope?: string }) {
   const [draft, setDraft] = useState<ChapterDraftState | null>({ ...base, id: 'a', content: 'A原文' })
   const [dirty, setDirty] = useState(false), [selected, setSelected] = useState<string | null>('a')

@@ -1,3 +1,4 @@
+import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { readChapterReviewReadiness } from './chapter-review-guard.js'
 import { projectCurrentReviewNextStep, currentReviewNextStepGuidance } from './review-dispatch.js'
@@ -126,7 +127,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       const next = review && projectCurrentReviewNextStep(review)
       if (next) observations.push({ compilationId: next.compilationId, chapterId: next.chapterId, revision: next.revision,
         state: next.state, requiredToolNames: next.requiredTools.map(tool => tool.name), selectionOnly: next.selectionOnly,
-        facts: next, content: currentReviewNextStepGuidance(next) })
+        facts: next, content: currentReviewNextStepGuidance(next, chapterReviewWorkflowEnabled(spec)) })
     }
     const reviewObservation = observations.length ? { version: 1, observations, fingerprint: runtimeJsonHash(observations) } : null
     const snapshot = runtimeJson({ version: 1, taskRootId: root.id, inputHash: root.inputHash, sourceRevision: frame.revision, sourceHash: frame.snapshotHash,

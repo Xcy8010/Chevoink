@@ -40,6 +40,8 @@ import { executeDurableDossier } from './tools/durable-research-dossier.js'
 import { executeDurableExport } from './tools/durable-export.js'
 import { novelExportTool } from './tools/export-tools.js'
 import { executeDurableCreative } from './tools/durable-creative.js'
+import { chapterReviewBatchTool } from './tools/durable-batch-review.js'
+import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import { platformNovelReadTool, platformNovelSearchTool } from './tools/platform-tools.js'
 import { executeDurablePlanSave } from './tools/durable-plan.js'
 import { executeDurableMemorySave } from './runtime-memory.js'
@@ -104,7 +106,7 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(taskScopeBindTool),
   checkedAdapter(webSearchTool), checkedAdapter(webReadTool),
   checkedAdapter(readFileTool), checkedAdapter(viewImageTool),
-  checkedAdapter(creativeCritiqueTool), checkedAdapter(creativeRevisionDraftTool),
+  checkedAdapter(creativeCritiqueTool), checkedAdapter(creativeRevisionDraftTool), checkedAdapter(chapterReviewBatchTool),
   checkedAdapter(bulkReplacePreviewTool), checkedAdapter(entityRenamePreviewTool), checkedAdapter(changeSetApplyTool), checkedAdapter(changeSetRollbackTool),
   checkedAdapter(skillCatalogTool), checkedAdapter(skillLoadTool), checkedAdapter(skillRunExplainTool), checkedAdapter(skillSharedInvitesTool),
   checkedAdapter(skillCreateDraftTool), checkedAdapter(skillTestTool), checkedAdapter(skillEnableTool), checkedAdapter(skillInstallSharedTool), checkedAdapter(skillRollbackTool), checkedAdapter(skillPublishTool),
@@ -276,6 +278,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       ...(!lease.parent && call.name === 'web_search' && originalSpec.networkAccess !== 'denied'
         ? { publicWebSearchQuestion: originalSpec.publicWebQuestion } : {}),
       qualityMode: current.configuration.qualityMode, protectedChapterIds: new Set(current.configuration.protectedChapterIds),
+      chapterReviewWorkflowEnabled: chapterReviewWorkflowEnabled(originalSpec),
       toolAuthority: new Map(effective.toolAuthority.map(item => [item.name, item])), signal, emit: () => {},
       modelSelection: { ...(current.configuration.model.tokenPrice ? { tokenPrice: current.configuration.model.tokenPrice } : {}), ...(current.configuration.model.modelConfigId ? { modelConfigId: current.configuration.model.modelConfigId, modelConfigRevision: current.configuration.model.modelConfigRevision } : {}), ...(current.configuration.model.weightedRoute ? { weightedRoute: current.configuration.model.weightedRoute } : {}), tier: current.configuration.model.tier as CreditModelTier,
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
@@ -296,7 +299,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     else if (call.name === 'cover_generate') ctx.durableCover = capability
     else if (call.name === 'research_dossier_build') ctx.durableDossier = capability
     else if (call.name === 'novel_export') ctx.durableExport = capability
-    else if (call.name === 'creative_critique' || call.name === 'creative_revision_draft') ctx.durableCreative = capability
+    else if (call.name === 'creative_critique' || call.name === 'creative_revision_draft' || call.name === 'chapter_review_batch') ctx.durableCreative = capability
     else if ((CHANGESET_ACTIONS as readonly string[]).includes(call.name)) ctx.durableChangeSet = capability
     else if (goalTool) ctx.durableRead = capability
     else if (['execution_context_read', 'chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline', ...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].includes(call.name)) ctx.durableRead = capability
@@ -406,7 +409,8 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   }
   if (selected.ctx.durableWeb) return { kind: 'tool' as const, result: await executeDurableWeb(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableAttachment) return { kind: 'tool' as const, result: await executeDurableAttachmentRead(selected.ctx, selected.tool, selected.args) }
-  if (selected.ctx.durableCreative) return { kind: 'tool' as const, result: await executeDurableCreative(selected.ctx, selected.tool, selected.args) }
+  if (selected.ctx.durableCreative) return { kind: 'tool' as const, result: selected.tool.name === 'chapter_review_batch'
+    ? await selected.tool.execute(selected.ctx, selected.args) : await executeDurableCreative(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableChangeSet) return { kind: 'tool' as const, result: await executeDurableChangeSet(selected.ctx, selected.tool, selected.args) }
   if (CHILD_ACTIONS.some(action => action === selected.tool.name) || selected.tool.name === 'task_wait') return executeDurableChildTool(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'ask_user') return executeDurableQuestion(lease, selected.cursor, selected.ctx, selected.tool, selected.args)

@@ -625,7 +625,10 @@ describe('严谨创作自动落实质量建议', () => {
   })
   it.each([false, true])('0关注8建议全部进入一次安全修订，缓存=%s', async cached => {
     const f = fixture(cached)
-    expect(await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).toMatchObject({ summary: '人类感质量检查 · r1 已检查，修订 8 处至 r2，需复检' })
+    expect(await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).toMatchObject({
+      summary: '人类感质量检查 · r1 已检查，修订 8 处至 r2',
+      output: expect.stringContaining('用 chapter_read 核对修改处和相关前文'),
+    })
     expect(f.critic).toHaveBeenCalledTimes(cached ? 0 : 1)
     expect(f.model).toHaveBeenCalledOnce()
     expect(f.write.mock.calls[0][0].replacements).toHaveLength(8)

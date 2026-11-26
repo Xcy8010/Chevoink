@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it } from 'vitest'
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
@@ -53,7 +53,7 @@ it.each([true, false])('keeps report summaries visible and details folded in an 
   expect(screen.queryByRole('button', { name: '展开工具详情' })).toBeNull()
 })
 
-it('expands and folds each real report with one click, independently of the other report', () => {
+it('expands and folds each real report with one click, independently of the other report', async () => {
   render(<AgentMessageParts parts={[tool(continuity), tool(quality)]} streaming={false} runActive />)
   const checkButton = screen.getByRole('button', { name: '展开检查详情' })
   const qualityButton = screen.getByRole('button', { name: '展开质量报告' })
@@ -70,11 +70,12 @@ it('expands and folds each real report with one click, independently of the othe
   expect(screen.getByText(`最小修法：${quality.findings[0].suggestion}`)).toBeTruthy()
   fireEvent.click(qualityButton)
   expect(qualityButton.getAttribute('aria-expanded')).toBe('false')
-  expect(screen.queryByText(quality.findings[0].evidence)).toBeNull()
+  expect(screen.getByText(quality.findings[0].evidence).closest('[aria-hidden="true"]')).toBeTruthy()
+  await waitFor(() => expect(screen.queryByText(quality.findings[0].evidence)).toBeNull())
   expect(screen.getByText(continuity.items[0])).toBeTruthy()
   fireEvent.click(checkButton)
   expect(checkButton.getAttribute('aria-expanded')).toBe('false')
-  expect(screen.queryByText(continuity.items[0])).toBeNull()
+  await waitFor(() => expect(screen.queryByText(continuity.items[0])).toBeNull())
 })
 
 it('supports keyboard focus, Enter expansion and Space collapse', async () => {

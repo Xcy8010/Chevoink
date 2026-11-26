@@ -1,3 +1,4 @@
+import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 /** Retry identity follows the failed operation and target, not a reformulated
  * manuscript or a different writer tool. Actual saved progress resets it. */
 export function toolRecoveryKey(action: string, code: string, args: unknown, fallbackChapterId?: string | null): string {
@@ -20,7 +21,7 @@ export function chapterAnchorFailureSummary(message: string): string {
   return '这批修改未保存，需要重新定位原文'
 }
 
-export function toolFailureRecovery(code: string): { label: string; guidance: string } | undefined {
+export function toolFailureRecovery(code: string, reviewWorkflow = chapterReviewWorkflowEnabled()): { label: string; guidance: string } | undefined {
   const entries: Record<string, { label: string; guidance: string }> = {
     TASK_SCOPE_REQUIRED: { label: '先确定正文任务', guidance: '根据完整作者请求与现有上下文自行理解本轮写作、修改或检查目标，核对目录后调用task_scope_bind；不要求作者重复同一目标，不重建任务。绑定后实际工具仍校验归属、选区、保护章与当前版本。' },
     TASK_SCOPE_BIND_CONFLICT: { label: '复用已确定目标', guidance: '该任务已有不可变的正文解释记录，请读取原绑定并完成其中目标；不能通过更换绑定重写已完成章节或扩大本轮范围。' },
@@ -34,14 +35,19 @@ export function toolFailureRecovery(code: string): { label: string; guidance: st
     COMPILATION_IDENTITY_MISMATCH: { label: '章节编译身份不匹配', guidance: '本次操作未执行。显式编号不会被自动替换；核对本任务已保存的真实编译状态，使用返回的编译编号继续该目标的缺失步骤，不能借旧章或其他任务完成当前任务。' },
     COMPILATION_NOT_WRITTEN: { label: '本任务章节正文尚未保存', guidance: '准备和场景计划不等于正文。保留当前编译与场景，按冻结目标创建或复用已绑定章节，然后写入非空正文，再完成当前版本的必要检查和终态提交。' },
     REVIEW_MERGED_REVISION_REQUIRED: { label: '修订依据需要核对', guidance: '本次修改被拒绝，未写入。按返回原因核对当前报告与意见真实编号；原授权范围内可分步调用 chapter_edit_range 或 chapter_write。实际改稿后复核新版。' },
-    REVIEW_DECISION_REQUIRED: { label: '检查意见需要明确处理', guidance: '当前报告已完成，意见尚待处理。按返回引用修改；决定保留时，在 chapter_bridge_commit.retainedFindings 填 source、reportId、真实 findingId 与具体理由。chapter_bridge_get 可读当前引用。正文与报告仍匹配时无需再次检查；实际改稿后复核新版。' },
-    REVIEW_REPAIR_RECHECK_REQUIRED: { label: '需要复核当前版本', guidance: '修订已保存，最终正文尚需复核。原授权内可继续编辑，提交前检查当前版本。' },
+    REVIEW_DECISION_REQUIRED: reviewWorkflow ? { label: '检查意见需要明确处理', guidance: '当前报告已完成，意见尚待处理。按返回引用修改；决定保留时，在 chapter_bridge_commit.retainedFindings 填 source、reportId、真实 findingId 与具体理由。chapter_bridge_get 可读当前引用。正文与报告仍匹配时复用。改稿后回读相关原文，作者要求终稿独立复核时调用对应检查。' }
+      : { label: '检查意见需要明确处理', guidance: '当前报告已完成，意见尚待处理。按返回引用修改；决定保留时，在 chapter_bridge_commit.retainedFindings 填 source、reportId、真实 findingId 与具体理由。chapter_bridge_get 可读当前引用。正文与报告仍匹配时无需再次检查；实际改稿后复核新版。' },
+    REVIEW_REPAIR_RECHECK_REQUIRED: reviewWorkflow ? { label: '需要复核当前版本', guidance: '核对当前保存稿与原文。原授权内可继续编辑；若作者明确要求终稿独立复核，使用相应的检查工具。' }
+      : { label: '需要复核当前版本', guidance: '修订已保存，最终正文尚需复核。原授权内可继续编辑，提交前检查当前版本。' },
     CHAPTER_ANCHOR_CONFLICT: { label: '正文片段需要重新定位', guidance: '本批片段未写入。用 chapter_read 读取原目标，按失败片段序号取当前版本的唯一连续原文，再用 chapter_edit_range 修改原修订范围。不能改用整章重写绕过定位失败；仍无法定位时说明哪些修改受阻及需核对的原文。' },
     TODO_CHANGE_REASON_REQUIRED: { label: '待办需要保留原项目身份', guidance: '读取当前清单，更新时保留原 id。确有新增的原授权工作请给出 changeReason，不重建整张清单或扩大章节范围。' },
     CONTINUITY_CHECK_REQUIRED: { label: '当前版本尚未完成连续性检查', guidance: '先完成当前正文的 continuity_validate，保留现有编译及真实用量，不能把缺报告视为通过。' },
-    CONTINUITY_EVIDENCE_UNLOCATED: { label: '检查引用需要核对', guidance: '报告引用无法定位，尚不能作为改稿或通过依据。核对当前原文与报告，原授权内处理有依据的问题，再复核最终版；未知费用先对账。' },
-    CONTINUITY_REPAIR_FAILED: { label: '连续性报告已保存，自动修订未应用', guidance: '当前报告与意见仍真实有效；本报告的自动修订不会重复请求。按报告中的真实 findingId、原文和建议，在原作者授权范围内用 chapter_edit_range 处理可定位的问题；决定保留时提交具体理由。普通改稿权限未因本次失败撤销，实际修改后复核最终版本，不能把自动修订失败当作检查通过或重建编译。' },
-    CONTINUITY_REPORT_INCOMPLETE: { label: '连续性报告未完成', guidance: '保留已经定位的意见、正文和原费用。若原请求需要完整报告，只处理未定位证据或明确的格式问题，不重新评审已定位意见；若仅为普通写作的辅助检查，先核对实际影响，正文已完成时可说明剩余未核对事项后交付。供应商结果或费用未知时先核对原请求。' },
+    CONTINUITY_EVIDENCE_UNLOCATED: reviewWorkflow ? { label: '检查引用需要核对', guidance: '报告引用无法定位，尚不能作为改稿或通过依据。核对当前原文与报告，原授权内处理有依据的问题并回读改动。作者要求完整报告时补核对应检查，未知费用先对账。' }
+      : { label: '检查引用需要核对', guidance: '报告引用无法定位，尚不能作为改稿或通过依据。核对当前原文与报告，原授权内处理有依据的问题，再复核最终版；未知费用先对账。' },
+    CONTINUITY_REPAIR_FAILED: reviewWorkflow ? { label: '连续性报告已保存，自动修订未应用', guidance: '当前报告与意见仍真实有效；本报告的自动修订不会重复请求。按报告中的真实 findingId、原文和建议，在原作者授权范围内用 chapter_edit_range 处理可定位的问题；决定保留时提交具体理由。继续使用获准的正文工具，保存后回读修改处。检查结论以实际报告为准。' }
+      : { label: '连续性报告已保存，自动修订未应用', guidance: '当前报告与意见仍真实有效；本报告的自动修订不会重复请求。按报告中的真实 findingId、原文和建议，在原作者授权范围内用 chapter_edit_range 处理可定位的问题；决定保留时提交具体理由。普通改稿权限未因本次失败撤销，实际修改后复核最终版本，不能把自动修订失败当作检查通过或重建编译。' },
+    CONTINUITY_REPORT_INCOMPLETE: reviewWorkflow ? { label: '连续性报告未完成', guidance: '保留已经定位的意见、正文和原费用。若原请求需要完整报告，只处理未定位证据或明确的格式问题，不重新评审已定位意见；普通写作可以在回读有实际影响的段落后交付。辅助检查状态留在工具卡。供应商结果或费用未知时先核对原请求。' }
+      : { label: '连续性报告未完成', guidance: '保留已经定位的意见、正文和原费用。若原请求需要完整报告，只处理未定位证据或明确的格式问题，不重新评审已定位意见；若仅为普通写作的辅助检查，先核对实际影响，正文已完成时可说明剩余未核对事项后交付。供应商结果或费用未知时先核对原请求。' },
     QUALITY_CHECK_REQUIRED: { label: '当前版本尚未完成人类感检查', guidance: '先完成当前正文的 quality_analyze，不能省略检查、引用旧版报告或宣称修订本身就是检查通过。' },
     AUTHOR_CHAPTER_SCOPE: { label: '章节目标或位置与原请求不符', guidance: '本次未执行，目标不符不表示任务已结束。核对原始请求和当前作品目录，仅在现有授权范围内纠正参数；全书位置与卷内位置不得混用。任务已暂停、结束或授权不匹配时不得继续。' },
     SCOPE_NEEDS_INPUT: { label: '原任务缺少可证明的章节目标', guidance: '原请求的目标章节无法证明，本次未写入任何章节。用ask_user只问一次要处理的具体章节并等待作者明确答复；原任务的缺失目标经受理后继续。不能按当前界面位置、历史记录或模型猜测写入，不能反复提问、重发准备参数或另建任务绕过。' },

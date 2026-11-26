@@ -99,6 +99,25 @@ export interface AgentToolDraft {
   content: string
 }
 
+export type AgentChapterReview = {
+  chapterId: EntityId
+  title: string
+  orderIndex: number
+  revision: number
+  status: 'complete' | 'incomplete' | 'stale'
+  detail?: string
+  findings?: Array<{
+    id: EntityId
+    label: string
+    severity: 'error' | 'warning' | 'advisory'
+    evidence: string
+    explanation: string
+    suggestion: string
+    disposition?: 'repaired' | 'retained'
+    related?: { chapterId: EntityId; title: string; evidence: string }
+  }>
+}
+
 /** 工具结果中给前端渲染的结构化数据 */
 export type AgentToolDisplayPayload =
   | {
@@ -187,6 +206,12 @@ export type AgentToolDisplayPayload =
       items: string[]
       errorCount?: number
       warningCount?: number
+      chapterReview?: AgentChapterReview
+    }
+  | {
+      kind: 'reviewBatch'
+      reviewType: 'continuity' | 'quality' | 'custom'
+      chapters: AgentChapterReview[]
     }
   | {
       kind: 'researchDossier'

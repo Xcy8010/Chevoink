@@ -16,6 +16,7 @@ import { useStreamingAutoFollow } from './useStreamingAutoFollow'
 type EditorCanvasProps = {
   chapterDraft: ChapterDraftState | null
   chapterRecoveryKey?: string
+  reviewEvidence?: { text: string }
   workspaceDocument?: WorkspaceDocumentView | null
   chapterLoading: boolean
   chapterErrorMessage: string | null
@@ -75,6 +76,7 @@ const desktopToolbarClassName = 'flex min-h-12 shrink-0 flex-wrap items-center j
 export default function EditorCanvas({
   chapterDraft: sourceChapterDraft,
   chapterRecoveryKey,
+  reviewEvidence,
   workspaceDocument: sourceWorkspaceDocument = null,
   chapterLoading,
   chapterErrorMessage,
@@ -467,6 +469,7 @@ export default function EditorCanvas({
               aria-label="章节正文"
               value={chapterDraft.content}
               recoveryKey={chapterRecoveryKey}
+              reviewEvidence={reviewEvidence}
               readOnly={writeLocked}
               resetKey={chapterDraft.id}
               onCommit={(content) => onChange({ ...chapterDraft, content })}
@@ -545,6 +548,7 @@ export default function EditorCanvas({
               aria-label="章节正文"
               value={chapterDraft.content}
               recoveryKey={chapterRecoveryKey}
+              reviewEvidence={reviewEvidence}
               readOnly={writeLocked}
               resetKey={chapterDraft.id}
               onCommit={(content) => onChange({ ...chapterDraft, content })}

@@ -80,7 +80,8 @@ it('keeps expansion, right rail and scroll ownership through reasoning updates a
   view.rerender(<AgentMessageParts parts={parts()} streaming={false} runActive summaryExpanded />)
   expect(toggle.getAttribute('aria-expanded')).toBe('true')
   expect(toggle.querySelector('[data-analysis-controls]')).toBe(controls)
-  fireEvent.click(toggle); expect(view.container.querySelector('.max-h-44')).toBeNull()
+  fireEvent.click(toggle)
+  expect(content.closest('[aria-hidden="true"]')).toBeTruthy()
   fireEvent.click(toggle); expect(view.container.querySelector('.max-h-44')?.scrollTop).toBe(900)
 })
 it('deduplicates the same receipt call within an episode', () => {

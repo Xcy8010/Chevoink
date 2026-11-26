@@ -19,6 +19,7 @@ type Props = {
   onRetryLoad?: () => void
   positionScope?: string
   chapterRecoveryKey?: string
+  reviewEvidence?: { text: string }
   selection: EditorSelectionState
   onChange: (draft: ChapterDraftState) => void
   onWorkspaceDocumentChange?: (next: { title: string; content: string }) => void
@@ -53,7 +54,7 @@ export default function StudioChapterViewer(props: Props) {
   return <ViewerContent {...props} />
 }
 
-function ViewerContent({ draft, pendingChapterTitle, workspaceDocument = null, loading, errorMessage, onRetryLoad, positionScope, chapterRecoveryKey, selection, onChange, onWorkspaceDocumentChange, onSelectionChange, onAddSelection, onCreateVolume, onCreateChapter, onClose, onBlur, streamingContent: receivedContent, writeLocked = false, retained = false }: Props & { retained?: boolean }) {
+function ViewerContent({ draft, pendingChapterTitle, workspaceDocument = null, loading, errorMessage, onRetryLoad, positionScope, chapterRecoveryKey, reviewEvidence, selection, onChange, onWorkspaceDocumentChange, onSelectionChange, onAddSelection, onCreateVolume, onCreateChapter, onClose, onBlur, streamingContent: receivedContent, writeLocked = false, retained = false }: Props & { retained?: boolean }) {
   const readOnly = retained || writeLocked
   const streaming = receivedContent !== undefined
   const visibleContent = useStreamingText(receivedContent ?? '', streaming, `${positionScope ?? ''}:${workspaceDocument?.id ?? draft?.id ?? ''}`)
@@ -76,7 +77,7 @@ function ViewerContent({ draft, pendingChapterTitle, workspaceDocument = null, l
     {loading && !errorMessage && !draft && !hasDocument ? <StudioPaneSkeleton label="正在载入章节内容" shape="document" bodyOnly /> : workspaceDocument ? <div key={`${positionScope ?? ''}:${workspaceDocument.kind}:${workspaceDocument.id}`} className="flex min-h-0 flex-1 flex-col overflow-hidden px-5 py-4">
       {workspaceDocument.kind === 'plan' ? <PlanMarkdownEditor positionScope={positionScope} documentId={workspaceDocument.id} markdown={streamingContent ?? workspaceDocument.content} editable={workspaceDocument.editableContent && !readOnly} streaming={streaming} onChange={(content) => onWorkspaceDocumentChange?.({ title: workspaceDocument.title, content })} onSelectionChange={onSelectionChange} onBlur={onBlur} /> : <LocalFirstTextarea ref={streamingScroll.ref} onScroll={streamingScroll.onScroll} value={streamingContent ?? workspaceDocument.content} readOnly={!workspaceDocument.editableContent || readOnly} resetKey={`${positionScope ?? ''}:${workspaceDocument.id}`} onCommit={(content) => onWorkspaceDocumentChange?.({ title: workspaceDocument.title, content })} onSelectionChange={onSelectionChange} onBlur={onBlur} className="h-full w-full resize-none bg-transparent text-[14px] leading-8 text-[var(--text-primary)] outline-none" placeholder="在这里维护目录内容。" />}
     </div> : draft ? <div key={`${positionScope ?? ''}:chapter:${draft.id}`} className="min-h-0 flex-1 overflow-hidden px-5 py-4">
-      <LocalFirstTextarea ref={streamingScroll.ref} onScroll={streamingScroll.onScroll} value={chapterContent} readOnly={readOnly} recoveryKey={chapterRecoveryKey} resetKey={`${positionScope ?? ''}:${draft.id}`} onCommit={(content) => onChange({ ...draft, content })} onSelectionChange={onSelectionChange} onBlur={onBlur} className="h-full w-full resize-none bg-transparent font-serif text-[15px] leading-8 text-[var(--text-primary)] outline-none read-only:cursor-default" placeholder="继续写这一章的正文。" />
+      <LocalFirstTextarea ref={streamingScroll.ref} onScroll={streamingScroll.onScroll} value={chapterContent} readOnly={readOnly} recoveryKey={chapterRecoveryKey} reviewEvidence={retained ? undefined : reviewEvidence} resetKey={`${positionScope ?? ''}:${draft.id}`} onCommit={(content) => onChange({ ...draft, content })} onSelectionChange={onSelectionChange} onBlur={onBlur} className="h-full w-full resize-none bg-transparent font-serif text-[15px] leading-8 text-[var(--text-primary)] outline-none read-only:cursor-default" placeholder="继续写这一章的正文。" />
     </div> : errorMessage ? <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center text-xs text-[var(--text-secondary)]">
       <p>{errorMessage}</p>
       {onRetryLoad ? <button type="button" onClick={onRetryLoad} className="rounded-md px-3 py-1.5 hover:bg-[var(--surface-muted)]">重试</button> : null}

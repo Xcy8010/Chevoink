@@ -36,6 +36,7 @@ import type {
 import { AgentMarkdownText } from './AgentMarkdownText'
 import { AgentProcessRegion } from './AgentProcessRegion'
 import { ActivityScrollArea } from './ActivityScrollArea'
+import { ChapterReviewCard, type OpenReviewedChapter } from './ChapterReviewCard'
 import { useStreamingTextState } from '../../components/use-streaming-text'
 import { useAgentStore } from '../agentStore'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
@@ -132,8 +133,9 @@ function computeLineDiff(before: string, after: string): DiffLine[] | null {
 }
 
 function ToolResultDetails({ open, id, authorActivity, children }: { open: boolean; id: string; authorActivity: boolean; children: ReactNode }) {
-  if (!authorActivity) return open ? <div id={id}>{children}</div> : null
-  return <AgentProcessRegion open={open} id={id}><ActivityScrollArea detail>{children}</ActivityScrollArea></AgentProcessRegion>
+  return <AgentProcessRegion open={open} id={id}>
+    {authorActivity ? <ActivityScrollArea detail>{children}</ActivityScrollArea> : children}
+  </AgentProcessRegion>
 }
 
 type ToolDetailCardProps<Kind extends AgentToolDisplayPayload['kind']> = {
@@ -723,11 +725,13 @@ function TaskOrchestrationCard({ display, authorActivity, readOnly }: ToolDetail
 export function ToolDisplayRenderer({
   display,
   onNavigateTarget,
+  onOpenReviewedChapter,
   authorActivity = false,
   readOnly = false,
 }: {
   display: AgentToolDisplayPayload
   onNavigateTarget?: () => void
+  onOpenReviewedChapter?: OpenReviewedChapter
   authorActivity?: boolean
   readOnly?: boolean
 }) {
@@ -737,9 +741,12 @@ export function ToolDisplayRenderer({
     case 'plan':
       return <PlanCard display={display} />
     case 'storyCompiler':
-      return <StoryCompilerCard display={display} authorActivity={authorActivity} />
+      return display.chapterReview ? <ChapterReviewCard chapters={[display.chapterReview]} onOpenChapter={onOpenReviewedChapter} />
+        : <StoryCompilerCard display={display} authorActivity={authorActivity} />
     case 'qualityReport':
       return <QualityReportCard display={display} authorActivity={authorActivity} />
+    case 'reviewBatch':
+      return <ChapterReviewCard chapters={display.chapters} onOpenChapter={onOpenReviewedChapter} />
     case 'coverImages':
       return <CoverImagesCard display={display} />
     case 'webSearch':
@@ -926,9 +933,9 @@ const ToolCallCard = memo(function ToolCallCard({
   const importWaiting = running && part.toolName === 'novel_import' && part.importWaiting
     && /^\/studio\/novel\/[^/?#]+\?/.test(part.importWaiting.url) ? part.importWaiting : null
   const writeTool = WRITE_TOOL_NAMES.has(part.toolName)
-  const workflowDisplay = part.display?.kind === 'storyCompiler' || part.display?.kind === 'qualityReport'
+  const workflowDisplay = part.display?.kind === 'storyCompiler' || part.display?.kind === 'qualityReport' || part.display?.kind === 'reviewBatch'
   const workflowDisplayHasBody = part.display?.kind !== 'storyCompiler'
-    || (part.display.items.length > 0 || (part.display.errorCount ?? 0) > 0 || (part.display.warningCount ?? 0) > 0)
+    || Boolean(part.display.chapterReview) || part.display.items.length > 0 || (part.display.errorCount ?? 0) > 0 || (part.display.warningCount ?? 0) > 0
   // 深读卡：执行结束后默认折叠、点击头部展开回看；按 toolName 精确门控（cover_prompt_set 同样产出 markdown，不能误折）
   const collapsible = part.toolName === 'web_read' && !!part.display
   const expandable = !workflowDisplay && argumentRows.length > 0
@@ -941,6 +948,13 @@ const ToolCallCard = memo(function ToolCallCard({
   const spotlightType = spotlight?.type ?? null
   const spotlightTitle = spotlight?.title ?? ''
   const rowExpandable = spotlightType === null && (expandable || collapsible)
+  const toolResult = part.display && workflowDisplayHasBody ? (
+    <div className={cn(workflowDisplay ? 'pb-2' : 'pb-3 pt-1 pl-[22px]')}>
+      <ToolDisplayRenderer display={part.display}
+        onNavigateTarget={targetTitle ? () => requestToolNavigation(part.toolName, part.args, part.display) : undefined}
+        onOpenReviewedChapter={(chapterId, evidence) => requestToolNavigation(part.toolName, { chapterId, evidence })} />
+    </div>
+  ) : null
   const webSearchQuery =
     part.toolName === 'web_search' && typeof argsRecord?.query === 'string' ? argsRecord.query : ''
   const platformSearchQuery =
@@ -998,7 +1012,7 @@ const ToolCallCard = memo(function ToolCallCard({
                 title="在记忆中心查看这张卡片"
                 className="absolute inset-0 z-0"
               />
-            ) : rowExpandable ? <button type="button" onClick={() => setExpanded((value) => !value)} aria-label={expanded ? '收起工具详情' : '展开工具详情'} className="absolute inset-0 z-0" /> : null}
+            ) : rowExpandable ? <button type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded} aria-label={expanded ? '收起工具详情' : '展开工具详情'} className="absolute inset-0 z-0" /> : null}
             {headerContent}
           </div>}
       {importWaiting ? <p className="pb-2 pl-[22px] text-xs leading-5">
@@ -1018,19 +1032,12 @@ const ToolCallCard = memo(function ToolCallCard({
           {part.summary}
         </p>
       </AgentProcessRegion>
-      {expanded && argumentRows.length > 0 ? (
+      {argumentRows.length > 0 && <AgentProcessRegion open={expanded}>
         <dl className="max-h-44 space-y-1.5 overflow-y-auto border-t border-[var(--border-subtle)] py-2 pl-[22px] pr-2 text-[10px] leading-5">
           {argumentRows.map((row, index) => <div key={`${row.label}-${index}`} className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2"><dt className="text-[var(--text-tertiary)]">{row.label}</dt><dd className="min-w-0 break-words text-[var(--text-secondary)]">{row.value}</dd></div>)}
         </dl>
-      ) : null}
-      {part.display && workflowDisplayHasBody && (!collapsible || expanded) ? (
-        <div className={cn(workflowDisplay ? 'pb-2' : 'pb-3 pt-1 pl-[22px]')}>
-          <ToolDisplayRenderer
-            display={part.display}
-            onNavigateTarget={targetTitle ? () => requestToolNavigation(part.toolName, part.args, part.display) : undefined}
-          />
-        </div>
-      ) : null}
+      </AgentProcessRegion>}
+      {collapsible ? <AgentProcessRegion open={expanded}>{toolResult}</AgentProcessRegion> : toolResult}
     </div>
   )
 })
@@ -1087,6 +1094,7 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
         onClick={() => setExpanded((value) => !value)}
         className="flex w-full items-center gap-2 px-2 py-2 text-left"
         aria-label={expanded ? '收起子 Agent 详情' : '展开子 Agent 详情'}
+        aria-expanded={expanded}
       >
         <Bot className={cn('h-3.5 w-3.5 shrink-0', running ? 'animate-pulse text-sky-500' : 'text-[var(--text-secondary)]')} />
         <span className="min-w-0 shrink-0 text-xs font-medium text-[var(--text-primary)]">{subagentName}</span>
@@ -1100,7 +1108,7 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
         <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] transition-transform', expanded && 'rotate-180')} />
       </button>
       {running ? <span aria-hidden className="agent-tool-progress pointer-events-none absolute inset-x-0 bottom-0 h-px bg-[var(--text-secondary)]/55" /> : null}
-      {expanded ? (
+      <AgentProcessRegion open={expanded}>
         <div className="border-t border-[var(--border-subtle)]">
           {children.length > 0 ? (
             <div className="pl-2">
@@ -1122,7 +1130,7 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
             <p className="border-t border-[var(--border-subtle)] px-2 py-2 text-[11px] leading-5 text-[var(--text-secondary)]">{part.summary}</p>
           ) : null}
         </div>
-      ) : null}
+      </AgentProcessRegion>
     </div>
   )
 })
@@ -1153,7 +1161,7 @@ const ReasoningPart = memo(function ReasoningPart({ text, streaming, count, titl
         <span className="inline-flex h-3 w-3 shrink-0">{text ? expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" /> : null}</span>
       </span>
     </button>
-    {expanded && text ? <div id={contentId} ref={contentRef} onScroll={() => {
+    <AgentProcessRegion open={expanded && Boolean(text)} id={contentId}><div ref={contentRef} onScroll={() => {
       const node = contentRef.current
       if (!node || node.clientHeight === 0) return
       const previousTop = lastScrollTop.current
@@ -1163,7 +1171,7 @@ const ReasoningPart = memo(function ReasoningPart({ text, streaming, count, titl
       // browser clamping at the actual bottom does not. Reaching bottom resumes.
       if (node.scrollTop < previousTop - 2 && distance > 1) pinnedToBottom.current = false
       else if (distance <= 1) pinnedToBottom.current = true
-    }} className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words border-l border-[var(--border-subtle)] py-1 pl-5 leading-6">{text}</div> : null}
+    }} className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words border-l border-[var(--border-subtle)] py-1 pl-5 leading-6">{text}</div></AgentProcessRegion>
   </div>
 })
 

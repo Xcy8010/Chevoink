@@ -40,14 +40,14 @@ export const agentRegistry: AgentDefinition[] = [
     type: 'continuity',
     title: '一致性 Agent',
     model: env.agentModel,
-    tools: ['novel_get_context', 'chapter_read', 'chapter_list_summaries', 'memory_search', 'story_charter_get', 'chapter_bridge_get', 'continuity_validate', 'quality_report_get', 'project_search', 'structure_validate', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'plan_save'],
+    tools: ['novel_get_context', 'chapter_read', 'chapter_list_summaries', 'memory_search', 'story_charter_get', 'chapter_bridge_get', 'continuity_validate', 'chapter_review_batch', 'quality_report_get', 'project_search', 'structure_validate', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'plan_save'],
     modes: ['review'],
   },
   {
     type: 'quality',
     title: '质量 Agent',
     model: env.agentModel,
-    tools: ['novel_get_context', 'chapter_read', 'quality_analyze', 'quality_report_get', 'quality_findings_select', 'creative_critique', 'style_profile_get', 'style_leakage_check', 'chapter_edit_range', 'chapter_write', 'chapter_append'],
+    tools: ['novel_get_context', 'chapter_read', 'quality_analyze', 'chapter_review_batch', 'quality_report_get', 'quality_findings_select', 'creative_critique', 'style_profile_get', 'style_leakage_check', 'chapter_edit_range', 'chapter_write', 'chapter_append'],
     modes: ['review'],
   },
   {

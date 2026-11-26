@@ -24,6 +24,7 @@ export type ActivityGroup = {
   unfinished?: boolean
   unsettled?: ActivityCall
   staleReviewCalls?: Set<ActivityCall>
+  reviewChapterRevisions?: ReadonlyMap<string, number>
 }
 
 /** These are presentation receipts, separate from the assistant's reply and
@@ -109,6 +110,7 @@ export function activityReviewProblem(part: ActivityCall): 'stale' | 'incomplete
     if (part.display.status === 'stale') return 'stale'
     if (part.display.status === 'analyzing' || part.display.status === 'failed') return 'incomplete'
   }
+  if (part.display?.kind === 'reviewBatch' && part.display.chapters.some(chapter => chapter.status === 'incomplete')) return 'incomplete'
 }
 
 function hasActivityFailure(part: ActivityCall) {
@@ -303,7 +305,10 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       const nextStage = getAgentToolPresentation(part.toolName)
       const changesStage = current && (publicTextSinceAction || previousCall?.messageId !== message.id && ['save', 'write', 'revise'].includes(nextStage.phase))
         && !sameAgentToolStage(getAgentToolPresentation(current.calls[current.stageStart].toolName), nextStage)
-      const title = proposedTitle ?? (changesStage ? undefined : current?.title)
+      // A batch has a specific check and coverage headline. A neighboring
+      // check or edit must not replace it, even under one authored activity title.
+      const separatesReviewBatch = part.toolName === 'chapter_review_batch' || current?.calls.at(-1)?.toolName === 'chapter_review_batch'
+      const title = proposedTitle ?? (changesStage || separatesReviewBatch ? undefined : current?.title)
       const separate = title ? title !== current?.title : current && (changesStage || !canGroup(current, part, publicTextSinceAction))
       if (!part.preparing && current?.title && !current.closed && !separate && nextStage.phase === 'read'
         && previousCall?.group === current && previousCall.wasRead && previousCall.reports.length) {
@@ -312,7 +317,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       }
       // A new stage without a report changes the existing row. Earlier receipts
       // stay in its details. Old untitled, silent transcripts keep their groups.
-      if (!current || current.closed || separate && (stageReports.some(report => !report.followingCallId) || !hasPublicReport && !hasActivityTitle)) {
+      if (!current || current.closed || separatesReviewBatch || separate && (stageReports.some(report => !report.followingCallId) || !hasPublicReport && !hasActivityTitle)) {
         if (current) current.closed = true
         current = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id,
           firstCallId: part.callId, calls: [], callKeys: [], receiptKeys: [], stageStart: 0, childrenByCall: new Map(), reportsAfterCall: new Map(), ...(title ? { title } : {}) }
@@ -353,9 +358,14 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
   for (const { group, scope } of groups) {
     const chapters = chaptersByScope.get(scope) ?? new Map<string, number>()
     chaptersByScope.set(scope, chapters)
-    for (const part of group.calls) {
+    for (const part of [...group.calls, ...[...group.childrenByCall.values()].flat()]) {
       const version = observedChapterVersion(part)
       if (version) chapters.set(version.chapterId, Math.max(version.revision, chapters.get(version.chapterId) ?? version.revision))
+      if (part.display?.kind === 'reviewBatch') {
+        for (const chapter of part.display.chapters) {
+          if (chapter.status === 'complete') chapters.set(chapter.chapterId, Math.max(chapter.revision, chapters.get(chapter.chapterId) ?? chapter.revision))
+        }
+      }
     }
   }
   for (const { group, scope } of groups) {
@@ -363,6 +373,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
     lastGroupByRun.set(sourceRunId, group)
     if (group.calls.some(part => part.status === 'running')) runningByRun.set(sourceRunId, group)
     const chapters = chaptersByScope.get(scope)
+    group.reviewChapterRevisions = chapters
     const stale = new Set(group.calls.filter(part => {
       const review = activityReviewVersion(part)
       return activityReviewProblem(part) === 'stale' || review && (chapters?.get(review.chapterId) ?? review.revision) > review.revision

@@ -3,8 +3,12 @@ import type { AppRelease, AppReleaseChannel, AppReleaseOperation, AppReleaseReti
 import type { Request, Response } from 'express'
 import { env } from '../../api/config/env.js'
 import { accountEmailAuthEnabled, withAccountEmailAuthPreview, writeAccountEmailAuthPreviewGrant } from '../../api/lib/account-email-auth-scope.js'
-import { executeAppRelease, hasAgentPersonalizationCapability, hasGenerativeContentPolicyCapability, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, resolveEmailAuthPreview, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../../api/lib/app-releases.js'
+import { executeAppRelease, hasAgentPersonalizationCapability, hasChapterReviewWorkflowCapability, hasGenerativeContentPolicyCapability, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, resolveEmailAuthPreview, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../../api/lib/app-releases.js'
+import { canAdmitChapterReviewWorkflow, chapterReviewWorkflowEnabled } from '../../api/lib/agent/chapter-review-rollout.js'
+import { restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
 import type { AppReleaseManifest, AppReleaseAction } from '../../shared/contracts/app-release.js'
+import type { TaskSpec } from '../../shared/contracts/task-spec-contracts.js'
+import type { AgentTool } from '../../api/lib/agent/tools/types.js'
 const state=vi.hoisted(()=>({releases:[] as AppRelease[],channels:[] as AppReleaseChannel[],operations:[] as AppReleaseOperation[],retirements:[] as AppReleaseRetirement[],audits:[] as unknown[],artifacts:new Map<string,{manifest:AppReleaseManifest;artifactSha256:string}>(),superAdmin:true,testers:new Set<string>(),policy:true,terms:'terms' as string|null,privacy:'privacy' as string|null,failAudit:false,serial:Promise.resolve<unknown>(undefined)}))
 const db={
  $executeRaw:vi.fn(async()=>1),
@@ -83,6 +87,36 @@ it('limits the generative content policy to accounts assigned the verified capab
  expect(await hasGenerativeContentPolicyCapability('tester')).toBe(false)
  state.channels[0].releaseId='test-version'
  expect(await hasGenerativeContentPolicyCapability('ordinary')).toBe(true)
+})
+it('freezes chapter review rollout in the task while keeping stable and existing tool catalogs scoped', async () => {
+ const originalAppEnv = env.appEnv
+ env.appEnv = 'production'
+ try {
+  expect(await hasChapterReviewWorkflowCapability('tester')).toBe(false)
+  release('stable-version');release('test-version',['chapterReviewWorkflow'])
+  channel('stable','stable-version');channel('test','test-version')
+  state.testers.add('tester')
+  const tx = db as unknown as Parameters<typeof canAdmitChapterReviewWorkflow>[1]
+  expect(await canAdmitChapterReviewWorkflow('ordinary', tx)).toBe(false)
+  expect(await canAdmitChapterReviewWorkflow('tester', tx)).toBe(true)
+
+  const existing = { scope: { novelId: 'synthetic-novel' } } as TaskSpec
+  const admitted: TaskSpec = { ...existing, scope: { ...existing.scope, chapterReviewWorkflow: 1 } }
+  const catalog = ['chapter_read', 'chapter_review_batch'].map(name => ({ name } as AgentTool))
+  expect(chapterReviewWorkflowEnabled(existing)).toBe(false)
+  expect(chapterReviewWorkflowEnabled(admitted)).toBe(true)
+  expect(restrictToolsToTask(catalog, existing).map(tool => tool.name)).toEqual(['chapter_read'])
+  expect(restrictToolsToTask(catalog, admitted)).toEqual(catalog)
+
+  state.channels[1].enabled=false
+  expect(await canAdmitChapterReviewWorkflow('tester', tx)).toBe(false)
+  expect(restrictToolsToTask(catalog, admitted)).toEqual(catalog)
+  state.channels[0].releaseId='test-version'
+  expect(await canAdmitChapterReviewWorkflow('ordinary', tx)).toBe(true)
+  expect(chapterReviewWorkflowEnabled(existing)).toBe(false)
+ } finally {
+  env.appEnv = originalAppEnv
+ }
 })
 it('selects real assigned artifacts from server tester qualification, never a URL or header',async()=>{release('stable-version');release('test-version');channel('stable','stable-version');channel('test','test-version');state.testers.add('tester');expect((await selectAppRelease(req('ordinary',{'x-release-channel':'test','x-release-id':'test-version'}))).release!.id).toBe('stable-version');expect((await selectAppRelease(req('tester'))).release).toMatchObject({id:'test-version',activatedAt:state.channels.find(row=>row.channel==='test')!.updatedAt.toISOString()});state.testers.delete('tester');expect((await selectAppRelease(req('tester'))).release!.id).toBe('stable-version');await expect(requireAppReleaseCapability(req('ordinary'),'siteContent')).rejects.toMatchObject({code:'APP_RELEASE_CAPABILITY_DISABLED'})})
 it('gates personalization by the effective account assignment and allows legacy development', async () => {

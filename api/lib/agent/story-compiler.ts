@@ -1,3 +1,4 @@
+import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import { prepareWritingPlanContext, assertWritingPlanContextCurrent, tryBindFutureWritingPlan, renderWritingPlanContext } from './writing-plan-context.js'
 
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage } from './writing-scope.js'
@@ -717,7 +718,7 @@ export async function commitChapterBridge(input: {
   return { compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, skippedMemoryCount, retainedIssueCount: readiness?.retainedDecisions?.length ?? 0 }
 }
 
-export async function buildStoryCompilerDigest(userId: string, novelId: string, _chapterId: string | null, runId?: string) {
+export async function buildStoryCompilerDigest(userId: string, novelId: string, _chapterId: string | null, runId?: string, reviewWorkflow = chapterReviewWorkflowEnabled()) {
   const scope = runId ? await compilationRunScope(prisma, { userId, novelId, runId }) : null
   const [bundle, active, latestBridge] = await Promise.all([
     getStoryCharterBundle(userId, novelId),
@@ -772,7 +773,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
     active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务没有编译记录。可直接使用普通正文工具，按需要准备上下文或记录场景。',
     chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字` : '正文为空，未写完'}；提纲一致性=${planNeedsReview ? 'needs-review' : review?.planAlignment ?? '未绑定提纲'}；当前连续性报告=${review?.continuity ?? 'missing'}，人类感质量报告=${review?.quality ?? 'missing'}；报告剩余意见=${review?.decisionEntries?.length ?? 0}，已明确保留=${review?.retainedDecisions?.length ?? 0}。报告完成、意见已修复、明确保留和章节已提交分别说明。${review?.requiredTools.length ? `当前尚无有效报告的检查：${review.requiredTools.map(tool => tool.name).join('、')}。` : ''}` : '',
     active && chapter ? `当前有效质量报告编号=${review?.qualityReportId ?? '无'}；最近已存质量报告=${latestQuality ? `${latestQuality.id}（revision=${latestQuality.chapterRevision}，${latestQuality.status}）` : '无'}；历史连续性记录 revision=${historicalValidation.checkedRevision ?? '未知'}。历史或独立报告不能代替当前编译与最终正文绑定的必要检查；缺失或旧版本报告不代表通过。` : '',
-    active ? '初稿流程：本任务冻结的新建目标章可在原写作权限内持续修订。先核对对象身份与原文证据，仅将同一对象同一维度的互斥事实视为冲突，不照 suggestion 机械改剧情。相关修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write；不硬性限定一次调用。每次使用当前正文与版本，不要求每次覆盖全部意见；全部修改后复核最终版本。已有章节与明确禁止修改的请求仍按原权限处理。自动局部修订后复查最终版本，原用量或费用未知时先核对，不为清零警告循环改写，剩余意见保留真实状态。' : '',
+    active ? reviewWorkflow ? '初稿流程：本任务冻结的新建目标章可在原写作权限内持续修订。先核对对象身份与原文证据，仅将同一对象同一维度的互斥事实视为冲突，不照 suggestion 机械改剧情。相关修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write；不硬性限定一次调用。每次使用当前正文与版本，不要求每次覆盖全部意见；修改保存后回读改动和相关前文，确认具体问题是否解决。已有章节与明确禁止修改的请求仍按原权限处理。作者要求终稿独立复查时调用对应检查，原用量或费用未知时先核对，风格建议留在报告中。' : '初稿流程：本任务冻结的新建目标章可在原写作权限内持续修订。先核对对象身份与原文证据，仅将同一对象同一维度的互斥事实视为冲突，不照 suggestion 机械改剧情。相关修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write；不硬性限定一次调用。每次使用当前正文与版本，不要求每次覆盖全部意见；全部修改后复核最终版本。已有章节与明确禁止修改的请求仍按原权限处理。自动局部修订后复查最终版本，原用量或费用未知时先核对，不为清零警告循环改写，剩余意见保留真实状态。' : '',
     latestBridge?.toChapter ? `最近已提交桥（仅作背景，不证明本任务完成）：第 ${latestBridge.toChapter.orderIndex} 章《${latestBridge.toChapter.title}》，提交 r${latestBridge.targetRevision ?? '未知'}，当前 r${latestBridge.toChapter.revision}；未完成动作：${latestBridge.lastUnfinishedAction || '无'}；开放钩子：${asStringArray(latestBridge.openLoops).slice(0, 4).join('、') || '无'}` : '',
   ].filter(Boolean)
   return lines.join('\n')

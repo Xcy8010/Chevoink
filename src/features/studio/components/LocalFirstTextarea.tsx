@@ -17,6 +17,7 @@ type LocalFirstTextareaProps = {
   resetKey?: string
   /** Present only for an authenticated author's chapter editor. */
   recoveryKey?: string
+  reviewEvidence?: { text: string }
   onSelectionChange?: (selection: EditorSelectionState) => void
   /** 影子层自增高布局（沉浸区正文），排版类名请放在 className 上 */
   autoGrow?: boolean
@@ -44,6 +45,7 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
     onCommit,
     resetKey,
     recoveryKey,
+    reviewEvidence,
     onSelectionChange,
     autoGrow = false,
     wrapperClassName,
@@ -218,6 +220,18 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
     lastSelectionCollapsedRef.current = collapsed
     onSelectionChangeRef.current?.({ start, end, text: target.value.slice(start, end) })
   }, [])
+
+  const revealedEvidence = useRef<typeof reviewEvidence>()
+  useLayoutEffect(() => {
+    const input = inputRef.current
+    if (!input || !reviewEvidence?.text.trim() || revealedEvidence.current === reviewEvidence || readOnly || composingRef.current || input.value !== localRef.current) return
+    revealedEvidence.current = reviewEvidence
+    const start = input.value.indexOf(reviewEvidence.text)
+    if (start < 0 || input.value.indexOf(reviewEvidence.text, start + 1) >= 0) return
+    input.focus()
+    input.setSelectionRange(start, start + reviewEvidence.text.length)
+    reportSelection(input)
+  }, [local, readOnly, reportSelection, reviewEvidence])
 
   const handleChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
     authorCommitRef.current = { key: resetKey, commit: onCommitRef.current }

@@ -58,6 +58,11 @@ export async function assertCurrentToolPolicy(tx: RuntimeTx, token: RunLeaseToke
       PERSONALIZATION_WRITE_ACTIONS.includes(operation.action) ? 'update' : 'share')
     const current = tooling.toolAuthority.find(item => item.name === operation.action)
     if (!grant || !current || current.permission === 'deny') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '当前实际权限已撤销此工具。')
+    if (operation.action === 'chapter_review_batch') {
+      const { reviewTypeSchema, checkBatchReviewGrant } = await import('./tools/batch-review.js')
+      const args = input?.args as Prisma.JsonObject | undefined
+      checkBatchReviewGrant(new Map(tooling.toolAuthority.map(item => [item.name, item])), reviewTypeSchema.parse(args?.reviewType))
+    }
     grant = { ...grant, permission: grant.permission === 'deny' ? 'deny'
       : grant.permission === 'ask' || current.permission === 'ask' ? 'ask' : 'allow',
       alwaysConfirm: grant.alwaysConfirm || current.alwaysConfirm, dangerous: grant.dangerous || current.dangerous }
@@ -114,9 +119,9 @@ export async function commitOperationEffect(token: RunLeaseToken, operationId: s
   // the operation snapshot, current tool policy, owner, and lease.
   const operation = await prisma.agentOperation.findFirst({ where: { id: operationId, taskRootId: token.taskRootId }, select: { action: true } })
   const manuscript = operation && [...STRUCTURE_MUTATIONS, 'task_scope_bind', 'chapter_create', 'chapter_rename', 'chapter_write', 'chapter_append', 'chapter_edit_range',
-    'novel_create', 'novel_publish', 'novel_archive', 'research_dossier_build', 'creative_critique', 'creative_revision_draft', 'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit', 'quality_analyze', 'continuity_validate', 'changeset_apply', 'changeset_rollback'].includes(operation.action)
+    'novel_create', 'novel_publish', 'novel_archive', 'research_dossier_build', 'creative_critique', 'creative_revision_draft', 'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit', 'quality_analyze', 'continuity_validate', 'chapter_review_batch', 'changeset_apply', 'changeset_rollback'].includes(operation.action)
   const effect = (tx: RuntimeTx) => commitOperationEffectInTransaction(tx, token, operationId, inputHash, work)
-  if (operation && ['chapter_bridge_get', 'chapter_bridge_commit', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'quality_analyze', 'continuity_validate'].includes(operation.action)) return withManuscriptRunLease(token, effect, { timeoutMs: 20_000 })
+  if (operation && ['chapter_bridge_get', 'chapter_bridge_commit', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'quality_analyze', 'continuity_validate', 'chapter_review_batch'].includes(operation.action)) return withManuscriptRunLease(token, effect, { timeoutMs: 20_000 })
   return (manuscript ? withManuscriptRunLease : withRunLease)(token, effect)
 }
 
@@ -239,29 +244,31 @@ export async function prepareProviderAttempt(token: RunLeaseToken, input: {
 }
 
 /** Only dispatchGranted=true permits a network call; a lost commit reply requires reconciliation. */
-export async function markProviderDispatched(token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number, dossierScope?: { parentOperationId: string }) {
+type ManuscriptDispatchScope = { parentOperationId: string; kind: 'research_dossier_synthesis' | 'chapter_review_batch' }
+
+export async function markProviderDispatched(token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number, manuscriptScope?: ManuscriptDispatchScope) {
   token = { ...token }
-  dossierScope = dossierScope ? { ...dossierScope } : undefined
+  manuscriptScope = manuscriptScope ? { ...manuscriptScope } : undefined
   // Dossier preconditions and its unique synthesis permit share the book/root
   // lock order with query admission and final dossier persistence.
-  const guard = dossierScope ? withManuscriptRunLease : withRunLease
-  return guard(token, tx => markProviderDispatchedInTransaction(tx, token, attemptId, goalTokenEstimate, dossierScope))
+  const guard = manuscriptScope ? withManuscriptRunLease : withRunLease
+  return guard(token, tx => markProviderDispatchedInTransaction(tx, token, attemptId, goalTokenEstimate, manuscriptScope))
 }
 
 /** Caller holds the same root/lease transaction as a fixed-price debit. */
-export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number, dossierScope?: { parentOperationId: string }) {
+export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number, manuscriptScope?: ManuscriptDispatchScope) {
     const attempt = await tx.agentProviderAttempt.findUnique({ where: { id: attemptId } })
     if (!attempt) return runtimeError('RUNTIME_SCOPE_MISMATCH', '供应商尝试不存在。')
     const operation = await ownedOperation(tx, token, attempt.operationId)
     if (!attempt.requestSnapshot || runtimeJsonHash(attempt.requestSnapshot) !== attempt.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
     if (attempt.status !== 'prepared') return { dispatchGranted: false, attempt }
     if (attempt.runId !== token.runId || attempt.ownerEpoch !== token.epoch) runtimeError('RUNTIME_LEASE_LOST', '供应商尝试未归属当前执行者。')
-    if (dossierScope && operation.parentOperationId !== dossierScope.parentOperationId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '研究综合锁范围不属于原父操作。')
+    if (manuscriptScope && operation.parentOperationId !== manuscriptScope.parentOperationId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '作品派发锁范围不属于原父操作。')
     if (operation.parentOperationId) {
       const parent = await ownedOperation(tx, token, operation.parentOperationId)
       await assertCurrentToolPolicy(tx, token, parent)
       if (parent.action === 'research_dossier_build') {
-        if (!dossierScope || dossierScope.parentOperationId !== parent.id) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '研究综合必须在作品锁内核验原前置条件。')
+        if (manuscriptScope?.kind !== 'research_dossier_synthesis') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '研究综合必须在作品锁内核验原前置条件。')
         const { dossierWorkSchema, assertDossierPredecessor, assertDossierForce, assertDossierBuildExclusive } = await import('./runtime-dossier-contract.js')
         const source = await (await import('./runtime-tool-cursor.js')).readToolOperationSource(tx, parent)
         const work = dossierWorkSchema.parse(source.input.work)
@@ -269,7 +276,11 @@ export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: 
         await assertDossierPredecessor(tx, token.userId, work)
         await assertDossierForce(tx, { userId: token.userId, novelId: work.novelId, runId: token.runId }, work)
         await assertDossierBuildExclusive(tx, token.userId, work.novelId, parent)
-      } else if (dossierScope) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '研究综合锁不能借给其他工具步骤。')
+      } else if (parent.action === 'chapter_review_batch') {
+        if (manuscriptScope?.kind !== 'chapter_review_batch') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '批量复查必须在作品锁内核验原文。')
+        const source = await (await import('./runtime-tool-cursor.js')).readToolOperationSource(tx, parent)
+        await (await import('./tools/durable-batch-review.js')).assertBatchReviewSources(tx, token, source.input)
+      } else if (manuscriptScope) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品派发锁不能借给其他工具步骤。')
     }
     await assertProviderBudget(tx, token.taskRootId)
     if (token.parent) {

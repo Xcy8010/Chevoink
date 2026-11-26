@@ -160,6 +160,7 @@ export const AGENT_TOOL_GOVERNANCE = {
   memory_relation_save: { category: 'write', risk: 'medium', postconditions: ['memory_source_recorded', 'entity_graph_updated'] },
   memory_event_save: { category: 'write', risk: 'medium', postconditions: ['memory_source_recorded', 'timeline_updated'] },
   creative_critique: { category: 'workflow', risk: 'medium', postconditions: ['isolated_critique_context', 'artifact_persisted', 'chapter_unchanged'] },
+  chapter_review_batch: { category: 'workflow', risk: 'medium', postconditions: ['owned_chapters_only', 'original_review_authority', 'independent_chapter_results', 'chapter_unchanged'] },
   creative_revision_draft: { category: 'workflow', risk: 'medium', postconditions: ['selected_findings_only', 'artifact_persisted', 'chapter_unchanged'] },
   skill_create_draft: { category: 'workflow', risk: 'medium', postconditions: ['private_scope', 'disabled_by_default', 'static_audit_recorded'] },
   skill_test: { category: 'workflow', risk: 'low', postconditions: ['prompt_hashed', 'eval_recorded', 'content_unchanged'] },

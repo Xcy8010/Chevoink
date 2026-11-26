@@ -179,6 +179,11 @@ describe('continuity accounting stays native when legacy usage is empty', () => 
 
 function runnerFixture() {
   vi.spyOn(retirements, 'readRetiredReviewUsageIds').mockResolvedValue(new Set())
+  vi.spyOn(prisma.agentPersonalization, 'findUnique').mockResolvedValue(null)
+  vi.spyOn(prisma, '$queryRaw').mockImplementation(((query: TemplateStringsArray) => {
+    if (query.join('').includes('SELECT tool_rules')) return Promise.resolve([])
+    throw new Error('Unexpected SQL in the continuity fixture')
+  }) as typeof prisma.$queryRaw)
   const chapter = { id: 'c', authorId: 'u', novelId: 'n', title: '合成章', revision: 4, content: body, orderIndex: 1 }
   const compilation = { id: 'comp', userId: 'u', novelId: 'n', runId: 'r', chapterId: 'c', status: 'active', validation: {} as Record<string, unknown> }
   const artifacts = new Map<string, Record<string, unknown>>()
@@ -577,7 +582,8 @@ describe('known failure recovery preserves report and paid evidence', () => {
     expect(f.chapter.content).toBe('合成甲句已修订。' + before.slice(f.sources.entries[0].end))
     expect(f.report().repairUnresolved?.map(item => item.findingId)).toEqual(['1', '2', '3'])
     expect(f.report().opinions).toEqual(f.opinions)
-    expect(result.output).toContain('需复查最终版')
+    expect(result.output).toContain('用 chapter_read 核对修改处及相关前文')
+    expect(result.output).toContain('作者要求终稿独立检查时调用对应工具')
   })
   it('resumes the same admitted native call interrupted before its first provider registration', async () => {
     const f = runnerFixture(), snapshot = await buildContinuitySnapshot(f.ctx, { compilationId: 'comp' })

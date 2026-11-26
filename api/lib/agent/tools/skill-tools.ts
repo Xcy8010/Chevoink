@@ -42,7 +42,7 @@ export const skillLoadTool = defineTool({
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: true,
   async execute(ctx, args) {
     const { catalog: runtime, routerVersion } = await resolveRuntimeSkillContext(ctx.userId, ctx.novelId, ctx.runId, ctx.transaction)
-    const content = loadSkill(args.skillId, args.phase, args.creativeFreedom, runtime)
+    const content = loadSkill(args.skillId, args.phase, args.creativeFreedom, runtime, ctx.chapterReviewWorkflowEnabled)
     const loaded = content ? runtime.filter(skill => content.startsWith(`[Skill ${skill.id}@${skill.version} /`)) : []
     if (ctx.runId && loaded.length) await recordSkillLoads({ ...ctx, runId: ctx.runId, routerVersion }, loaded, args.phase, 'tool', ctx.transaction)
     return content

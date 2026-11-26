@@ -16,6 +16,8 @@ import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import * as toolCursor from '../../api/lib/agent/runtime-tool-cursor.js'
 import { qualityWorkContextProjection } from '../../api/lib/agent/tools/durable-quality.js'
+import { chapterReviewBatchTool } from '../../api/lib/agent/tools/durable-batch-review.js'
+import { creativeCritiqueTool } from '../../api/lib/agent/tools/skill-tools.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
@@ -31,11 +33,11 @@ import * as tokenPrices from '../../api/lib/billing/resolve-token-price.js'
 import * as credits from '../../api/lib/credits.js'
 import { getCreditWindow } from '../../api/lib/credits.js'
 import { DataAccessError,prisma } from '../../api/lib/prisma.js'
-import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
+import { available,claim,fixture,novelFixture } from '../support/agent-durable-runtime-fixture.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
-import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { chapterCreateTool,chapterEditRangeTool,chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import * as reviewCompletion from '../../api/lib/agent/review-completion.js'
 import * as humanityQuality from '../../api/lib/agent/humanity-quality.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
@@ -255,7 +257,10 @@ describe.runIf(available)('new-draft quality-first prepayment admission', () => 
           return JSON.stringify({ patches: candidates.map(candidate => ({ findingId: candidate.findingId, replacement: '握紧手指' })) })
         })
         const result = await qualityAnalyzeTool.execute({ ...ctx, callId: 'quality-first' }, { compilationId })
-        expect(result).toMatchObject({ summary: expect.stringContaining('需复检') })
+        expect(result).toMatchObject({
+          summary: expect.stringContaining('已检查，修订'),
+          output: expect.stringContaining('用 chapter_read 核对修改处和相关前文'),
+        })
         expect(result.outcome).toBeUndefined()
         expect(critic).toHaveBeenCalledOnce()
         expect(reserve).toHaveBeenCalledOnce()
@@ -1221,11 +1226,93 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('真实报告
 })
 
 describe.runIf(available)('既有章节独立检查', () => {
+  it('uses one settled request per batch family and reuses current reports for saved chapters without compilation', async () => {
+    const skillId = `custom.${randomUUID()}`
+    await novelFixture(async f => {
+      const first = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const second = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: first.volumeId,
+        title: '第二章', content: '风把窗纸吹得作响。', wordCount: 9, orderIndex: 2, orderInVolume: 2 } })
+      const chapterIds = [first.id, second.id]
+      const instruction = '在周宁的视角中核对人物称谓，信中直接引文按原文保留。'
+      await prisma.agentSkillDefinition.create({ data: { id: skillId, ownerUserId: f.userId, name: '称谓复核', description: instruction,
+        source: 'user', visibility: 'private', license: 'Proprietary-Author-Owned', status: 'active', defaultVersion: '0.1.0',
+        versions: { create: { version: '0.1.0', status: 'active', instructions: { critique: instruction }, contentHash: 'a'.repeat(64),
+          manifest: { intents: ['review'], modes: ['build', 'review'], phases: ['critique'], triggerPhrases: ['称谓复核'] } } },
+        installations: { create: { userId: f.userId, scope: 'novel', scopeId: f.novelId, lockedVersion: '0.1.0' } },
+      } })
+      const families = ['continuity', 'quality', 'custom'] as const
+      const tools = [chapterReviewBatchTool, continuityValidateTool, qualityAnalyzeTool, creativeCritiqueTool, chapterEditRangeTool, chapterReadTool]
+      const readBack = [first, second].flatMap((chapter, index) => [
+        { id: `read-original-${index}`, name: 'chapter_read', arguments: JSON.stringify({ chapterId: chapter.id }) },
+        { id: `edit-${index}`, name: 'chapter_edit_range', arguments: JSON.stringify({ chapterId: chapter.id, oldText: chapter.content, newText: '雨拍在屋檐上。' }) },
+        { id: `read-${index}`, name: 'chapter_read', arguments: JSON.stringify({ chapterId: chapter.id }) },
+      ])
+      const argsFor = (reviewType: typeof families[number]) => ({ chapterIds, reviewType,
+        ...(reviewType === 'custom' ? { skillIds: [skillId] } : {}) })
+      const lease = await claim(f)
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: tools.map(item => ({ type: 'function', function: { name: item.name, description: item.description, parameters: z.toJSONSchema(item.parameters, { io: 'input' }) } })),
+        toolAuthority: tools.map(item => ({ name: item.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [],
+        pinnedSkillVersions: [{ id: skillId, version: '0.1.0' }] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: '复查这两章' }, { role: 'assistant', content: null,
+            toolCalls: [...[...families, ...families].map((reviewType, index) => ({ id: `batch-${index}`, name: chapterReviewBatchTool.name,
+              arguments: JSON.stringify(argsFor(reviewType)) })), ...readBack] }], successfulToolSignatures: [] } })
+      const window = getCreditWindow()
+      await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
+      vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
+        rateCardId: 'batch-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
+      const reply = JSON.stringify({ chapters: chapterIds.map(chapterId => ({ chapterId, findings: [] })) })
+      const model = vi.fn(async (_url: unknown, init: RequestInit) => {
+        const messages = JSON.parse(String(init.body)).messages
+        expect(JSON.parse(messages[1].content).targets).toHaveLength(2)
+        if (messages[0].content.includes('按选定技能审阅')) expect(messages[0].content).toContain(instruction)
+        if (!JSON.parse(String(init.body)).stream) return Response.json({
+          choices: [{ message: { content: reply }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 9 },
+        })
+        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: reply }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 9 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
+      })
+      vi.stubGlobal('fetch', model)
+      for (const reviewType of [...families, ...families]) {
+        expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool', result: {
+          display: { kind: 'reviewBatch', reviewType, chapters: chapterIds.map(chapterId => ({ chapterId, status: 'complete' })) },
+        } })
+      }
+      expect(model).toHaveBeenCalledTimes(3)
+      expect(await prisma.agentProviderUsageReceipt.count({ where: { settlementStatus: 'settled',
+        attempt: { operation: { taskRootId: f.rootId, operationKey: { startsWith: 'aux:', endsWith: ':chapter_review_batch' } } } } })).toBe(3)
+      const context: ToolContext = { ...f, callId: 'legacy-batch', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium',
+        toolAuthority: new Map(tools.map(tool => [tool.name, { permission: 'allow', alwaysConfirm: false, dangerous: false }])),
+        modelRuntime: selectedRuntime, emit: () => {}, signal: new AbortController().signal }
+      for (const callId of ['legacy-batch', 'legacy-cache']) expect(await chapterReviewBatchTool.execute({ ...context, callId }, argsFor('custom'))).toMatchObject({
+        display: { kind: 'reviewBatch', chapters: chapterIds.map(chapterId => ({ chapterId, status: 'complete' })) },
+      })
+      expect(model).toHaveBeenCalledTimes(4)
+      expect(await prisma.storyCompilation.count({ where: { novelId: f.novelId } })).toBe(0)
+      expect(await prisma.chapter.findMany({ where: { novelId: f.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual([first, second])
+      for (const chapter of [first, second]) {
+        expect(await executeDurableToolStep(lease, context.signal)).toMatchObject({ kind: 'tool', result: { display: {
+          kind: 'chapterRef', chapterId: chapter.id, revision: chapter.revision,
+        } } })
+        expect(await executeDurableToolStep(lease, context.signal)).toMatchObject({ kind: 'tool', result: { display: { kind: 'chapterDiff', chapterId: chapter.id } } })
+        expect(await executeDurableToolStep(lease, context.signal)).toMatchObject({ kind: 'tool', result: { display: {
+          kind: 'chapterRef', chapterId: chapter.id, revision: chapter.revision + 1,
+        } } })
+      }
+      expect(model).toHaveBeenCalledTimes(4)
+    }).finally(async () => {
+      await prisma.agentSkillDefinition.deleteMany({ where: { id: skillId } })
+    })
+  })
+
   it.each(['continuity_validate', 'quality_analyze'] as const)('无需准备编译即可独立执行 %s，并复用当前报告', async name => {
     await fixture(async f => {
       const lease = await claim(f)
       const tool = name === 'continuity_validate' ? continuityValidateTool : qualityAnalyzeTool
-      const tools = [chapterReadTool, tool]
+      const tools = [chapterReadTool, tool, chapterEditRangeTool]
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
         tools: tools.map(item => ({ type: 'function', function: { name: item.name, description: item.description, parameters: z.toJSONSchema(item.parameters, { io: 'input' }) } })),
@@ -1235,6 +1322,8 @@ describe.runIf(available)('既有章节独立检查', () => {
             { id: 'read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
             { id: 'check', name, arguments: JSON.stringify({ chapterId: f.chapterId }) },
             { id: 'cached', name, arguments: JSON.stringify({ chapterId: f.chapterId }) },
+            { id: 'edit', name: 'chapter_edit_range', arguments: JSON.stringify({ chapterId: f.chapterId, oldText: '原文', newText: '灯还亮着。' }) },
+            { id: 'read-revised', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
           ] }], successfulToolSignatures: [] } })
       const window = getCreditWindow()
       await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
@@ -1261,7 +1350,12 @@ describe.runIf(available)('既有章节独立检查', () => {
         expect((await continuityValidateTool.execute(ctx, { chapterId: f.chapterId })).outcome).not.toBe('failed')
         expect(fetchMock).toHaveBeenCalledOnce()
       }
-    }, undefined, '检查当前既有章节')
+      expect(await step()).toMatchObject({ kind: 'tool', result: { display: { kind: 'chapterDiff', chapterId: f.chapterId } } })
+      expect(await step()).toMatchObject({ kind: 'tool', result: { display: {
+        kind: 'chapterRef', chapterId: f.chapterId, revision: before.revision + 1,
+      } } })
+      expect(fetchMock).toHaveBeenCalledOnce()
+    }, undefined, '检查并修改当前已有章节')
   })
 
   it.each(['unread', 'wrong-id', 'stale', 'cancelled', 'format'] as const)('独立连续性检查 %s 不保存伪通过报告或修改正文', async scenario => {

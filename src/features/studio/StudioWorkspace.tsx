@@ -343,6 +343,7 @@ export default function StudioWorkspace() {
   const [agentStateNovelId, setAgentStateNovelId] = useState(activeNovelId)
   const taskUiScope = activeAgentTaskWindowId && agentStateNovelId === activeNovelId
     ? `${taskScopeOwner}:${activeNovelId}:${activeAgentTaskWindowId}` : undefined
+  const [reviewEvidence, setReviewEvidence] = useState<{ chapterId: string; scope: string; text: string }>()
   const taskDockId = useId()
   const [foldedTaskStatuses, setFoldedTaskStatuses] = useState<ReadonlySet<string>>(() => new Set())
   const taskStatusExpanded = !taskUiScope || !foldedTaskStatuses.has(taskUiScope)
@@ -1980,7 +1981,10 @@ export default function StudioWorkspace() {
         clearToolNavigationRequest()
         return
       }
-      selectChapterFromToolRef.current(chapterId, { showInWork: workspacePerspective === 'work' })
+      selectChapterFromToolRef.current(chapterId, {
+        showInWork: workspacePerspective === 'work',
+        reviewEvidence: typeof args.evidence === 'string' ? args.evidence : undefined,
+      })
       if (workspacePerspective === 'work') {
         setWorkInspectorTab('work')
         setWorkRightOpen(true)
@@ -2895,10 +2899,11 @@ export default function StudioWorkspace() {
     callback()
   }
 
-  function handleSelectChapter(nextChapterId: string, options?: { openSettings?: boolean; showInWork?: boolean }) {
+  function handleSelectChapter(nextChapterId: string, options?: { openSettings?: boolean; showInWork?: boolean; reviewEvidence?: string }) {
     const openSettings = options?.openSettings ?? false
     const scope = chapterStreamOwnerRef.current
     const selectChapter = () => {
+      setReviewEvidence(options?.reviewEvidence && taskUiScope ? { chapterId: nextChapterId, scope: taskUiScope, text: options.reviewEvidence } : undefined)
       setSelectedTreeItemId(`chapter:${nextChapterId}`)
       setEditorChapterSettingsOpen(openSettings)
       setMobileView('editor')
@@ -4340,6 +4345,7 @@ export default function StudioWorkspace() {
       {...presentation}
       chapterDraft={chapterDraft}
       chapterRecoveryKey={chapterDraftChoice ? undefined : manuscriptKey}
+      reviewEvidence={reviewEvidence?.scope === taskUiScope && reviewEvidence?.chapterId === chapterDraft?.id ? reviewEvidence : undefined}
       workspaceDocument={activeWorkspaceDocument}
       chapterLoading={chapterQuery.isLoading}
       chapterErrorMessage={chapterQuery.isError ? chapterSaveMessage : null}
@@ -4801,6 +4807,7 @@ export default function StudioWorkspace() {
                 viewer={workViewerMode ? <StudioChapterViewer
                   positionScope={taskUiScope}
                   chapterRecoveryKey={chapterDraftChoice ? undefined : manuscriptKey}
+                  reviewEvidence={reviewEvidence?.scope === taskUiScope && reviewEvidence?.chapterId === workChapterDraft?.id ? reviewEvidence : undefined}
                   draft={workChapterDraft}
                   pendingChapterTitle={workViewerMode === 'chapter' ? chapters.find(chapter => chapter.id === viewerChapterId)?.title : undefined}
                   workspaceDocument={workViewerMode === 'document' ? activeWorkspaceDocument : null}

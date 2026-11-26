@@ -1,7 +1,10 @@
+import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import type { AgentExecutionMode, TaskSpec } from '../../../shared/contracts/index.js'
-import { WRITING_COLLABORATION_GUIDANCE } from './writing-collaboration.js'
+import { WRITING_COLLABORATION_GUIDANCE, writingCollaborationGuidance } from './writing-collaboration.js'
 
-export const SAVED_WORK_CLOSING_GUIDANCE = '作者未指定回复方式且成果已实际保存时，先交代完成了什么、在哪里查看。简单改动用短段落即可。单章或计划有多个值得说明的变化时，可用 Markdown 短列表，每项用加粗短标签。按成果选取有用的信息，例如剧情推进、人物选择、章末衔接，或计划的主线安排、关键转折与章节分工。通常挑两到四项，按实际内容取舍。已保存的正文、完整提纲和报告可在作品中查看，聊天交代值得关注的变化和影响使用的缺项。作者明确要求在聊天中交付正文、完整计划或报告、详细解释或具体改动时，按原请求完整提供。明确不要总结时直接结束。'
+export const SAVED_WORK_CLOSING_GUIDANCE = '作者未指定回复方式且成果已实际保存时，先交代完成了什么、在哪里查看。简单改动用短段落即可。单章或计划有多个值得说明的变化时，可用 Markdown 短列表，每项用加粗短标签。按成果选取有用的信息，例如剧情推进、人物选择、章末衔接，或计划的主线安排、关键转折与章节分工。通常挑两到四项，按实际内容取舍。已保存的正文、完整提纲和报告可在作品中查看，聊天概括实际成果和重要改动。作者明确要求的检查未完成时，说明哪项及具体原因；待作者决定的问题引用具体位置和事实。例行复查、旧报告版本和可选建议留在工具卡，收尾直接交付结果。作者明确要求在聊天中交付正文、完整计划或报告、详细解释或具体改动时，按原请求完整提供。明确不要总结时直接结束。'
+const LEGACY_SAVED_WORK_CLOSING_GUIDANCE = '作者未指定回复方式且成果已实际保存时，先交代完成了什么、在哪里查看。简单改动用短段落即可。单章或计划有多个值得说明的变化时，可用 Markdown 短列表，每项用加粗短标签。按成果选取有用的信息，例如剧情推进、人物选择、章末衔接，或计划的主线安排、关键转折与章节分工。通常挑两到四项，按实际内容取舍。已保存的正文、完整提纲和报告可在作品中查看，聊天交代值得关注的变化和影响使用的缺项。作者明确要求在聊天中交付正文、完整计划或报告、详细解释或具体改动时，按原请求完整提供。明确不要总结时直接结束。'
+export const savedWorkClosingGuidance = (enabled: boolean) => enabled ? SAVED_WORK_CLOSING_GUIDANCE : LEGACY_SAVED_WORK_CLOSING_GUIDANCE
 export const COMPLETED_WORK_FOLLOWUP_GUIDANCE = '任务真实完成后，如有具体且有用的下一步，可简短建议或自然询问作者是否需要继续。保持为普通聊天中的可选邀请，等作者明确回应后再执行。此时直接结束本轮，提问工具和后续待办留到实际需要时使用。作者只要结果、只要标题正文或明确不要建议时省略。未完成、失败或结果未知时据实说明。'
 export const SAVED_PLAN_CLOSING_GUIDANCE = '计划已有实际保存回执。原请求完成后，按已保存成果的收尾指引说明作品树「计划」中的名称和本次最有用的安排。作者同时要求在聊天中交付完整计划或解释时，按原请求提供。'
 
@@ -9,6 +12,7 @@ export const SAVED_PLAN_CLOSING_GUIDANCE = '计划已有实际保存回执。原
  * contracts and domain transactions own execution rules; this is neither an
  * authorization source nor a second workflow. Legacy durable frames stay saved. */
 export function taskOperatingGuidance(task: TaskSpec, mode: AgentExecutionMode): string | null {
+  const reviewWorkflow = chapterReviewWorkflowEnabled(task)
   if (!task.scope.authorEffects) return null
   const modeScope = mode === 'review' ? '当前是审阅模式，不执行正文写入；按原目标读取和检查，交付有位置与证据的问题及建议。'
     : mode === 'plan' ? '当前是规划模式，不执行章节正文写入；讨论、规划与明确要求保存的计划仍以实际工具权限为准。'
@@ -31,14 +35,14 @@ export function taskOperatingGuidance(task: TaskSpec, mode: AgentExecutionMode):
 本次未授权作品正文写入。围绕作者要求在聊天交付正文、答复或规划；明确要求保存的产物使用真实对象，按实际范围处理。`
   const local = task.scope.localEditBoundary
   if (task.scope.selection || local && local.version !== 3) return `${shared}
-本次是限定范围修改。读取原文及必要邻文，用唯一原文锚点或冻结选区修改；不扩展到其他段落，不例行创建整章计划。核对受影响的事实与检查要求，已有安全修法尽量集中处理后再核验最终版本。`
+${reviewWorkflow ? '本次是限定范围修改。读取原文及必要邻文，用唯一原文锚点或冻结选区修改；不扩展到其他段落，不例行创建整章计划。集中应用可定位的修法，再回读实际保存的改动处与受影响的上下文。' : '本次是限定范围修改。读取原文及必要邻文，用唯一原文锚点或冻结选区修改；不扩展到其他段落，不例行创建整章计划。核对受影响的事实与检查要求，已有安全修法尽量集中处理后再核验最终版本。'}`
   if (unboundWriter) return `${shared}
-作品内的正文协作以完整原请求和当前章的真实回执为准。确定本次要保存新章后，按实际目标创建并写入；用已有前文、计划和技能支持写作。已有保存回执且没有影响交付的具体事实、因果或人物知识问题时，推进剧情的任务按当前规则补记本章，再交付。只有建议或未定位的意见时，保留在报告里，不据此开启新一轮改稿。确需修订时先用原文确认哪些问题成立，再合并互不重叠的修法；写入后核对这些改动和受影响的前文。只有作者要求的复查范围或已核实的问题确实需要时，才重做整章复查。作者要求的检查照常完成，未取得完整报告就说明哪项检查尚未完成。
-章节完成后按已保存成果的收尾指引交付。`
+作品内的正文协作以完整原请求和当前章的真实回执为准。确定本次要保存新章后，按实际目标创建并写入；用已有前文、计划和技能支持写作。已有保存回执且没有影响交付的具体事实、因果或人物知识问题时，推进剧情的任务按当前规则补记本章，再交付。只有建议或未定位的意见时，保留在报告里，不据此开启新一轮改稿。确需修订时先用原文确认哪些问题成立，再合并互不重叠的修法；写入后核对这些改动和受影响的前文。${reviewWorkflow ? '作者明确要求终稿独立检查时，再调用对应工具。' : '只有作者要求的复查范围或已核实的问题确实需要时，才重做整章复查。'}作者要求的检查照常完成，未取得完整报告就说明哪项检查尚未完成。
+${reviewWorkflow ? WRITING_COLLABORATION_GUIDANCE + "\n" : ""}章节完成后按已保存成果的收尾指引交付。`
   if (task.scope.writingCoordinationProtocol === 2) return `${shared}
 本次整章写作由真实正文工具自动协调保存、当前连续性与质量报告、原授权内一次集中局部修订、新版复检及实际章末提交。随正文明确实际场景、已发生的章末状态和文学决定；计划不冒充事实。完整报告中的真实问题或未知不等于工具未执行。后端按原阶段、预算和回执执行确定的下一步，不靠重复主模型回合选择检查工具。不要手工重买成功或未知的检查，也不以候选改写补充判断额度；确缺新阶段权限时使用真实具体问题卡说明该一次检查及费用上限。实际提交与交付证明齐备后，推进剧情的任务先按当前规则补记本章，再交付当前保存稿。`
   if (task.scope.writingCoordinationProtocol) return `${shared}
 本次整章写作由真实正文写入工具协调保存、必要的独立复核和章末提交。先核对目标与读取回执，随正文给出实际场景、章末已经发生的状态及文学决定；不要把计划写成既成事实。草稿保持未完成，明确本章完成时才请求完整核验。服务返回保存与检查的真实结果后，处理具体未完成事项，推进剧情时按当前规则补记本章，再交付当前已保存版本。已成功的检查、提交或写入直接复用。多章逐章处理，不能把部分成功说成整批完成。`
-  return `${shared}\n${WRITING_COLLABORATION_GUIDANCE}
-本次是写作或修订。先核对冻结目标、当前正文及必要承接，编辑器位置不替代目标；写下一章时创建新目标，不覆盖前章。复用已有准备与已保存稿件，按工具合同完成完整章节的准备、正文、连续性与质量核验。先处理相关意见并集中修订，再核验当前最终版本；位置、对象、方向和未解决义务必须准确。正文保存、独立检查、意见处置与可信承接分别据实确认，缺少必要检查时保留正文并报告未完成。多章逐章保存，不把部分完成说成整批完成。`
+  return `${shared}\n${writingCollaborationGuidance(reviewWorkflow)}
+${reviewWorkflow ? '本次是写作或修订。先核对冻结目标、当前正文及必要承接，编辑器位置不替代目标；写下一章时创建新目标，不覆盖前章。复用已有准备与已保存稿件，根据上一段协作指引完成写作、检查和收尾。位置、对象、方向和未解决义务必须准确。正文保存、独立检查、意见处置和承接分别按实际结果确认。' : '本次是写作或修订。先核对冻结目标、当前正文及必要承接，编辑器位置不替代目标；写下一章时创建新目标，不覆盖前章。复用已有准备与已保存稿件，按工具合同完成完整章节的准备、正文、连续性与质量核验。先处理相关意见并集中修订，再核验当前最终版本；位置、对象、方向和未解决义务必须准确。正文保存、独立检查、意见处置与可信承接分别据实确认，缺少必要检查时保留正文并报告未完成。多章逐章保存，不把部分完成说成整批完成。'}`
 }

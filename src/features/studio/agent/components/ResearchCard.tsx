@@ -3,6 +3,7 @@ import { BookOpenText, ChevronDown, FileText, LoaderCircle, Search } from 'lucid
 import { cn } from '@/lib/utils'
 import { projectAgentToolSummary } from '../../../../../shared/agent-author-view.js'
 import { AgentProcessRegion } from './AgentProcessRegion'
+import { ToolDetailDisclosure } from './ToolDetailDisclosure'
 import { AgentMarkdownText } from './AgentMarkdownText'
 import { researchCallTarget, researchCallUnavailable, summarizeResearchGroup, type ResearchCall, type ResearchGroup } from '../lib/research-groups'
 import './research-card.css'
@@ -28,10 +29,11 @@ function ResearchResult({ call, runActive }: { call: ResearchCall; runActive: bo
         </a>
       </li>)}
     </ul> : <p className="mt-1 pl-5 text-[11px] text-[var(--text-tertiary)]">未找到结果</p> : null}
-    {call.status === 'success' && display?.kind === 'markdown' && display.markdown.trim() ? <details className="mt-1 pl-5">
-      <summary className="cursor-pointer text-[11px] text-[var(--text-secondary)]">查看资料内容</summary>
+    {call.status === 'success' && display?.kind === 'markdown' && display.markdown.trim() ? <div className="mt-1 pl-5 text-[11px] text-[var(--text-secondary)]">
+      <ToolDetailDisclosure label="查看资料内容" leadingChevron>
       <div className="mt-1 max-h-80 overflow-y-auto break-words text-xs leading-6 text-[var(--text-primary)]"><AgentMarkdownText text={display.markdown} identity={`research:${call.callId}`} /></div>
-    </details> : null}
+      </ToolDetailDisclosure>
+    </div> : null}
     {call.status === 'success' && !display ? <p className="mt-1 pl-5 text-[11px] leading-5 text-[var(--text-secondary)]">
       {call.summary ? projectAgentToolSummary(call.summary, call.status) || '暂无可展示的参考内容' : '暂无可展示的参考内容'}
     </p> : null}

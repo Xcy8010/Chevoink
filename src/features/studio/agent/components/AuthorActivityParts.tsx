@@ -17,6 +17,8 @@ import { ToolDisplayRenderer } from './AgentMessageParts'
 import { AgentProcessRegion } from './AgentProcessRegion'
 import { ActivityScrollArea } from './ActivityScrollArea'
 import { ProcessDuration } from './ProcessDuration'
+import { ChapterReviewCard, ContinuityReviewDetails } from './ChapterReviewCard'
+import { reviewBatchHeadline } from '../lib/chapter-review-presentation'
 
 const actionNames: Record<string, string> = {
   chapter_read: '查看章节', chapter_list_summaries: '查看章节摘要', project_search: '搜索前文',
@@ -39,13 +41,13 @@ function toolIcon(part: ActivityCall) {
   if (part.toolName === 'novel_export') return Download
   if (part.toolName === 'ask_user') return CircleHelp
   if (['subagent_run', 'subagent_delegate'].includes(part.toolName)) return Bot
-  if (phase === 'review') return ClipboardCheck
+  if (phase === 'review' || part.display?.kind === 'reviewBatch') return ClipboardCheck
   if (phase === 'write' || phase === 'revise') return FilePenLine
   if (phase === 'read') return BookOpenText
   return FileText
 }
 
-export type ActivityChapters = ReadonlyMap<string, Pick<ChapterListItem, 'title' | 'orderIndex'>>
+export type ActivityChapters = ReadonlyMap<string, Pick<ChapterListItem, 'title' | 'orderIndex'> & Partial<Pick<ChapterListItem, 'revision'>>>
 
 function chapterTitle(part: ActivityCall, chapters?: ActivityChapters) {
   const display = part.display
@@ -53,6 +55,16 @@ function chapterTitle(part: ActivityCall, chapters?: ActivityChapters) {
   if (display?.kind === 'chapterRef') return display.title
   const id = activityChapterId(part)
   return id ? chapters?.get(id)?.title : undefined
+}
+
+function observedReviewDisplay(display: AgentToolDisplayPayload | undefined, revisions?: ReadonlyMap<string, number>, chapters?: ActivityChapters) {
+  const forChapter = <T extends { chapterId: string; revision: number; status: string },>(chapter: T): T =>
+    chapter.status === 'complete' && Math.max(revisions?.get(chapter.chapterId) ?? 0, chapters?.get(chapter.chapterId)?.revision ?? 0) > chapter.revision
+      ? { ...chapter, status: 'stale' }
+      : chapter
+  if (display?.kind === 'reviewBatch') return { ...display, chapters: display.chapters.map(forChapter) }
+  if (display?.kind === 'storyCompiler' && display.chapterReview) return { ...display, chapterReview: forChapter(display.chapterReview) }
+  return display
 }
 
 function activitySummary(part: ActivityCall, runActive: boolean, chapters?: ActivityChapters, detail = false, grouped = false, stale = false): string {
@@ -177,15 +189,22 @@ function memorySearchSourceTitle({ title, preview, memoryType }: ReadSource, req
   return name ? `第 ${chapter.orderIndex} 章 · ${name}` : `第 ${chapter.orderIndex} 章`
 }
 
-const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters, readOnly, stale }: {
+const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters, readOnly, stale, reviewChapterRevisions }: {
   part: ActivityCall; runActive: boolean; chapters?: ActivityChapters; readOnly?: boolean; stale?: boolean
+  reviewChapterRevisions?: ReadonlyMap<string, number>
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
   const navigate = useAgentStore(state => state.requestToolNavigation)
   const spotlight = useAgentStore(state => state.requestMemorySpotlight)
   const Icon = toolIcon(part)
-  const display = part.display
+  const display = observedReviewDisplay(part.display, reviewChapterRevisions, chapters)
+  const qualityChapter = display?.kind === 'qualityReport' ? chapters?.get(display.chapterId) : undefined
+  const qualityStatus = part.status !== 'success' || activityReviewProblem(part) === 'incomplete' ? 'incomplete'
+    : stale || activityReviewProblem(part) === 'stale' || display?.kind === 'qualityReport' && (qualityChapter?.revision ?? 0) > display.chapterRevision
+      ? 'stale' : 'complete'
+  const legacyContinuity = part.toolName === 'continuity_validate' && display?.kind === 'storyCompiler' && !display.chapterReview
+  const structuredReview = display?.kind === 'reviewBatch' || display?.kind === 'qualityReport' || display?.kind === 'storyCompiler' && (display.chapterReview || legacyContinuity)
   const requestedMemoryType = (part.args as { memoryType?: unknown } | null)?.memoryType
   const chapterId = activityChapterId(part)
   const planId = part.toolName === 'plan_read' && !display ? (part.args as { planId?: unknown } | null)?.planId : undefined
@@ -197,8 +216,24 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters,
   const collapsible = display?.kind === 'projectSearch' && new Set(display.matches.map(hit => hit.chapterId)).size > 4
     || display?.kind === 'readSources' && display.items.length > 4
     || display?.kind === 'subagentReport' && (display.report.length > 180 || display.report.split('\n').length > 4)
+  const onOpenReviewedChapter = readOnly ? undefined : (chapterId: string, evidence?: string) => navigate(part.toolName, { chapterId, evidence })
+  const singleReview = legacyContinuity || display?.kind === 'qualityReport'
+  const reviewTitle = singleReview ? chapterTitle(part, chapters) ?? qualityChapter?.title : undefined
   const result = display ? <div className="agent-activity-detail min-w-0">
-    {display.kind === 'projectSearch' ? <ProjectSearchLocations display={display} onOpen={readOnly ? undefined : chapterId => navigate(part.toolName, { chapterId })} />
+    {display.kind === 'qualityReport' ? <ChapterReviewCard showChapter={false} onOpenChapter={onOpenReviewedChapter} chapters={[{
+      chapterId: display.chapterId,
+      title: qualityChapter?.title ?? display.appliedBodyChange?.chapterTitle ?? '',
+      orderIndex: qualityChapter?.orderIndex,
+      revision: display.chapterRevision,
+      status: qualityStatus,
+      findings: display.findings.map(finding => ({
+        ...finding,
+        disposition: finding.disposition === 'repaired' ? 'repaired' : finding.authorFeedback === 'rejected' ? 'retained' : undefined,
+      })),
+    }]} />
+      : legacyContinuity && display.kind === 'storyCompiler'
+        ? <ContinuityReviewDetails display={display} status={qualityStatus} />
+        : display.kind === 'projectSearch' ? <ProjectSearchLocations display={display} onOpen={readOnly ? undefined : chapterId => navigate(part.toolName, { chapterId })} />
       : display.kind === 'readSources' ? <ActivityScrollArea detail><ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
         {display.items.map((item, index) => {
           const { target } = item
@@ -212,20 +247,25 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters,
       </ul></ActivityScrollArea>
         : display.kind === 'subagentReport'
           ? <ActivityScrollArea detail><p className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">{projectAgentAuthorText(display.report)}</p></ActivityScrollArea>
-          : <ToolDisplayRenderer display={display} onNavigateTarget={openTarget} authorActivity readOnly={readOnly} />}
+          : <ToolDisplayRenderer display={display} onNavigateTarget={openTarget}
+            onOpenReviewedChapter={onOpenReviewedChapter}
+            authorActivity readOnly={readOnly} />}
   </div> : null
   return <li className="min-w-0 font-normal" data-activity-tool={part.toolName}>
-    <div className="agent-activity-line min-h-7 items-start py-1 text-xs leading-5 text-[var(--text-secondary)]">
+    {display?.kind !== 'reviewBatch' && <div className="agent-activity-line min-h-7 items-start py-1 text-xs leading-5 text-[var(--text-secondary)]">
       <Icon aria-hidden className="mt-0.5 h-4 w-4 text-[var(--text-tertiary)]" />
       <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
         {collapsible ? <button type="button" aria-expanded={open} aria-controls={detailsId} onClick={() => setOpen(value => !value)}
           data-activity-detail-toggle className="min-w-0 break-words text-left underline-offset-2 hover:underline focus-visible:underline">
           {label}<ChevronDown aria-hidden className={cn('ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-transform', !open && '-rotate-90')} />
-        </button> : <span className="min-w-0 break-words">{label}</span>}
-        {openTarget && !hasResultTarget ? <button type="button" onClick={openTarget} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">{typeof planId === 'string' ? '打开计划' : '打开章节'}</button> : null}
+        </button> : <span className="min-w-0 break-words">{structuredReview ? getAgentToolPresentation(part.toolName).label : label}</span>}
+        {openTarget && !hasResultTarget && (!structuredReview || singleReview) ? <button type="button" onClick={openTarget}
+          className={cn('underline-offset-2 hover:underline focus-visible:underline', reviewTitle ? 'min-w-0 max-w-full break-words text-left' : 'shrink-0')}>
+          {reviewTitle ? `《${plainChapterTitle(reviewTitle)}》` : typeof planId === 'string' ? '打开计划' : '打开章节'}
+        </button> : reviewTitle ? <span className="min-w-0 break-words">《{plainChapterTitle(reviewTitle)}》</span> : null}
         {memory ? <button type="button" onClick={() => spotlight(memory.type, memory.title, memory.memoryId)} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">查看设定</button> : null}
       </div>
-    </div>
+    </div>}
     {collapsible ? <AgentProcessRegion open={open} id={detailsId}>{result}</AgentProcessRegion> : result}
   </li>
 })
@@ -248,15 +288,20 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
   const waitingForAnswer = runActive && calls.some(call => call.toolName === 'ask_user' && call.status === 'running')
   const waitingForApproval = runActive && awaitingApprovalCallId !== undefined
     && calls.some(call => !call.preparing && call.status === 'running' && call.callId === awaitingApprovalCallId)
-  const namedInProgress = Boolean(group.title && runActive && (running || active && !group.closed && !group.completed))
+  const settledBatch = !running && part?.display?.kind === 'reviewBatch'
+  const namedInProgress = Boolean(group.title && runActive && !settledBatch && (running || active && !group.closed && !group.completed))
   const waiting = Boolean(importWaiting || waitingForAnswer || waitingForApproval)
   const Icon = iconPart && toolIcon(iconPart)
   const stageCalls = calls.slice(group.stageStart)
   const readChapterIds = grouped && stageCalls.every(call => call.toolName === 'chapter_read' && activityChapterId(call))
     ? new Set(stageCalls.map(activityChapterId)) : undefined
   const readLabel = group.readLabel
+  const latestDisplay = observedReviewDisplay(part?.display, group.reviewChapterRevisions, chapters)
+  const currentBatch = !running && !waiting && latestDisplay?.kind === 'reviewBatch' && latestDisplay.chapters.length ? latestDisplay : undefined
   let label: string | undefined
-  if (runActive && continuing && !running && !namedInProgress && !waiting && part) {
+  if (currentBatch) {
+    label = reviewBatchHeadline(currentBatch)
+  } else if (runActive && continuing && !running && !namedInProgress && !waiting && part) {
     label = group.readLabel === '查看创作资料' ? '核对创作资料' : getAgentToolPresentation(part.toolName).label
   } else if (group.title) {
     const title = group.title
@@ -274,7 +319,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
     else label = activitySummary(part, runActive, chapters, false, grouped && !readChapterIds, group.staleReviewCalls?.has(part))
   }
   const showingActivity = Boolean(running && !waiting)
-  const shimmer = runActive && Boolean(showingActivity || namedInProgress || continuing) && !waiting
+  const shimmer = runActive && Boolean(showingActivity || namedInProgress || continuing) && !waiting && !settledBatch
   const step = group.title ? label : part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : ''
   const enter = useRef<boolean | undefined>(undefined)
   if (enter.current === undefined) {
@@ -302,7 +347,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
         {Icon && <Icon aria-hidden className="h-4 w-4" />}
         <span className="min-w-0 break-words text-balance">
           <span aria-live={group.title || active || running ? 'polite' : undefined}
-            data-activity-continuing={runActive && continuing && !waiting || undefined}
+            data-activity-continuing={runActive && continuing && !waiting && !settledBatch || undefined}
             data-activity-preparing={showingActivity && running?.preparing || undefined}
             data-activity-running={showingActivity && !running?.preparing || undefined}
             className={cn('agent-activity-label', shimmer && 'agent-processing-shimmer')}>{label}</span>
@@ -317,7 +362,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
           const key = group.callKeys[index]
           const receipts = [call, ...(group.childrenByCall.get(key) ?? [])].map(detail =>
             <ActivityDetail key={JSON.stringify([key, detail.subagentCallId ?? null, detail.callId])} part={detail} runActive={runActive} chapters={chapters} readOnly={readOnly}
-              stale={group.staleReviewCalls?.has(detail)} />)
+              stale={group.staleReviewCalls?.has(detail)} reviewChapterRevisions={group.reviewChapterRevisions} />)
           const reports = group.reportsAfterCall.get(key)?.filter(report => isActivityDetailReport(report, runActive, awaitingApprovalCallId))
           return [...receipts, ...reports?.map(report => <li key={report.id} data-activity-report className="ml-6 text-[var(--text-secondary)]">
             <AgentMarkdownText text={report.text} identity={report.id} />

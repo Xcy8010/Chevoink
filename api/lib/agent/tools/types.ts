@@ -19,6 +19,8 @@ import type { RunLeaseToken } from '../runtime-lease.js'
 export type ToolContext = {
   /** Actual server policy attached to this Agent invocation. */
   contentPolicyEnabled?: boolean
+  /** Frozen with the original chapter review workflow at task admission. */
+  chapterReviewWorkflowEnabled?: boolean
   /** Server-resolved input allowance after reserving the model's output and safety margin. */
   attachmentInputBudgetTokens?: number
   /** Exact public question supplied separately by the authenticated author. */

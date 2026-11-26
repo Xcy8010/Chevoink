@@ -1,3 +1,4 @@
+import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import { z } from 'zod'
 import { legacyMemorySaveParameters, legacyMemorySearchParameters, previousMemorySaveParameters } from './memory-tool-parameters.js'
 import { storyCharterInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
@@ -17,10 +18,15 @@ export function toOpenAIParameters(parameters: z.ZodType): Record<string, unknow
   return withObjectType(z.toJSONSchema(parameters, { io: 'input' }) as Record<string, unknown>)
 }
 
+const LEGACY_QUALITY_REVIEW_DESCRIPTION = 'Humanity Quality Gate 的 CHECK 步骤。用于评估整章或完整长场景的人类感质量：当作者明确要求判断「有没有 AI 味 / 像不像 AI 写的」「文风是否自然、像真人」「要不要通篇精修润色」，或在整章写完要求深度审阅、或 Story Compiler 进入 CHECK 时，都必须调用本工具，而不是自己只读正文下结论。服务端先运行确定性统计，再启动与 Writer 隔离的 Critic；每条模型意见必须逐字定位正文才能保存。严谨创作可在本任务可写范围内有界自动修订。只看不改或改后只读复核传 readOnly=true。平衡创作与大胆创作只展示报告。标题、元数据、局部错字、单句润色、纯剧情/设定/写作建议等普通问答禁止触发。不得把科幻术语、华丽文风、口语或无悬念结尾按词表误判。'
+
 const importModelParameters = toOpenAIParameters(novelImportModelArguments)
 
 /** Execution still parses the original full schema and validates scope. */
 export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope'], baseParameters?: Record<string, unknown>): { strict: false; description: string; parameters: Record<string, unknown> } {
+  if (tool.name === 'quality_analyze' && !chapterReviewWorkflowEnabled({ scope })) {
+    tool = { ...tool, description: LEGACY_QUALITY_REVIEW_DESCRIPTION }
+  }
   // Chat defaults to non-strict; Responses may normalize an omitted strict
   // flag and make optional fields required. Keep our existing omission-based
   // input contract explicit across compatible API gateways.

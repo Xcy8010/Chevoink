@@ -1,3 +1,4 @@
+import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { formatNovelSetupRecap, getNovelSetupFollowup, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
@@ -628,7 +629,7 @@ export async function handleToolCall(
     failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
     if (result.outcome === 'failed') {
       failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
-      const recovery = toolFailureRecovery(failureCode)
+      const recovery = toolFailureRecovery(failureCode, ctx.chapterReviewWorkflowEnabled)
       return { ...fail(result.summary ?? recovery?.label ?? '执行未完成', wrapToolOutput(tool.name,
         result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed', result.reviewRequestFinished, reviewOutcome, result.display), ...(recovery ? { recoveryCode: failureCode } : {}), reviewCompleted: result.reviewCompleted,
         reviewDecisionFeedback: ctx.inlineChild ? undefined : result.reviewDecisionFeedback }
@@ -753,7 +754,7 @@ export async function handleToolCall(
       const detail = error.message.slice(0, 4096)
       return fail('执行失败', detail, 'failed')
     }
-    const recovery = error instanceof DataAccessError ? toolFailureRecovery(error.code) : undefined
+    const recovery = error instanceof DataAccessError ? toolFailureRecovery(error.code, ctx.chapterReviewWorkflowEnabled) : undefined
     if (recovery && error instanceof DataAccessError) return {
       ...fail(error.code === 'CHAPTER_ANCHOR_CONFLICT' ? chapterAnchorFailureSummary(error.message) : recovery.label,
         `工具 ${call.name} 未完成（${error.code}）：${error.message} ${recovery.guidance} ${frozenWritingToolGuidance(call.name, ctx.writingScope)}`, 'failed'),
@@ -1733,7 +1734,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     // Resolve each phase once per execution; keep only its active hint at the tail.
     // Multi-chapter cycles reuse it, and compaction must not silently lose it.
     const phaseDigests = new Map<SkillPhase, string>(assembledContext.skillRoute
-      ? [[assembledContext.skillRoute.phase, buildSkillExecutionDigest(assembledContext.skillRoute, taskSpec.creativeFreedom)]] : [])
+      ? [[assembledContext.skillRoute.phase, buildSkillExecutionDigest(assembledContext.skillRoute, taskSpec.creativeFreedom, { chapterReviewWorkflowEnabled: chapterReviewWorkflowEnabled(taskSpec) })]] : [])
     let activeSkillHint: ChatMessage | null = null
     let activeReviewStateHint: ChatMessage | null = null
     let pendingSkillPhase: SkillPhase | null = null
@@ -1759,7 +1760,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const decision = routeSkills({ mode: params.mode, intent: phaseIntent(phase), phase,
         prompt: `${params.prompt}\n当前已验证工作阶段：${phaseSignals[phase] ?? phase}`,
         freedom: taskSpec.creativeFreedom, catalog, routerVersion, pinnedSkillIds: new Set(params.pinnedSkillIds ?? []) })
-      const digest = decision.selected.length ? buildSkillExecutionDigest(decision, taskSpec.creativeFreedom) : ''
+      const digest = decision.selected.length ? buildSkillExecutionDigest(decision, taskSpec.creativeFreedom, { chapterReviewWorkflowEnabled: chapterReviewWorkflowEnabled(taskSpec) }) : ''
       phaseDigests.set(phase, digest)
       // Appended only between complete tool batches, never inside call/result pairs.
       activateSkillDigest(digest)
@@ -1944,6 +1945,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const publicWebQuestion = params.publicWebQuestion === taskSpec.publicWebQuestion ? params.publicWebQuestion : undefined
     const toolContext: ToolContext = {
       contentPolicyEnabled,
+      chapterReviewWorkflowEnabled: chapterReviewWorkflowEnabled(taskSpec),
       get attachmentInputBudgetTokens() { return contextBudget.hardRequestTokens },
       publicWebSearchQuestion: taskSpec.networkAccess !== 'denied' && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId
         ? publicWebQuestion : undefined,
@@ -2000,9 +2002,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     if (frozenWritingHint) messages.push({ role: 'user', content: `[系统·本任务冻结目标] ${frozenWritingHint}` })
     const currentChapterReview = currentReviewState.value
     if (continuingTask && requiresManuscriptDelivery(taskSpec)) messages.push({ role: 'user', content:
-      `[系统·当前检查合同] 按当前已保存正文和当前工具说明继续原任务。${currentChapterReview ? `chapterId=${currentChapterReview.chapterId}，compilationId=${currentChapterReview.compilationId}，r${currentChapterReview.revision}。` : ''}检查只需当前 chapterId 或 compilationId。旧本地阶段拒绝、平台检查次数或格式故障保留为历史失败，不是永久撤销原作者授权；当前有效报告有意见时按原权限处理，实际修改后复查新版，再一次提交。原始目标、明确用户预算、取消、作用域和未知费用先核对的约束保持，不能把旧失败当检查通过。` })
+      `[系统·当前检查合同] 按当前已保存正文和当前工具说明继续原任务。${currentChapterReview ? `chapterId=${currentChapterReview.chapterId}，compilationId=${currentChapterReview.compilationId}，r${currentChapterReview.revision}。` : ''}检查只需当前 chapterId 或 compilationId。旧本地阶段拒绝、平台检查次数或格式故障保留为历史失败，不是永久撤销原作者授权；当前有效报告有意见时按原权限处理${chapterReviewWorkflowEnabled(taskSpec) ? "。修改后回读相关原文，作者要求终稿独立检查时调用对应工具，再按实际结果交付。" : "，实际修改后复查新版，再一次提交。"}原始目标、明确用户预算、取消、作用域和未知费用先核对的约束保持，不能把旧失败当检查通过。` })
     if (continuingTask && currentChapterReview?.ready && hasPendingChapterReviewDecision(currentChapterReview)) {
-      messages.push({ role: 'user', content: `[系统·本次只读核对] compilationId=${currentChapterReview.compilationId}。${chapterReviewDecisionGuidance(currentChapterReview)} 此状态提示不新增权限、不重置预算，也不代表意见已处理或任务完成。` })
+      messages.push({ role: 'user', content: `[系统·本次只读核对] compilationId=${currentChapterReview.compilationId}。${chapterReviewDecisionGuidance(currentChapterReview, chapterReviewWorkflowEnabled(taskSpec))} 此状态提示不新增权限、不重置预算，也不代表意见已处理或任务完成。` })
     }
     const deliveryReminder: ChatMessage = { role: 'user', content: '' }
     const preparationReminder: ChatMessage = { role: 'user', content: '' }
@@ -2258,7 +2260,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       const reviewState = currentReviewState.value
       activeReviewStateHint = reviewState && (reviewState.reviewBoundPlan || reviewState.terminalReview?.state === 'unverified')
-        ? { role: 'user', content: `[系统/只读修订状态] 仅呈现原合同与当前报告，不新增权限、检查额度或进度。${reviewState.reviewBoundPlan?.guidance ?? ''}\n${chapterReviewDecisionGuidance(reviewState)}` } : null
+        ? { role: 'user', content: `[系统/只读修订状态] 仅呈现原合同与当前报告，不新增权限、检查额度或进度。${reviewState.reviewBoundPlan?.guidance ?? ''}\n${chapterReviewDecisionGuidance(reviewState, chapterReviewWorkflowEnabled(taskSpec))}` } : null
       if (activeReviewStateHint) messages.push(activeReviewStateHint)
       const reminderIndex = messages.indexOf(deliveryReminder)
       if (reminderIndex >= 0) {
@@ -3329,7 +3331,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         await bus.persist()
         consumedReviewDecisionFeedback.add(currentFeedback!.key)
         await persistCheckpoint()
-        messages.push({ role: 'user', content: `[系统] 已读取真实检查意见；读取不是处理或完成。${chapterReviewDecisionGuidance(review!)}` })
+        messages.push({ role: 'user', content: `[系统] 已读取真实检查意见；读取不是处理或完成。${chapterReviewDecisionGuidance(review!, chapterReviewWorkflowEnabled(taskSpec))}` })
       }
       if (!textOnlyModel && !publicWebQuestion && !bootstrapCall && !forceWrapUpReason && blockedRepeat < 4 && stagnantBatches >= 4 && taskSpec.researchDiscoveryProtocol === 1
         && taskSpec.intent === 'research_analysis' && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied'
