@@ -1306,7 +1306,7 @@ describe.runIf(available)('既有章节独立检查', () => {
     }).finally(async () => {
       await prisma.agentSkillDefinition.deleteMany({ where: { id: skillId } })
     })
-  })
+  }, DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS)
 
   it.each(['continuity_validate', 'quality_analyze'] as const)('无需准备编译即可独立执行 %s，并复用当前报告', async name => {
     await fixture(async f => {
@@ -1356,7 +1356,7 @@ describe.runIf(available)('既有章节独立检查', () => {
       } } })
       expect(fetchMock).toHaveBeenCalledOnce()
     }, undefined, '检查并修改当前已有章节')
-  })
+  }, DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS)
 
   it.each(['unread', 'wrong-id', 'stale', 'cancelled', 'format'] as const)('独立连续性检查 %s 不保存伪通过报告或修改正文', async scenario => {
     await fixture(async f => {
