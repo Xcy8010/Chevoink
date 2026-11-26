@@ -82,7 +82,8 @@ describe('chapter authority failure feedback', () => {
     expect(recovery.guidance).toContain('自动修订不会重复请求')
     expect(recovery.guidance).toContain('chapter_edit_range')
     expect(recovery.guidance).toContain('原作者授权范围')
-    expect(recovery.guidance).toContain('实际修改后复核最终版本')
+    expect(recovery.guidance).toContain('保存后回读修改处')
+    expect(toolFailureRecovery('CONTINUITY_REPAIR_FAILED', false)!.guidance).toContain('实际修改后复核最终版本')
     expect(recovery.guidance).toContain('不能把自动修订失败当作检查通过')
   })
   it('routes a completed-check decision to commit with exact references instead of another critic', () => {

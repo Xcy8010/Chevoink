@@ -638,7 +638,7 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
     const result: ToolResult = { reviewCompleted: false, reviewOutcome: 'stale', reviewRequestFinished: checked.reviewRequestFinished,
       summary: reviewWorkflow ? `连续性检查完成 · 已局部修订至 r${updated.revision}`
         : `连续性检查完成 · 已局部修订至 r${updated.revision}，需复查`,
-      output: reviewWorkflow ? `已局部修订 ${ranges.length} 处至 r${updated.revision}，用 chapter_read 核对修改处及相关前文。作者要求终稿独立检查时调用对应工具。以下为改前 r${report.revision} 报告：\n${checked.output}`
+      output: reviewWorkflow ? `已局部修订 ${ranges.length} 处至 r${updated.revision}，用 chapter_read 核对修改处及相关前文。作者要求终稿独立检查时调用对应工具，完成所要求的连续性与人类感质量复查。以下为改前 r${report.revision} 报告：\n${checked.output}`
         : `已局部修订 ${ranges.length} 处至 r${updated.revision}，需复查最终版的连续性与人类感质量。以下为改前 r${report.revision} 报告：\n${checked.output}`,
       display: { kind: 'chapterDiff', chapterId: updated.id, chapterTitle: updated.title, before: snapshot.chapter.content, after,
         appliedDirectly: true, revision: updated.revision }, snapshot: { target: 'chapter', targetId: updated.id, field: 'content', previousValue: snapshot.chapter.content } }

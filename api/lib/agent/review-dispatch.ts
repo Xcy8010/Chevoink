@@ -37,12 +37,12 @@ export function currentReviewNextStepGuidance(step: CurrentReviewNextStep, revie
   const scope = step.selectionOnly
     ? '原任务仅授权局部范围，使用 chapter_edit_range 的当前唯一逐字锚点，保留范围外正文；不得使用 chapter_write 或 chapter_append 扩大范围。'
     : '根据当前真实报告，在原作者授权内按当前正文的唯一逐字锚点修订；报告本身不扩大写入权限。'
-  if (step.state === 'check_required') return reviewWorkflow ? `${facts}当前报告状态与实际检查范围见上。作者明确要求当前版本独立检查时，所需工具：${JSON.stringify(step.requiredTools)}；其他情况回读修改与受影响的前文即可。未知供应商结果或费用先核对原回执。`
+  if (step.state === 'check_required') return reviewWorkflow ? `${facts}当前报告状态与实际检查范围见上。作者明确要求当前版本独立检查时，所需工具：${JSON.stringify(step.requiredTools)}；其他情况回读修改与受影响的前文即可。未知供应商结果或费用先核对原回执，不能重放未知请求。`
     : `${facts}当前版本尚缺有效检查：${JSON.stringify(step.requiredTools)}。调用相应工具只需 chapterId 或 compilationId；已知格式失败不是正文问题，未知供应商结果或费用须先核对，不能重放未知请求。`
   if (step.state === 'commit_available') return `${facts}当前必要检查已保存，下一步调用一次 chapter_bridge_commit 提交当前版本。${step.reviewCycle.edited ? '修订后的最终复查已完成，剩余警告与建议保留在报告中供作者参考，无需为清零建议继续改稿或逐项填写保留理由。' : ''}实际提交回执才表示完成。`
   const decisions = `当前真实意见：${JSON.stringify(step.details)}。${scope}意见无法安全修改时，使用当前报告的 source、reportId、findingId、reason 在 retainedFindings 中写明具体原因；留置不是修复，也不是检查通过。`
   if (step.state === 'must_pass_required') return `${facts}${decisions}原作者明确要求检查通过，留置不能替代硬通过要求；按证据合法修改后复核最终版本。`
-  return reviewWorkflow ? `${facts}${decisions}把成立的问题合并为授权范围内的局部修订。修改后回读新稿的改动与相关原文，按实际保存结果交付。作者要求当前版本独立检查时调用相应工具，最终提交以真实回执为准。`
+  return reviewWorkflow ? `${facts}${decisions}把成立的问题合并为授权范围内的局部修订。修改后回读新稿的改动与相关原文，按实际保存结果交付。作者要求当前版本独立检查时调用相应工具，需要提交时调用一次 chapter_bridge_commit，以真实回执为准。`
     : `${facts}${decisions}检查可在同一授权条件下自动局部修订；有新 revision 时须复查新版，旧报告不能认证新版。全部修改完成后核对当前两项必要检查，再调用一次 chapter_bridge_commit。`
 }
 

@@ -35,7 +35,7 @@ export function toolFailureRecovery(code: string, reviewWorkflow = chapterReview
     COMPILATION_IDENTITY_MISMATCH: { label: '章节编译身份不匹配', guidance: '本次操作未执行。显式编号不会被自动替换；核对本任务已保存的真实编译状态，使用返回的编译编号继续该目标的缺失步骤，不能借旧章或其他任务完成当前任务。' },
     COMPILATION_NOT_WRITTEN: { label: '本任务章节正文尚未保存', guidance: '准备和场景计划不等于正文。保留当前编译与场景，按冻结目标创建或复用已绑定章节，然后写入非空正文，再完成当前版本的必要检查和终态提交。' },
     REVIEW_MERGED_REVISION_REQUIRED: { label: '修订依据需要核对', guidance: '本次修改被拒绝，未写入。按返回原因核对当前报告与意见真实编号；原授权范围内可分步调用 chapter_edit_range 或 chapter_write。实际改稿后复核新版。' },
-    REVIEW_DECISION_REQUIRED: reviewWorkflow ? { label: '检查意见需要明确处理', guidance: '当前报告已完成，意见尚待处理。按返回引用修改；决定保留时，在 chapter_bridge_commit.retainedFindings 填 source、reportId、真实 findingId 与具体理由。chapter_bridge_get 可读当前引用。正文与报告仍匹配时复用。改稿后回读相关原文，作者要求终稿独立复核时调用对应检查。' }
+    REVIEW_DECISION_REQUIRED: reviewWorkflow ? { label: '检查意见需要明确处理', guidance: '当前报告已完成，意见尚待处理。按返回引用修改；决定保留时，在 chapter_bridge_commit.retainedFindings 填 source、reportId、真实 findingId 与具体理由。chapter_bridge_get 可读当前引用。正文与报告仍匹配时复用，无需再次检查。改稿后回读相关原文，作者要求终稿独立复核时调用对应检查。' }
       : { label: '检查意见需要明确处理', guidance: '当前报告已完成，意见尚待处理。按返回引用修改；决定保留时，在 chapter_bridge_commit.retainedFindings 填 source、reportId、真实 findingId 与具体理由。chapter_bridge_get 可读当前引用。正文与报告仍匹配时无需再次检查；实际改稿后复核新版。' },
     REVIEW_REPAIR_RECHECK_REQUIRED: reviewWorkflow ? { label: '需要复核当前版本', guidance: '核对当前保存稿与原文。原授权内可继续编辑；若作者明确要求终稿独立复核，使用相应的检查工具。' }
       : { label: '需要复核当前版本', guidance: '修订已保存，最终正文尚需复核。原授权内可继续编辑，提交前检查当前版本。' },
@@ -44,7 +44,7 @@ export function toolFailureRecovery(code: string, reviewWorkflow = chapterReview
     CONTINUITY_CHECK_REQUIRED: { label: '当前版本尚未完成连续性检查', guidance: '先完成当前正文的 continuity_validate，保留现有编译及真实用量，不能把缺报告视为通过。' },
     CONTINUITY_EVIDENCE_UNLOCATED: reviewWorkflow ? { label: '检查引用需要核对', guidance: '报告引用无法定位，尚不能作为改稿或通过依据。核对当前原文与报告，原授权内处理有依据的问题并回读改动。作者要求完整报告时补核对应检查，未知费用先对账。' }
       : { label: '检查引用需要核对', guidance: '报告引用无法定位，尚不能作为改稿或通过依据。核对当前原文与报告，原授权内处理有依据的问题，再复核最终版；未知费用先对账。' },
-    CONTINUITY_REPAIR_FAILED: reviewWorkflow ? { label: '连续性报告已保存，自动修订未应用', guidance: '当前报告与意见仍真实有效；本报告的自动修订不会重复请求。按报告中的真实 findingId、原文和建议，在原作者授权范围内用 chapter_edit_range 处理可定位的问题；决定保留时提交具体理由。继续使用获准的正文工具，保存后回读修改处。检查结论以实际报告为准。' }
+    CONTINUITY_REPAIR_FAILED: reviewWorkflow ? { label: '连续性报告已保存，自动修订未应用', guidance: '当前报告与意见仍真实有效；本报告的自动修订不会重复请求。按报告中的真实 findingId、原文和建议，在原作者授权范围内用 chapter_edit_range 处理可定位的问题；决定保留时提交具体理由。继续使用获准的正文工具，保存后回读修改处，不能把自动修订失败当作检查通过。' }
       : { label: '连续性报告已保存，自动修订未应用', guidance: '当前报告与意见仍真实有效；本报告的自动修订不会重复请求。按报告中的真实 findingId、原文和建议，在原作者授权范围内用 chapter_edit_range 处理可定位的问题；决定保留时提交具体理由。普通改稿权限未因本次失败撤销，实际修改后复核最终版本，不能把自动修订失败当作检查通过或重建编译。' },
     CONTINUITY_REPORT_INCOMPLETE: reviewWorkflow ? { label: '连续性报告未完成', guidance: '保留已经定位的意见、正文和原费用。若原请求需要完整报告，只处理未定位证据或明确的格式问题，不重新评审已定位意见；普通写作可以在回读有实际影响的段落后交付。辅助检查状态留在工具卡。供应商结果或费用未知时先核对原请求。' }
       : { label: '连续性报告未完成', guidance: '保留已经定位的意见、正文和原费用。若原请求需要完整报告，只处理未定位证据或明确的格式问题，不重新评审已定位意见；若仅为普通写作的辅助检查，先核对实际影响，正文已完成时可说明剩余未核对事项后交付。供应商结果或费用未知时先核对原请求。' },

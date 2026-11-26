@@ -2,7 +2,7 @@ import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import type { AgentExecutionMode, TaskSpec } from '../../../shared/contracts/index.js'
 import { WRITING_COLLABORATION_GUIDANCE, writingCollaborationGuidance } from './writing-collaboration.js'
 
-export const SAVED_WORK_CLOSING_GUIDANCE = '作者未指定回复方式且成果已实际保存时，先交代完成了什么、在哪里查看。简单改动用短段落即可。单章或计划有多个值得说明的变化时，可用 Markdown 短列表，每项用加粗短标签。按成果选取有用的信息，例如剧情推进、人物选择、章末衔接，或计划的主线安排、关键转折与章节分工。通常挑两到四项，按实际内容取舍。已保存的正文、完整提纲和报告可在作品中查看，聊天概括实际成果和重要改动。作者明确要求的检查未完成时，说明哪项及具体原因；待作者决定的问题引用具体位置和事实。例行复查、旧报告版本和可选建议留在工具卡，收尾直接交付结果。作者明确要求在聊天中交付正文、完整计划或报告、详细解释或具体改动时，按原请求完整提供。明确不要总结时直接结束。'
+export const SAVED_WORK_CLOSING_GUIDANCE = '作者未指定回复方式且成果已实际保存时，先交代完成了什么、在哪里查看。简单改动用短段落即可。单章或计划有多个值得说明的变化时，可用 Markdown 短列表，每项用加粗短标签。按成果选取有用的信息，例如剧情推进、人物选择、章末衔接，或计划的主线安排、关键转折与章节分工。通常挑两到四项，按实际内容取舍。已保存的正文、完整提纲和报告可在作品中查看，聊天交代值得关注的变化和影响使用的缺项。作者明确要求的检查未完成时，说明哪项及具体原因；待作者决定的问题引用具体位置和事实。例行复查、旧报告版本和可选建议留在工具卡，收尾直接交付结果。作者明确要求在聊天中交付正文、完整计划或报告、详细解释或具体改动时，按原请求完整提供。明确不要总结时直接结束。'
 const LEGACY_SAVED_WORK_CLOSING_GUIDANCE = '作者未指定回复方式且成果已实际保存时，先交代完成了什么、在哪里查看。简单改动用短段落即可。单章或计划有多个值得说明的变化时，可用 Markdown 短列表，每项用加粗短标签。按成果选取有用的信息，例如剧情推进、人物选择、章末衔接，或计划的主线安排、关键转折与章节分工。通常挑两到四项，按实际内容取舍。已保存的正文、完整提纲和报告可在作品中查看，聊天交代值得关注的变化和影响使用的缺项。作者明确要求在聊天中交付正文、完整计划或报告、详细解释或具体改动时，按原请求完整提供。明确不要总结时直接结束。'
 export const savedWorkClosingGuidance = (enabled: boolean) => enabled ? SAVED_WORK_CLOSING_GUIDANCE : LEGACY_SAVED_WORK_CLOSING_GUIDANCE
 export const COMPLETED_WORK_FOLLOWUP_GUIDANCE = '任务真实完成后，如有具体且有用的下一步，可简短建议或自然询问作者是否需要继续。保持为普通聊天中的可选邀请，等作者明确回应后再执行。此时直接结束本轮，提问工具和后续待办留到实际需要时使用。作者只要结果、只要标题正文或明确不要建议时省略。未完成、失败或结果未知时据实说明。'

@@ -123,7 +123,8 @@ export async function beginDurableChat(input: {
       await input.admit()
       const scope = execution.auxiliaryStep === 'research_dossier_synthesis' || execution.auxiliaryStep === 'chapter_review_batch'
         ? { parentOperationId: execution.parentOperationId!, kind: execution.auxiliaryStep } : undefined
-      const permit = await markProviderDispatched(execution.lease, attempt.id, goalTokenEstimate, scope)
+      const permit = scope ? await markProviderDispatched(execution.lease, attempt.id, goalTokenEstimate, scope)
+        : await markProviderDispatched(execution.lease, attempt.id, goalTokenEstimate)
       if (!permit.dispatchGranted) {
         runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '派发权已使用，不能重复请求供应商。')
       }
