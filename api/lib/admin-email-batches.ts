@@ -202,7 +202,7 @@ export async function createEmailPreview(
   }
   const template = await delivery.loadTemplate(campaign, customTemplate)
   const templateHash = adminEmailTemplateHash(template)
-  return prisma.$transaction(async tx => {
+  const savePreview = () => prisma.$transaction(async tx => {
     await lockEmailAdmin(tx, adminId)
     const id = randomUUID()
     if (replaces) {
@@ -241,11 +241,19 @@ export async function createEmailPreview(
       ...batchDetail,
     })
     return presentBatch(snapshot)
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }).catch(error => {
-    if (error instanceof Prisma.PrismaClientKnownRequestError
-      && (error.code === 'P2034' || (error.code === 'P2010' && error.meta?.code === '40001'))) throw previewChanged()
-    throw error
-  })
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead })
+
+  // A concurrent last-active update can invalidate the snapshot while acquiring the admin row lock.
+  // PostgreSQL rolls back the entire preview transaction before it can be retried.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await savePreview()
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError)
+        || (error.code !== 'P2034' && !(error.code === 'P2010' && error.meta?.code === '40001'))) throw error
+      if (attempt >= 2) throw previewChanged()
+    }
+  }
 }
 
 export async function confirmEmailBatch(

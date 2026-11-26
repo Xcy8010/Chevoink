@@ -5,7 +5,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import AuthPage from '../../src/app/routes/AuthPage'
-import AppRouter from '../../src/app/AppRouter'
+import AppRouter, { AppRoutes } from '../../src/app/AppRouter'
 import { requestSessionSignIn } from '../../src/app/session-activity'
 import { ApiClientError } from '../../src/app/api-client'
 import AuthPromptDialog from '../../src/components/ui/AuthPromptDialog'
@@ -72,7 +72,7 @@ function mountApp(path: string, user?: User) {
   if (user) useShellStore.setState({ authStatus: 'authenticated', sessionUser: user })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
   window.history.replaceState(null, '', path)
-  render(<QueryClientProvider client={client}><AppRouter /></QueryClientProvider>)
+  render(<AppRouter><QueryClientProvider client={client}><AppRoutes /></QueryClientProvider></AppRouter>)
 }
 
 function submitEmailBinding(dialog: HTMLElement, email: string) {
