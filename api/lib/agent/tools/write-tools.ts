@@ -235,10 +235,11 @@ export const planSaveTool = defineTool({
     if (ctx.durablePlan) {
       const capturedCtx = { ...ctx, toolAuthority: new Map(ctx.toolAuthority), protectedChapterIds: new Set(ctx.protectedChapterIds) }
       const capturedArgs = { ...args }
+      const routedId = ctx.durablePlan.saveRoute?.id
+      const planId = routedId === undefined ? capturedArgs.planId : routedId ?? undefined
       return executeDurablePlanSave(capturedCtx, capturedArgs,
         raw => Object.fromEntries(Object.entries(planSaveTool.parameters.parse(planSaveTool.coerceArgs!(raw))).filter(([, value]) => value !== undefined)),
-        (tx, verifiedContentHash, legacyCreationReplay, verifiedPlanHash, routedId) => {
-          const planId = routedId === undefined ? capturedArgs.planId : routedId ?? undefined
+        (tx, verifiedContentHash, legacyCreationReplay, verifiedPlanHash) => {
           return planSaveTool.execute({ ...capturedCtx, durablePlan: undefined, transaction: tx, legacyPlanCreationReplay: legacyCreationReplay,
             planSaveTargetResolved: true,
             planContentHashes: planId && verifiedContentHash ? new Map([[planId, verifiedContentHash]]) : undefined,

@@ -396,6 +396,7 @@ export const chapterCreateTool = defineTool({
       ...(chapter.scopeReused ? { chapterCreateReuse: { version: 1 as const, userId: ctx.userId, novelId: ctx.novelId, chapterId: chapter.id, revision: chapter.revision } } : {}),
       summary: `${chapter.scopeReused ? '复用' : '新建'}第 ${chapter.orderIndex} 章《${chapter.title}》 · ${chapter.volume.title}${chapter.scopeReused ? '（未创建）' : ''}`,
       // 带正文创建时返回 chapterDiff（空基线→全绿新增），前端才能挂上绿增红减的审查条；空章节仍用 chapterRef
+      // 普通执行从事件恢复版本；可恢复执行已将版本记录在 observedState 中。
       display: !chapter.scopeReused && chapter.content
         ? {
             kind: 'chapterDiff',
@@ -407,7 +408,7 @@ export const chapterCreateTool = defineTool({
             revision: chapter.revision,
           }
         : { kind: 'chapterRef', chapterId: chapter.id, title: chapter.title, wordCount: chapter.wordCount,
-            ...(sequentialWriting(ctx) ? { revision: chapter.revision } : {}) },
+            ...(!ctx.transaction && sequentialWriting(ctx) ? { revision: chapter.revision } : {}) },
       ...(!chapter.scopeReused && content
         ? { snapshot: { target: 'chapter' as const, targetId: chapter.id, field: 'content', previousValue: '' } }
         : {}),
