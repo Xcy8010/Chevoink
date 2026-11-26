@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef, useState, type PropsWithChildren } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Route, Routes, useLocation, useNavigate, useNavigationType, type Location } from 'react-router-dom'
 
@@ -25,7 +25,7 @@ const defaultRouteFallback = (
   </div>
 )
 
-function AppRoutes() {
+export function AppRoutes() {
   const location = useLocation()
   const navigate = useNavigate()
   const navigationType = useNavigationType()
@@ -112,10 +112,11 @@ function AppRoutes() {
   )
 }
 
-export default function AppRouter() {
+export default function AppRouter({ children }: PropsWithChildren) {
   const [captionHost, setCaptionHost] = useState<HTMLElement | null>(null)
   return <BrowserRouter>
     {isWindowsDesktopApp() && <DesktopWindowFrame onContentHost={setCaptionHost} />}
-    <DesktopCaptionHost.Provider value={captionHost}><AppRoutes /></DesktopCaptionHost.Provider>
+    {/* The native caption survives changes to the session's query provider. */}
+    <DesktopCaptionHost.Provider value={captionHost}>{children}</DesktopCaptionHost.Provider>
   </BrowserRouter>
 }

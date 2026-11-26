@@ -7,6 +7,7 @@ type DialogFocusTrapOptions = {
   panel: RefObject<HTMLElement | null>
   open: boolean
   onClose: () => void
+  focusPanelOnOpen?: boolean
 }
 
 export function isTopDialog(panel: HTMLElement | null): boolean {
@@ -14,7 +15,7 @@ export function isTopDialog(panel: HTMLElement | null): boolean {
 }
 
 /** Keeps keyboard focus inside an open dialog and restores the trigger on close. */
-export function useDialogFocusTrap({ panel, open, onClose }: DialogFocusTrapOptions) {
+export function useDialogFocusTrap({ panel, open, onClose, focusPanelOnOpen = false }: DialogFocusTrapOptions) {
   const close = useRef(onClose)
   close.current = onClose
 
@@ -42,7 +43,8 @@ export function useDialogFocusTrap({ panel, open, onClose }: DialogFocusTrapOpti
       const elements = focusable()
       ;(elements[0] ?? currentPanel).focus({ preventScroll: true })
     }
-    focus()
+    if (focusPanelOnOpen) currentPanel.focus({ preventScroll: true })
+    else focus()
 
     // A native modal in the browser's top layer owns focus and Escape until it closes.
     const ownsEvent = (event: Event) => {
@@ -58,9 +60,11 @@ export function useDialogFocusTrap({ panel, open, onClose }: DialogFocusTrapOpti
       const elements = focusable()
       const first = elements[0], last = elements.at(-1)
       if (!first) { event.preventDefault(); currentPanel.focus({ preventScroll: true }); return }
-      if (event.shiftKey && (document.activeElement === first || !currentPanel.contains(document.activeElement))) {
+      const active = document.activeElement
+      const enterPanel = active === currentPanel || !currentPanel.contains(active)
+      if (event.shiftKey && (active === first || enterPanel)) {
         event.preventDefault(); last?.focus({ preventScroll: true })
-      } else if (!event.shiftKey && (document.activeElement === last || !currentPanel.contains(document.activeElement))) {
+      } else if (!event.shiftKey && (active === last || enterPanel)) {
         event.preventDefault(); first.focus({ preventScroll: true })
       }
     }
@@ -92,5 +96,5 @@ export function useDialogFocusTrap({ panel, open, onClose }: DialogFocusTrapOpti
         previous.focus({ preventScroll: true })
       }
     }
-  }, [open, panel])
+  }, [open, panel, focusPanelOnOpen])
 }

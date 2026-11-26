@@ -10,6 +10,7 @@ import { DeviceProvider } from '@/components/layout/DeviceProvider'
 import { ToastProvider } from '@/components/ui/Toast'
 import UpdateBanner from '@/components/ui/UpdateBanner'
 import { hydrateReadingSync } from '@/features/home/reading-sync'
+import { captionLogoFinished, captionWaitingForLogo } from '@/lib/desktop-caption'
 import { restoreNativeSystemBarsToTheme } from '@/lib/native-app'
 import { useShellStore } from '@/store/useShellStore'
 import type { UserMePayload } from '../../shared/contracts'
@@ -29,17 +30,69 @@ export default function AppProviders({ children }: PropsWithChildren) {
   useLayoutEffect(() => {
     const splash = document.getElementById('app-loading')
     if (!splash || authStatus === 'checking' || splash.hasAttribute('data-revealing')) return
-    if (studioAppearance.reducedMotion || document.documentElement.dataset.bootPlatform === 'android'
-      || !document.querySelector('[data-route-loading]')) {
-      splash.remove()
-      return
+    const root = document.documentElement
+    const platform = root.dataset.bootPlatform
+    const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+    const windows = platform === 'windows'
+    const windowsReload = windows && navigation?.type === 'reload'
+    function revealSplash(splash: HTMLElement) {
+      const animate = windows ? windowsReload : platform !== 'android'
+      if (studioAppearance.reducedMotion || !animate) {
+        splash.remove()
+        return
+      }
+      // This element belongs to the startup document. Later route and task loads never recreate it.
+      splash.setAttribute('aria-hidden', 'true')
+      splash.setAttribute('data-revealing', '')
+      const reveal = splash.getAnimations?.()[0]
+      if (reveal) void reveal.finished.then(() => splash.remove(), () => splash.remove())
+      else splash.remove()
     }
-    // This element belongs to the startup document. Later route and task loads never recreate it.
-    splash.setAttribute('aria-hidden', 'true')
-    splash.setAttribute('data-revealing', '')
-    const reveal = splash.getAnimations?.()[0]
-    if (reveal) void reveal.finished.then(() => splash.remove(), () => splash.remove())
-    else splash.remove()
+
+    const captionPending = 'data-desktop-caption-pending'
+    const app = document.getElementById('root')
+    const contentReady = () => {
+      if (app?.querySelector('span[hidden][data-route-loading]')) return false
+      return !Array.from(app?.querySelectorAll('[data-route-loading]:not([hidden]), .boot-splash') ?? [])
+        .some(element => element.getClientRects().length > 0)
+    }
+    const finishDesktopLogo = () => {
+      const exiting = 'data-desktop-caption-logo-exiting'
+      if (!splash.hasAttribute(captionWaitingForLogo) || splash.hasAttribute(exiting)) return
+      splash.setAttribute(exiting, '')
+      const logo = splash.querySelector<HTMLElement>('.agent-loading-mark')
+      const hidden = () => {
+        if (logo) logo.style.visibility = 'hidden'
+        // Let Chromium paint the final logo state before moving the native client area.
+        requestAnimationFrame(() => requestAnimationFrame(() => splash.setAttribute(captionLogoFinished, '')))
+      }
+      const reduced = studioAppearance.reducedMotion || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      const fade = reduced ? null : logo?.animate?.([{ opacity: 1 }, { opacity: 0 }], {
+        duration: 150, easing: 'ease-out', fill: 'forwards',
+      })
+      if (fade) void fade.finished.then(hidden, hidden)
+      else hidden()
+    }
+    const advance = () => {
+      if (!contentReady()) return false
+      if (windows && root.hasAttribute(captionPending)) {
+        finishDesktopLogo()
+        return false
+      }
+      revealSplash(splash)
+      return true
+    }
+    if (advance()) return
+    // Finish the first reveal with usable content beneath the original splash.
+    const observer = new MutationObserver(() => {
+      if (advance()) observer.disconnect()
+    })
+    if (windows) {
+      observer.observe(root, { attributes: true, attributeFilter: [captionPending] })
+      observer.observe(splash, { attributes: true, attributeFilter: [captionWaitingForLogo] })
+    }
+    if (app) observer.observe(app, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-route-loading', 'hidden'] })
+    return () => observer.disconnect()
   }, [authStatus, studioAppearance.reducedMotion])
 
   useEffect(() => {

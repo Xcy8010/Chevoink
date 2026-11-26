@@ -31,14 +31,26 @@
       }
       html[data-boot-platform="android"] { --boot-background: #f4f0e8; }
       html.dark[data-boot-platform="android"] { --boot-background: #111318; }
-      html[data-boot-platform="windows"] { --boot-background: #1f2023; }
+      html[data-boot-platform="windows"] {
+        --boot-background: #1f2023;
+        --boot-mark-base: #babbbe;
+        --boot-mark-highlight: #d1d1d2;
+      }
+      html:has(> body > #app-loading), html:has(> body > #app-loading) body {
+        background-color: var(--boot-splash-background, var(--boot-background));
+      }
       .boot-splash {
         position: fixed;
         inset: 0;
         z-index: 1000;
         display: grid;
         place-items: center;
-        background: var(--boot-background);
+        background: var(--startup-surface, var(--boot-background));
+      }
+      #app-loading {
+        --startup-surface: var(--boot-splash-background, var(--boot-background));
+        --startup-mark-base: var(--boot-splash-mark-base, var(--boot-mark-base));
+        --startup-mark-highlight: var(--boot-splash-mark-highlight, var(--boot-mark-highlight));
       }
       .agent-loading-mark {
         position: relative;
@@ -46,22 +58,20 @@
         width: 48px;
         height: 48px;
         overflow: hidden;
-        background: var(--boot-mark-base);
+        background: var(--startup-mark-base, var(--boot-mark-base));
         -webkit-mask: var(--boot-mark-image) center / contain no-repeat;
         mask: var(--boot-mark-image) center / contain no-repeat;
       }
       html[data-boot-platform="windows"] .boot-splash .agent-loading-mark {
         width: 52px;
         height: 52px;
-        --boot-mark-base: #babbbe;
-        --boot-mark-highlight: #d1d1d2;
       }
       @media (prefers-reduced-motion: no-preference) {
         .agent-loading-mark::after {
           content: "";
           position: absolute;
           inset: 0;
-          background: linear-gradient(105deg, transparent 15%, var(--boot-mark-highlight), transparent 85%);
+          background: linear-gradient(105deg, transparent 15%, var(--startup-mark-highlight, var(--boot-mark-highlight)), transparent 85%);
           animation: agent-icon-shimmer 1.4s linear infinite;
         }
         @keyframes agent-icon-shimmer {

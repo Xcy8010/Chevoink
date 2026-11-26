@@ -15,7 +15,12 @@
   if (android) root.dataset.bootPlatform = 'android'
   else if (/\bChevoinkDesktop\/\d+\.\d+\.\d+\b/.test(navigator.userAgent)) root.dataset.bootPlatform = 'windows'
   root.classList.add(theme)
-  const background = getComputedStyle(root).getPropertyValue('--boot-background').trim()
+  const colors = getComputedStyle(root)
+  const background = colors.getPropertyValue('--boot-background').trim()
+  // Keep the first-paint palette until the startup document releases its splash.
+  root.style.setProperty('--boot-splash-background', background)
+  root.style.setProperty('--boot-splash-mark-base', colors.getPropertyValue('--boot-mark-base').trim())
+  root.style.setProperty('--boot-splash-mark-highlight', colors.getPropertyValue('--boot-mark-highlight').trim())
   const meta = document.querySelector('meta[name="theme-color"]')
   if (meta) {
     meta.setAttribute('content', background)

@@ -83,8 +83,8 @@
   color: var(--text-secondary);
 }
 .studio-announcement-history:hover { color: var(--text-primary); text-decoration: underline; text-underline-offset: 3px; }
-.studio-announcement :is(button,section):focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 3px; }
-.studio-announcement-copy:focus-visible { outline-offset: -3px; }
+.studio-announcement-copy:focus-visible { outline: none; }
+.studio-announcement-copy:focus-visible h2 { text-decoration: underline; text-underline-offset: .22em; }
 .studio-announcement footer button:focus-visible { outline: 1px dashed currentColor; outline-offset: -5px; }
 @media (max-height: 460px) {
   .studio-announcement { width: min(530px, 92vw); }

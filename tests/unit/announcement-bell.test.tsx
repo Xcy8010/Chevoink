@@ -47,8 +47,8 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); restoreDialog() })
 
-it('keeps the notification list and detail inside the desktop client area and restores list focus', async () => {
-  document.documentElement.dataset.desktopFrame = 'studio'
+it.each(['data-desktop-frame', 'data-desktop-caption-pending'])('keeps desktop notices in the client area and restores focus with %s', async captionAttribute => {
+  document.documentElement.setAttribute(captionAttribute, 'studio')
   try {
     request.mockResolvedValue(inbox(null))
     mount(<AnnouncementBell placement="site" />)
@@ -60,12 +60,14 @@ it('keeps the notification list and detail inside the desktop client area and re
     fireEvent.click(row)
     const detail = await screen.findByRole('dialog', { name: '最新通知' })
     expect(detail.closest('.desktop-notice-layer')).toBeTruthy()
+    await waitFor(() => expect(document.activeElement).toBe(detail))
+    expect(detail.querySelector('.studio-announcement-copy')?.getAttribute('tabindex')).toBe('0')
     fireEvent.keyDown(detail, { key: 'Escape' })
     await waitFor(() => expect(document.activeElement).toBe(row))
     fireEvent.keyDown(row, { key: 'Escape' })
     await waitFor(() => expect(document.activeElement).toBe(bell))
   } finally {
-    delete document.documentElement.dataset.desktopFrame
+    document.documentElement.removeAttribute(captionAttribute)
   }
 })
 

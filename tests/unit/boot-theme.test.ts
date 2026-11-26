@@ -8,7 +8,8 @@ function boot(saved: string | null, options: { native?: boolean; userAgent?: str
   let theme = ''
   const meta = { setAttribute: vi.fn() }
   const dataset: { sessionActivity: string; bootPlatform?: string } = { sessionActivity: 'native' }
-  const root = { dataset, classList: { add: (value: string) => { theme = value } } }
+  const style = { setProperty: vi.fn() }
+  const root = { dataset, style, classList: { add: (value: string) => { theme = value } } }
   runInNewContext(script, {
     localStorage: { getItem: () => saved },
     document: { documentElement: root, querySelector: () => meta },
@@ -16,7 +17,7 @@ function boot(saved: string | null, options: { native?: boolean; userAgent?: str
     navigator: { userAgent: options.userAgent ?? (options.native ? 'Android ChevoinkApp/1.0.13' : 'Chrome') },
     window: { Capacitor: { Plugins: { ImmersiveMode: { setSystemBarAppearance: options.appearance } } } },
   })
-  return { theme, meta, dataset }
+  return { theme, meta, dataset, style }
 }
 
 describe('loading page theme before the app bundle mounts', () => {
@@ -27,6 +28,7 @@ describe('loading page theme before the app bundle mounts', () => {
     expect(result.theme).toBe(theme)
     expect(result.dataset.bootPlatform).toBe('android')
     expect(result.meta.setAttribute).toHaveBeenCalledWith('content', color)
+    expect(result.style.setProperty).toHaveBeenCalledWith('--boot-splash-background', color)
     expect(appearance).toHaveBeenCalledExactlyOnceWith({ color, dark: theme === 'dark' })
   })
 

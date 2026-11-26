@@ -750,12 +750,12 @@ body.autohide-scrollbars *:not([data-scrolling='true'])::-webkit-scrollbar-thumb
   #app-loading[data-revealing] {
     animation: boot-handoff 240ms cubic-bezier(.32, 0, .2, 1) both;
   }
-  #app-loading[data-revealing] ~ #root [data-route-loading]:not([hidden]) {
+  html:not([data-boot-platform="windows"]) #app-loading[data-revealing] ~ #root [data-route-loading]:not([hidden]) {
     transform-origin: center;
     animation: boot-content-settle 240ms cubic-bezier(.2, .65, .3, 1) both;
   }
 }
-#app-loading[data-revealing] ~ #root [data-studio-skeleton].studio-pending {
+html:not([data-boot-platform="windows"]) #app-loading[data-revealing] ~ #root [data-studio-skeleton].studio-pending {
   animation-delay: -200ms;
 }
 @keyframes boot-handoff {

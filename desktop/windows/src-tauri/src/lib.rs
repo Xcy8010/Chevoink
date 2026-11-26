@@ -5,6 +5,8 @@ mod window;
 mod windows_webview;
 
 use navigation::{is_app_url, is_fallback_url, APP_ORIGIN};
+use std::{sync::Mutex, time::Duration};
+use tauri::webview::{PageLoadEvent, PageLoadPayload};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::{StateFlags, WindowExt};
@@ -73,6 +75,56 @@ struct CaptionState {
     fullscreen: bool,
 }
 
+#[derive(Default)]
+struct CaptionLoad {
+    generation: u64,
+    claimed: bool,
+}
+
+impl CaptionLoad {
+    fn start(&mut self) {
+        self.generation += 1;
+        self.claimed = false;
+    }
+
+    fn awaiting_claim(&self) -> Option<u64> {
+        (!self.claimed).then_some(self.generation)
+    }
+}
+
+fn on_caption_page_load(window: tauri::WebviewWindow, payload: PageLoadPayload<'_>) {
+    let state = window.state::<Mutex<CaptionLoad>>();
+    match payload.event() {
+        PageLoadEvent::Started => {
+            // WebView2 can still be displaying the previous document at ContentLoading.
+            state.lock().unwrap().start();
+        }
+        PageLoadEvent::Finished if is_fallback_url(payload.url()) => {
+            let _ = window.set_decorations(true);
+        }
+        PageLoadEvent::Finished => {
+            let Some(generation) = state.lock().unwrap().awaiting_claim() else {
+                return;
+            };
+            if !matches!(window.is_decorated(), Ok(false)) {
+                return;
+            }
+            let window = window.clone();
+            tauri::async_runtime::spawn(async move {
+                // Older pages and failed loads still need working system controls.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let restore = window.clone();
+                let _ = window.run_on_main_thread(move || {
+                    let state = restore.state::<Mutex<CaptionLoad>>();
+                    if state.lock().unwrap().awaiting_claim() == Some(generation) {
+                        let _ = restore.set_decorations(true);
+                    }
+                });
+            });
+        }
+    }
+}
+
 #[tauri::command]
 fn desktop_caption(
     window: tauri::WebviewWindow,
@@ -81,8 +133,10 @@ fn desktop_caption(
     authorize(&window)?;
     let apply = || -> tauri::Result<CaptionState> {
         match action {
-            CaptionAction::Attach => window.set_decorations(false)?,
-            CaptionAction::System => window.set_decorations(true)?,
+            CaptionAction::Attach | CaptionAction::System => {
+                window.set_decorations(matches!(action, CaptionAction::System))?;
+                window.state::<Mutex<CaptionLoad>>().lock().unwrap().claimed = true;
+            }
             CaptionAction::State => (),
             CaptionAction::Drag => window.start_dragging()?,
             CaptionAction::Minimize => window.minimize()?,
@@ -133,6 +187,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(window::CloseState::default())
         .manage(update::UpdateState::default())
+        .manage(Mutex::new(CaptionLoad::default()))
         .invoke_handler(tauri::generate_handler![
             desktop_get_info,
             desktop_report_state,
@@ -158,15 +213,7 @@ pub fn run() {
                     .data_directory(data)
                     .disable_drag_drop_handler()
                     .initialization_script(include_str!("browser-links.js"))
-                    // A reloaded/older website and the packaged failure page must always
-                    // have working system controls until a compatible page takes over.
-                    .on_page_load(|window, payload| {
-                        if payload.event() == tauri::webview::PageLoadEvent::Started
-                            && matches!(window.is_decorated(), Ok(false))
-                        {
-                            let _ = window.set_decorations(true);
-                        }
-                    })
+                    .on_page_load(on_caption_page_load)
                     .on_navigation(|url| is_app_url(url) || is_fallback_url(url))
                     .build()?;
             // Restore only the normal bounds before maximizing on their monitor.
@@ -196,6 +243,20 @@ pub fn run() {
 
 #[cfg(test)]
 mod startup_tests {
+    #[test]
+    fn only_the_current_unclaimed_page_can_restore_the_system_caption() {
+        let mut load = super::CaptionLoad::default();
+        load.start();
+        let displaced = load.awaiting_claim();
+        load.start();
+        assert_ne!(load.awaiting_claim(), displaced);
+
+        let current = load.awaiting_claim();
+        assert!(current.is_some());
+        load.claimed = true;
+        assert_eq!(load.awaiting_claim(), None);
+    }
+
     #[test]
     fn settings_actions_are_a_closed_whitelist() {
         use super::{settings_action, SettingsAction};

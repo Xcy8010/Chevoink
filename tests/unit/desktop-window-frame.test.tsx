@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { Link, MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
+import { captionLogoFinished, captionWaitingForLogo } from '../../src/lib/desktop-caption'
 import DesktopWindowFrame from '../../src/components/layout/DesktopWindowFrame'
 
 const invoke = vi.hoisted(() => vi.fn())
@@ -21,7 +22,7 @@ it('keeps older desktop hosts on their working system frame', async () => {
 })
 it('uses the native controls and follows workspace navigation without reattaching', async () => {
   invoke.mockImplementation(async (cmd, args) => cmd === 'desktop_get_info' ? { windowCaption: 1 }
-    : { maximized: args.action === 'toggleMaximize', fullscreen: false })
+    : { decorated: false, maximized: args.action === 'toggleMaximize', fullscreen: false })
   mount()
   const maximize = await screen.findByRole('button', { name: '最大化窗口' })
   expect(document.querySelector('.desktop-window-outline')).toBeTruthy()
@@ -49,9 +50,46 @@ it('uses the native controls and follows workspace navigation without reattachin
   expect(screen.queryByRole('navigation', { name: '桌面工作区导航' })).toBeNull()
   expect(invoke.mock.calls.filter(call => call[1]?.action === 'attach')).toHaveLength(1)
 })
-it('returns window management to the OS while a dialog makes the web caption inert', async () => {
+it('waits for the system caption to disappear before showing the Studio caption', async () => {
+  let decorated = true
   invoke.mockImplementation(async cmd => cmd === 'desktop_get_info' ? { windowCaption: 1 }
-    : { maximized: false, fullscreen: false })
+    : { decorated, maximized: true, fullscreen: false })
+  mount()
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_caption', { action: 'state' }))
+  expect(screen.queryByRole('button', { name: '最小化窗口' })).toBeNull()
+  expect(document.documentElement.hasAttribute('data-desktop-caption-pending')).toBe(true)
+
+  decorated = false
+  fireEvent(window, new Event('resize'))
+  await screen.findByRole('button', { name: '最小化窗口' })
+  expect(document.documentElement.hasAttribute('data-desktop-caption-pending')).toBe(false)
+  fireEvent(window, new Event('pagehide'))
+  expect(document.documentElement.hasAttribute('data-desktop-page-leaving')).toBe(true)
+  fireEvent(window, new Event('pageshow'))
+  expect(document.documentElement.hasAttribute('data-desktop-page-leaving')).toBe(false)
+})
+it('keeps the native caption until the visible startup logo has finished', async () => {
+  const splash = document.createElement('div')
+  splash.id = 'app-loading'
+  document.body.append(splash)
+  try {
+    invoke.mockImplementation(async (cmd, args) => cmd === 'desktop_get_info' ? { windowCaption: 1 }
+      : { decorated: args.action === 'state', maximized: true, fullscreen: false })
+    mount()
+    await waitFor(() => expect(splash.hasAttribute(captionWaitingForLogo)).toBe(true))
+    expect(invoke).not.toHaveBeenCalledWith('desktop_caption', { action: 'attach' })
+
+    splash.setAttribute(captionLogoFinished, '')
+    expect(await screen.findByRole('button', { name: '最小化窗口' })).toBeTruthy()
+    expect(invoke).toHaveBeenCalledWith('desktop_caption', { action: 'attach' })
+  } finally {
+    splash.remove()
+  }
+})
+
+it('returns window management to the OS while a dialog makes the web caption inert', async () => {
+  invoke.mockImplementation(async (cmd, args) => cmd === 'desktop_get_info' ? { windowCaption: 1 }
+    : { decorated: args.action === 'system', maximized: false, fullscreen: false })
   mount()
   await screen.findByRole('button', { name: '最小化窗口' })
   const dialog = document.createElement('dialog')
@@ -71,7 +109,7 @@ it('returns window management to the OS while a dialog makes the web caption ine
 
 it('keeps Studio commands and window controls attached while a client-area notification is open', async () => {
   invoke.mockImplementation(async cmd => cmd === 'desktop_get_info' ? { windowCaption: 1 }
-    : { maximized: true, fullscreen: false })
+    : { decorated: false, maximized: true, fullscreen: false })
   mount()
   const control = await screen.findByRole('button', { name: '还原窗口' })
   const notice = document.createElement('dialog')
@@ -89,8 +127,8 @@ it('keeps Studio commands and window controls attached while a client-area notif
 })
 
 it.each(['/', '/studio'])('keeps the %s toolbar and its open dialog mounted during system caption handover', async path => {
-  invoke.mockImplementation(async cmd => cmd === 'desktop_get_info' ? { windowCaption: 1 }
-    : { maximized: false, fullscreen: false })
+  invoke.mockImplementation(async (cmd, args) => cmd === 'desktop_get_info' ? { windowCaption: 1 }
+    : { decorated: args.action === 'system', maximized: false, fullscreen: false })
   const bind = vi.fn()
   render(<MemoryRouter initialEntries={[path]}><DesktopWindowFrame onContentHost={bind} /></MemoryRouter>)
   await screen.findByRole('button', { name: '最小化窗口' })
@@ -114,7 +152,7 @@ it('serializes caption changes when a modal opens during attach and closes durin
     if (cmd === 'desktop_get_info') return { windowCaption: 1 }
     if (args.action === 'system' || invoke.mock.calls.filter(call => call[1]?.action === 'attach').length === 1)
       await new Promise<void>(resolve => { finish = resolve })
-    return native
+    return { ...native, decorated: args.action === 'system' }
   })
   mount()
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_caption', { action: 'attach' }))

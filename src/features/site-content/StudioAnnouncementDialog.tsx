@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import artwork from '@/assets/studio-announcement.webp'
 import paper from '@/assets/studio-notice-paper.webp'
 import { useStudioDismiss } from '@/features/studio/components/use-studio-presence'
+import { isWindowsDesktopApp } from '@/lib/desktop-app'
 import './studio-announcement.css'
 import { useDesktopNoticeLayer } from './desktop-notice-layer'
 import { useDialogFocusTrap } from '@/features/studio/components/use-dialog-focus-trap'
@@ -32,7 +33,7 @@ export default function StudioAnnouncementDialog({ item, coverTitle, publishedAt
   const dialog = useRef<HTMLDialogElement>(null)
   const { desktop, layer } = useDesktopNoticeLayer()
   const [desktopOpen, setDesktopOpen] = useState(false)
-  useDialogFocusTrap({ panel: dialog, open: desktopOpen, onClose: () => close() })
+  useDialogFocusTrap({ panel: dialog, open: desktopOpen, onClose: () => close(), focusPanelOnOpen: true })
   const cover = useRef<HTMLImageElement>(null)
   const titleId = useId()
   const destination = useRef<'close' | 'history' | null>(null)
@@ -53,7 +54,8 @@ export default function StudioAnnouncementDialog({ item, coverTitle, publishedAt
       if (disposed || node.open) return
       const otherDialog = !invoker && Array.from(document.querySelectorAll('dialog[open], [role="dialog"][aria-modal="true"]'))
         .some(other => other !== node && (other.matches('dialog[open]') || other.getClientRects().length > 0))
-      if (otherDialog) {
+      const desktopStarting = !invoker && isWindowsDesktopApp() && document.getElementById('app-loading')
+      if (otherDialog || desktopStarting) {
         if (!observer) {
           observer = new MutationObserver(present)
           observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['open', 'hidden', 'aria-modal', 'inert'] })

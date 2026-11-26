@@ -77,6 +77,8 @@ html[data-desktop-frame][data-system-caption] { --caption-height: 0px; }
 .desktop-system-caption:not(:has([data-site-header])) > * { display: none; }
 /* Leave the site navigation and bell in their desktop slots while the OS supplies the window buttons. */
 .desktop-system-caption .desktop-window-controls { visibility: hidden; }
+html[data-desktop-caption-pending] .studio-web-caption,
+html[data-desktop-page-leaving] :is(.desktop-caption, .desktop-window-outline) { visibility: hidden; }
 .desktop-notice-layer { display: none; }
 .desktop-notice-layer:has(> dialog[open]) {
   display: block;
