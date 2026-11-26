@@ -156,7 +156,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const proof = z.object({ version: z.literal(1), sourceRevision: z.number(), sourceHash: z.string(),
           candidateHash: z.string(), evidenceHash: z.string(), evidence: z.object({ blockers: z.array(z.never()),
             terminalReason: z.enum(['question_timeout', 'question_cancelled', 'question_unanswered']).optional() }).passthrough(),
-          chapterPresentation: savedChapterPresentationSchema.optional(), limitedWritingDelivery: limitedWritingDeliverySchema.optional(),
+          chapterPresentation: savedChapterPresentationSchema.optional(), chapterWrapUp: z.string().min(1).optional(), limitedWritingDelivery: limitedWritingDeliverySchema.optional(),
           outcome: limitedWritingOutcomeSchema.optional() }).safeParse(receipt?.result)
         const frame = await readExecutionFrame(tx, root.id, decision.revision)
         const before = await readExecutionFrame(tx, root.id, decision.sourceRevision)
@@ -170,12 +170,17 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           && cancelled === (candidate.localCompletion?.kind === 'question_cancelled')
           && cancelled === (proof.data.evidence.terminalReason === 'question_cancelled')
           && (candidate.localCompletion?.kind === 'question_unanswered') === (proof.data.evidence.terminalReason === 'question_unanswered')
-          && (!(cancelled || candidate.localCompletion?.kind === 'question_unanswered') || (!proof.data.outcome && !proof.data.chapterPresentation && !proof.data.limitedWritingDelivery))
+          && (!(cancelled || candidate.localCompletion?.kind === 'question_unanswered') || (!proof.data.outcome && !proof.data.chapterPresentation && !proof.data.chapterWrapUp && !proof.data.limitedWritingDelivery))
           && (!proof.data.chapterPresentation || proof.data.chapterPresentation.targetRunId === source.runId)
           && (!proof.data.chapterPresentation || (() => {
             const admitted = z.object({ input: z.object({ chapterPresentation: savedChapterPresentationSchema }) }).safeParse(receipt.operation.inputSnapshot)
             return admitted.success && runtimeJson(receipt.operation.inputSnapshot).hash === receipt.operation.inputHash
               && runtimeJson(admitted.data.input.chapterPresentation).hash === runtimeJson(proof.data.chapterPresentation).hash
+          })())
+          && (!proof.data.chapterWrapUp || (() => {
+            const admitted = z.object({ input: z.object({ chapterWrapUp: z.string() }) }).safeParse(receipt.operation.inputSnapshot)
+            return admitted.success && runtimeJson(receipt.operation.inputSnapshot).hash === receipt.operation.inputHash
+              && admitted.data.input.chapterWrapUp === proof.data.chapterWrapUp
           })())
           && (!proof.data.limitedWritingDelivery || (() => {
             const limited = proof.data.limitedWritingDelivery
@@ -205,16 +210,16 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const roots = [root.id, ...children.flatMap(child => child.childRun.taskRootId ? [child.childRun.taskRootId] : [])]
         const usage = await tx.agentProviderUsageReceipt.aggregate({ where: { attempt: { operation: { taskRootId: { in: roots } } } }, _sum: { promptTokens: true, completionTokens: true } })
         const promptTokens = usage._sum.promptTokens ?? 0, completionTokens = usage._sum.completionTokens ?? 0
-        const presentation = validProof && proof.success ? proof.data.chapterPresentation : null
+        const presentationText = validProof && proof.success ? proof.data.chapterWrapUp ?? proof.data.chapterPresentation?.text : undefined
         const receiptSuggestion = z.object({ nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).nullable() }).safeParse(receipt.result)
         const nextPrompt = !cancelled && validProof && proof.success
           ? receiptSuggestion.success ? receiptSuggestion.data.nextPrompt : !proof.data.limitedWritingDelivery ? candidate.nextPrompt : undefined
           : undefined
-        bodies = [...(presentation ? [{ type: 'text.final' as const, messageId: durableMessageId(root.id, before.state.turn), text: presentation.text, asReasoning: false }] : []),
+        bodies = [...(presentationText ? [{ type: 'text.final' as const, messageId: durableMessageId(root.id, before.state.turn), text: presentationText, asReasoning: false }] : []),
           { type: 'run.finished', status: cancelled ? 'cancelled' : 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
             ...(validProof && proof.success && proof.data.limitedWritingDelivery ? { outcome: proof.data.limitedWritingDelivery.outcome } : {}),
             ...(nextPrompt ? { nextPrompt } : {}),
-            artifacts: [], outputSummary: presentation?.text ?? (candidate.localCompletion ? candidate.content ?? '' : normalizeAgentFinalText(candidate.content ?? '')) }]
+            artifacts: [], outputSummary: presentationText ?? (candidate.localCompletion ? candidate.content ?? '' : normalizeAgentFinalText(candidate.content ?? '')) }]
       } else if (source.type === 'run.paused') {
         const paused = durablePauseSchema.safeParse(source.payload)
         if (!paused.success || !paused.data.runIds.includes(runId) || source.eventKey !== `pause:${source.id}`) return runtimeError('RUNTIME_RECEIPT_INVALID', '暂停事件源损坏。')

@@ -917,16 +917,18 @@ function currentWritingSummarySentence(sentence: string, delivery: PresentationD
   return true
 }
 
+const manuscriptIntroduction = /^(?:(?:以下|下面)(?:是|为)?|这是|附上|展示)?\s*(?:(?:修改|修订|改写|调整|编辑|完善|补写)(?:后(?:的)?)?|已(?:保存|提交)(?:的)?|当前|最新|最终|新版)?\s*(?:正文|原文|章节正文|正文全文|全文|修订稿|成稿)(?:如下|是|为|内容)?\s*(?:[:：]|$)/u
+const markdownHeadingText = (line: string) => line.replace(/^\s*(?:#{1,6}\s*)?/u, '').replace(/\*\*|__/gu, '').trim()
+
 /** A model-declared manuscript block is replaced by the saved body below, never
  * appended as an unchecked second draft. Explicit summary sections survive. */
 function withoutModelManuscriptBlocks(text: string): string {
   const lines: string[] = []
   let manuscript = false
-  const introduction = /^(?:(?:以下|下面)(?:是|为)?|这是|附上|展示)?\s*(?:(?:修改|修订|改写|调整|编辑|完善|补写)(?:后(?:的)?)?|已(?:保存|提交)(?:的)?|当前|最新|最终|新版)?\s*(?:正文|原文|章节正文|正文全文|全文|修订稿|成稿)(?:如下|是|为|内容)?\s*(?:[:：]|$)/u
   const commentary = /^(?:修改总结|修订总结|改动总结|修改说明|修订说明|改动说明|完成情况|检查结果|核验结果|总结|说明|备注)\s*(?:[:：]|$)/u
   for (const line of text.split('\n')) {
-    const heading = line.replace(/^\s*(?:#{1,6}\s*)?/u, '').replace(/\*\*|__/gu, '').trim()
-    const introductionMatch = introduction.exec(heading)
+    const heading = markdownHeadingText(line)
+    const introductionMatch = manuscriptIntroduction.exec(heading)
     // Inline literal quotations are checked as quotations, including their
     // line breaks; they must not swallow a later independent summary.
     if (introductionMatch && !writingQuotePairs[heading.slice(introductionMatch[0].length).trim()[0]]) { manuscript = true; continue }
@@ -1006,6 +1008,60 @@ export function usesBriefStandaloneWritingClosing(prompt: string): boolean {
     && !/(?:只要|仅|贴出|输出|展示|发我|给我|回复).{0,12}(?:正文|原文|全文)|(?:全文|原文)(?:贴出|发我|给我)|详细|逐条|列出|解释|分析|复盘|报告|说明|对照|\b(?:explain|summary|details|report|list|full text)\b/iu.test(prompt)
 }
 
+function withoutRepeatedChapterBodies(text: string, chapters: ReadonlyArray<{ title: string; content: string }>): string {
+  const normalizeWhitespace = (value: string) => value.trim().replace(/\s+/gu, ' ')
+  const lines: Array<{ value: string; offset: number }> = []
+  const starts = new Map<number, number>(), ends = new Map<number, number>()
+  let position = 0
+  for (const match of text.matchAll(/[^\r\n]+/gu)) {
+    const value = normalizeWhitespace(match[0])
+    if (!value) continue
+    starts.set(position, lines.length)
+    ends.set(position + value.length, match.index + match[0].length)
+    position += value.length + 1
+    lines.push({ value, offset: match.index })
+  }
+  const normalized = lines.map(line => line.value).join(' ')
+  const removals: Array<{ start: number; end: number }> = []
+  for (const { title, content } of chapters) {
+    const body = normalizeWhitespace(content)
+    if (!body) continue
+    // Whole saved bodies can span reflowed lines. Line boundaries keep an
+    // inline excerpt or quotation in the wrap-up.
+    for (let index = normalized.indexOf(body); index !== -1; index = normalized.indexOf(body, index + 1)) {
+      let first = starts.get(index)
+      const end = ends.get(index + body.length)
+      if (first === undefined || end === undefined) continue
+      const heading = lines[first - 1] && markdownHeadingText(lines[first - 1].value)
+      if (heading === title || heading === `《${title}》`) first--
+      const introduction = lines[first - 1] && markdownHeadingText(lines[first - 1].value)
+      const label = introduction && manuscriptIntroduction.exec(introduction)
+      if (label && label[0].trim() === introduction) first--
+      removals.push({ start: lines[first].offset, end })
+      index += body.length - 1
+    }
+  }
+  if (!removals.length) return text
+  let cursor = 0, visible = ''
+  for (const { start, end } of removals.sort((a, b) => a.start - b.start)) {
+    if (start > cursor) visible += text.slice(cursor, start)
+    cursor = Math.max(cursor, end)
+  }
+  return (visible + text.slice(cursor)).replace(/(?:\r?\n[\t ]*){3,}/gu, '\n\n').trim()
+}
+
+/** Optional display projection for successful writes outside the bounded
+ * chapter-delivery formatter. It never establishes task completion. */
+export async function readSavedChapterWrapUp(tx: Prisma.TransactionClient, subject: Subject, text: string): Promise<string | undefined> {
+  if (!text.trim()) return undefined
+  const { readCurrentSavedTaskChapters } = await import('./saved-chapter-work.js')
+  const chapters = await readCurrentSavedTaskChapters(tx, subject)
+  if (!chapters.length) return undefined
+  const visible = withoutRepeatedChapterBodies(text, chapters)
+  if (visible === text || (await readWritingPresentation(tx, subject, chapters))?.mode === 'full_text') return undefined
+  return visible || `已保存${chapters.map(({ title }) => `《${title}》`).join('、')}。`
+}
+
 export function completedWritingPresentationText(delivery: PresentationDelivery, candidateText: string): string {
   const receipt = `${delivery.chapters.map(chapter => `已保存《${chapter.title}》（r${chapter.revision}）`).join('；')}，章节终态已提交。`
   const completion = `已完成${delivery.chapters.map(chapter => {
@@ -1015,11 +1071,7 @@ export function completedWritingPresentationText(delivery: PresentationDelivery,
   const showFullText = delivery.presentation?.mode === 'full_text'
     || !delivery.presentation && delivery.titleAndBodyOnly
   const candidate = candidateText.startsWith(completion) ? candidateText.slice(completion.length).trimStart() : candidateText
-  let summary = withoutModelManuscriptBlocks(candidate.split(receipt).join('')).trim()
-  for (const chapter of delivery.chapters) {
-    summary = summary.split(`${chapter.title}\n\n${chapter.content}`).join('')
-    if (summary.trim() === chapter.content.trim()) summary = ''
-  }
+  let summary = withoutModelManuscriptBlocks(withoutRepeatedChapterBodies(candidate.split(receipt).join('').trim(), delivery.chapters)).trim()
   let inherited = delivery.chapters
   summary = summarySentences(summary).filter(sentence => {
     const mentions = writingChapterMentions(sentence, writingQuotations(sentence), delivery.chapters)

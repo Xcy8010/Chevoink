@@ -102,7 +102,7 @@ export async function readExecutionStateInTransaction(tx: RuntimeTx, taskRootId:
   if (!latest || latest.revision !== head.revision) runtimeError('RUNTIME_RECEIPT_INVALID', '执行头指针与最新快照不一致。')
   // 旧快照的工具参数可能缺顶层 type（被供应商拒绝、任务无法继续）；读取时统一修复，与新转换哈希口径一致。
   const storedConfiguration = { ...configuration.data, tools: configuration.data.tools.map(tool => ({ ...tool, function: { ...tool.function, parameters: withObjectType(tool.function.parameters) } })) }
-  return { head, configuration: storedConfiguration, originalRequest: root.requestSnapshot, originalSpec: root.specSnapshot,
+  return { head, root, configuration: storedConfiguration, originalRequest: root.requestSnapshot, originalSpec: root.specSnapshot,
     frame: await verifyExecutionFrame(tx, taskRootId, head.revision, latest) }
 }
 

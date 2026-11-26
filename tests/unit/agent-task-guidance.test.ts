@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { taskOperatingGuidance } from '../../api/lib/agent/task-guidance.js'
+import { COMPLETED_WORK_FOLLOWUP_GUIDANCE, SAVED_WORK_CLOSING_GUIDANCE, taskOperatingGuidance } from '../../api/lib/agent/task-guidance.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { enableAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
 
@@ -85,18 +85,18 @@ it.each(['plan', 'review'] as const)('respects %s mode before selecting a manusc
 
 it.each(['创建新作品并保存简介标签。', '写下一章。', '只输出标题正文，不要建议。'])('keeps optional stage suggestions separate from completion, questions and execution: %s', prompt => {
   const spec = task(prompt), before = structuredClone(spec), text = taskOperatingGuidance(spec, 'build')!
-  for (const required of ['真实完成后，如有对作者有用的下一步建议', '可以用一句话简短提出', '本轮最新成功回执', '不重复完成事项', '不把未知状态说成缺失',
-    '建议不调用 ask_user、不要求回答、不建立待办或执行新任务', '简短认可不自动选择多个建议之一', '仅要标题正文、仅要结果或明确不要建议时不附加',
-    '任务未完成、失败或结果未知时先如实说明']) expect(text).toContain(required)
+  for (const required of ['任务真实完成后', '可简短建议或自然询问作者是否需要继续', '普通聊天中的可选邀请', '等作者明确回应后再执行',
+    '作者只要结果、只要标题正文或明确不要建议时省略', '未完成、失败或结果未知时据实说明']) expect(COMPLETED_WORK_FOLLOWUP_GUIDANCE).toContain(required)
+  expect(text).not.toContain('只有作者要求时才附后续建议')
   expect(spec).toEqual(before)
 })
 
 it.each(['把第三章修好并保存。', '详细解释每处修改，完整列出复查意见。', '只输出标题正文，不要总结。'])('keeps concise defaults subordinate to the complete author request: %s', prompt => {
   const spec = task(prompt), before = structuredClone(spec), text = taskOperatingGuidance(spec, 'build')!
-  expect(text).toContain('作品中已有保存成果时，用一个短段落交代结果、位置和有代表性的内容')
-  expect(text).toContain('有影响使用的缺项才说明')
-  expect(text).toContain('不复述已保存正文、提纲情节或修改流水')
-  expect(text).toContain('作者要求在聊天中交付完整内容、报告、详细解释或具体改动时按要求展开')
+  expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('简单改动用短段落即可')
+  expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('可用 Markdown 短列表')
+  expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('聊天交代值得关注的变化和影响使用的缺项')
+  expect(SAVED_WORK_CLOSING_GUIDANCE).toContain('作者明确要求在聊天中交付正文、完整计划或报告、详细解释或具体改动时，按原请求完整提供')
   expect(text).toContain('作者指定仅交付标题正文时直接交付所需内容')
   expect(spec).toEqual(before)
 })

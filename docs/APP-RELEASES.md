@@ -5,6 +5,7 @@
 ## 存储与入口
 
 - `/opt/chevoink/app/current` 继续由现有 `scripts/deploy-production.ps1` 管理后端源码和运行时。
+- 公共启动页从 `/var/www/chevoink/current` 提供，首页和 SPA 深链接先经过此入口。启动配色修复需要通过正常的完整 Web 部署一起发布公共 HTML 和首帧脚本。`-ApiOnly` 保留公共 HTML，切换稳定通道只更新下一跳的版本产物。发布后分别核对公共首页、`/studio` 和选中产物的首帧，覆盖浏览器和 Windows WebView。
 - `/srv/chevoink-data/beta-releases/<releaseId>` 保存不可变前端、每文件 SHA256 和受保护的 `manifest.json`。提升到稳定版只改变数据库通道，不移动、重建或覆盖这些字节；旧产物一直保留。
 - `/srv/chevoink-data/release-archives` 是既有完整应用历史归档，独立于新前端产物；本功能不默认复制第二份，也不修改旧归档、数据库或原生安装包。
 - `/api/app-releases/bootstrap` 使用已验证会话、服务端测试员资格与通道记录选版本。URL、请求头和客户端布尔值都不能授予资格。

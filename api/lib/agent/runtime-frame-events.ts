@@ -14,6 +14,8 @@ import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/inte
 import { isDurablePublicWebOperation, projectDurablePublicWeb } from './runtime-public-web.js'
 import { toolActivityReport } from './activity-report.js'
 import { semanticHistoryDigest } from './semantic-compaction.js'
+import { isChapterBodyWriter } from './saved-chapter-work.js'
+import { readSavedChapterWrapUp } from './writing-scope.js'
 
 export const durableMessageId = (rootId: string, turn: number) => `dm-${runtimeJson({ rootId, turn }).hash.slice(0, 48)}`
 const sourceSchema = z.object({ revision: z.number().int().nonnegative(), snapshotHash: z.string(), previousHash: z.string().nullable() }).strict()
@@ -126,7 +128,10 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
       const toolCall = appended.toolCalls?.find(call => call.name !== 'task_respond')
       const metadata = toolCall ? readAgentActivityTitle(raw) : { text: normalizeAgentFinalText(raw) }
       const title = metadata.title && visibleAgentActivityTitle(metadata.title)
-      const prose = humanizeAgentVisibleText(metadata.text)
+      const wrapUp = !toolCall && previous.state.messages.some(message => message.role === 'assistant' && message.toolCalls?.some(call => isChapterBodyWriter(call.name)))
+        ? await readSavedChapterWrapUp(tx, { runId: source.runId, novelId: current.root.novelId, userId: current.root.userId }, metadata.text)
+        : undefined
+      const prose = humanizeAgentVisibleText(wrapUp ?? metadata.text)
       let report = prose
       if (toolCall && !prose.trim()) {
         const hasPriorTool = previous.state.messages.some(message =>

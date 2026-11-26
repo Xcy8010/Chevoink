@@ -234,6 +234,34 @@ describe('current committed manuscript wrap-up', () => {
     delivery.chapters.push({ ...delivery.chapters[0], id: 'other-chapter', orderIndex: 4 })
     expect(completedWritingPresentationText(delivery, '人物仍在等待。')).toBe('已完成第3章《河岸》、第4章《河岸》。\n\n人物仍在等待。')
   })
+  it('removes multiple unlabeled chapter bodies and keeps Markdown summary, source quotation and optional follow-up', async () => {
+    const { delivery } = await current()
+    const first = delivery.chapters[0]
+    const second = { ...first, id: 'other-chapter', title: '北站', orderIndex: 4,
+      content: '末班车已经离站。\n\n阿岚把未寄出的信塞回口袋，沿着站台往回走。' }
+    delivery.chapters.push(second)
+    const summary = '- **剧情推进** 阿岚决定暂时收起那封信。\n- **章末衔接** 可以从守闸人的回答接续。\n- **原句** 第3章保留「北岸闸门只开了半尺」。'
+    const question = '需要我先列出下一章的两个走向吗？'
+    const text = completedWritingPresentationText(delivery, `${summary}\n\n${first.content}\n\n${second.content.replaceAll('\n\n', '\r\n')}\n\n${question}`)
+    expect(text).toBe(`已完成第3章《河岸》、第4章《北站》。\n\n${summary}\n\n${question}`)
+    expect(completedWritingPresentationText(delivery, text)).toBe(text)
+  })
+  it('keeps Markdown findings and the optional question after an explicitly labelled saved body', async () => {
+    const { delivery } = await current()
+    const chapter = delivery.chapters[0]
+    const summary = '- **剧情推进** 阿岚还在等答复。\n- **尚未完成** 卷末校对仍待确认。\n\n需要我先检查下一章的衔接吗？'
+    expect(completedWritingPresentationText(delivery, `正文如下：\n\n## ${chapter.title}\n\n${chapter.content}\n\n${summary}`))
+      .toBe(`已完成第3章《河岸》。\n\n${summary}`)
+  })
+  it('handles long saved chapters both for short summaries and for exact repeated bodies', async () => {
+    const { delivery } = await current()
+    const chapter = delivery.chapters[0]
+    chapter.content = Array.from({ length: 8_000 }, (_, index) => `第${index + 1}段 远处隐隐传来钟声。`).join('\n\n')
+    const summary = '章末留下了钟声的线索。'
+    const expected = `已完成第3章《河岸》。\n\n${summary}`
+    expect(completedWritingPresentationText(delivery, summary)).toBe(expected)
+    expect(completedWritingPresentationText(delivery, `正文如下：\n${chapter.content}\n\n${summary}`)).toBe(expected)
+  })
   it.each(['empty-body', 'missing-commit', 'uncommitted', 'stale-revision', 'other-task'] as const)('cannot present completion for %s evidence', async invalid => {
     const f = await fixture('完成第一章，简要总结。', false)
     if (invalid === 'empty-body') f.chapter.content = ' '

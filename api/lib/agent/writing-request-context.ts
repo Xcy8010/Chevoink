@@ -22,9 +22,12 @@ export function writingPresentationPreference(prompt: string): 'saved_only' | 'f
   let preference: 'saved_only' | 'full_text' | null = null
   for (const clause of text.split(/[。！？!?；;\n，,]+/u)) {
     if (/(?:例如|比如|假如|假设|如果|角色|台词|小说里|他说|她说|作者曾说|example|if\b)/iu.test(clause)) continue
+    // Authors also put the body first, e.g. 「正文全文发我」 or 「把正文贴在聊天里」.
+    const bodyFirst = /(?:正文(?:全文)?|全文|整章正文)\s*(?:(不要|不用|无需|别|不必)\s*)?(?:再)?\s*(?:发给我|发我|给我看|贴出来|贴[在到进](?:聊天|对话|回复)(?:里|中)?)/u.exec(clause)
+    if (bodyFirst?.[1]) { preference = 'saved_only'; continue }
     if (/(?:不要|不用|无需|别|不必|没让|没要求|未要求).{0,24}(?:重复|贴|展示|输出|回复).{0,16}(?:正文|全文|章节内容|第[一二三四五六七八九十\d]+章)|(?:不要|不用|无需|别|没让|没要求).{0,16}(?:正文|全文).{0,16}(?:贴|展示|输出|重复)|(?:只|仅).{0,8}(?:落库|保存|写入章节|写到章节)|(?:不(?:要|用|必)|别).{0,8}重复.{0,8}(?:正文|全文)|(?:do not|don't).{0,16}(?:paste|repeat|display).{0,16}(?:chapter|text)/iu.test(clause)) preference = 'saved_only'
     else if (!/(?:不要|不用|无需|别|不必|禁止|不想|未要求|没让|没要求|前面|之前|原来|曾经)/u.test(clause)
-      && /(?:输出|贴出|展示|回复|给我).{0,16}(?:全文|正文)|(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|(?:paste|display).{0,16}(?:full text|chapter text)/iu.test(clause)) preference = 'full_text'
+      && (bodyFirst || /(?:输出|贴出|展示|回复|给我).{0,16}(?:全文|正文)|(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|(?:paste|display).{0,16}(?:full text|chapter text)|\bonly\b.{0,20}\btitle\b.{0,12}\b(?:body|text)\b/iu.test(clause))) preference = 'full_text'
   }
   return preference
 }
@@ -168,7 +171,7 @@ export function renderChapterWritingBackground(background: ChapterWritingBackgro
 }
 
 export function renderWritingPresentation(preference: WritingPresentation | null, defaultSavedOnly = false): string | null {
-  const wrapUp = '默认先说明实际完成了哪一章或哪些修改，再从本章的人物变化、主要事件和章末落点里选取有意义的内容，写成一个短段落；不盘点工具调用或检查步骤。作者明确要求只给正文、不总结或指定格式时，以其要求为准。'
+  const wrapUp = '按已保存成果的收尾指引说明实际完成的章节和相关变化，篇幅按内容需要取舍。作者明确要求只给正文、不总结或指定格式时，以其要求为准。'
   if (!preference) return defaultSavedOnly ? `[本次聊天交付] 写入章节不等于在聊天贴全文。本次未明确要求展示全文时，核实保存后不要在聊天重复整章正文；${wrapUp}同章历史请求的标题正文格式不跨新任务继承。` : null
   return `[最新真实作者展示偏好；只控制聊天交付]\n${preference.mode === 'saved_only'
     ? `章节写入并核实后，不要在聊天重复标题加整章正文；${wrapUp}旧请求中的“只输出标题与正文”已被此展示偏好撤回；后续重写指令不会自行恢复它。`

@@ -6,6 +6,7 @@ import { runtimeJson } from './runtime-common.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 const bodyWriters = new Set(['chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_create'])
+export const isChapterBodyWriter = (name: string) => bodyWriters.has(name)
 const diff = z.object({ kind: z.literal('chapterDiff'), chapterId: z.string(), before: z.string(), after: z.string(), revision: z.number().int().positive() })
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 
@@ -17,7 +18,7 @@ export async function readCurrentSavedTaskChapters(tx: Prisma.TransactionClient,
   const runIds = await originalTaskRunIds(tx, subject, original)
   const proofs = new Map<string, { after: string; revision: number; sourceHash: string }>()
   const observe = (name: unknown, display: unknown, source: unknown) => {
-    if (typeof name !== 'string' || !bodyWriters.has(name)) return
+    if (typeof name !== 'string' || !isChapterBodyWriter(name)) return
     const parsed = diff.safeParse(display)
     if (!parsed.success || !parsed.data.after.trim() || parsed.data.before === parsed.data.after) return
     proofs.set(parsed.data.chapterId, { after: parsed.data.after, revision: parsed.data.revision, sourceHash: runtimeJson(source).hash })
@@ -30,7 +31,7 @@ export async function readCurrentSavedTaskChapters(tx: Prisma.TransactionClient,
     const state = await (await import('./runtime-state.js')).readExecutionStateInTransaction(tx, run.taskRootId)
     const evidence = await (await import('./runtime-evidence.js')).collectDurableToolEvidence(tx, run.taskRootId, state.frame.revision)
     for (const effect of evidence.effects) {
-      if (!bodyWriters.has(effect.action)) continue
+      if (!isChapterBodyWriter(effect.action)) continue
       const receipt = await tx.agentEffectReceipt.findUniqueOrThrow({ where: { operationId: effect.operationId } })
       observe(effect.action, object(object(receipt.result).toolResult).display, { operationId: effect.operationId, resultHash: receipt.resultHash })
     }

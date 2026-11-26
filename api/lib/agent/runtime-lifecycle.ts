@@ -11,7 +11,10 @@ import { assertRunGoalFence } from './goal-fence.js'
 import { assertChildParentFence, assertPinnedChildCompletion, pauseChildGrants } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
-import { readSavedWritingPresentation, shouldUseSavedWritingPresentation, savedChapterPresentationProof } from './writing-scope.js'
+import { readSavedChapterWrapUp, readSavedWritingPresentation, shouldUseSavedWritingPresentation, savedChapterPresentationProof } from './writing-scope.js'
+import { isChapterBodyWriter } from './saved-chapter-work.js'
+import { normalizeAgentFinalText } from '../../../shared/agent-activity-title.js'
+import { humanizeAgentVisibleText } from './visible-text.js'
 import { assertLimitedWritingDelivery, limitedWritingDeliverySchema } from './writing-delivery-limitations.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { originalPrompt } from './original-request.js'
@@ -68,8 +71,11 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
       if (candidate.content !== limited.text) return runtimeError('RUNTIME_COMPLETION_BLOCKED', '受限交付必须明确展示当前正文未复核的限制。')
     }
     const savedPresentation = candidate.localCompletion ? null : await readSavedWritingPresentation(tx, subject)
-    const chapterPresentation = savedPresentation && shouldUseSavedWritingPresentation(savedPresentation, candidate.content)
+    const wrapUp = !limited && !candidate.localCompletion && !facts.terminalReason && facts.effects.some(effect => effect.outcome === 'succeeded' && isChapterBodyWriter(effect.action))
+      ? await readSavedChapterWrapUp(tx, subject, normalizeAgentFinalText(candidate.content)) : undefined
+    const chapterPresentation = savedPresentation && (!wrapUp || wrapUp === savedPresentation.text) && shouldUseSavedWritingPresentation(savedPresentation, candidate.content)
       ? savedChapterPresentationProof(subject, savedPresentation) : null
+    const chapterWrapUp = !chapterPresentation && wrapUp ? humanizeAgentVisibleText(wrapUp) : undefined
     const spec = taskSpecSchema.safeParse(originalSpec)
     const setup = candidate.localCompletion?.kind === 'novel_setup' ? candidate.localCompletion : null
     const metadataSaved = facts.postconditionChecks.some(check => check.code === 'NOVEL_METADATA_INITIALIZED' && check.status === 'passed'
@@ -106,7 +112,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
       key: `finalize:${frame.revision}`, kind: 'internal', action: 'completion_finalize',
       input: runtimeJson({ sourceRevision: frame.revision, sourceHash: frame.snapshotHash, evidenceHash: evidence.snapshotHash,
         ...(limited ? { limitedWritingDelivery: limited, outcome: limited.outcome } : {}),
-        ...(chapterPresentation ? { chapterPresentation } : {}) }).value,
+        ...(chapterPresentation ? { chapterPresentation } : {}), ...(chapterWrapUp ? { chapterWrapUp } : {}) }).value,
     })
     const receipt = await commitOperationEffectInTransaction(tx, lease, operation.id, operation.inputHash,
       async () => runtimeJson({ version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash,
@@ -114,7 +120,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
         ...(questionFollowup ? { questionFollowup } : {}),
         ...(offersNextPrompt ? { nextPrompt: nextPrompt ?? null } : {}),
         ...(limited ? { limitedWritingDelivery: limited, outcome: limited.outcome } : {}),
-        ...(chapterPresentation ? { chapterPresentation } : {}) }).value)
+        ...(chapterPresentation ? { chapterPresentation } : {}), ...(chapterWrapUp ? { chapterWrapUp } : {}) }).value)
     const next = await saveExecutionStateInTransaction(tx, lease, { ...expected,
       snapshot: { ...frame.state, phase: 'completed' } })
     const completion = await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: run.id, operationId: operation.id,

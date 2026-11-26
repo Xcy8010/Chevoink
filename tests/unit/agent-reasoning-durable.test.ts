@@ -2,7 +2,9 @@ import { expect, it, vi } from 'vitest'
 import type { AgentExecutionOutbox } from '@prisma/client'
 import type { RuntimeTx } from '../../api/lib/agent/runtime-common.js'
 import { persistProjectedMessages, projectExecutionFrame } from '../../api/lib/agent/runtime-frame-events.js'
-import { readExecutionFrame } from '../../api/lib/agent/runtime-state.js'
+import { readExecutionFrame, readExecutionStateInTransaction } from '../../api/lib/agent/runtime-state.js'
+import { readCurrentSavedTaskChapters } from '../../api/lib/agent/saved-chapter-work.js'
+import { readWritingPresentation } from '../../api/lib/agent/writing-request-context.js'
 
 const returned = '先比较人物动机。\\n调用 chapter_read，chapterId=target。\n\n保持完整返回文本。'
 vi.mock('../../api/lib/agent/runtime-state.js', () => ({
@@ -12,6 +14,38 @@ vi.mock('../../api/lib/agent/runtime-state.js', () => ({
   readExecutionStateInTransaction: vi.fn(async () => ({})),
 }))
 vi.mock('../../api/lib/agent/runtime-review-deferral.js', () => ({ projectReviewWriteDeferral: vi.fn(async () => null) }))
+vi.mock('../../api/lib/agent/saved-chapter-work.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/saved-chapter-work.js')>(), readCurrentSavedTaskChapters: vi.fn(),
+}))
+vi.mock('../../api/lib/agent/writing-request-context.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/writing-request-context.js')>(), readWritingPresentation: vi.fn(),
+}))
+
+it.each([false, true])('projects and saves manuscript delivery with explicit full-text preference %s', async fullText => {
+  const chapter = { id: 'chapter', title: '渡口', orderIndex: 1, revision: 2,
+    content: '傍晚，守夜人从小船上跳下来。\n\n他把船票翻过来，认出了发信人的字迹。', contentHash: 'hash', sourceHash: 'proof' }
+  const recap = '- **剧情推进** 渡口的旧线索有了新的指向。\n\n需要我先检查下一章的衔接吗？'
+  const candidate = { role: 'assistant', content: `${recap}\n\n${chapter.content}` }
+  const prior = [{ role: 'assistant', content: null, toolCalls: [{ id: 'write', name: 'chapter_write', arguments: '{}' }] },
+    { role: 'tool', toolCallId: 'write', content: '章节已保存。' }]
+  vi.mocked(readExecutionFrame)
+    .mockResolvedValueOnce({ revision: 2, snapshotHash: 'frame', state: { phase: 'idle', turn: 1, messages: [...prior, candidate] } } as Awaited<ReturnType<typeof readExecutionFrame>>)
+    .mockResolvedValueOnce({ revision: 1, snapshotHash: 'prev', state: { phase: 'awaiting_operation', messages: prior } } as Awaited<ReturnType<typeof readExecutionFrame>>)
+  vi.mocked(readExecutionStateInTransaction).mockResolvedValueOnce({ root: { userId: 'author', novelId: 'novel' } } as Awaited<ReturnType<typeof readExecutionStateInTransaction>>)
+  vi.mocked(readCurrentSavedTaskChapters).mockResolvedValueOnce([chapter])
+  vi.mocked(readWritingPresentation).mockResolvedValueOnce(fullText ? { mode: 'full_text', sourceRunId: 'run', sourceMessageId: 'author-message' } : null)
+  const upsert = vi.fn()
+  const tx = { agentMessage: { findUnique: vi.fn(async () => null), upsert } } as unknown as RuntimeTx
+  const source: AgentExecutionOutbox = { id: 'source', taskRootId: 'root', runId: 'run', operationId: null, sequence: 1n,
+    type: 'execution.state.saved', eventKey: 'state:root:2', payload: { revision: 2, snapshotHash: 'frame', previousHash: null },
+    createdAt: new Date(10), publishedAt: null }
+  const events = await projectExecutionFrame(tx, source)
+  const text = fullText ? candidate.content : recap
+  expect(events).toEqual([{ type: 'text.final', messageId: expect.any(String), text, asReasoning: false }])
+  await persistProjectedMessages(tx, source, 'session', events)
+  expect(upsert.mock.calls[0][0].create.parts).toEqual([{ type: 'text', text }])
+  expect(candidate.content).toContain(chapter.content)
+})
 
 it('projects and saves only full returned reasoning from a committed provider frame', async () => {
   const upsert = vi.fn()

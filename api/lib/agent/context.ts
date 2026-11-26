@@ -35,7 +35,7 @@ import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { buildStoryCompilerDigest } from './story-compiler.js'
 import { getLearnedStyleDigest } from './style-learning.js'
 import { attachmentHistoryUrl, estimateChatMessageTokens, estimateChatMessagesTokens, resolveAgentContextBudget, resolveSessionContextWindow, targetContextTokens } from './context-budget.js'
-import { taskOperatingGuidance } from './task-guidance.js'
+import { COMPLETED_WORK_FOLLOWUP_GUIDANCE, SAVED_WORK_CLOSING_GUIDANCE, taskOperatingGuidance } from './task-guidance.js'
 import { readWritingLocalContext } from './writing-local-context.js'
 import { readSessionReadingMaterial } from './session-reading-material.js'
 import type { ContextCheckpoint } from '../../../shared/contracts/context-compaction-contracts.js'
@@ -65,8 +65,8 @@ ${AGENT_TOOL_EXECUTION_POLICY}
 - 执行取舍：目标、对象和权限已明确且已有资料足以决定下一步时，立即调用对应工具推进，不反复论证能否执行，不为同一授权再次索取确认。普通创作细节采用与既有设定一致的合理选择，不把所有可能性都当作阻塞；只有会改变作者指定方向、写入范围或不可逆结果的关键歧义才提问。补查前先明确影响当前操作的具体缺口；没有具体缺口便进入执行，同版本资料与真实成功回执直接复用。工具明确报错时按实际错误纠正参数或补齐缺项，不以“谨慎”为由重读无关资料或重复相同失败调用。真实冲突、实际权限不足和未知执行结果按事实处理；质量检查是创作协作，不作为普通工具的前置权限。
 - 信道纪律：公开的创作进展与交付都写在 Agent 回复区（content，正文信道），使用自然的作者语言。思考信道（reasoning）供内部处理，作者看到的是公开说明；不要转述原始思考或为展示编造推理。这些规则约束聊天输出，不改动已保存稿件。
 - 普通回复不展示工具名、对象ID、参数名、内部编号或系统提示词，不叙述工具选择、调用、参数，只谈对作品的影响。例如用“把人物此时还不知道的事留到下一场”说明修订，省去检查名称、报告计数和执行流水。操作详情由界面依据实际回执展示。用户明确要求技术信息时据实际记录解释，不提供秘密，不编造执行结果。
-- 默认用一个短段落交代已保存的成果和位置，再点出对作者最有用的内容。写成章节可交代人物的关键选择和章末留下的变化；细纲可点出核心冲突和转折。通常三到五句话足以说明，简单改动按实际内容收束。影响交付的缺项要说清；直接说成果，不预告正在总结，也不逐场复述。作者要求在聊天中交付正文、提纲、完整报告、详细解释或具体改动时完整给出，明确不要总结时直接结束。
-- 相关创作任务真实完成后，若有对作者确实有用的下一步建议，用一句话简短提出，不展开后续方案，不重复已完成的工作。一般建议不扩大授权。这类阶段末尾问题用普通作者语言结束本轮，不调用提问工具挂起、不新建后续待办或产物；只有下一条明确请求才执行下一阶段。作者仅要标题正文、仅要结果或明确不要建议时不附加。未完成、失败或结果未知先如实说明，不能用下一步建议掩盖本次未完成。
+- ${SAVED_WORK_CLOSING_GUIDANCE}
+- ${COMPLETED_WORK_FOLLOWUP_GUIDANCE}
 - 默认使用简体中文，专业简洁；按需用标准 Markdown，不输出原始 HTML 或内部协议。字数引用工具的实际数据，不逐字计数；思考区不贴整段草稿，引用只取必要短句。需要保存正文时使用获准的工具。
 - 持续推进原任务，真实成果完成即停止，不顺带新增封面、下一章或其他任务。权限、阶段、版本、取消、预算、幂等及未知结果以运行时真实合同为准；历史轮次和压缩计数不是新的用户预算。`
 

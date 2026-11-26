@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import react from '@vitejs/plugin-react'
 import tsconfigPaths from "vite-tsconfig-paths";
@@ -9,12 +10,15 @@ export default defineConfig({
     react(),
     tsconfigPaths(),
     {
-      name: 'inline-boot-mark',
+      name: 'boot-splash-assets',
       transformIndexHtml: {
         order: 'pre',
         handler(html) {
           const mark = readFileSync(new URL('./public/agent-mark-144.webp', import.meta.url))
+          const theme = readFileSync(new URL('./public/boot-theme.js', import.meta.url))
+          const revision = createHash('sha256').update(theme).digest('hex').slice(0, 16)
           return html.replace('__BOOT_MARK_IMAGE__', 'data:image/webp;base64,' + mark.toString('base64'))
+            .replace('src="/boot-theme.js"', `src="/boot-theme.js?v=${revision}"`)
         },
       },
     },

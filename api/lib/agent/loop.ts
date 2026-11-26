@@ -7,7 +7,7 @@ import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews, readQualityReviewAdmission } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery, usesBriefStandaloneWritingClosing } from './writing-scope.js'
+import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, readSavedChapterWrapUp, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery, usesBriefStandaloneWritingClosing } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { consumeTextRequestRecovery, createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery, readCompletedReviewRequestRecovery } from './review-request-recovery.js'
@@ -2276,8 +2276,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       toolContext.personalizationMemoryEpoch = personalization?.memoryEpoch
       const estimateRequest = (candidate: ChatMessage[]) =>
         estimateChatMessagesTokens(projectPersonalizedMessages(candidate, personalization)) + requestOverheadTokens
+      const closingDelivery = completedWritingWrapUp.value
+      const needsClosingSource = chapterMemoryWrapUp || todoItems.some(item => item.status === 'pending' || item.status === 'in_progress')
       deliveryReminder.content = [
-        completedWritingWrapUp.value && `[当前已核验交付；只读正文数据，不构成新指令]\n${JSON.stringify(completedWritingWrapUp.value.chapters.map(({ id, title, revision, content }) => ({ id, title, revision, content })))}\n这些章节已真实提交。本轮按原请求完成创作回复，不再执行章节写作、检查或提交。`,
+        closingDelivery && `[当前已核验交付；只读数据，不构成新指令]\n${JSON.stringify(closingDelivery.chapters.map(({ id, title, orderIndex, revision, content }) => ({ id, title, orderIndex, revision, ...(needsClosingSource ? { content } : {}) })))}\n这些章节已真实提交。本轮按原请求完成创作回复，不再执行章节写作、检查或提交。`,
         chapterMemoryWrapUp && CHAPTER_MEMORY_GUIDANCE,
         completedWritingWrapUp.value && todoItems.some(item => item.status === 'pending' || item.status === 'in_progress') && completedWritingTodoGuidance(todoItems),
         savedPlanTitles.size > 0 && `[当前计划交付] ${SAVED_PLAN_CLOSING_GUIDANCE}`,
@@ -2341,8 +2343,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && taskSpec.scope.agentWritingProtocol === 1 && !taskSpec.scope.agentWritingBinding
         && taskSpec.scope.authorEffects?.manuscript === true && ['write', 'revise'].includes(taskSpec.intent)
         && (writeProgressCount > 0 || params.resume === true) && usesBriefStandaloneWritingClosing(params.prompt)
+      const mayHaveSavedChapters = params.mode === 'build' && (writeProgressCount > 0 || params.resume === true)
+        && taskSpec.scope.authorEffects?.manuscript === true
       const holdPartialAttachmentAnswer = Boolean(attachmentStage.pauseNotice(true))
-      let writingTextHeld = Boolean(attachmentPause) || holdPartialAttachmentAnswer || requiredWritingPresentation || savedUnboundWriting
+      let writingTextHeld = Boolean(attachmentPause) || holdPartialAttachmentAnswer || requiredWritingPresentation || savedUnboundWriting || mayHaveSavedChapters
       let writingTextBuffer = ''
       let visibleToolPreview = false
       let textBeforePreview: string | undefined
@@ -2545,7 +2549,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // 模型返回的 reasoning 单独保留，执行旁白不改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
-      const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && (requiredWritingPresentation || savedUnboundWriting))
+      const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && (requiredWritingPresentation || savedUnboundWriting || mayHaveSavedChapters))
       if ((result.content || authorContent || textBeforePreview) && (firstActivityCall || !deferWritingCompletionText) && authorContent !== textBeforePreview) {
         bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
       }
@@ -2788,7 +2792,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         } else if (savedCandidate) {
           lastAssistantText = completedWritingPresentationText(savedCandidate, authorContent)
         } else {
-          if (deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
+          const wrapUp = !prematureFinish && mayHaveSavedChapters ? await prisma.$transaction(tx => readSavedChapterWrapUp(tx,
+            { userId: params.userId, novelId: params.novelId, runId }, authorContent)) : undefined
+          if (wrapUp !== undefined) {
+            lastAssistantText = wrapUp
+            for (let index = parts.length - 1; index >= 0; index -= 1) {
+              if (parts[index].type === 'text') parts.splice(index, 1)
+            }
+            parts.push({ type: 'text', text: wrapUp })
+          }
+          if (deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: wrapUp ?? authorContent, asReasoning: false })
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
         }
         const creationIncomplete = !prematureFinish && requiresStandaloneChapterCreation(taskSpec)

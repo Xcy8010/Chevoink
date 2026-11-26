@@ -248,10 +248,12 @@ describe('same-state admission and continuation', () => {
     expect(promisesFurtherAction('第七章已完成落库与校验。')).toBe(false)
   })
   it('ends on optional advice but retains actual execution promises in mixed replies', () => {
-    for (const text of ['下一步建议补齐大纲。', '下一步可以考虑修订人物档案。', '建议先检查人物关系，再补齐大纲。', '如果继续创作，可以先写正文。', '第一章已完成。下一步建议完善封面和标签。']) {
+    for (const text of ['下一步建议补齐大纲。', '下一步可以考虑修订人物档案。', '建议先检查人物关系，再补齐大纲。', '如果继续创作，可以先写正文。', '第一章已完成。下一步建议完善封面和标签。',
+      '需要我先检查下一章的衔接吗？', '- **下一步** 要不要我先写正文？']) {
       expect(promisesFurtherAction(text), text).toBe(false)
     }
-    for (const text of ['下一步建议完善封面，我现在先修订正文。', '第一章已完成，接下来我会检查第二章。', '建议稍后再看，我马上写入正文。']) {
+    for (const text of ['下一步建议完善封面，我现在先修订正文。', '第一章已完成，接下来我会检查第二章。', '建议稍后再看，我马上写入正文。',
+      '我现在先检查第二章，需要我再写第三章吗？']) {
       expect(promisesFurtherAction(text), text).toBe(true)
     }
   })

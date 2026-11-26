@@ -555,8 +555,8 @@ it.each([
     return response('', [plan])
   }).mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
     const instructions = input.messages.map(message => typeof message.content === 'string' ? message.content : '').join('\n')
-    expect(instructions).toContain('说明计划名称和位置，点出核心冲突、关键转折或与前章的衔接')
-    expect(instructions).toContain('作者要求在聊天里交付计划、详细解释或完整内容时，按原请求完整提供')
+    expect(instructions).toContain('说明作品树「计划」中的名称和本次最有用的安排')
+    expect(instructions).toContain('作者同时要求在聊天中交付完整计划或解释时，按原请求提供')
     return response(closing)
   })
   await run(prompt)
@@ -1075,7 +1075,11 @@ describe('server assessment fallback in the real execution loop', () => {
         ({ ...ref, reason: 'The full current evidence does not justify changing the manuscript; preserve this independent opinion for the author.' })) }))])
     })
     mocks.chat.mockImplementationOnce(async request => {
-      if (scenario !== 'missing-tool') expect(request.messages.some(message => message.content?.includes('[当前已核验交付') && message.content.includes(body))).toBe(true)
+      if (scenario !== 'missing-tool') {
+        const deliveryMessage = request.messages.find(message => message.content?.includes('[当前已核验交付'))
+        expect(deliveryMessage?.content).toContain('这些章节已真实提交')
+        expect(deliveryMessage?.content).not.toContain(body)
+      }
       return response('本章延续人物的选择，让后续线索逐步展开。')
     })
     // The loop-only suite supplies its existing explicit committed-delivery
@@ -4257,7 +4261,9 @@ describe('recovered committed writing uses the ordinary creative wrap-up', () =>
     mocks.chat.mockImplementationOnce(async request => {
       expect(request.model).toBe('selected-current-model')
       expect(request.toolChoice).not.toBe('required')
-      expect(request.messages.some(message => message.content?.includes('[当前已核验交付') && message.content.includes(mocks.chapters[0].content))).toBe(scenario !== 'batch-only-prose')
+      const deliveryMessage = request.messages.find(message => message.content?.includes('[当前已核验交付'))
+      expect(Boolean(deliveryMessage)).toBe(scenario !== 'batch-only-prose')
+      if (deliveryMessage) expect(deliveryMessage.content).not.toContain(mocks.chapters[0].content)
       return model
     })
     const writing = await import('../../api/lib/agent/writing-scope.js')

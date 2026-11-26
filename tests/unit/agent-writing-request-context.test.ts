@@ -37,10 +37,8 @@ describe('owned author presentation', () => {
   it.each(['default', 'saved_only'] as const)('keeps a natural story wrap-up without repeating prose: %s', mode => {
     const preference = mode === 'saved_only' ? { mode, sourceRunId: 'author', sourceMessageId: 'message' } : null
     const text = renderWritingPresentation(preference, true)
-    expect(text).toContain('默认先说明实际完成了哪一章或哪些修改')
-    expect(text).toContain('本章的人物变化、主要事件和章末落点')
-    expect(text).toContain('不盘点工具调用或检查步骤')
-    expect(text).toContain('写成一个短段落')
+    expect(text).toContain('说明实际完成的章节和相关变化')
+    expect(text).toContain('篇幅按内容需要取舍')
     expect(text).toContain('不要在聊天重复')
     expect(text).toContain('作者明确要求只给正文、不总结或指定格式时，以其要求为准')
     expect(text).not.toContain('只简短确认')
@@ -56,6 +54,15 @@ describe('owned author presentation', () => {
   })
   it('leaves presentation unset when neither preference nor saved-only default applies', () => {
     expect(renderWritingPresentation(null)).toBeNull()
+  })
+  it.each(['写下一章并保存，把完整正文贴在聊天里', '修改本章，正文全文发我', '保存后，整章正文给我看', 'Write the chapter. Output only the title and body.'])('preserves explicit chat delivery in the author’s wording: %s', async prompt => {
+    expect(writingPresentationPreference(prompt)).toBe('full_text')
+    const { db } = fixture([run('rewrite', prompt, 30)])
+    expect(await readWritingPresentation(db, subject, targets)).toMatchObject({ mode: 'full_text', sourceRunId: 'rewrite' })
+  })
+  it('distinguishes body-first chat delivery from withdrawal and writing into the editor', () => {
+    expect(writingPresentationPreference('正文全文不要再发我')).toBe('saved_only')
+    expect(writingPresentationPreference('把正文贴进编辑器')).toBeNull()
   })
   it.each(['例如“只输出标题与正文”', '> 不要重复正文', '小说里角色说“不要贴全文”', '如果作者说不要输出正文', '不要使用“输出全文”这个示例'])('does not infer from quoted or hypothetical text: %s', text => {
     expect(writingPresentationPreference(text)).toBeNull()
