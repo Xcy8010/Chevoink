@@ -3,6 +3,7 @@
  * 由 StudioWorkspace.tsx 模块级拆分而来（声明顺序与原文件一致）。
  */
 import type { Chapter, StudioPayload } from '../../../../shared/contracts/index.js'
+import { orderPlanFiles } from '../../../../shared/plan-order.js'
 import type { NovelPlanFileItem } from '../api'
 import type { AgentArtifact, AgentLocalRollbackSnapshot, ChapterDraftState, ChapterPendingReview, PlanSavedSnapshot, WorkspacePlanFile } from '../types'
 
@@ -341,7 +342,7 @@ export function mergeServerPlanFile(item: NovelPlanFileItem, previous?: Workspac
 }
 
 /** Saved server text replaces historical caches; only explicit author drafts keep their body and baseline. */
-export function mergeWorkspacePlanFiles(localPlans: WorkspacePlanFile[], serverPlanFiles: WorkspacePlanFile[]): WorkspacePlanFile[] {
+export function mergeWorkspacePlanFiles(localPlans: WorkspacePlanFile[], serverPlanFiles: WorkspacePlanFile[], chapters: Pick<Chapter, 'id' | 'orderIndex'>[] = [], byChapter = true): WorkspacePlanFile[] {
   const serverByBackendId = new Map(serverPlanFiles.filter(plan => plan.backendArtifactId).map(plan => [plan.backendArtifactId, plan]))
   const orderedLocalPlans = localPlans.map(plan => {
     const server = plan.backendArtifactId ? serverByBackendId.get(plan.backendArtifactId) : undefined
@@ -359,7 +360,5 @@ export function mergeWorkspacePlanFiles(localPlans: WorkspacePlanFile[], serverP
     }
   })
   const localBackendIds = new Set(orderedLocalPlans.map(plan => plan.backendArtifactId).filter(Boolean))
-  return [...orderedLocalPlans, ...serverPlanFiles.filter(plan => !plan.backendArtifactId || !localBackendIds.has(plan.backendArtifactId))]
-    .sort((left, right) => (left.orderIndex ?? Number.MAX_SAFE_INTEGER) - (right.orderIndex ?? Number.MAX_SAFE_INTEGER)
-      || new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
+  return orderPlanFiles([...orderedLocalPlans, ...serverPlanFiles.filter(plan => !plan.backendArtifactId || !localBackendIds.has(plan.backendArtifactId))], chapters, byChapter)
 }

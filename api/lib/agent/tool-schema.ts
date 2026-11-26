@@ -1,4 +1,5 @@
 import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
+import { sequentialWritingEnabled } from './sequential-writing-rollout.js'
 import { z } from 'zod'
 import { legacyMemorySaveParameters, legacyMemorySearchParameters, previousMemorySaveParameters } from './memory-tool-parameters.js'
 import { storyCharterInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
@@ -21,16 +22,35 @@ export function toOpenAIParameters(parameters: z.ZodType): Record<string, unknow
 const LEGACY_QUALITY_REVIEW_DESCRIPTION = 'Humanity Quality Gate 的 CHECK 步骤。用于评估整章或完整长场景的人类感质量：当作者明确要求判断「有没有 AI 味 / 像不像 AI 写的」「文风是否自然、像真人」「要不要通篇精修润色」，或在整章写完要求深度审阅、或 Story Compiler 进入 CHECK 时，都必须调用本工具，而不是自己只读正文下结论。服务端先运行确定性统计，再启动与 Writer 隔离的 Critic；每条模型意见必须逐字定位正文才能保存。严谨创作可在本任务可写范围内有界自动修订。只看不改或改后只读复核传 readOnly=true。平衡创作与大胆创作只展示报告。标题、元数据、局部错字、单句润色、纯剧情/设定/写作建议等普通问答禁止触发。不得把科幻术语、华丽文风、口语或无悬念结尾按词表误判。'
 
 const importModelParameters = toOpenAIParameters(novelImportModelArguments)
+const previousWritingDescriptions: Record<string, string> = {
+  chapter_create: "建立只有标题与位置的空章节，取得真实 chapterId；本工具负责章节身份和结构，正文由后续 chapter_write 写入。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。作者说“全书第 N 章”时只传 position=N；作者说“第 M 卷第 N 章/卷内第 N 章”时传 volumeOrder=M（或 volumeId）与 positionInVolume=N，两个坐标系不得混用。沿用现有卷时不要传newVolume；新任务需要新卷时先用volume_create取得真实volumeId；newVolume保留旧冻结请求兼容。未指定位置时紧接全书最后一个已有章节。已有目标或恢复时先核对真实身份，复用已绑定章节；已有正文先读后按原请求修改，不重建或覆盖已完成内容。创建成功后使用返回的 chapterId 调用 chapter_write，不能把创建空章说成正文已写完。",
+  chapter_write: "用新内容整体覆盖指定章节的正文。标题由独立 title 字段展示，正文默认从叙事开始，并沿用前章排版，不在正文首行重复章号或章名；作者明确要求正文含标题或作品已有此格式时照其要求。需要已存在的 chapterId（新章节请先 chapter_create）。覆盖前建议先 chapter_read 了解现有内容；如只是接着写请用 chapter_append。覆盖前必须确认该章节确实是作者所指：作者按「第N章」指称时，若该排位章节的标题序号对不上（作者删过章导致错位），不要覆盖，改用 chapter_create 传 position 在正确位置插入。",
+  chapter_append: "把生成的内容追加到指定章节正文末尾（自动补一个空行分隔），用于续写场景。",
+  plan_save: "把创作计划写入作品树「计划」文件夹。规划诉求必须落盘完整目标。长计划按完整小节分次写入，每次建议不超过2000字符且独立调用；首次保存首节，后续mode=append带planId和expectedContentHash追加，直到全部完成。修订已有计划必须传planId就地更新，不另建同名副本；新建时planKind必须明确outline大纲或detail细纲；大纲管主线、阶段、转折、结局，细纲管单章行动、冲突、结果、人物场景、伏笔衔接。细纲用parentPlanId和expectedParentPlanHash绑定已读取大纲，用target绑定真实chapterId或future全书序号；未关联草稿不能用于章节执行。修订typed计划带planHash作为expectedPlanHash；父大纲变化后明确核对并提交expectedParentPlanHash。默认replace替换全文，无planId只在相同类型、父大纲和目标内匹配。查看先plan_read，不重写代替读取。不要把计划全文粘贴在回复里。",
+}
+
+function previousChapterBody(name: string, schema: Record<string, unknown>) {
+  const description = name === 'chapter_write' ? '目标章节 ID；缺省时默认写入最近操作/当前正在编辑的章节'
+    : '目标章节 ID；缺省时默认追加到最近操作/当前正在编辑的章节'
+  const properties = schema.properties as Record<string, Record<string, unknown>>
+  return { ...schema, properties: Object.fromEntries(Object.entries(properties)
+    .filter(([key]) => key !== 'targetOrderIndex')
+    .map(([key, value]) => [key, key === 'chapterId' ? { ...value, description } : value])) }
+}
 
 /** Execution still parses the original full schema and validates scope. */
 export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope'], baseParameters?: Record<string, unknown>): { strict: false; description: string; parameters: Record<string, unknown> } {
   if (tool.name === 'quality_analyze' && !chapterReviewWorkflowEnabled({ scope })) {
     tool = { ...tool, description: LEGACY_QUALITY_REVIEW_DESCRIPTION }
   }
+  const sequential = sequentialWritingEnabled({ scope })
+  if (!sequential && previousWritingDescriptions[tool.name]) tool = { ...tool, description: previousWritingDescriptions[tool.name] }
   // Chat defaults to non-strict; Responses may normalize an omitted strict
   // flag and make optional fields required. Keep our existing omission-based
   // input contract explicit across compatible API gateways.
-  const parameters = baseParameters ?? toOpenAIParameters(tool.parameters)
+  const base = baseParameters ?? toOpenAIParameters(tool.parameters)
+  const parameters = !sequential && (tool.name === 'chapter_write' || tool.name === 'chapter_append')
+    ? previousChapterBody(tool.name, base) : base
   if (tool.name === 'ask_user' && !scope?.agentQuestionProtocol) {
     const legacy = toOpenAIParameters(legacyAskUserParameters)
     const properties = legacy.properties as Record<string, Record<string, unknown>>
@@ -81,10 +101,13 @@ function toolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parame
 /** Exact alternatives for immutable legacy or server-frozen presentations.
  * Callers must supply scope from the verified original task, never model input. */
 export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope: TaskSpec['scope']): Record<string, unknown>[] {
+  const hasChapterPosition = tool.name === 'chapter_write' || tool.name === 'chapter_append'
   if (scope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === tool.name)) {
-    return [toOpenAIParameters(tool.parameters), toOpenAIParameters(coordinatedWriterParameters(tool, scope))]
+    const original = [toOpenAIParameters(tool.parameters), toOpenAIParameters(coordinatedWriterParameters(tool, scope))]
+    return hasChapterPosition ? [...original, ...original.map(schema => previousChapterBody(tool.name, schema))] : original
   }
   const current = toOpenAIParameters(tool.parameters)
+  if (hasChapterPosition) return [current, previousChapterBody(tool.name, current)]
   if (tool.name === 'memory_search') return [current, toOpenAIParameters(legacyMemorySearchParameters)]
   if (tool.name === 'memory_save') {
     const legacy = toOpenAIParameters(legacyMemorySaveParameters)

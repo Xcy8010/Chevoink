@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { Prisma } from '@prisma/client'
+import type { AgentArtifact, Prisma } from '@prisma/client'
 import { planTargetSchema, type PlanKind, type PlanTarget, type PlanMetadataPatch, type PlanLinkFields } from '../../../shared/contracts/novel-plans.js'
 import { DataAccessError } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
@@ -45,6 +45,60 @@ export async function findPlanByIdentity(db: Prisma.TransactionClient, userId: s
       && JSON.stringify(planTarget(row.metadata)) === JSON.stringify(target.success ? target.data : null)))
   if (kind !== 'legacy' && matches.length > 1) throw new DataAccessError(409, 'PLAN_TARGET_AMBIGUOUS', '同类型、关联和目标有多份同名计划，请明确 planId，未猜选或覆盖。')
   return matches[0] ?? null
+}
+
+type PlanWriteIdentity = PlanMetadataPatch & { title?: string; planId?: string; mode?: 'replace' | 'append'; expectedContentHash?: string }
+
+export async function findOwnedPlan(db: Prisma.TransactionClient, userId: string, novelId: string, planId: string) {
+  return db.agentArtifact.findFirst({ where: { id: planId, artifactType: 'chapterPlan', run: { userId, novelId } } })
+}
+
+/** A chapter selector and an exact saved title can recover an incorrect or absent
+ * ID. The caller still verifies the selected file's own observed version. */
+export async function resolveDetailPlanWrite(db: Prisma.TransactionClient, userId: string, novelId: string, args: PlanWriteIdentity,
+  explicit: AgentArtifact | null): Promise<{ id: string | null; plan: AgentArtifact | null } | undefined> {
+  const explicitKind = explicit ? planKind(explicit.metadata) : null
+  const explicitTarget = explicit && explicitKind === 'detail' ? planTarget(explicit.metadata) : null
+  if (args.planKind === 'outline') {
+    if (!explicitTarget) return undefined
+    throw new DataAccessError(409, 'PLAN_TARGET_CONFLICT', '编号指向已绑定章节的细纲。保存大纲时请使用大纲的编号；已保存细纲保持原样。')
+  }
+  const title = args.title?.trim()
+  const mismatchedTitle = Boolean(explicit && title && title !== explicit.title && (explicitTarget || args.mode === 'append'))
+  const mismatchedTarget = Boolean(args.target && explicitTarget && JSON.stringify(args.target) !== JSON.stringify(explicitTarget))
+  const wrongDraft = Boolean(args.target && args.planKind === 'detail' && explicit && !explicitTarget
+    && (explicitKind !== 'detail' || explicit.title !== title))
+  if (mismatchedTarget && args.target && explicitTarget && args.target.kind !== explicitTarget.kind) {
+    const chapter = args.target.kind === 'chapter' ? args.target : explicitTarget.kind === 'chapter' ? explicitTarget : null
+    const future = args.target.kind === 'future' ? args.target : explicitTarget.kind === 'future' ? explicitTarget : null
+    if (chapter && future && await db.chapter.findFirst({ where: { id: chapter.chapterId, orderIndex: future.targetOrderIndex,
+      authorId: userId, ...activeChapterScope(novelId) }, select: { id: true } })) return undefined
+  }
+  if (explicitTarget && args.target && !mismatchedTarget) return undefined
+  if (!mismatchedTarget && !mismatchedTitle && !wrongDraft && (explicit || (!args.planId && args.mode !== 'append'))) return undefined
+  if (mismatchedTitle && !args.target && args.mode !== 'append') {
+    if (explicit && explicit.id === args.planId && (args.expectedPlanHash === novelPlanHash(explicit)
+      || args.expectedContentHash === createHash('sha256').update(explicit.content).digest('hex'))) return undefined
+    throw new DataAccessError(409, 'PLAN_TARGET_CONFLICT',
+      '计划编号与标题指向不同的写入目标。替换时请带明确的章节目标或该文件的核对版本，已保存内容保持原样。')
+  }
+  if (!args.target && !mismatchedTitle && args.mode !== 'append') return undefined
+  if (title) {
+    const candidates = await db.agentArtifact.findMany({ where: { title, artifactType: 'chapterPlan',
+      metadata: { path: ['savedAsPlan'], equals: true }, run: { userId, novelId } } })
+    const matches = candidates.filter(plan => {
+      const target = planTarget(plan.metadata)
+      return planKind(plan.metadata) === 'detail' && target && (!args.target || JSON.stringify(args.target) === JSON.stringify(target))
+        && (args.parentPlanId === undefined || args.parentPlanId === null && args.mode === 'append'
+          || (planMetadata(plan.metadata).parentPlanId ?? null) === args.parentPlanId)
+    })
+    if (matches.length > 1) throw new DataAccessError(409, 'PLAN_TARGET_AMBIGUOUS', '计划标题对应多份细纲。请带准确的目标章号或计划编号，已保存内容保持原样。')
+    if (matches.length === 1) return { id: matches[0].id, plan: matches[0] }
+  }
+  if (args.target && args.planKind === 'detail' && args.mode !== 'append') return { id: null, plan: null }
+  if (mismatchedTarget || mismatchedTitle || wrongDraft) throw new DataAccessError(409, 'PLAN_TARGET_CONFLICT',
+    '计划编号与这一节的目标不一致。新章请传细纲类型、父大纲和目标章号，回头修改请使用原计划名和编号。已保存内容保持原样。')
+  return undefined
 }
 
 export async function applyPlanMetadataPatch(db: Prisma.TransactionClient, userId: string, novelId: string,

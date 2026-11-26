@@ -20,6 +20,20 @@ function settings(plan = detail, plans = [parent, detail]) {
   return { props, ...render(<PlanSettingsPanel {...props} />) }
 }
 
+it('sorts related numbered details while preserving manual, unrelated and unlinked slots after merge', () => {
+  const plan = (id: string, day: number, changes: Partial<WorkspacePlanFile> = {}): WorkspacePlanFile =>
+    ({ ...detail, id, backendArtifactId: id, artifactId: id, createdAt: `2026-11-${day}`, ...changes })
+  const files = [
+    plan('17', 10, { target: { kind: 'future', targetOrderIndex: 17 } }),
+    plan('other-parent', 11, { parentPlanId: 'other' }),
+    plan('unlinked', 12, { target: null }),
+    plan('16', 13, { target: { kind: 'chapter', chapterId: 'chapter-16' } }),
+    plan('18', 14, { orderIndex: 1, target: { kind: 'future', targetOrderIndex: 18 } }),
+  ]
+  const merged = mergeWorkspacePlanFiles([], files, [{ id: 'chapter-16', orderIndex: 16 }])
+  expect(merged.map(item => item.id)).toEqual(['18', '16', 'other-parent', 'unlinked', '17'])
+})
+
 it('preserves server link fields and exact body whitespace in its workspace mapping', () => {
   const item: NovelPlanFileItem = { ...detail, id: 'd1', runId: 'r1', updatedAt: '', orderIndex: 2, planKind: 'detail', planHash: 'd-v1', parentPlanId: 'p1', parentPlanHash: 'p-v1', target: detail.target!, reviewState: 'stale' }
   expect(buildServerPlanFile(item)).toMatchObject({ id: 'server-d1', content: '\n自由原文\n', planKind: 'detail', planHash: 'd-v1', parentPlanId: 'p1', parentPlanHash: 'p-v1', target: { kind: 'future', targetOrderIndex: 21 }, reviewState: 'stale' })

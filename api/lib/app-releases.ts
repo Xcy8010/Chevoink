@@ -65,10 +65,16 @@ export async function hasGenerativeContentPolicyCapability(userId:string,tx:Tran
  return manifest.capabilities.includes('generativeContentPolicy')
 }
 export async function hasChapterReviewWorkflowCapability(userId:string,tx:Transaction=prisma):Promise<boolean>{
+ return (await readWritingWorkflowCapabilities(userId,tx)).chapterReviewWorkflow
+}
+export async function readWritingWorkflowCapabilities(userId:string,tx:Transaction=prisma){
  const {selected}=await selectAccountAssignment(tx,userId)
- if(!selected)return false
+ if(!selected)return {chapterReviewWorkflow:false,sequentialWriting:false}
  const {manifest}=await readVerifiedRelease(tx,selected.releaseId)
- return manifest.capabilities.includes('chapterReviewWorkflow')
+ return {
+  chapterReviewWorkflow:manifest.capabilities.includes('chapterReviewWorkflow'),
+  sequentialWriting:manifest.capabilities.includes('sequentialWriting'),
+ }
 }
 async function selectAssignedRelease(tx:Transaction,selected:AppReleaseChannel,channel:'stable'|'test'):Promise<AppReleaseBootstrap>{
  const {row,manifest}=await readVerifiedRelease(tx,selected.releaseId)

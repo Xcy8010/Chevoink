@@ -53,6 +53,7 @@ const inputSchema = z.object({ input: z.object({ callId: z.string(), normalizati
 const resultSchema = z.object({ toolResult: z.object({ output: z.string(),
   observedMemories: z.array(z.object({ kind: z.literal('memory'), id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) })).optional(),
   observedStructure: z.object({ kind: z.literal('structure'), id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) }).optional(),
+  chapterCreateReuse: z.object({ chapterId: z.string() }).passthrough().optional(),
   observedState: z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('chapter'), id: z.string(), revision: z.number().int().positive() }),
     z.object({ kind: z.literal('plan'), id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) }),
@@ -74,12 +75,16 @@ const resultSchema = z.object({ toolResult: z.object({ output: z.string(),
 
 /** Only observations already reduced into this cursor can authorize a baseline.
  * Never query today's content revision to silently upgrade an old write. */
-export async function readObservedBaseline(tx: RuntimeTx, rootId: string, revision: number, target: { kind: 'chapter' | 'plan' | 'structure' | 'memory' | 'novel' | 'charter' | 'changeset'; id: string }) {
+export async function readObservedBaseline(tx: RuntimeTx, rootId: string, revision: number, target:
+  { kind: 'chapter'; id?: string; creationOnly?: boolean } | { kind: 'plan' | 'structure' | 'memory' | 'novel' | 'charter' | 'changeset'; id: string }) {
   let afterId: string | undefined
   let best: { revision: number; baseline: NonNullable<z.infer<typeof resultSchema>['toolResult']['observedState'] | z.infer<typeof resultSchema>['toolResult']['observedStructure']> | { kind: 'memory'; id: string; hash: string } } | undefined
   for (;;) {
     const operations = await tx.agentOperation.findMany({ where: { taskRootId: rootId, kind: 'tool', status: 'succeeded',
-      action: { in: target.kind === 'changeset' ? ['bulk_replace_preview', 'entity_rename_preview', 'changeset_apply', 'changeset_rollback'] : target.kind === 'charter' ? ['story_charter_get', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'] : target.kind === 'novel' ? ['novel_get_context', 'novel_rename', 'novel_update_meta', 'cover_prompt_set'] : target.kind === 'memory' ? ['memory_search', 'memory_save', 'memory_event_save', 'memory_relation_save'] : target.kind === 'chapter' ? ['chapter_read', 'chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename', 'chapter_move', 'chapter_move_to_volume', 'chapter_merge', 'continuity_validate', 'quality_analyze']
+      action: { in: target.kind === 'changeset' ? ['bulk_replace_preview', 'entity_rename_preview', 'changeset_apply', 'changeset_rollback'] : target.kind === 'charter' ? ['story_charter_get', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'] : target.kind === 'novel' ? ['novel_get_context', 'novel_rename', 'novel_update_meta', 'cover_prompt_set'] : target.kind === 'memory' ? ['memory_search', 'memory_save', 'memory_event_save', 'memory_relation_save']
+        : target.kind === 'chapter' && target.creationOnly ? ['chapter_create']
+        : target.kind === 'chapter' && !target.id ? ['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range']
+        : target.kind === 'chapter' ? ['chapter_read', 'chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename', 'chapter_move', 'chapter_move_to_volume', 'chapter_merge', 'continuity_validate', 'quality_analyze']
         : target.kind === 'structure' ? ['volume_list', 'structure_outline', 'volume_update', 'volume_move', 'volume_delete', 'chapter_move', 'chapter_move_to_volume', 'chapter_split', 'chapter_merge'] : ['plan_read', 'plan_save', 'plan_rename', 'plan_delete'] } },
       orderBy: { id: 'asc' }, take: 100, ...(afterId ? { cursor: { id: afterId }, skip: 1 } : {}), include: { effectReceipt: true } })
     for (const operation of operations) {
@@ -92,8 +97,9 @@ export async function readObservedBaseline(tx: RuntimeTx, rootId: string, revisi
       const result = resultSchema.safeParse(receipt.result)
       if (!result.success) runtimeError('RUNTIME_RECEIPT_INVALID', '写入基线观察格式无效。')
       const value = result.data!.toolResult
+      if (target.kind === 'chapter' && target.creationOnly && value.chapterCreateReuse) continue
       const baseline = target.kind === 'memory' ? value.observedMemories?.find(item => item.id === target.id) : target.kind === 'structure' ? value.observedStructure : value.observedState ?? (value.display?.kind === 'chapterDiff' ? { kind: 'chapter' as const, id: value.display.chapterId, revision: value.display.revision } : undefined)
-      if (!baseline || baseline.kind !== target.kind || baseline.id !== target.id) continue
+      if (!baseline || baseline.kind !== target.kind || target.id !== undefined && baseline.id !== target.id) continue
       const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `effect:${operation.id}` } })
       if (!event || event.taskRootId !== rootId || event.operationId !== operation.id || event.type !== 'effect.committed'
         || runtimeJson(event.payload).hash !== runtimeJson({ operationId: operation.id, resultHash: receipt.resultHash }).hash) runtimeError('RUNTIME_RECEIPT_INVALID', '写入基线缺少对应持久事件。')

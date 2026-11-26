@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { sequentialWritingEnabled } from './sequential-writing-rollout.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import type { TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
@@ -674,7 +675,7 @@ export async function resolveWritingCreateTarget(tx: Prisma.TransactionClient, s
     && (args.positionInVolume === undefined || args.positionInVolume === chapter.orderInVolume)
   if (existing && !matchesPlacement(existing)) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '显式创建位置与已绑定章节不一致，本次未创建或复用其他章节。')
   const bounded = scope.writing?.kind === 'bounded' ? scope.writing : null
-  const slot = bounded?.targets.find(target => {
+  const matchingTargets = bounded?.targets.filter(target => {
     const boundId = target.chapterId ?? scope.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId
     if (existingChapterId && boundId !== existingChapterId) return false
     if (args.position !== undefined && target.orderIndex !== args.position) return false
@@ -690,6 +691,10 @@ export async function resolveWritingCreateTarget(tx: Prisma.TransactionClient, s
     return position <= count + 1 && (target.positionInVolume === undefined || position === target.positionInVolume)
       && target.orderIndex === chapters.filter(item => item.volume.orderIndex < volume.orderIndex).length + position
   })
+  const nextUnbound = sequentialWritingEnabled(scope.spec) && args.position === undefined && args.positionInVolume === undefined && !existingChapterId
+    ? matchingTargets?.find(target => !target.chapterId && !scope.bindings?.targets.some(binding => binding.orderIndex === target.orderIndex))
+    : undefined
+  const slot = nextUnbound ?? matchingTargets?.[0]
   if (bounded && !slot) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '显式创建目标不匹配原始请求的冻结章节范围，本次未创建或复用其他章节。')
   await assertWritingTarget(tx, subject, existing ? { chapterId: existing.id, effect: 'create' }
     : { orderIndex: slot?.orderIndex ?? args.position, effect: 'create' })

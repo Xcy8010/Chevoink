@@ -1,12 +1,14 @@
 import { bindCreatedChapterWritingPlan } from '../writing-plan-context.js'
 import { readSemanticStructureHash } from '../semantic-progress.js'
 import { bindWritingChapter, readWritingScope, resolveWritingCreateTarget, originalSelectionBoundary } from '../writing-scope.js'
+import { sequentialWritingEnabled } from '../sequential-writing-rollout.js'
 import { assertLocalEditArguments, originalLocalEditBoundary } from '../local-edit-scope.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 
 import { DataAccessError, prisma } from '../../prisma.js'
-import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordCreatedChapter } from '../baseline.js'
+import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordChapterWrite, recordCreatedChapter } from '../baseline.js'
+import { isBodyWriteAction, resolveChapterWriteTarget } from '../chapter-write-target.js'
 import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { readChapterReviewWriteAdmission, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
@@ -69,19 +71,40 @@ async function resolveChapterId(ctx: ToolContext, chapterId: string | undefined)
 }
 
 const MISSING_CHAPTER_HINT =
+  '还没有可写入的目标章。已有章请用实际 chapterId 或全书章号 targetOrderIndex；新章先用 chapter_create 建立，然后继续写入。'
+const legacyMissingChapterHint =
   '未传 chapterId 且当前没有正在编辑的章节。请先用 novel_get_context 查看章节列表拿到 chapterId，或用 chapter_create 新建章节。'
+
+const sequentialWriting = (ctx: ToolContext) => ctx.sequentialWritingEnabled ?? sequentialWritingEnabled({ scope: ctx.writingScope })
+
+function preparedChapterId(ctx: ToolContext, chapterId?: string) {
+  if (ctx.durableContent && !ctx.durableContent.cursor) return chapterId?.trim() || ctx.durableContent.chapterId
+  return ctx.durableContent?.chapterId ?? ctx.resolvedWriteChapterId
+}
+
+async function resolveBodyWriteChapter(ctx: ToolContext, action: Parameters<typeof resolveChapterWriteTarget>[2],
+  args: { chapterId?: string; targetOrderIndex?: number }) {
+  if (!sequentialWriting(ctx)) return resolveChapterId(ctx, args.chapterId)
+  return preparedChapterId(ctx, args.chapterId) ?? resolveChapterWriteTarget(ctx.transaction ?? prisma, ctx, action, args)
+}
+
+function recordWritingTarget(ctx: ToolContext, chapterId: string, revision: number) {
+  if (ctx.transaction) return
+  if (ctx.inlineChild || !sequentialWriting(ctx)) recordChapterBaseline(ctx.runId, chapterId, revision)
+  else recordChapterWrite(ctx.runId, chapterId, revision)
+}
 
 /** Same identity and composition as the effect adapters; malformed inputs and
  * stale anchors remain the handler's existing errors. This never reserves work. */
 export async function preflightChapterReviewWrite(ctx: ToolContext, name: string, raw: unknown) {
   const tool = name === 'chapter_write' ? chapterWriteTool : name === 'chapter_append' ? chapterAppendTool
     : name === 'chapter_edit_range' ? chapterEditRangeTool : null
-  if (!tool) return null
+  if (!tool || !isBodyWriteAction(name)) return null
   let parsed: ReturnType<typeof chapterEditArguments.safeParse> | ReturnType<typeof chapterWriteArguments.safeParse>
   try { parsed = tool.parameters.safeParse(normalizeToolInput(tool, raw)) } catch { return null }
   if (!parsed.success) return null
   const args = parsed.data
-  const chapterId = await resolveChapterId(ctx, args.chapterId)
+  const chapterId = await resolveBodyWriteChapter(ctx, name, args)
   if (!chapterId) return null
   const chapter = await findOwnedChapter(ctx, chapterId)
   if (!chapter) return null
@@ -181,9 +204,9 @@ async function writeChapterContent(
   if (!updated) {
     return buildConflictResult(chapter.title, ctx)
   }
+  if (sequentialWriting(ctx) || after !== before) recordWritingTarget(ctx, chapter.id, updated.revision)
   if (after === before) return unchangedChapterResult(chapter, ctx)
   await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
-  if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
   if (isAgent2FeatureEnabled('memory2', ctx.userId)) {
     await enqueueChapterMemoryExtraction({
       novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: updated.revision, before, after,
@@ -216,7 +239,7 @@ export const chapterCreateTool = defineTool({
   name: 'chapter_create',
   title: '新建章节',
   description:
-    '建立只有标题与位置的空章节，取得真实 chapterId；本工具负责章节身份和结构，正文由后续 chapter_write 写入。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。作者说“全书第 N 章”时只传 position=N；作者说“第 M 卷第 N 章/卷内第 N 章”时传 volumeOrder=M（或 volumeId）与 positionInVolume=N，两个坐标系不得混用。沿用现有卷时不要传newVolume；新任务需要新卷时先用volume_create取得真实volumeId；newVolume保留旧冻结请求兼容。未指定位置时紧接全书最后一个已有章节。已有目标或恢复时先核对真实身份，复用已绑定章节；已有正文先读后按原请求修改，不重建或覆盖已完成内容。创建成功后使用返回的 chapterId 调用 chapter_write，不能把创建空章说成正文已写完。',
+    '建立只有标题与位置的空章节，取得真实 chapterId，再用 chapter_write 写正文。连续写多章时，默认建好并写完一章再建下一章，按回执的真实位置继续；查前章只补充上下文。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。全书第 N 章只传 position=N；第 M 卷第 N 章传 volumeOrder=M（或 volumeId）与 positionInVolume=N。沿用现有卷时不要传newVolume；新卷先用volume_create取得真实volumeId；newVolume保留旧请求兼容。多章已有任务目标时省略位置会选择下一个未建目标；无章节范围时接在全书最后一章。已有章节先核对身份并复用，建空章不表示正文写完。',
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
     const args = { ...raw } as Record<string, unknown>
@@ -356,7 +379,7 @@ export const chapterCreateTool = defineTool({
     const chapter = ctx.transaction ? await create(ctx.transaction) : await prisma.$transaction(create)
     if (!chapter.scopeReused) await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
     if (!ctx.transaction) {
-      recordChapterBaseline(ctx.runId, chapter.id, chapter.revision)
+      recordWritingTarget(ctx, chapter.id, chapter.revision)
       if (!chapter.scopeReused) recordCreatedChapter(ctx.runId, args.title, chapter.id)
     }
     if (!chapter.scopeReused && content && isAgent2FeatureEnabled('memory2', ctx.userId)) {
@@ -383,7 +406,8 @@ export const chapterCreateTool = defineTool({
             appliedDirectly: true,
             revision: chapter.revision,
           }
-        : { kind: 'chapterRef', chapterId: chapter.id, title: chapter.title, wordCount: chapter.wordCount },
+        : { kind: 'chapterRef', chapterId: chapter.id, title: chapter.title, wordCount: chapter.wordCount,
+            ...(sequentialWriting(ctx) ? { revision: chapter.revision } : {}) },
       ...(!chapter.scopeReused && content
         ? { snapshot: { target: 'chapter' as const, targetId: chapter.id, field: 'content', previousValue: '' } }
         : {}),
@@ -395,14 +419,14 @@ export const chapterWriteTool = defineTool({
   name: 'chapter_write',
   title: '写入章节正文',
   description:
-    '用新内容整体覆盖指定章节的正文。标题由独立 title 字段展示，正文默认从叙事开始，并沿用前章排版，不在正文首行重复章号或章名；作者明确要求正文含标题或作品已有此格式时照其要求。需要已存在的 chapterId（新章节请先 chapter_create）。覆盖前建议先 chapter_read 了解现有内容；如只是接着写请用 chapter_append。覆盖前必须确认该章节确实是作者所指：作者按「第N章」指称时，若该排位章节的标题序号对不上（作者删过章导致错位），不要覆盖，改用 chapter_create 传 position 在正确位置插入。',
+    '用新内容整体覆盖已建章节的正文。连续写多章时，建当前章后可省略 chapterId，沿用当前写入目标；回读前文不会切换写入目标。明确回头写另一章时传 targetOrderIndex（全书章号）。已有正文先读再按作者要求修改，接着写请用 chapter_append。标题独立展示，正文默认从叙事开始；作者要求保留正文标题或作品已有此格式时照其要求。若目标位置和现有章名不符，先核对作者真正指定的章节再操作。',
   parameters: chapterWriteArguments,
   permission: WRITE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const chapterId = await resolveChapterId(ctx, args.chapterId)
+    const chapterId = await resolveBodyWriteChapter(ctx, 'chapter_write', args)
     if (!chapterId) {
-      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }, 'CHAPTER_NOT_FOUND')
+      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: sequentialWriting(ctx) ? MISSING_CHAPTER_HINT : legacyMissingChapterHint }, 'CHAPTER_NOT_FOUND')
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_write', { ...args, chapterId })
     return writeChapterContent(ctx, chapterId, args.content, '覆盖写入', args.content, 'replace', args.retainedFindings)
@@ -412,14 +436,14 @@ export const chapterWriteTool = defineTool({
 export const chapterAppendTool = defineTool({
   name: 'chapter_append',
   title: '追加章节正文',
-  description: '把生成的内容追加到指定章节正文末尾（自动补一个空行分隔），用于续写场景。',
+  description: '把内容追加到当前写入章末尾，自动用空行分隔。回读其他章节不会切换目标；明确回到另一章追加时传其全书章号 targetOrderIndex。',
   parameters: chapterAppendArguments,
   permission: WRITE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const chapterId = await resolveChapterId(ctx, args.chapterId)
+    const chapterId = await resolveBodyWriteChapter(ctx, 'chapter_append', args)
     if (!chapterId) {
-      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }, 'CHAPTER_NOT_FOUND')
+      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: sequentialWriting(ctx) ? MISSING_CHAPTER_HINT : legacyMissingChapterHint }, 'CHAPTER_NOT_FOUND')
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_append', { ...args, chapterId })
     return writeChapterContent(
@@ -442,9 +466,9 @@ export const chapterEditRangeTool = defineTool({
   permission: WRITE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const chapterId = await resolveChapterId(ctx, args.chapterId)
+    const chapterId = await resolveBodyWriteChapter(ctx, 'chapter_edit_range', args)
     if (!chapterId) {
-      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }, 'CHAPTER_NOT_FOUND')
+      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: sequentialWriting(ctx) ? MISSING_CHAPTER_HINT : legacyMissingChapterHint }, 'CHAPTER_NOT_FOUND')
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_edit_range', { ...args, chapterId })
     const chapter = await findOwnedChapter(ctx, chapterId)
@@ -487,9 +511,9 @@ export const chapterEditRangeTool = defineTool({
     if (!updated) {
       return buildConflictResult(chapter.title, ctx)
     }
+    if (sequentialWriting(ctx) || after !== before) recordWritingTarget(ctx, chapter.id, updated.revision)
     if (after === before) return unchangedChapterResult(chapter, ctx)
     await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
-    if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
     if (isAgent2FeatureEnabled('memory2', ctx.userId)) {
       await enqueueChapterMemoryExtraction({
         novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: updated.revision, before, after,
@@ -528,7 +552,7 @@ export const chapterRenameTool = defineTool({
   async execute(ctx, args) {
     const chapterId = await resolveChapterId(ctx, args.chapterId)
     if (!chapterId) {
-      return { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }
+      return { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: sequentialWriting(ctx) ? MISSING_CHAPTER_HINT : legacyMissingChapterHint }
     }
     const chapter = await findOwnedChapter(ctx, chapterId)
 

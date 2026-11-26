@@ -2,8 +2,11 @@ import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import type { Prisma } from '@prisma/client'
 
 import { DataAccessError, prisma } from '../prisma.js'
+import { activeChapterScope } from '../data/internal.js'
+import { orderPlanFiles } from '../../../shared/plan-order.js'
 import type { PlanLinkFields, PlanMetadataPatch } from '../../../shared/contracts/novel-plans.js'
 import { applyPlanMetadataPatch, planKind, planLinkFields, type PlanRow } from './novel-plan-contract.js'
+import { chapterPlanOrderingEnabled } from './sequential-writing-rollout.js'
 
 /**
  * 作品维度的「计划文件夹」产物服务（自 run-service.ts 模块级拆分而来，行为原样保留）。
@@ -61,6 +64,11 @@ export async function listNovelPlanArtifacts(
     throw new DataAccessError(404, 'NOT_FOUND', '作品不存在或无权访问。')
   }
 
+  const { items } = await readOrderedPlans(db, userId, novelId, await chapterPlanOrderingEnabled(userId, db))
+  return { items }
+}
+
+async function readOrderedPlans(db: Prisma.TransactionClient, userId: string, novelId: string, byChapter: boolean) {
   const artifacts = await db.agentArtifact.findMany({
     where: {
       artifactType: 'chapterPlan',
@@ -80,15 +88,15 @@ export async function listNovelPlanArtifacts(
       latestByTitle.set(artifact.title, artifact)
     }
   }
-  const deduped = artifacts
-    .filter((artifact) => planKind(artifact.metadata) !== 'legacy' || latestByTitle.get(artifact.title)?.id === artifact.id)
-    .sort((left, right) => {
-      const leftOrder = toNovelPlanArtifact(left).orderIndex ?? Number.MAX_SAFE_INTEGER
-      const rightOrder = toNovelPlanArtifact(right).orderIndex ?? Number.MAX_SAFE_INTEGER
-      return leftOrder - rightOrder || left.createdAt.getTime() - right.createdAt.getTime()
-    })
-
-  return { items: deduped.map(item => toNovelPlanArtifact(item, artifacts)) }
+  const items = artifacts
+    .filter(artifact => planKind(artifact.metadata) !== 'legacy' || latestByTitle.get(artifact.title)?.id === artifact.id)
+    .map(artifact => toNovelPlanArtifact(artifact, artifacts))
+  const chapterIds = byChapter ? items.flatMap(item => item.orderIndex === null && item.planKind === 'detail' && item.target?.kind === 'chapter' ? [item.target.chapterId] : []) : []
+  const chapters = chapterIds.length ? await db.chapter.findMany({
+    where: { ...activeChapterScope(novelId), authorId: userId, id: { in: chapterIds } },
+    select: { id: true, orderIndex: true },
+  }) : []
+  return { items: orderPlanFiles(items, chapters, byChapter), artifacts }
 }
 
 /** 手工新建计划：作者在作品树点「新建计划」时落一份空白计划，挂到该作品最近的 Agent 任务上 */
@@ -111,6 +119,7 @@ export async function createNovelPlanArtifact(
     throw new DataAccessError(404, 'NOT_FOUND', '作品不存在或无权访问。')
   }
 
+  const byChapter = await chapterPlanOrderingEnabled(userId, db)
   const linkMetadata = await applyPlanMetadataPatch(db, userId, novelId, null, options, '')
 
   // 计划产物必须挂在 AgentRun 上：优先复用该作品最近一次任务，还没跑过任务时补一条载体
@@ -176,18 +185,18 @@ export async function createNovelPlanArtifact(
       metadata: {
         ...linkMetadata,
         manualCreated: true,
-        planOrder: existing.reduce((maximum, item, index) => {
+        ...(byChapter && options.planKind === 'detail' ? {} : { planOrder: existing.reduce((maximum, item, index) => {
           const metadata = item.metadata && typeof item.metadata === 'object' && !Array.isArray(item.metadata)
             ? item.metadata as Record<string, unknown>
             : {}
           return Math.max(maximum, typeof metadata.planOrder === 'number' ? metadata.planOrder : index + 1)
-        }, 0) + 1,
+        }, 0) + 1 }),
       } as Prisma.InputJsonValue,
     },
     select: { id: true, runId: true, title: true, content: true, metadata: true, createdAt: true, updatedAt: true },
   })
 
-  return { item: (await listNovelPlanArtifacts(userId, novelId, db)).items.find(item => item.id === artifact.id)! }
+  return { item: (await readOrderedPlans(db, userId, novelId, byChapter)).items.find(item => item.id === artifact.id)! }
 }
 
 /** 更新计划：改名/改正文，或 saved=false 从计划文件夹移除（保留产物本体与任务历史） */
@@ -211,6 +220,7 @@ export async function updateNovelPlanArtifact(
     throw new DataAccessError(404, 'NOT_FOUND', '计划不存在或无权访问。')
   }
 
+  const byChapter = await chapterPlanOrderingEnabled(userId, db)
   const metadata = await applyPlanMetadataPatch(db, userId, artifact.run.novelId!, artifact, patch, patch.content ?? artifact.content)
 
   if (typeof patch.saved === 'boolean') {
@@ -218,30 +228,20 @@ export async function updateNovelPlanArtifact(
   }
 
   if (typeof patch.position === 'number') {
-    const siblings = await db.agentArtifact.findMany({
-      where: {
-        artifactType: 'chapterPlan',
-        metadata: { path: ['savedAsPlan'], equals: true },
-        run: { userId, novelId: artifact.run.novelId },
-      },
-      orderBy: { createdAt: 'asc' },
-    })
-    siblings.sort((left, right) => {
-      const leftMeta = left.metadata && typeof left.metadata === 'object' && !Array.isArray(left.metadata) ? left.metadata as Record<string, unknown> : {}
-      const rightMeta = right.metadata && typeof right.metadata === 'object' && !Array.isArray(right.metadata) ? right.metadata as Record<string, unknown> : {}
-      const leftOrder = typeof leftMeta.planOrder === 'number' ? leftMeta.planOrder : Number.MAX_SAFE_INTEGER
-      const rightOrder = typeof rightMeta.planOrder === 'number' ? rightMeta.planOrder : Number.MAX_SAFE_INTEGER
-      return leftOrder - rightOrder || left.createdAt.getTime() - right.createdAt.getTime()
-    })
+    const { items, artifacts } = await readOrderedPlans(db, userId, artifact.run.novelId!, byChapter)
+    const siblings = byChapter ? items : orderPlanFiles(artifacts.map(item => {
+      const metadata = item.metadata && typeof item.metadata === 'object' && !Array.isArray(item.metadata) ? item.metadata : {}
+      return { id: item.id, createdAt: item.createdAt.toISOString(), orderIndex: typeof metadata.planOrder === 'number' ? metadata.planOrder : null }
+    }), [], false)
+    const metadataById = new Map(artifacts.map(item => [item.id, item.metadata]))
     const currentIndex = siblings.findIndex((item) => item.id === artifact.id)
     if (currentIndex >= 0) {
       const [moved] = siblings.splice(currentIndex, 1)
       siblings.splice(Math.max(0, Math.min(patch.position - 1, siblings.length)), 0, moved)
-      await Promise.all(siblings.filter(item => item.id !== artifact.id).map((item) => {
-        const index = siblings.findIndex(sibling => sibling.id === item.id)
-        const itemMetadata = item.metadata && typeof item.metadata === 'object' && !Array.isArray(item.metadata)
-          ? { ...(item.metadata as Record<string, unknown>) }
-          : {}
+      await Promise.all(siblings.map((item, index) => {
+        if (item.id === artifact.id || byChapter && item.orderIndex === index + 1) return
+        const previous = metadataById.get(item.id)
+        const itemMetadata = previous && typeof previous === 'object' && !Array.isArray(previous) ? previous : {}
         return db.agentArtifact.update({
           where: { id: item.id },
           data: { metadata: { ...itemMetadata, planOrder: index + 1 } as Prisma.InputJsonValue },
@@ -260,6 +260,6 @@ export async function updateNovelPlanArtifact(
     },
   })
   if (updated.count !== 1) throw new DataAccessError(409, 'PLAN_REVISION_CONFLICT', '计划已被并发修改，未覆盖作者内容。')
-  return { item: (await listNovelPlanArtifacts(userId, artifact.run.novelId!, db)).items.find(item => item.id === artifact.id)
+  return { item: (await readOrderedPlans(db, userId, artifact.run.novelId!, byChapter)).items.find(item => item.id === artifact.id)
     ?? toNovelPlanArtifact({ ...artifact, title: patch.title ?? artifact.title, content: patch.content ?? artifact.content, metadata: metadata as Prisma.JsonValue }) }
 }

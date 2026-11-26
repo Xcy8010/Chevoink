@@ -1,7 +1,11 @@
 import { requestJson } from '@/app/api-client'
 import { showAppReleaseUpdateNotice } from '../../../shared/app-release-update-notice'
 import { canonicalAppRoute } from '../../../shared/app-release-route'
-import type { AppReleaseBootstrap } from '../../../shared/contracts/app-release'
+import type { AppReleaseBootstrap, AppReleaseCapability } from '../../../shared/contracts/app-release'
+let loadedCapabilities: readonly AppReleaseCapability[] | null = null
+export function appReleaseSupports(capability: AppReleaseCapability) {
+ return loadedCapabilities?.includes(capability) ?? true
+}
 export function selectedArtifactUrl(selection:AppReleaseBootstrap,route:string){
  if(selection.mode!=='artifact'||!selection.release)return null
  return `${selection.release.entryUrl}?route=${encodeURIComponent(canonicalAppRoute(route))}`
@@ -14,6 +18,7 @@ export async function bootstrapAppRelease():Promise<boolean>{
   return false
  }
  if(selection.mode==='legacy'&&loaded){location.replace(canonicalAppRoute(location.pathname+location.search+location.hash));return false}
+ loadedCapabilities=selection.release?.capabilities??null
  if(!loaded)watchLegacyRelease()
  return true
 }

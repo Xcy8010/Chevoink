@@ -2,14 +2,19 @@ import { z } from 'zod'
 export const retainedFindingSchema = z.object({ source: z.enum(['continuity', 'quality']), reportId: z.string().min(1), findingId: z.string().min(1), reason: z.string().trim().min(1).max(1000) }).strict()
 export const retainedFindings = z.array(retainedFindingSchema).optional().describe('保留当前报告意见时逐项填写工具返回的 source、reportId、findingId 和具体理由；连续性与人类感质量均使用当前真实报告引用。保留不表示问题已修复')
 
+export const chapterTargetOrderIndex = z.number().int().positive().max(2_147_483_647).optional()
+  .describe('切换写入目标的全书章号，包括回改前章')
+
 export const chapterWriteArguments = z.object({
-  chapterId: z.string().optional().describe('目标章节 ID；缺省时默认写入最近操作/当前正在编辑的章节'),
+  chapterId: z.string().optional().describe('省略即沿用当前写入章'),
   content: z.string().min(1).describe('完整的新正文'),
+  targetOrderIndex: chapterTargetOrderIndex,
   retainedFindings,
 })
 export const chapterAppendArguments = z.object({
-  chapterId: z.string().optional().describe('目标章节 ID；缺省时默认追加到最近操作/当前正在编辑的章节'),
+  chapterId: z.string().optional().describe('省略即沿用当前写入章'),
   content: z.string().min(1).describe('要追加的内容'),
+  targetOrderIndex: chapterTargetOrderIndex,
 })
 export const chapterPatchSchema = z.object({ oldText: z.string().min(1), newText: z.string() }).strict()
 export const chapterEditArguments = z.object({

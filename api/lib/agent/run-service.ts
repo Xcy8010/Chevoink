@@ -96,7 +96,7 @@ import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../.
 import { buildTaskSpec } from './task-spec.js'
 import { freezeTaskCapabilities } from './task-capabilities.js'
 import { isFreshDurableAdmissionEnabled } from './fresh-durable-rollout.js'
-import { canAdmitChapterReviewWorkflow } from './chapter-review-rollout.js'
+import { readAdmittedWritingWorkflows } from './sequential-writing-rollout.js'
 
 /**
  * Agent Loop 新链路的路由服务层（plan/13 §4.9）。
@@ -632,8 +632,8 @@ export async function startLoopRunLocked(
         terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 2,
         novelInitializationTarget: isEmptyNovelMetadata(manuscript) ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom, qualityMode: input.qualityMode })
-      if (options.humanOrigin === 'http' && !options.goal && !options.completedQuestion && await canAdmitChapterReviewWorkflow(userId, tx)) {
-        fresh = { ...fresh, scope: { ...fresh.scope, chapterReviewWorkflow: 1 } }
+      if (options.humanOrigin === 'http' && !options.goal && !options.completedQuestion) {
+        fresh = { ...fresh, scope: { ...fresh.scope, ...await readAdmittedWritingWorkflows(userId, tx) } }
       }
       if (networkAdmission && input.publicWebQuestion) fresh = { ...fresh, publicWebQuestion: input.publicWebQuestion }
       if (networkAdmission && input.agentQuestionProtocol) {

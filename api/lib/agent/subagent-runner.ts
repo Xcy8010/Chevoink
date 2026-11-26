@@ -137,7 +137,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
     parentAuthority,
   )
   const toolAuthority = snapshotToolAuthority(tools, params.mode)
-  const openAITools = toOpenAITools(tools)
+  const openAITools = toOpenAITools(tools, { novelId: params.novelId, sequentialWriting: params.toolContextBase.writingScope?.sequentialWriting })
 
   let modelRuntime = params.modelRuntime
   const messages = buildSubagentMessages(params)

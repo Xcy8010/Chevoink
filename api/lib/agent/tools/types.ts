@@ -21,6 +21,7 @@ export type ToolContext = {
   contentPolicyEnabled?: boolean
   /** Frozen with the original chapter review workflow at task admission. */
   chapterReviewWorkflowEnabled?: boolean
+  sequentialWritingEnabled?: boolean
   /** Server-resolved input allowance after reserving the model's output and safety margin. */
   attachmentInputBudgetTokens?: number
   /** Exact public question supplied separately by the authenticated author. */
@@ -35,6 +36,8 @@ export type ToolContext = {
   userId: string
   novelId: string
   chapterId: string | null
+  /** Destination of this single body proposal, shared by preflight, permission UI and dispatch. */
+  resolvedWriteChapterId?: string
   sessionId: string
   runId: string
   /** Current legacy run.started receipt, injected by the loop. It cannot be
@@ -71,8 +74,13 @@ export type ToolContext = {
     cursor?: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   /** Only the verified pre-existing durable plan operation may preserve legacy creation. Never model input. */
   legacyPlanCreationReplay?: true
+  /** Durable or approved saves execute against their already resolved target. */
+  planSaveTargetResolved?: true
+  /** The author saw a new file in the approval request; never reuse a file concurrently created at that identity. */
+  planSaveApprovedCreate?: true
   durablePlan?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor;
-    expected: { id: string | null; hash: string | null } }
+    expected: { id: string | null; hash: string | null };
+    saveRoute?: { id: string | null } | { code: string; message: string; id?: string | null } }
   durableRead?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableWeb?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableAttachment?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }

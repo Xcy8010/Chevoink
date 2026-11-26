@@ -36,6 +36,22 @@ async function fixture(work: (data: { userId: string; novelId: string; runId: st
 }
 
 describe.skipIf(!available)('outline/detail metadata persistence and compiler dependencies (PostgreSQL)', () => {
+  it('orders details by chapter until an author moves them, using the displayed order for that move', () => fixture(async f => {
+    const parent = (await createNovelPlanArtifact(f.userId, f.novelId, '三章合成大纲', { planKind: 'outline' })).item
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 16 } })
+    const create = async (number: number) => (await createNovelPlanArtifact(f.userId, f.novelId, `合成细纲 ${number}`, {
+      planKind: 'detail', parentPlanId: parent.id, expectedParentPlanHash: parent.planHash,
+      target: number === 16 ? { kind: 'chapter', chapterId: f.chapterId } : { kind: 'future', targetOrderIndex: number },
+    })).item.id
+    const seventeen = await create(17), eighteen = await create(18), sixteen = await create(16)
+    const ids = async () => (await listNovelPlanArtifacts(f.userId, f.novelId)).items.map(item => item.id)
+    expect(await ids()).toEqual([parent.id, sixteen, seventeen, eighteen])
+    await updateNovelPlanArtifact(f.userId, eighteen, { position: 3 })
+    expect(await ids()).toEqual([parent.id, sixteen, eighteen, seventeen])
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 19 } })
+    expect(await ids()).toEqual([parent.id, sixteen, eighteen, seventeen])
+  }))
+
   it('keeps identically titled kinds, semantic CAS, explicit parent review and missing-parent drafts', async () => fixture(async f => {
     const outline = (await createNovelPlanArtifact(f.userId, f.novelId, '同名计划', { planKind: 'outline' })).item
     const parent = (await updateNovelPlanArtifact(f.userId, outline.id, { content: '本阶段取得钥匙，最后返回故乡。', expectedPlanHash: outline.planHash })).item

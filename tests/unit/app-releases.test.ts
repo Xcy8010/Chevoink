@@ -5,6 +5,10 @@ import { env } from '../../api/config/env.js'
 import { accountEmailAuthEnabled, withAccountEmailAuthPreview, writeAccountEmailAuthPreviewGrant } from '../../api/lib/account-email-auth-scope.js'
 import { executeAppRelease, hasAgentPersonalizationCapability, hasChapterReviewWorkflowCapability, hasGenerativeContentPolicyCapability, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, resolveEmailAuthPreview, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../../api/lib/app-releases.js'
 import { canAdmitChapterReviewWorkflow, chapterReviewWorkflowEnabled } from '../../api/lib/agent/chapter-review-rollout.js'
+import { readAdmittedWritingWorkflows, sequentialWritingEnabled } from '../../api/lib/agent/sequential-writing-rollout.js'
+import { listNovelPlanArtifacts } from '../../api/lib/agent/plan-artifacts.js'
+import { toOpenAIToolPresentation } from '../../api/lib/agent/tool-schema.js'
+import { chapterWriteArguments } from '../../api/lib/agent/tools/chapter-arguments.js'
 import { restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
 import type { AppReleaseManifest, AppReleaseAction } from '../../shared/contracts/app-release.js'
 import type { TaskSpec } from '../../shared/contracts/task-spec-contracts.js'
@@ -119,6 +123,41 @@ it('freezes chapter review rollout in the task while keeping stable and existing
  }
 })
 it('selects real assigned artifacts from server tester qualification, never a URL or header',async()=>{release('stable-version');release('test-version');channel('stable','stable-version');channel('test','test-version');state.testers.add('tester');expect((await selectAppRelease(req('ordinary',{'x-release-channel':'test','x-release-id':'test-version'}))).release!.id).toBe('stable-version');expect((await selectAppRelease(req('tester'))).release).toMatchObject({id:'test-version',activatedAt:state.channels.find(row=>row.channel==='test')!.updatedAt.toISOString()});state.testers.delete('tester');expect((await selectAppRelease(req('tester'))).release!.id).toBe('stable-version');await expect(requireAppReleaseCapability(req('ordinary'),'siteContent')).rejects.toMatchObject({code:'APP_RELEASE_CAPABILITY_DISABLED'})})
+it('freezes sequential writing from the effective release and scopes the plan API ordering', async () => {
+ const originalAppEnv = env.appEnv
+ env.appEnv = 'production'
+ try {
+  release('stable-version')
+  release('test-version', ['chapterReviewWorkflow', 'sequentialWriting'])
+  channel('stable', 'stable-version')
+  channel('test', 'test-version')
+  state.testers.add('tester')
+  const artifacts = [17, 16, 18].map((order, index) => ({
+   id: String(order), runId: 'fixture-run', title: `第${order}章合成细纲`, content: '合成正文', createdAt: new Date(index),
+   updatedAt: new Date(index), metadata: { savedAsPlan: true, planKind: 'detail', target: { kind: 'future', targetOrderIndex: order } },
+  }))
+  const tx = { ...db, novel: { findFirst: vi.fn(async () => ({ id: 'fixture-novel' })) },
+   agentArtifact: { findMany: vi.fn(async () => artifacts) } } as unknown as Parameters<typeof readAdmittedWritingWorkflows>[1]
+  const existing = { scope: { novelId: 'fixture-novel' } }
+  const ordinary = { scope: { ...existing.scope, ...await readAdmittedWritingWorkflows('ordinary', tx) } }
+  const tester = { scope: { ...existing.scope, ...await readAdmittedWritingWorkflows('tester', tx) } }
+  expect(ordinary.scope).not.toHaveProperty('sequentialWriting')
+  expect(tester.scope).toMatchObject({ sequentialWriting: 1, chapterReviewWorkflow: 1 })
+  const writer = { name: 'chapter_write', description: '连写多章按绑定写入', parameters: chapterWriteArguments }
+  expect(toOpenAIToolPresentation(writer, ordinary.scope).parameters).not.toHaveProperty('properties.targetOrderIndex')
+  expect(toOpenAIToolPresentation(writer, tester.scope).parameters).toHaveProperty('properties.targetOrderIndex')
+  expect((await listNovelPlanArtifacts('ordinary', 'fixture-novel', tx)).items.map(plan => plan.id)).toEqual(['17', '16', '18'])
+  expect((await listNovelPlanArtifacts('tester', 'fixture-novel', tx)).items.map(plan => plan.id)).toEqual(['16', '17', '18'])
+  state.channels[1].enabled = false
+  expect(await readAdmittedWritingWorkflows('tester', tx)).toEqual({})
+  expect(sequentialWritingEnabled(tester)).toBe(true)
+  expect((await listNovelPlanArtifacts('tester', 'fixture-novel', tx)).items.map(plan => plan.id)).toEqual(['17', '16', '18'])
+  state.channels[0].releaseId = 'test-version'
+  expect(await readAdmittedWritingWorkflows('ordinary', tx)).toHaveProperty('sequentialWriting', 1)
+  expect(sequentialWritingEnabled(existing)).toBe(false)
+  expect((await listNovelPlanArtifacts('ordinary', 'fixture-novel', tx)).items.map(plan => plan.id)).toEqual(['16', '17', '18'])
+ } finally { env.appEnv = originalAppEnv }
+})
 it('gates personalization by the effective account assignment and allows legacy development', async () => {
  await expect(hasAgentPersonalizationCapability('ordinary')).resolves.toBe(true)
  release('stable-version')

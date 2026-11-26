@@ -18,6 +18,7 @@ import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { planTargetHash } from '../../api/lib/agent/tools/durable-plan.js'
+import { novelPlanHash } from '../../api/lib/agent/novel-plan-contract.js'
 import { chapterListSummariesTool,chapterReadTool,memorySearchTool,novelGetContextTool,planReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { sceneTaskBuildTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { structureOutlineTool,volumeCreateTool,volumeListTool } from '../../api/lib/agent/tools/structure-tools.js'
@@ -27,6 +28,136 @@ import { getCreditWindow } from '../../api/lib/credits.js'
 import { getStructureReportObservation } from '../../api/lib/data-access.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture,novelFixture,reported } from '../support/agent-durable-runtime-fixture.js'
+
+describe.runIf(available)('sequential detail plan writes', () => {
+  it('shows the corrected destination when the author must approve an append', () => fixture(async f => {
+    const lease = await claim(f)
+    const signal = new AbortController().signal
+    const [previous, target] = await Promise.all([16, 17].map(order => prisma.agentArtifact.create({ data: {
+      runId: f.runId, artifactType: 'chapterPlan', title: `第${order}章细纲`, content: '沿河调查。', metadata: {
+        savedAsPlan: true, planKind: 'detail', target: { kind: 'future', targetOrderIndex: order },
+      },
+    } })))
+    const tools = [planReadTool, planSaveTool]
+    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high',
+        routeRevision: modelRouteRevision({ provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1', reasoningEffort: 'high' }) },
+      tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+      toolAuthority: tools.map(tool => ({ name: tool.name, permission: tool === planSaveTool ? 'ask' : 'allow', alwaysConfirm: false, dangerous: false })),
+      protectedChapterIds: [], pinnedSkillVersions: [] }, snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0,
+      phase: 'idle', pendingOperationId: null, messages: [{ role: 'user', content: '补写十七章细纲。' },
+        { role: 'assistant', content: null, toolCalls: [
+          { id: 'read', name: 'plan_read', arguments: JSON.stringify({ planId: target.id }) },
+          { id: 'append', name: 'plan_save', arguments: JSON.stringify({ planId: previous.id, title: target.title, mode: 'append', content: '在下游找到记号。' }) },
+        ] }], successfulToolSignatures: [] } })
+    await expect(executeDurableToolStep(lease, signal)).resolves.toMatchObject({ kind: 'tool', result: { display: { kind: 'readSources' } } })
+    await expect(executeDurableToolStep(lease, signal)).resolves.toMatchObject({ kind: 'waiting_approval' })
+    const request = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'approval.requested' } })
+    expect(request.payload).toMatchObject({ args: { planId: target.id, title: target.title, content: '在下游找到记号。' } })
+    await resolveDurableApproval({ userId: f.userId, runId: f.runId, requestId: request.id, callId: 'append', approved: true, alwaysAllow: false })
+    await expect(executeDurableToolStep(lease, signal)).resolves.toMatchObject({ kind: 'tool', result: { display: { kind: 'planDiff', artifactId: target.id } } })
+    expect(await prisma.agentArtifact.findUnique({ where: { id: previous.id } })).toEqual(previous)
+    expect(await prisma.agentArtifact.findUnique({ where: { id: target.id } })).toMatchObject({ content: '沿河调查。\n\n在下游找到记号。' })
+  }), 30_000)
+
+  it('saves the explicit next detail target through the legacy loop tool', () => fixture(async f => {
+    const ctx: ToolContext = {
+      ...f, callId: 'legacy-detail', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium',
+      emit: () => {}, signal: new AbortController().signal, planContentHashes: new Map(), planSemanticHashes: new Map(),
+    }
+    const parent = await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'chapterPlan', title: '合成父大纲',
+      content: '过桥后传信。', metadata: { savedAsPlan: true, planKind: 'outline' } } })
+    const create = (order: number, content: string, planId?: string) => planSaveTool.execute(ctx, {
+      title: `第${order}章细纲`, content, planId, planKind: 'detail', parentPlanId: parent.id, expectedParentPlanHash: novelPlanHash(parent),
+      target: { kind: 'future', targetOrderIndex: order },
+    })
+    await create(16, '木匣已经过桥。')
+    const sixteen = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, title: '第16章细纲' } })
+    await expect(create(17, '信使打开木匣核验来信。', sixteen.id)).resolves.toMatchObject({ display: { kind: 'planFile' } })
+    await planReadTool.execute(ctx, { planId: sixteen.id })
+    await expect(planSaveTool.execute(ctx, { title: '第17章细纲', mode: 'append', content: '她按约定回信。', target: null, parentPlanId: null }))
+      .resolves.toMatchObject({ display: { kind: 'planDiff' } })
+    await expect(planSaveTool.execute(ctx, { title: '第17章细纲', mode: 'append', planId: parent.id, content: '信留在驿站。' }))
+      .resolves.toMatchObject({ display: { kind: 'planDiff' } })
+    await expect(create(18, '驿卒取到了回信。', parent.id)).resolves.toMatchObject({ display: { kind: 'planFile' } })
+    await expect(planSaveTool.execute(ctx, { title: '第17章细纲', planId: sixteen.id, content: '这一段不可悄悄替换另一份细纲。' }))
+      .resolves.toMatchObject({ outcome: 'failed', failureCode: 'PLAN_TARGET_CONFLICT' })
+    expect(await prisma.agentArtifact.findUnique({ where: { id: sixteen.id } })).toEqual(sixteen)
+    expect(await prisma.agentArtifact.findUnique({ where: { id: parent.id } })).toEqual(parent)
+    const plans = await prisma.agentArtifact.findMany({ where: { runId: f.runId, title: { in: ['第17章细纲', '第18章细纲'] } }, orderBy: { title: 'asc' } })
+    expect(plans).toMatchObject([
+      { title: '第17章细纲', content: '信使打开木匣核验来信。\n\n她按约定回信。\n\n信留在驿站。', metadata: { parentPlanId: parent.id, target: { targetOrderIndex: 17 } } },
+      { title: '第18章细纲', content: '驿卒取到了回信。', metadata: { target: { targetOrderIndex: 18 } } },
+    ])
+  }), 30_000)
+
+  it.each(['exact IDs', 'missing and previous IDs'] as const)('keeps chapters 16–18 separate with %s', scenario => fixture(async f => {
+    const lease = await claim(f)
+    const syntheticFetch = vi.fn()
+    vi.stubGlobal('fetch', syntheticFetch)
+    try {
+      const parent = await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'chapterPlan', title: '合成父大纲',
+        content: '三章依次过桥、传信、抵达驿站。', metadata: { savedAsPlan: true, planKind: 'outline' } } })
+      const tools = [planReadTool, planSaveTool]
+      const signal = new AbortController().signal
+      const model = { tier: 'speed' as const, provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high' as const,
+        routeRevision: modelRouteRevision({ provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1', reasoningEffort: 'high' }) }
+      const get = (order: number) => prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, title: `第${order}章细纲` } })
+      const save = (id: string, order: number, content: string, args: object = {}) => ({ id, name: 'plan_save',
+        arguments: JSON.stringify({ title: `第${order}章细纲`, content, ...args }) })
+      const create = (order: number) => ({ planKind: 'detail', parentPlanId: parent.id, expectedParentPlanHash: novelPlanHash(parent),
+        target: { kind: 'future', targetOrderIndex: order } })
+      const initialContent = '守桥人打开侧门，他带着木匣过桥。'
+      const omitted = scenario === 'missing and previous IDs'
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model, tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description,
+          parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+        toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: '连写十六、十七、十八章细纲' }, { role: 'assistant', content: null,
+          toolCalls: [save('first', 16, initialContent, create(16))] }], successfulToolSignatures: [] } })
+      await expect(executeDurableToolStep(lease, signal)).resolves.toMatchObject({ kind: 'tool', result: { display: { kind: 'planFile' } } })
+      const sixteen = await get(16)
+      const dispatch = async (calls: ReturnType<typeof save>[], expected: Array<'failed' | 'saved'>) => {
+        const { frame } = await loadExecutionState(f.userId, f.runId)
+        await saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+          snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: null, toolCalls: calls }] } })
+        for (const outcome of expected) {
+          const step = await executeDurableToolStep(lease, signal)
+          expect(step.kind).toBe('tool')
+          if (step.kind === 'tool') expect(step.result.outcome === 'failed').toBe(outcome === 'failed')
+        }
+      }
+      const secondContent = '他在桥北找到信使，将封口的短笺交给她。'
+      await dispatch([save('second', 17, secondContent, { ...create(17), ...(omitted ? { planId: sixteen.id } : {}) }),
+        { id: 'reference', name: 'plan_read', arguments: JSON.stringify({ planId: sixteen.id }) }], ['saved', 'saved'])
+      const seventeen = await get(17)
+      expect(await get(16)).toEqual(sixteen)
+      const secondSection = '信使核对火漆后约定次日回报。'
+      await dispatch([
+        save('missing-id', 17, secondSection, { mode: 'append', ...(omitted ? {} : { planId: seventeen.id }) }),
+        save('stale-hash', 17, '旧版本内容不会写入。', { mode: 'append', planId: omitted ? sixteen.id : seventeen.id,
+          expectedContentHash: createHash('sha256').update(sixteen.content).digest('hex') }),
+        save('stale-id', 17, '两人分别从南北小路离开。', { mode: 'append', planId: omitted ? sixteen.id : seventeen.id,
+          expectedContentHash: createHash('sha256').update(`${secondContent}\n\n${secondSection}`).digest('hex') }),
+        save('third', 18, '信使沿着堤岸抵达驿站。', { ...create(18), ...(omitted ? { planId: parent.id } : {}) }),
+      ], ['saved', 'failed', 'saved', 'saved'])
+      const eighteen = await get(18)
+      await dispatch([save('complete-third', 18, '她在驿站收到下一封信。', { mode: 'append', planId: eighteen.id }),
+        save('back-edit', 16, '守桥人核对木匣封条后打开侧门，他带匣过桥。', { planId: sixteen.id })], ['saved', 'saved'])
+      expect(await get(16)).toMatchObject({ id: sixteen.id, content: '守桥人核对木匣封条后打开侧门，他带匣过桥。', metadata: { target: create(16).target } })
+      expect(await get(17)).toMatchObject({ id: seventeen.id, content: `${secondContent}\n\n${secondSection}\n\n两人分别从南北小路离开。`,
+        metadata: { target: create(17).target } })
+      expect(await get(18)).toMatchObject({ id: eighteen.id, content: '信使沿着堤岸抵达驿站。\n\n她在驿站收到下一封信。', metadata: { target: create(18).target } })
+      expect(await prisma.agentArtifact.findUnique({ where: { id: parent.id } })).toEqual(parent)
+      expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'chapterPlan' } })).toBe(4)
+      expect((await loadExecutionState(f.userId, f.runId)).frame.state.phase).toBe('idle')
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(4)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
+      expect(syntheticFetch).not.toHaveBeenCalled()
+    } finally { vi.unstubAllGlobals() }
+  }), 45_000)
+})
 
 describe.runIf(available)('saved-cursor tool dispatch', () => {
   it.each(['settled', 'unknown-usage', 'unknown-result', 'stop-resume'] as const)('recovers pending provider %s without HTTP or a second charge', async scenario => {

@@ -1,6 +1,6 @@
 import { DataAccessError } from '../prisma.js'
 import { resolveDurableInputLimit, resolveSessionContextWindow } from './context-budget.js'
-import { findPlanByIdentity } from './novel-plan-contract.js'
+import { findOwnedPlan, findPlanByIdentity, resolveDetailPlanWrite } from './novel-plan-contract.js'
 import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection,
   readAssistantModelSnapshot, readPreparedModelRequest } from './runtime-tool-view.js'
 import { PERSONALIZATION_READ_ACTIONS, PERSONALIZATION_WRITE_ACTIONS } from './personalization-operations.js'
@@ -20,9 +20,10 @@ import { runtimeError, runtimeJson } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { normalizeToolInput, validateToolInput } from './tools/input-validation.js'
-import { readPreparedLiteraryArguments, rejectToolCursorCall } from './runtime-tool-cursor.js'
+import { readAdmittedToolOperation, readPreparedLiteraryArguments, rejectToolCursorCall } from './runtime-tool-cursor.js'
 import { failedToolResultSchema, readFailedToolResult, reduceExecutionReceipt } from './runtime-reducer.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
+import { isBodyWriteAction, resolveDurableChapterTarget } from './chapter-write-target.js'
 import { chapterReadTool, planReadTool, novelGetContextTool, chapterListSummariesTool, memorySearchTool } from './tools/read-tools.js'
 import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from './tools/chapter-tools.js'
 import { deferReviewWriteInTransaction, deferWritingTodoProposalInTransaction } from './runtime-review-deferral.js'
@@ -42,8 +43,9 @@ import { novelExportTool } from './tools/export-tools.js'
 import { executeDurableCreative } from './tools/durable-creative.js'
 import { chapterReviewBatchTool } from './tools/durable-batch-review.js'
 import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
+import { sequentialWritingEnabled } from './sequential-writing-rollout.js'
 import { platformNovelReadTool, platformNovelSearchTool } from './tools/platform-tools.js'
-import { executeDurablePlanSave } from './tools/durable-plan.js'
+import { durablePlanTargetSchema, executeDurablePlanSave, routedPlanSaveArgs } from './tools/durable-plan.js'
 import { executeDurableMemorySave } from './runtime-memory.js'
 import { novelCreateTool, novelPublishTool, novelArchiveTool, novelDeleteTool, novelRenameTool, novelUpdateMetaTool, coverPromptSetTool } from './tools/novel-tools.js'
 import { prepareNovelDeletion } from './runtime-novel-delete.js'
@@ -170,6 +172,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     let frame = current.frame
     let historicalWriter = false
     let admittedTool: NativeToolAdmission | null = null
+    let preparedPlanSaveId: string | undefined
     if (frame.state.phase === 'awaiting_operation') {
       const pending = await tx.agentOperation.findUniqueOrThrow({ where: { id: frame.state.pendingOperationId! } })
       if (pending.kind === 'tool' && ['succeeded', 'failed'].includes(pending.status)) return { recover: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, operationId: pending.id } }
@@ -181,6 +184,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       }
       if (pending.kind !== 'tool' || pending.status !== 'prepared') return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原操作尚待恢复或核对，不能选择下一工具。')
       admittedTool = readNativeToolAdmission(pending)
+      if (pending.action === 'plan_save') preparedPlanSaveId = pending.id
       const source = await readExecutionFrame(tx, lease.taskRootId, frame.revision - 1)
       if (source.state.phase !== 'idle' || pending.operationKey !== `exec:${source.state.nextOperationSequence}`
         || frame.state.nextOperationSequence !== source.state.nextOperationSequence + 1 || frame.state.turn !== source.state.turn
@@ -279,6 +283,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
         ? { publicWebSearchQuestion: originalSpec.publicWebQuestion } : {}),
       qualityMode: current.configuration.qualityMode, protectedChapterIds: new Set(current.configuration.protectedChapterIds),
       chapterReviewWorkflowEnabled: chapterReviewWorkflowEnabled(originalSpec),
+      sequentialWritingEnabled: sequentialWritingEnabled(originalSpec),
       toolAuthority: new Map(effective.toolAuthority.map(item => [item.name, item])), signal, emit: () => {},
       modelSelection: { ...(current.configuration.model.tokenPrice ? { tokenPrice: current.configuration.model.tokenPrice } : {}), ...(current.configuration.model.modelConfigId ? { modelConfigId: current.configuration.model.modelConfigId, modelConfigRevision: current.configuration.model.modelConfigRevision } : {}), ...(current.configuration.model.weightedRoute ? { weightedRoute: current.configuration.model.weightedRoute } : {}), tier: current.configuration.model.tier as CreditModelTier,
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
@@ -286,6 +291,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     ctx.modelAssignments = current.configuration.modelAssignments
     if (historicalWriter || originalScope.volumeCreateIntent || ['ask_user', 'quality_analyze', 'continuity_validate', 'memory_search'].includes(call.name)) ctx.writingScope = originalScope
     ctx.inlineChild = Boolean(lease.parent)
+    let chapterApproval: Awaited<ReturnType<typeof readToolApprovalOutcome>> | undefined
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
     if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
     else if (PERSONALIZATION_WRITE_ACTIONS.includes(call.name)) {
@@ -321,17 +327,63 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       ctx.durableStructure = { ...capability, expectedHash: baseline.hash }
     }
     else if (['plan_save', 'plan_rename', 'plan_delete'].includes(call.name)) {
-      const target = typeof args.planId === 'string' ? args.planId : null
-      const baseline = target ? await readObservedBaseline(tx, root.id, frame.revision, { kind: 'plan', id: target }) : null
-      if (target && baseline?.kind !== 'plan') return { reject: { cursor, callId: call.id, tool } }
-      // An existing same-title plan must first be explicitly read, never silently overwritten.
-      if (!target) {
-        try { if (await findPlanByIdentity(tx, lease.userId, root.novelId, args)) return { reject: { cursor, callId: call.id, tool } } }
-        catch (error) { if (error instanceof DataAccessError && error.code === 'PLAN_TARGET_AMBIGUOUS') return { reject: { cursor, callId: call.id, tool } }; throw error }
+      if (preparedPlanSaveId && ctx.sequentialWritingEnabled) {
+        const saved = await readAdmittedToolOperation(lease, { operationId: preparedPlanSaveId, action: call.name, novelId: root.novelId, callId: call.id }, tx)
+        ctx.durablePlan = { ...capability, ...durablePlanTargetSchema.parse(saved.input) }
+      } else {
+        let target = typeof args.planId === 'string' ? args.planId : null
+        let saveRoute: NonNullable<ToolContext['durablePlan']>['saveRoute']
+        if (call.name === 'plan_save' && ctx.sequentialWritingEnabled) {
+          const explicit = target ? await findOwnedPlan(tx, lease.userId, root.novelId, target) : null
+          try {
+            const route = await resolveDetailPlanWrite(tx, lease.userId, root.novelId, args as z.output<typeof planSaveTool.parameters>, explicit)
+            if (route) {
+              target = route.id
+              saveRoute = { id: target }
+            }
+          } catch (error) {
+            if (!(error instanceof DataAccessError) || !error.code.startsWith('PLAN_TARGET_')) throw error
+            saveRoute = { code: error.code, message: error.message }
+          }
+          if (grant.permission === 'ask' || grant.alwaysConfirm) {
+            const previous = await readToolApprovalOutcome(tx, lease, frame.snapshotHash, call.id, call.name, call.arguments)
+            if (previous) {
+              const { planId } = z.object({ planId: z.string().optional() }).parse(previous.requestData.args)
+              if ((planId ?? null) !== target || saveRoute && 'code' in saveRoute) saveRoute = {
+                id: planId ?? null, code: 'PLAN_REVISION_CONFLICT', message: '等待确认期间，细纲目标已变化。请核对后再提交原来的内容。'
+              }
+            }
+          }
+        }
+        const baseline = target && (!saveRoute || !('code' in saveRoute))
+          ? await readObservedBaseline(tx, root.id, frame.revision, { kind: 'plan', id: target }) : null
+        if (target && baseline?.kind !== 'plan') {
+          if (!saveRoute) return { reject: { cursor, callId: call.id, tool } }
+          if (!('code' in saveRoute)) saveRoute = { id: target, code: 'PLAN_REVISION_CONFLICT',
+            message: `先用 plan_read 核对目标细纲 planId=${target} 的已保存版本，再提交原来的内容。已保存内容保持原样。` }
+        }
+        // A title identifies a file, but only its observed version can authorize an update.
+        if (!target && !saveRoute) {
+          try { if (await findPlanByIdentity(tx, lease.userId, root.novelId, args)) return { reject: { cursor, callId: call.id, tool } } }
+          catch (error) { if (error instanceof DataAccessError && error.code === 'PLAN_TARGET_AMBIGUOUS') return { reject: { cursor, callId: call.id, tool } }; throw error }
+        }
+        ctx.durablePlan = { ...capability, expected: baseline?.kind === 'plan' ? { id: baseline.id, hash: baseline.hash } : { id: null, hash: null },
+          ...(saveRoute ? { saveRoute } : {}) }
       }
-      ctx.durablePlan = { ...capability, expected: baseline?.kind === 'plan' ? { id: baseline.id, hash: baseline.hash } : { id: null, hash: null } }
     } else {
-      const target = typeof args.chapterId === 'string' && args.chapterId.trim() ? args.chapterId.trim() : originalChapterId
+      let target: string | null
+      const pendingId = current.frame.state.pendingOperationId
+      if (!ctx.sequentialWritingEnabled || !isBodyWriteAction(call.name)) {
+        target = typeof args.chapterId === 'string' && args.chapterId.trim() ? args.chapterId.trim() : originalChapterId
+      } else if (pendingId) {
+        const saved = await readAdmittedToolOperation(lease, { operationId: pendingId, action: call.name, novelId: root.novelId, callId: call.id }, tx)
+        if (typeof saved.input.args.chapterId !== 'string') return runtimeError('RUNTIME_RECEIPT_INVALID', '原正文操作缺少已绑定章节。')
+        target = saved.input.args.chapterId
+      } else {
+        chapterApproval = await readToolApprovalOutcome(tx, lease, frame.snapshotHash, call.id, call.name, call.arguments)
+        target = chapterApproval ? z.object({ chapterId: z.string() }).parse(chapterApproval.requestData.args).chapterId
+          : await resolveDurableChapterTarget(tx, ctx, call.name, args, { rootId: root.id, revision: frame.revision }, published.function.parameters)
+      }
       if (!target) return { reject: { cursor, callId: call.id, tool } }
       const baseline = await readObservedBaseline(tx, root.id, frame.revision, { kind: 'chapter', id: target })
       if (baseline?.kind !== 'chapter') return { reject: { cursor, callId: call.id, tool } }
@@ -359,7 +411,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       ctx.personalizationMemoryEpoch = source.personalizationMemoryEpoch
     }
     const needsApproval = !resumeTool && (grant.permission === 'ask' || grant.alwaysConfirm || serviceConfirmation || personalization === 'confirm'
-      || Boolean(await readToolApprovalOutcome(tx, lease, frame.snapshotHash, call.id, call.name, call.arguments)))
+      || Boolean(chapterApproval === undefined ? await readToolApprovalOutcome(tx, lease, frame.snapshotHash, call.id, call.name, call.arguments) : chapterApproval))
     return { tool, args, ctx, cursor, historicalWriter, needsApproval }
   })
   if ('deferred' in selected) return { kind: 'context' as const, frame: selected.deferred! }
@@ -381,7 +433,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   if (selected.needsApproval) {
     const normalize = (raw: unknown) => {
       const parsed = selected.tool.parameters.parse(normalizeToolInput(selected.tool, raw)) as Record<string, unknown>
-      return Object.fromEntries(Object.entries({ ...parsed,
+      return Object.fromEntries(Object.entries({ ...routedPlanSaveArgs(parsed, selected.ctx.durablePlan?.saveRoute),
         ...(selected.ctx.durableContent ? { chapterId: selected.ctx.durableContent.chapterId } : {}),
         ...(selected.ctx.durableCreate ? { title: String(parsed.title).trim() } : {}),
       }).filter(([, value]) => value !== undefined))

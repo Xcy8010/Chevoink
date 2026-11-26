@@ -237,13 +237,29 @@ describe('tool schema provider contract', () => {
     const legacy = toOpenAIParameters(tool.parameters)
     expect(coordinatedWriterParameters(tool, legacyScope)).toBe(tool.parameters)
     expect(toOpenAITools([tool], legacyScope)[0].function.parameters).toEqual(legacy)
-    expect(originalToolParameterSchemas(tool, legacyScope).every(schema => runtimeJson(schema).hash === runtimeJson(legacy).hash)).toBe(true)
+    const ordinarySchemas = originalToolParameterSchemas(tool, legacyScope)
+    expect(ordinarySchemas[0]).toEqual(legacy)
     const marked = toOpenAITools([tool], markedScope)[0].function.parameters
     expect(marked).toEqual(legacy)
     expect(marked).not.toHaveProperty('properties.writing')
     const historical = toOpenAIParameters(coordinatedWriterParameters(tool, markedScope))
     expect(historical).toHaveProperty('properties.writing')
-    expect(originalToolParameterSchemas(tool, markedScope)).toEqual([legacy, historical])
+    const markedSchemas = originalToolParameterSchemas(tool, markedScope)
+    if (tool.name === 'chapter_edit_range') {
+      expect(ordinarySchemas).toEqual([legacy, legacy])
+      expect(markedSchemas).toEqual([legacy, historical])
+    } else {
+      expect(marked).toHaveProperty('properties.targetOrderIndex')
+      const previous = (schema: Record<string, unknown>) => {
+        const { targetOrderIndex, chapterId, ...properties } = schema.properties as Record<string, Record<string, unknown>>
+        expect(targetOrderIndex).toBeDefined()
+        return { ...schema, properties: { ...properties, chapterId: { ...chapterId,
+          description: tool.name === 'chapter_write' ? '目标章节 ID；缺省时默认写入最近操作/当前正在编辑的章节'
+            : '目标章节 ID；缺省时默认追加到最近操作/当前正在编辑的章节' } } }
+      }
+      expect(ordinarySchemas).toEqual([legacy, previous(legacy)])
+      expect(markedSchemas).toEqual([legacy, historical, previous(legacy), previous(historical)])
+    }
     const schema = coordinatedWriterParameters(tool, markedScope)
     const body = tool.name === 'chapter_edit_range' ? { oldText: '原文', newText: '新文' } : { content: '新文' }
     expect(schema.safeParse({ chapterId: 'chapter', ...body, writing: { draftComplete: false } }).success).toBe(true)

@@ -45,6 +45,7 @@ export const taskIntentSchema = z.enum([
 export const taskScopeSchema = z.object({
   /** Frozen on a new author task admitted through a capable app release. */
   chapterReviewWorkflow: z.literal(1).optional(),
+  sequentialWriting: z.literal(1).optional(),
   /** Fresh main-Agent interpretation. Absence of a binding is not a denied user request. */
   agentWritingProtocol: z.literal(1).optional(),
   agentQuestionProtocol: z.union([z.literal(1), z.literal(2)]).optional(),

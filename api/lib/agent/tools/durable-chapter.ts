@@ -9,14 +9,14 @@ import { assertCraftOutputSafe } from '../craft-library.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from '../runtime-common.js'
 import { commitOperationEffect, prepareOperation, recordToolFailure } from '../runtime-operations.js'
 import { chapterAnchorFailureSummary } from '../tool-failure-recovery.js'
-import { recordChapterBaseline } from '../baseline.js'
+import { recordChapterWrite } from '../baseline.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
 import { updateOwnedChapterAtRevision } from './chapter-mutation.js'
 import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import type { ToolContext, ToolResult, AgentTool } from './types.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
-import { chapterPatchSchema, retainedFindingSchema } from './chapter-arguments.js'
+import { chapterPatchSchema, chapterTargetOrderIndex, retainedFindingSchema } from './chapter-arguments.js'
 import { composeChapterBody } from './chapter-body.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { reduceExecutionReceipt, failedToolResultSchema } from '../runtime-reducer.js'
@@ -70,7 +70,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
   if (failed.success) return { ...failed.data.toolResult, outcome: 'failed' }
   return z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
 }
-const argsSchema = z.object({ chapterId: z.string().min(1).max(64), content: z.string().min(1).optional(),
+const argsSchema = z.object({ chapterId: z.string().min(1).max(64), content: z.string().min(1).optional(), targetOrderIndex: chapterTargetOrderIndex,
   oldText: z.string().optional(), start: z.number().int().nonnegative().optional(), end: z.number().int().nonnegative().optional(), newText: z.string().optional(), patches: z.array(chapterPatchSchema).min(1).max(8).optional(), retainedFindings: z.array(retainedFindingSchema).max(40).optional() }).strict()
 const resultSchema = z.object({
   toolResult: z.object({ output: z.string(), summary: z.string(), display: z.object({ kind: z.literal('chapterDiff'), chapterId: z.string(),
@@ -129,7 +129,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     callId: ctx.callId, targetId: args.chapterId, operationInput, effectiveArgs, normalize: raw => {
       const schema = action === 'chapter_write' ? chapterWriteArguments : action === 'chapter_append' ? chapterAppendArguments : chapterEditArguments
       const parsed = schema.parse(raw)
-      return Object.fromEntries(Object.entries({ ...parsed, chapterId: parsed.chapterId?.trim() || capability.chapterId }).filter(([, value]) => value !== undefined))
+      return Object.fromEntries(Object.entries({ ...parsed, chapterId: capability.chapterId }).filter(([, value]) => value !== undefined))
     } }).catch(async error => {
       if (!(error instanceof DataAccessError) || !['RUNTIME_APPROVAL_DENIED', 'RUNTIME_APPROVAL_EXPIRED'].includes(error.code)) throw error
       const rejected = await rejectToolCursorCall(lease, capability.cursor!, ctx.callId)
@@ -154,7 +154,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   }
   const saved = resultSchema.safeParse(receipt.result)
   if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '正文工具回执损坏。')
-  recordChapterBaseline(ctx.runId, args.chapterId, saved.data.toolResult.display.revision)
+  recordChapterWrite(ctx.runId, args.chapterId, saved.data.toolResult.display.revision)
   // The job is durable in the effect transaction. Do not launch the legacy
   // unfenced multi-write processor after losing/pausing this task's lease.
   ctx.signal.throwIfAborted()

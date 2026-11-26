@@ -18,6 +18,8 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { assertTaskResponseEligible } from '../../api/lib/agent/task-response.js'
 import { taskRespondTool } from '../../api/lib/agent/tools/task-response-tool.js'
 import { continueLoopRun } from '../../api/lib/agent/run-service.js'
+import { createNovelPlanArtifact, listNovelPlanArtifacts } from '../../api/lib/agent/plan-artifacts.js'
+import * as storyMemory from '../../api/lib/agent/story-memory.js'
 
 describe.runIf(available)('unbound conversation through the real legacy loop and database context', () => {
   const selectionModelIds:string[]=[]
@@ -214,6 +216,94 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
     expect(await prisma.storyCompilation.count({ where: { runId } })).toBe(0)
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
   }))
+
+  it.each(['plan', 'build'] as const)('sequential writing in %s mode settles the same requests for accurate and stale IDs', mode => fixture(async f => {
+    const memoryRefresh = vi.spyOn(storyMemory, 'syncNovelMemoryProjection').mockResolvedValue({
+      chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: true,
+    })
+    const window = credits.getCreditWindow()
+    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 500000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 })
+    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'deepseek', modelName: 'deepseek-flash',
+      baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['high'],
+      thinkingEnabled: true, visionEnabled: false, contextWindowTokens: 128000 })
+    async function simulate(stale: boolean) {
+      memoryRefresh.mockClear()
+      const novel = await prisma.novel.create({ data: { authorId: f.userId, title: '三章合成样本', slug: randomUUID(), summary: '' } })
+      const parent = mode === 'plan' ? (await createNovelPlanArtifact(f.userId, novel.id, '合成大纲', { planKind: 'outline' })).item : null
+      if (mode === 'build') {
+        const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '合成卷', orderIndex: 1 } })
+        await prisma.chapter.createMany({ data: Array.from({ length: 15 }, (_, index) => ({ novelId: novel.id, authorId: f.userId, volumeId: volume.id,
+          title: `既有章${index + 1}`, content: '既有内容。', orderIndex: index + 1, orderInVolume: index + 1 })) })
+      }
+      const session = await prisma.agentSession.create({ data: { userId: f.userId, novelId: novel.id, title: '顺序写细纲' } })
+      const runId = randomUUID(), prompt = mode === 'plan' ? '按同一大纲依次写第十六、十七、十八章细纲，再回到第十六章细纲补上收据，然后在第十八章细纲末补上回信。'
+        : '依次写第十六、十七、十八章正文。回到第十六章末补上收据，然后在第十八章末补上回信。'
+      const subject = { runId, userId: f.userId, novelId: novel.id, sessionId: session.id }
+      await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: novel.id, sessionId: session.id,
+        mode: mode === 'build' ? 'act' : 'plan', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', runtimeProtocolVersion: 0,
+        status: 'queued', startRequest: withHumanAdmission({ novelId: novel.id, sessionId: session.id, prompt, mode }) } })
+      let requests = 0
+      vi.stubGlobal('fetch', async () => {
+        requests++
+        const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+        if (parent) {
+          const create = (n: number, planId?: string) => ({ name: 'plan_save', args: { title: `第${n}章细纲`, content: `合成小节${n}`,
+            planId, target: { kind: 'future', targetOrderIndex: n }, planKind: 'detail', parentPlanId: parent.id, expectedParentPlanHash: parent.planHash } })
+          const plans = (await listNovelPlanArtifacts(f.userId, novel.id)).items
+          const sixteen = plans.find(item => item.title === '第16章细纲'), seventeen = plans.find(item => item.title === '第17章细纲')
+          const eighteen = plans.find(item => item.title === '第18章细纲')
+          switch (requests) {
+            case 1: calls.push({ name: 'plan_read', args: { planId: parent.id } }); break
+            case 2: calls.push(create(16)); break
+            case 3: calls.push(create(17, stale ? sixteen!.id : undefined), { name: 'plan_read', args: { planId: sixteen!.id } }); break
+            case 4: calls.push({ name: 'plan_save', args: { mode: 'append', title: seventeen!.title, content: '回读前章后继续十七。',
+              ...(stale ? {} : { planId: seventeen!.id }) } }, create(18)); break
+            case 5: calls.push({ name: 'plan_save', args: { mode: 'append', planId: sixteen!.id, title: sixteen!.title, content: '补上收据。' } },
+              { name: 'plan_save', args: { mode: 'append', planId: stale ? sixteen!.id : eighteen!.id, title: eighteen!.title, content: '补上回信。' } }); break
+            case 6: break
+            default: throw new Error('unexpected additional model request')
+          }
+        } else {
+          const chapters = await prisma.chapter.findMany({ where: { novelId: novel.id, orderIndex: { gte: 16 } }, orderBy: { orderIndex: 'asc' } })
+          const [sixteen, seventeen, eighteen] = chapters
+          const newChapter = (n: number) => ({ name: 'chapter_create', args: { position: n, title: `合成章${n}` } })
+          switch (requests) {
+            case 1: calls.push(newChapter(16)); break
+            case 2: calls.push({ name: 'chapter_write', args: { chapterId: sixteen.id, content: '合成小节16' } }, newChapter(17)); break
+            case 3: calls.push({ name: 'chapter_read', args: { chapterId: sixteen.id } },
+              { name: 'chapter_write', args: { chapterId: stale ? sixteen.id : seventeen.id, content: '合成小节17' } }, newChapter(18)); break
+            case 4: calls.push({ name: 'chapter_read', args: { chapterId: seventeen.id } },
+              { name: 'chapter_write', args: { ...(stale ? {} : { chapterId: eighteen.id }), content: '合成小节18' } }); break
+            case 5: calls.push({ name: 'chapter_append', args: { targetOrderIndex: 16, chapterId: sixteen.id, content: '补上收据。' } },
+              { name: 'chapter_append', args: { targetOrderIndex: 18, chapterId: stale ? sixteen.id : eighteen.id, content: '补上回信。' } }); break
+            case 6: break
+            default: throw new Error('unexpected additional model request')
+          }
+        }
+        const delta = calls.length ? { tool_calls: calls.map(({ name, args }, index) => ({ index, id: `r${requests}-${index}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })) } : { content: '三章均已保存，第十六章已补上收据，第十八章已补上回信。' }
+        const frame = { choices: [{ delta, finish_reason: calls.length ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 2000, completion_tokens: 100, total_tokens: 2100 } }
+        return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
+      })
+      await executeAgentRun({ ...subject, chapterId: null, mode, prompt, modelTier: 'speed', reasoningEffort: 'high' })
+      const result = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+      expect(result.status, result.errorMessage ?? '').toBe('completed')
+      const content = mode === 'plan' ? (await listNovelPlanArtifacts(f.userId, novel.id)).items.filter(item => item.planKind === 'detail')
+        : await prisma.chapter.findMany({ where: { novelId: novel.id, orderIndex: { gte: 16 } }, orderBy: { orderIndex: 'asc' } })
+      expect(content.map(item => item.content)).toEqual(['合成小节16\n\n补上收据。', mode === 'plan' ? '合成小节17\n\n回读前章后继续十七。' : '合成小节17', '合成小节18\n\n补上回信。'])
+      const payments = await prisma.aiUsageLog.findMany({ where: { agentRunId: runId }, orderBy: { turn: 'asc' } })
+      expect(payments).toHaveLength(6)
+      expect(payments.every(item => item.billingStatus === 'settled' && item.creditChargeMilli > 0)).toBe(true)
+      const charges = payments.reduce((sum, row) => sum + row.creditChargeMilli, 0)
+      const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId, kind: 'usage', referenceId: runId } })
+      expect(ledger).toHaveLength(payments.length)
+      expect(ledger.reduce((sum, debit) => sum - debit.deltaMilli, 0)).toBe(charges)
+      return { requests, charges, memoryRefreshes: memoryRefresh.mock.calls.length }
+    }
+    const control = await simulate(false)
+    expect(control).toMatchObject({ requests: 6, charges: 6 * credits.calculateTokenChargeMilli(2000, 100) })
+    expect(await simulate(true)).toEqual(control)
+  }), 60000)
 
   it.each(['settled', 'pending_settlement'] as const)('%s empty response recovery uses the real request, reservation and settlement', async settlement => fixture(async f => {
     const novel = await prisma.novel.create({ data: { authorId: f.userId, title: '未命名作品', slug: randomUUID(), summary: '' } })

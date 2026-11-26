@@ -1,4 +1,5 @@
 import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
+import { sequentialWritingEnabled } from './sequential-writing-rollout.js'
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
 import { formatNovelSetupRecap, getNovelSetupFollowup, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
@@ -50,6 +51,9 @@ import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
 import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, governedPolicyKey, type AgentDefinition } from './agents.js'
 import { deregisterActiveRun, registerActiveRun, getActiveRun } from './active-runs.js'
 import { clearRunBaselines, getLastTouchedChapter } from './baseline.js'
+import { isBodyWriteAction, resolveChapterWriteTarget, restoreLegacyChapterWrites } from './chapter-write-target.js'
+import { findOwnedPlan, resolveDetailPlanWrite } from './novel-plan-contract.js'
+import { routedPlanSaveArgs } from './tools/durable-plan.js'
 import { assembleContext, insertSubagentCatalog } from './context.js'
 import { formatFullContentRefusal, isFullContentRefusal, usesAgentContentPolicy } from '../generative-content-policy.js'
 import { readWritingCollaborationDigest, COLLABORATION_MARKER } from './writing-collaboration.js'
@@ -546,14 +550,48 @@ export async function handleToolCall(
   }
   const needAsk = Boolean(hardConfirmation || (permission === 'ask' && !env.agentAutoApprove
     && !(hasAlwaysAllow(ctx.sessionId, tool.name) && !tool.dangerous)))
+  let admittedArgs = validated.data
+  let resolvedWriteChapterId = ctx.resolvedWriteChapterId
+  if ((ctx.sequentialWritingEnabled ?? sequentialWritingEnabled({ scope: ctx.writingScope }))
+    && isBodyWriteAction(call.name) && (subagent || resolvedWriteChapterId || needAsk)) {
+    const args = admittedArgs as { chapterId?: unknown; targetOrderIndex?: unknown }
+    if (subagent || !resolvedWriteChapterId) {
+      try {
+        resolvedWriteChapterId = (await resolveChapterWriteTarget(ctx.transaction ?? prisma,
+          { ...ctx, inlineChild: Boolean(subagent) }, call.name, args)) ?? undefined
+      } catch (error) {
+        failureCode = error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR'
+        return rejectBeforeExecution('正文目标未确定', error instanceof DataAccessError ? error.message : '请核对要写入的章节后继续。')
+      }
+    }
+    if (!resolvedWriteChapterId) {
+      failureCode = 'CHAPTER_NOT_FOUND'
+      return rejectBeforeExecution('正文目标未确定', '请确认要写入的章节 ID 或全书章号后继续。')
+    }
+    admittedArgs = { ...args, chapterId: resolvedWriteChapterId }
+  }
+  let approvedPlanCreate = false
+  if (needAsk && call.name === 'plan_save' && (ctx.sequentialWritingEnabled ?? sequentialWritingEnabled({ scope: ctx.writingScope }))) {
+    const args = admittedArgs as Parameters<typeof resolveDetailPlanWrite>[3]
+    try {
+      const explicit = args.planId ? await findOwnedPlan(prisma, ctx.userId, ctx.novelId, args.planId) : null
+      const route = await resolveDetailPlanWrite(prisma, ctx.userId, ctx.novelId, args, explicit)
+      admittedArgs = routedPlanSaveArgs(args, route)
+      approvedPlanCreate = route?.id === null
+    } catch (error) {
+      if (!(error instanceof DataAccessError) || !error.code.startsWith('PLAN_TARGET_')) throw error
+      failureCode = error.code
+      return rejectBeforeExecution('请核对细纲写入目标', error.message)
+    }
+  }
   autoApproved = !needAsk && personalAdmission !== 'reject'
-  if (!questionCall) { publishToolCall(validated.data); published = true }
+  if (!questionCall) { publishToolCall(admittedArgs); published = true }
   if (personalAdmission === 'reject') {
     return fail('个性化设置未修改', '缺少可核实的本次作者来源，不能修改个性化。', 'denied')
   }
 
   // 协作作用域约束：检查派生授权和目标归属，不拦截无关章节写入。
-  const orchestrationBlock = await assertOrchestrationResumeGuard(runId, ctx.sessionId, tool.name, validated.data)
+  const orchestrationBlock = await assertOrchestrationResumeGuard(runId, ctx.sessionId, tool.name, admittedArgs)
   if (orchestrationBlock) {
     return fail('续跑协作约束', orchestrationBlock, 'failed')
   }
@@ -570,7 +608,7 @@ export async function handleToolCall(
       callId: call.id,
       toolName: tool.name,
       title: tool.title,
-      args: validated.data,
+      args: admittedArgs,
       allowAlways: !tool.dangerous && !hardConfirmation,
       expiresAt,
     })
@@ -619,10 +657,12 @@ export async function handleToolCall(
         if (!recent || recent.alwaysConfirm && !humanApproved)
           throw new DataAccessError(409, 'PERSONALIZATION_PERMISSION_CHANGED', '当前个性化权限没有批准本次操作。')
       }
-      return tool.execute({ ...ctx, inlineChild: Boolean(subagent), personalizationApproved: humanApproved ? true : undefined, publishQuestion: questionCall ? () => {
+      return tool.execute({ ...ctx, resolvedWriteChapterId, inlineChild: Boolean(subagent), personalizationApproved: humanApproved ? true : undefined,
+        ...(call.name === 'plan_save' && humanApproved ? { planSaveTargetResolved: true as const, planSaveApprovedCreate: approvedPlanCreate ? true as const : undefined } : {}),
+        publishQuestion: questionCall ? () => {
         if (!published) publishToolCall(validated.data)
         published = true
-      } : undefined }, validated.data)
+      } : undefined }, admittedArgs)
     })))
     const reviewOutcome = requestTrace.records.length > 0 && !textRequestsFinished(requestTrace) && result.reviewOutcome
       ? 'provider_unresolved' as const : result.reviewOutcome
@@ -653,6 +693,8 @@ export async function handleToolCall(
       ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}),
       ...(reviewRequestFinished ? { reviewRequestFinished } : {}),
       ...(reviewedChapter ? { reviewedChapter } : {}),
+      ...(call.name === 'chapter_create' && !result.chapterCreateReuse && (ctx.sequentialWritingEnabled ?? sequentialWritingEnabled({ scope: ctx.writingScope }))
+        ? { chapterCreated: true as const } : {}),
       durationMs,
       ...subagentMark,
     })
@@ -675,7 +717,7 @@ export async function handleToolCall(
       questionCancelled: call.name === 'ask_user' && !ctx.inlineChild ? result.questionCancelled : undefined,
       part: {
         ...basePart,
-        args: validated.data,
+        args: admittedArgs,
         status: 'success',
         summary,
         display: result.display,
@@ -1946,6 +1988,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const toolContext: ToolContext = {
       contentPolicyEnabled,
       chapterReviewWorkflowEnabled: chapterReviewWorkflowEnabled(taskSpec),
+      sequentialWritingEnabled: sequentialWritingEnabled(taskSpec),
       get attachmentInputBudgetTokens() { return contextBudget.hardRequestTokens },
       publicWebSearchQuestion: taskSpec.networkAccess !== 'denied' && !ownedGoalExecution && !sessionPolicy?.spawnedFromSessionId
         ? publicWebQuestion : undefined,
@@ -1992,7 +2035,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     let planSaveReminders = 0
     // 长任务防早停：待办清单（todo_write 维护）未全部完成就想收尾时，回填强指令让它接着执行
     // 续跑时从会话恢复既有清单，新任务从空开始（避免上一个任务的残留待办干扰）
-    let todoItems: AgentTodoItem[] = continuingTask ? await loadSessionTodoItems(params.sessionId, await getTaskRunIds(params.sessionId, runId)) : []
+    const continuedRunIds = continuingTask ? await getTaskRunIds(params.sessionId, runId) : []
+    if (continuingTask && params.mode === 'build' && toolContext.sequentialWritingEnabled) {
+      await restoreLegacyChapterWrites(prisma, toolContext, continuedRunIds)
+    }
+    let todoItems: AgentTodoItem[] = continuingTask ? await loadSessionTodoItems(params.sessionId, continuedRunIds) : []
     let researchCompletionReminders = 0
     let authorEndRequested = false
     if (continuingTask) messages.push({ role: 'user', content: `[系统] 恢复指定任务 ${taskSpec.id}，不是恢复整个会话的历史工作。原目标：${taskSpec.goals.join('；')}。\n${renderTodoItems(todoItems)}\n历史中其他任务的并行窗口、待办与一次性指令不构成本任务的授权；禁止重新启动它们。被停止时生成但未成功执行的工具不是已保存成果。先核对本任务已保存进度，执行剩余工作。仅尚有多个独立执行单元的长任务或复杂任务需要建立待办；没有清单不是未完成的证据，确已完成时直接交付，禁止在结尾补造已完成清单、提交空清单或覆盖历史待办。不得仅回复下一步打算就结束，也不得将未完成项标为已完成。` })
@@ -2953,12 +3000,20 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             continue
           }
         }
-        if (preflightTool && preflightArgs && ['chapter_write', 'chapter_append', 'chapter_edit_range'].includes(call.name)
-          && preflightTool.parameters.safeParse(preflightArgs).success) {
+        let resolvedWriteChapterId: string | undefined
+        if (preflightTool && preflightArgs && isBodyWriteAction(call.name)
+          && (toolContext.sequentialWritingEnabled || preflightTool.parameters.safeParse(preflightArgs).success)) {
+          if (toolContext.sequentialWritingEnabled) {
+            resolvedWriteChapterId = await resolveChapterWriteTarget(prisma, toolContext, call.name, preflightArgs) ?? undefined
+          }
+          if (resolvedWriteChapterId && resolvedWriteChapterId !== preflightArgs.chapterId) {
+            preflightArgs = { ...preflightArgs, chapterId: resolvedWriteChapterId }
+            call = { ...call, arguments: JSON.stringify(preflightArgs) }
+          }
           // Author scope and review progress are different contracts. The
           // shared writer preflight uses the exact manuscript candidate; its
           // admission is checked again inside the actual body CAS transaction.
-          const reviewWrite = await preflightChapterReviewWrite({ ...toolContext, callId: call.id, messageId }, call.name, preflightArgs)
+          const reviewWrite = await preflightChapterReviewWrite({ ...toolContext, resolvedWriteChapterId, callId: call.id, messageId }, call.name, preflightArgs)
           if (reviewWrite?.kind === 'decision_required') {
             deferToolProposal(call, reviewWrite.guidance, messageId, bus)
             messages.push({ role: 'tool', toolCallId: call.id,
@@ -3095,7 +3150,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           if (!mayAutoVerifyWeb(snapshotToolAuthority(effective, params.mode).get(call.name))) return deny()
           return work()
         } : undefined
-        const outcome = await handleToolCall(call, executionTools, { ...toolContext, writingScope: taskSpec.scope, callId: call.id, messageId, respondTask,
+        const outcome = await handleToolCall(call, executionTools, { ...toolContext, resolvedWriteChapterId, writingScope: taskSpec.scope, callId: call.id, messageId, respondTask,
           ...(admittedPublicStep ? { platformWebVerification: true as const, webAdmission: publicWebAdmission } : {}),
           legacyBatchRenames: call.name === 'novel_update_meta' ? legacyBatchRenames : undefined }, bus, messageId, runId,
           undefined, coordinatedCommit || bootstrapCall?.id === call.id ? async () => { await bus.persist() } : undefined)

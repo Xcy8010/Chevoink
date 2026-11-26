@@ -1,4 +1,5 @@
 import { useStudioPresence } from './components/use-studio-presence'
+import { appReleaseSupports } from '@/features/app-releases/bootstrap'
 import { StudioPresence } from './components/StudioPresence'
 import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -1595,13 +1596,15 @@ export default function StudioWorkspace() {
           if (previous?.localDraft) return current
           return [{
             ...previous,
+            ...display.planLink,
+            reviewState: previous?.reviewState ?? (display.planLink?.parentPlanId && display.planLink.target ? 'current' : undefined),
             id: `server-${display.artifactId}`,
             planHash: undefined,
             savedSnapshot: undefined,
             hasRemoteConflict: false,
             title: display.title,
             content: display.content,
-            createdAt: event.ts,
+            createdAt: previous?.createdAt ?? event.ts,
             artifactId: `server-${display.artifactId}`,
             backendArtifactId: display.artifactId,
           },
@@ -1662,13 +1665,14 @@ export default function StudioWorkspace() {
           if (previous?.localDraft) return current
           return [{
             ...previous,
+            ...display.planLink,
             id: `server-${display.artifactId}`,
             planHash: undefined,
             savedSnapshot: undefined,
             hasRemoteConflict: false,
             title: display.title,
             content: display.after,
-            createdAt: event.ts,
+            createdAt: previous?.createdAt ?? event.ts,
             artifactId: `server-${display.artifactId}`,
             backendArtifactId: display.artifactId,
           },
@@ -1812,7 +1816,7 @@ export default function StudioWorkspace() {
     () => volumes.find((volume) => volume.id === activeChapterListItem?.volumeId)?.title ?? null,
     [activeChapterListItem?.volumeId, volumes],
   )
-  const savedPlanFiles = useMemo(() => mergeWorkspacePlanFiles(buildWorkspacePlanFiles(agentArtifacts), serverPlanFiles), [agentArtifacts, serverPlanFiles])
+  const savedPlanFiles = useMemo(() => mergeWorkspacePlanFiles(buildWorkspacePlanFiles(agentArtifacts), serverPlanFiles, chapters, appReleaseSupports('sequentialWriting')), [agentArtifacts, serverPlanFiles, chapters])
   // 计划设置抽屉指向的计划：计划被删除/切换作品后自动收起
   const planSettingsPlan = planSettingsPlanId
     ? savedPlanFiles.find((plan) => plan.id === planSettingsPlanId) ?? null

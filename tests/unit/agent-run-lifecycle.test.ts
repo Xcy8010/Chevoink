@@ -250,6 +250,18 @@ vi.mock('../../api/lib/prisma.js', () => {
       return row?.userId === values[1] && row.novelId === values[2] ? [{ id: row.id }] : []
     }
     if (sql === 'SELECT id FROM chapters WHERE id = ? FOR SHARE') return mocks.chapters.filter(row => row.id === values[0]).map(({ id }) => ({ id }))
+    if (sql.startsWith('SELECT e.run_id AS "runId", e.type, jsonb_strip_nulls')) {
+      const [runs, userId, novelId, sessionId, actions] = values as [
+        { values: string[] }, string, string, string, { values: string[] },
+      ]
+      return mocks.runEvents.filter(({ runId, payload }) => {
+        const run = mocks.runs.get(runId)
+        return runs.values.includes(runId) && run?.userId === userId && run.novelId === novelId && run.sessionId === sessionId
+          && run.engine === 'loop' && !run.runtimeProtocolVersion && !run.taskRootId
+          && (payload.type === 'tool.call' && payload.toolName === 'chapter_create' && !payload.subagentCallId
+            || payload.type === 'tool.result' && actions.values.includes(payload.toolName) && !payload.subagentCallId)
+      }).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.seq - b.seq)
+    }
     throw new Error(`Unsupported fixture lock: ${sql}`)
   }),
   $transaction: vi.fn(async (work: (tx: Record<string, unknown>) => Promise<unknown>) => {
@@ -274,7 +286,10 @@ vi.mock('../../api/lib/agent/agents.js', () => ({
   applySessionToolPolicy: (tools: AgentTool[]) => tools,
 }))
 vi.mock('../../api/lib/agent/tools/registry.js', () => ({ allTools: [], getToolByName: (name: string) => [...mocks.tools, ...mocks.hiddenTools].find(tool => tool.name === name), toOpenAITools: mocks.openAITools }))
-vi.mock('../../api/lib/agent/baseline.js', () => ({ clearRunBaselines: vi.fn(), getLastTouchedChapter: () => undefined }))
+vi.mock('../../api/lib/agent/baseline.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/baseline.js')>(),
+  getLastTouchedChapter: () => undefined,
+}))
 vi.mock('../../api/lib/agent/context.js', async importOriginal => ({ AGENT_BEHAVIOR_CORE: (await importOriginal<typeof import('../../api/lib/agent/context.js')>()).AGENT_BEHAVIOR_CORE,
   assembleContext: vi.fn(async () => ({ messages: [] })), insertSubagentCatalog: vi.fn() }))
 vi.mock('../../api/lib/agent/skills/receipts.js', () => ({ recordSkillLoads: mocks.skillLoads }))
@@ -3192,7 +3207,7 @@ describe('tool execution authority (real dispatch, mocked global registry)', () 
     const previous = env.agentAutoApprove
     env.agentAutoApprove = true
     try {
-      const result = await handleToolCall(call('confirm', admitted.name), [admitted], ctx, { emit: mocks.emit }, 'message', 'run')
+      const result = await handleToolCall(call('confirm', admitted.name, '{"chapterId":"chapter"}'), [admitted], ctx, { emit: mocks.emit }, 'message', 'run')
       expect(waitForApproval).toHaveBeenCalledOnce()
       expect(admitted.execute).not.toHaveBeenCalled()
       expect(result.part.status).toBe('denied')

@@ -1,7 +1,7 @@
 import { assertOriginalAuthorContext } from '../support/original-author-context.js'
 import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
-import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, saveExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import * as reviewGuard from '../../api/lib/agent/chapter-review-guard.js'
 import { qualityReportGetTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
@@ -15,7 +15,7 @@ import { verifyTestDatabase } from '../support/database-preflight.js'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { assertWritingTarget, freezeWritingScope, readWritingScope, readNewDraftRevision, readNewDraftWritingAuthority, readCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
-import { chapterCreateTool, chapterWriteTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { chapterAppendTool, chapterCreateTool, chapterWriteTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { storyCompilerPrepareTool, sceneTaskBuildTool, chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
@@ -34,7 +34,12 @@ import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js
 import { z } from 'zod'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
-import { getCreatedChapter } from '../../api/lib/agent/baseline.js'
+import { clearRunBaselines, getChapterBaseline, getCreatedChapter } from '../../api/lib/agent/baseline.js'
+import { restoreLegacyChapterWrites } from '../../api/lib/agent/chapter-write-target.js'
+import { getTaskRunIds } from '../../api/lib/agent/task-lineage.js'
+import { handleToolCall } from '../../api/lib/agent/loop.js'
+import type { AgentStreamEventBody } from '../../shared/contracts/agent-events.js'
+import { enableAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
 import * as volumeData from '../../api/lib/data/volume.js'
 import { prepareStoryCompilation, commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
 import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
@@ -76,6 +81,200 @@ async function fixture(prompt: string, work: (ctx: ToolContext) => Promise<void>
     })
   }
 }
+describe.skipIf(!available)('sequential chapter writing', () => {
+  const prompt = '连续写第16章到第18章正文'
+  const cases = (['legacy', 'durable'] as const).flatMap(engine =>
+    [true, false].map(bounded => ({ engine, bounded })))
+
+  it.each(cases)('writes 16–18 by saved target across reference reads, explicit switch and replay ($engine, bounded=$bounded)', ({ engine, bounded }) => fixture(prompt, async ctx => {
+    const volume = await prisma.volume.findFirstOrThrow({ where: { novelId: ctx.novelId } })
+    await prisma.chapter.createMany({ data: Array.from({ length: 15 }, (_, index) => ({
+      novelId: ctx.novelId, authorId: ctx.userId, volumeId: volume.id, title: `合成前章 ${index + 1}`,
+      orderIndex: index + 1, orderInVolume: index + 1, content: '前情正文，不得被串写。',
+    })) })
+    const spec = buildTaskSpec({ ...ctx, prompt })
+    const scoped = bounded ? await prisma.$transaction(tx => freezeWritingScope(tx, ctx, spec, prompt)) : enableAgentWritingScope(spec)
+    if (bounded) expect(scoped.scope.writing?.targets.map(target => target.orderIndex)).toEqual([16, 17, 18])
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: {
+      taskSpec: runtimeJson(JSON.parse(JSON.stringify(scoped))).value, status: engine === 'durable' ? 'queued' : 'running',
+    } })
+    const source = await prisma.agentMessage.create({ data: {
+      runId: ctx.runId, sessionId: ctx.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }],
+    } })
+    const tools = [chapterCreateTool, chapterReadTool, chapterWriteTool, chapterAppendTool, chapterEditRangeTool]
+    const root = engine === 'durable' ? await initializeDurableTask({ userId: ctx.userId, runId: ctx.runId, sourceMessageId: source.id }) : null
+    const lease = root ? await acquireRunLease({ userId: ctx.userId, runId: ctx.runId, ownerId: 'writer-target-test', claimId: randomUUID() }) : null
+    if (lease) await initializeExecutionState(lease, {
+      configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: toOpenAITools(tools, scoped.scope),
+        toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })),
+        protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: prompt }], successfulToolSignatures: [] },
+    })
+
+    let callNumber = 0
+    async function call(name: string, args: Record<string, unknown>, options: { interrupt?: boolean; failure?: boolean } = {}) {
+      const id = `serial-${++callNumber}`
+      const tool = tools.find(item => item.name === name)!
+      if (!lease) {
+        const result = await tool.execute({ ...ctx, callId: id }, tool.parameters.parse(args) as never)
+        expect(result.outcome, result.output).toBe(options.failure ? 'failed' : undefined)
+        await prisma.agentRunEvent.createMany({ data: [
+          ...(name === 'chapter_create' ? [{ runId: ctx.runId, seq: callNumber * 2 - 1, type: 'tool.call', payload: runtimeJson({ callId: id, toolName: name, args }).value }] : []),
+          { runId: ctx.runId, seq: callNumber * 2, type: 'tool.result', payload: runtimeJson({
+          ok: result.outcome !== 'failed', toolName: name, callId: id, ...(result.display ? { display: result.display } : {}),
+          ...(name === 'chapter_create' && !result.chapterCreateReuse ? { chapterCreated: true } : {}),
+        }).value },
+        ] })
+        return result
+      }
+      const { frame } = await loadExecutionState(ctx.userId, ctx.runId)
+      await saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+        snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: null,
+          toolCalls: [{ id, name, arguments: JSON.stringify(args) }] }] } })
+      if (options.interrupt) {
+        const interruption = new Error('synthetic interruption after target admission')
+        const effect = vi.spyOn(runtimeOperations, 'commitOperationEffect').mockRejectedValueOnce(interruption)
+        try { await expect(executeDurableToolStep(lease, ctx.signal)).rejects.toThrow(interruption.message) } finally { effect.mockRestore() }
+        expect((await loadExecutionState(ctx.userId, ctx.runId)).frame.state.phase).toBe('awaiting_operation')
+        clearRunBaselines(ctx.runId)
+      }
+      const effect = await executeDurableToolStep(lease, ctx.signal)
+      if (effect.kind !== 'tool') throw Error(`Expected settled ${name}, got ${effect.kind}`)
+      expect(effect.result.outcome, effect.result.output).toBe(options.failure ? 'failed' : undefined)
+      return effect.result
+    }
+
+    async function chapter(orderIndex: number) {
+      return prisma.chapter.findFirstOrThrow({ where: { novelId: ctx.novelId, orderIndex }, select: { id: true, revision: true, content: true } })
+    }
+    const reference = await chapter(15)
+    await call('chapter_create', { title: '合成十六' })
+    const sixteen = await chapter(16)
+    await call('chapter_read', { chapterId: reference.id })
+    await call('chapter_write', { chapterId: reference.id, content: '十六的正文。' })
+    expect(await chapter(15)).toEqual(reference)
+    const beforeLaterChapters = await chapter(16)
+    expect(beforeLaterChapters).toMatchObject({ content: '十六的正文。', revision: sixteen.revision + 1 })
+    const originalSeventeenTitle = '第十七章 合成十七'
+    await call('chapter_create', { title: originalSeventeenTitle })
+    const seventeen = await chapter(17)
+    await call('chapter_read', { chapterId: sixteen.id })
+    if (!lease) {
+      // The previous read must not set write focus when the server restores
+      // its existing receipts, and a receipt must not import an unseen edit.
+      await prisma.chapter.update({ where: { id: seventeen.id }, data: { revision: { increment: 1 } } })
+      clearRunBaselines(ctx.runId)
+      await restoreLegacyChapterWrites(prisma, ctx, await getTaskRunIds(ctx.sessionId, ctx.runId))
+      expect(getChapterBaseline(ctx.runId, seventeen.id)).toBe(seventeen.revision)
+      expect(getCreatedChapter(ctx.runId, originalSeventeenTitle)).toBe(seventeen.id)
+      await call('chapter_write', { chapterId: sixteen.id, content: '不应覆盖上一版或第十六章。' }, { failure: true })
+      expect(await chapter(16)).toEqual(beforeLaterChapters)
+      await call('chapter_read', { chapterId: seventeen.id })
+      await call('chapter_read', { chapterId: sixteen.id })
+    }
+    const seventeenBaseline = await chapter(17)
+    await call('chapter_write', { chapterId: sixteen.id, content: '十七的正文。' }, { interrupt: true })
+    await call('chapter_append', { chapterId: seventeen.id, content: '十七的续段。' })
+    expect(await chapter(16)).toEqual(beforeLaterChapters)
+    expect(await chapter(17)).toMatchObject({ content: '十七的正文。\n\n十七的续段。', revision: seventeenBaseline.revision + 2 })
+    await call('chapter_create', { title: '合成十八' })
+    const eighteen = await chapter(18)
+    await call('chapter_read', { chapterId: seventeen.id })
+    await call('chapter_write', { content: '十八的正文。' })
+    const completedEighteen = await chapter(18)
+    expect(completedEighteen).toMatchObject({ content: '十八的正文。', revision: eighteen.revision + 1 })
+    await call('chapter_write', { chapterId: 'unknown-synthetic-chapter', content: '不应写入任何章节。' }, { failure: true })
+    expect(await chapter(18)).toEqual(completedEighteen)
+    await call('chapter_write', { chapterId: eighteen.id, targetOrderIndex: 16, content: '十六的回改。' })
+    await call('chapter_read', { chapterId: eighteen.id })
+    await call('chapter_append', { content: '十六的回改续段。' })
+    const afterBackwardEdit = await chapter(16)
+    await call('chapter_append', { chapterId: eighteen.id, content: '十八的续段。' })
+    expect(await chapter(16)).toEqual(afterBackwardEdit)
+    expect(await chapter(18)).toMatchObject({ content: '十八的正文。\n\n十八的续段。', revision: eighteen.revision + 2 })
+    await call('chapter_edit_range', { chapterId: seventeen.id, oldText: '十七的续段。', newText: '十七的定点回改。' })
+    expect(await chapter(15)).toEqual(reference)
+    expect(await chapter(16)).toMatchObject({ content: '十六的回改。\n\n十六的回改续段。', revision: sixteen.revision + 3 })
+    expect(await chapter(17)).toMatchObject({ content: '十七的正文。\n\n十七的定点回改。', revision: seventeenBaseline.revision + 3 })
+    expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(18)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(ctx.userId, { userId: ctx.userId }) })).toBe(0)
+    if (lease && root) {
+      expect(await executeDurableToolStep(lease, ctx.signal)).toEqual({ kind: 'idle' })
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(callNumber)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id, action: { not: 'fixture_model_turn' } } } })).toBe(0)
+      expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: root.id, kind: 'tool', status: 'succeeded' } } })).toBe(callNumber - 1)
+    }
+  }), 60_000)
+
+  it('keeps a legacy inline child write on the exact chapter shown for approval', () => fixture('为合成第十七章写入正文', async base => {
+    const ctx = { ...base, sequentialWritingEnabled: true }
+    const input = '为合成第十七章写入正文'
+    const spec = enableAgentWritingScope(buildTaskSpec({ ...ctx, prompt: input }))
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
+    const volume = await prisma.volume.findFirstOrThrow({ where: { novelId: ctx.novelId } })
+    const previous = await prisma.chapter.create({ data: {
+      novelId: ctx.novelId, authorId: ctx.userId, volumeId: volume.id, orderIndex: 16, orderInVolume: 16, title: '合成前章', content: '原有前章。',
+    } })
+    const chosen = await prisma.chapter.create({ data: {
+      novelId: ctx.novelId, authorId: ctx.userId, volumeId: volume.id, orderIndex: 17, orderInVolume: 17, title: '合成目标', content: '',
+    } })
+    const selected = { ...ctx, chapterId: chosen.id }
+    await chapterReadTool.execute(selected, { chapterId: previous.id })
+    await expect(chapterWriteTool.execute(selected, { content: '作者编辑器目标的初稿。' })).resolves.toMatchObject({ display: { chapterId: chosen.id } })
+    const events: AgentStreamEventBody[] = []
+    const confirmingWriter = { ...chapterWriteTool, alwaysConfirm: true }
+    const unbound = await handleToolCall({
+      id: 'missing-confirmation-target', name: chapterWriteTool.name,
+      arguments: JSON.stringify({ targetOrderIndex: 99, content: '没有绑定的章节。' }),
+    }, [confirmingWriter], ctx, { emit: event => events.push(event) }, randomUUID(), ctx.runId)
+    expect(unbound.part).toMatchObject({ status: 'failed', preExecutionFailure: true })
+    expect(events.some(event => event.type === 'permission.ask')).toBe(false)
+    const controller = new AbortController()
+    const result = handleToolCall({
+      id: ctx.callId, name: chapterWriteTool.name,
+      arguments: JSON.stringify({ chapterId: previous.id, targetOrderIndex: 17, content: '经确认写入合成目标。' }),
+    }, [confirmingWriter], { ...ctx, signal: controller.signal },
+    { emit: event => events.push(event) }, randomUUID(), ctx.runId, { callId: 'parent-inline-call' })
+    try {
+      await vi.waitFor(() => expect(questionPermissions.getPendingApprovalCallIds(ctx.runId)).toContain(ctx.callId))
+      expect(events).toContainEqual(expect.objectContaining({ type: 'permission.ask',
+        args: expect.objectContaining({ chapterId: chosen.id, targetOrderIndex: 17 }) }))
+      await prisma.$transaction([
+        prisma.chapter.update({ where: { id: chosen.id }, data: { orderIndex: 18, orderInVolume: 18 } }),
+        prisma.chapter.update({ where: { id: previous.id }, data: { orderIndex: 17, orderInVolume: 17 } }),
+      ])
+      expect(questionPermissions.resolveApproval(ctx.runId, ctx.callId, true, false)).toBe(true)
+      expect((await result).part).toMatchObject({ status: 'success', display: { chapterId: chosen.id } })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chosen.id } })).toMatchObject({ content: '经确认写入合成目标。' })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: previous.id } })).toMatchObject({ content: '原有前章。', revision: previous.revision })
+    } finally {
+      controller.abort()
+      await result.catch(() => {})
+    }
+  }))
+
+  it('keeps the later target active across a reference read when both chapters already exist', () => fixture('改写第16章到第17章正文', async base => {
+    const ctx = { ...base, sequentialWritingEnabled: true }
+    const input = '改写第16章到第17章正文'
+    const volume = await prisma.volume.findFirstOrThrow({ where: { novelId: ctx.novelId } })
+    const [previous, current] = await Promise.all([16, 17].map(orderIndex => prisma.chapter.create({ data: {
+      novelId: ctx.novelId, authorId: ctx.userId, volumeId: volume.id, orderIndex, orderInVolume: orderIndex,
+      title: `已有第 ${orderIndex} 章`, content: `第 ${orderIndex} 章原文。`,
+    } })))
+    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ ...ctx, prompt: input }), input))
+    expect(spec.scope.writing?.targets.map(target => target.chapterId)).toEqual([previous.id, current.id])
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
+    await expect(chapterWriteTool.execute(ctx, { chapterId: current.id, content: '已有第十七章的新稿。' })).resolves.toMatchObject({ display: { chapterId: current.id } })
+    await chapterReadTool.execute(ctx, { chapterId: previous.id })
+    await expect(chapterAppendTool.execute(ctx, { chapterId: previous.id, content: '仍追加到第十七章。' })).resolves.toMatchObject({ display: { chapterId: current.id } })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: previous.id } })).toMatchObject({ content: previous.content, revision: previous.revision })
+    await expect(chapterAppendTool.execute(ctx, { targetOrderIndex: 16, content: '明确回到第十六章补写。' })).resolves.toMatchObject({ display: { chapterId: previous.id } })
+  }))
+})
+
 describe.skipIf(!available)('authenticated empty-book clarification', () => {
   it.each((['none', 'before-reduction', 'after-reduction'] as const).flatMap(crash => [false, true].map(wrapped => ({ crash, wrapped }))))(
     'returns the actual answer to the Agent without a parser-driven pause, crash=$crash wrapped=$wrapped', ({ crash, wrapped }) => fixture(shortSceneRequest, async ctx => {

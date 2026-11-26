@@ -1,5 +1,6 @@
 import type { AgentAttachmentMeta } from './agent-attachments.js'
 import type { AgentExecutionMode, EntityId } from './models.js'
+import type { PlanLinkFields } from './novel-plans.js'
 import type { ProjectSearchMatch } from './search-contracts.js'
 import type { StoryMemoryCard } from './memory-contracts.js'
 import type { ReviewOutcome } from '../review-lifecycle.js'
@@ -150,9 +151,10 @@ export type AgentToolDisplayPayload =
   | { kind: 'memoryCard'; memoryId: EntityId; memoryType: StoryMemoryCard['memoryType']; title: string }
   | { kind: 'sessionRename'; sessionId: EntityId; title: string }
   | { kind: 'plan'; summary: string; steps: Array<{ title: string; detail?: string }> }
-  | { kind: 'planFile'; artifactId: EntityId; title: string; content: string }
+  | { kind: 'planFile'; artifactId: EntityId; title: string; content: string; planLink?: Pick<PlanLinkFields, 'planKind' | 'target' | 'parentPlanId'> }
   | {
       kind: 'planDiff'
+      planLink?: Pick<PlanLinkFields, 'planKind' | 'target' | 'parentPlanId'>
       artifactId: EntityId
       title: string
       beforeTitle: string
@@ -510,6 +512,8 @@ export type AgentStreamEventBody =
       reviewRequestFinished?: AgentReviewRequestReceipt
       /** Actual chapter/version observed by a review, for activity presentation. */
       reviewedChapter?: { chapterId: string; revision: number }
+      /** A successful chapter_create produced a new chapter, as opposed to reusing one. */
+      chapterCreated?: true
       invalidFields?: string[]
       display?: AgentToolDisplayPayload
       durationMs: number

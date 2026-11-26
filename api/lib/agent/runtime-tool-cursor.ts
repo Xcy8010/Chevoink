@@ -16,6 +16,8 @@ import type { AgentTool } from './tools/types.js'
 import { assertToolApproval, readToolApprovalOutcome } from './runtime-approval.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
+import { resolveDurableChapterTarget } from './chapter-write-target.js'
+import { sequentialWritingEnabled } from './sequential-writing-rollout.js'
 import { STRUCTURE_MUTATIONS, structureContentTargets } from './runtime-common.js'
 
 export type ToolExecutionCursor = { expectedRevision: number; expectedHash: string }
@@ -174,10 +176,12 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
             if (await readPersonalizationWriteAdmission(tx, { ...token, sessionId: root.sessionId, novelId: root.novelId }, call.name, args) === 'reject')
               code = 'PERSONALIZATION_AUTHOR_REQUIRED'
           }
-          const chapterId = typeof args.chapterId === 'string' && args.chapterId.trim() ? args.chapterId.trim()
-            : scope.selection?.chapterId ?? (scope.chapterIds?.length === 1 ? scope.chapterIds[0] : null)
+          const initialChapterId = scope.selection?.chapterId ?? (scope.chapterIds?.length === 1 ? scope.chapterIds[0] : null)
           const target = ['chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename'].includes(call.name)
-            ? { kind: 'chapter' as const, id: chapterId }
+            ? { kind: 'chapter' as const, id: sequentialWritingEnabled(spec) ? await resolveDurableChapterTarget(tx,
+              { userId: token.userId, runId: token.runId, novelId: scope.novelId, chapterId: initialChapterId },
+              call.name, args, { rootId: token.taskRootId, revision: frame.revision }, published.function.parameters)
+              : (typeof args.chapterId === 'string' ? args.chapterId.trim() : '') || initialChapterId }
             : ['plan_save', 'plan_rename', 'plan_delete'].includes(call.name) && typeof args.planId === 'string' ? { kind: 'plan' as const, id: args.planId } : null
           if (target && (!target.id || !await readObservedBaseline(tx, token.taskRootId, frame.revision, { kind: target.kind, id: target.id }))) {
             code = 'TOOL_BASELINE_REQUIRED'
