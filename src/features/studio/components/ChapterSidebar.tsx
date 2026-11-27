@@ -1,6 +1,6 @@
 import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { useStudioPresence } from '@/features/studio/components/use-studio-presence'
-import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight, FilePlus2, FileText, FolderPlus, FolderTree, GripVertical, NotebookPen, NotebookText, PencilLine, ScrollText, Settings2, Trash2, type LucideIcon } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -12,7 +12,6 @@ import TreeContextMenu, { TreeMenuButton, type TreeMenuAnchor, type TreeMenuItem
 import './chapter-tree.css'
 
 type CreatePlanKind = 'outline' | 'detail'
-type PlanFolderKind = CreatePlanKind | 'legacy'
 type TreeContextMenuTarget = { title: string } & (
   | { kind: 'novel' | 'plan-folder' | 'chapter-folder'; id?: never }
   | { kind: 'plan-kind'; id: CreatePlanKind }
@@ -37,10 +36,24 @@ function TreeHeaderButton({ label, onClick, children }: { label: string; onClick
   )
 }
 
-function readCollapsedVolumes(scope?: string): Set<string> {
-  if (!scope) return new Set()
-  try { const value: unknown = JSON.parse(localStorage.getItem(`chevoink:volume-collapse:${scope}`) ?? '[]'); return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : []) }
-  catch { return new Set() }
+const folderKeys = ['novel', 'plans', 'outline', 'detail', 'legacy', 'chapters']
+const volumeKey = (volumeId: string) => `volume:${volumeId}`
+
+function readCollapsedNodes(scope?: string): Set<string> {
+  const defaults = new Set(['plans'])
+  if (!scope) return defaults
+  try {
+    const saved = localStorage.getItem(`chevoink:tree-collapse:${scope}`)
+    if (saved !== null) {
+      const nodes: unknown = JSON.parse(saved)
+      if (Array.isArray(nodes)) return new Set(nodes.filter((key): key is string => typeof key === 'string'))
+    }
+    const volumes: unknown = JSON.parse(localStorage.getItem(`chevoink:volume-collapse:${scope}`) ?? '[]')
+    if (Array.isArray(volumes)) {
+      for (const id of volumes) if (typeof id === 'string') defaults.add(volumeKey(id))
+    }
+  } catch { /* Use the default expansion when storage is unavailable. */ }
+  return defaults
 }
 
 type ChapterSidebarProps = {
@@ -92,7 +105,11 @@ type ChapterSidebarProps = {
   showExtendedMenus?: boolean
 }
 
-export default function ChapterSidebar({
+export default function ChapterSidebar(props: ChapterSidebarProps) {
+  return <ScopedChapterSidebar key={props.taskScope} {...props} />
+}
+
+function ScopedChapterSidebar({
   showExtendedMenus = true,
   taskScope,
   chapters,
@@ -128,34 +145,32 @@ export default function ChapterSidebar({
   const chapterHoverTimer = useRef<number>()
   function cancelChapterHover() { window.clearTimeout(chapterHoverTimer.current) }
   useEffect(() => cancelChapterHover, [onPrepareChapter])
-  const [volumeState, setVolumeState] = useState(() => ({ scope: taskScope, collapsed: readCollapsedVolumes(taskScope) }))
-  const collapsedVolumes = volumeState.scope === taskScope ? volumeState.collapsed : readCollapsedVolumes(taskScope)
-  useLayoutEffect(() => { setVolumeState({ scope: taskScope, collapsed: readCollapsedVolumes(taskScope) }) }, [taskScope])
-  function updateCollapsedVolumes(next: Set<string>) {
-    setVolumeState({ scope: taskScope, collapsed: next })
-    if (taskScope) try { localStorage.setItem(`chevoink:volume-collapse:${taskScope}`, JSON.stringify([...next])) } catch { /* Memory state remains available. */ }
+  const [collapsedNodes, setCollapsedNodes] = useState(() => readCollapsedNodes(taskScope))
+
+  function updateCollapsedNodes(next: Set<string>) {
+    setCollapsedNodes(next)
+    if (!taskScope) return
+    try {
+      localStorage.setItem(`chevoink:tree-collapse:${taskScope}`, JSON.stringify([...next]))
+    } catch { /* Keep in-memory expansion when storage is unavailable. */ }
   }
-  function toggleVolume(volumeId: string) {
-    const next = new Set(collapsedVolumes)
-    if (next.has(volumeId)) next.delete(volumeId); else next.add(volumeId)
-    updateCollapsedVolumes(next)
+
+  function toggleNode(key: string) {
+    const next = new Set(collapsedNodes)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    updateCollapsedNodes(next)
   }
-  const [novelExpanded, setNovelExpanded] = useState(true)
-  const [planFolderExpanded, setPlanFolderExpanded] = useState(false)
-  const [expandedPlanKinds, setExpandedPlanKinds] = useState<Record<PlanFolderKind, boolean>>({ outline: true, detail: true, legacy: true })
-  const [chapterFolderExpanded, setChapterFolderExpanded] = useState(true)
+
+  const novelExpanded = !collapsedNodes.has('novel')
+  const planFolderExpanded = !collapsedNodes.has('plans')
+  const chapterFolderExpanded = !collapsedNodes.has('chapters')
   const [draggedItem, setDraggedItem] = useState<{ kind: 'chapter' | 'plan'; id: string } | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ target: TreeContextMenuTarget; anchor: TreeMenuAnchor } | null>(null)
   const { rendered: visibleMenu, phase: menuPhase } = useStudioPresence(contextMenu)
   const [renameTarget, setRenameTarget] = useState<TreeRenameTarget | null>(null)
   const [renameValue, setRenameValue] = useState('')
-
-  useLayoutEffect(() => {
-    setContextMenu(null)
-    setRenameTarget(null)
-    setRenameValue('')
-  }, [taskScope])
 
   function openTreeContextMenu(event: MouseEvent<HTMLElement>, target: TreeContextMenuTarget) {
     if (!showExtendedMenus && target.kind !== 'chapter' && target.kind !== 'plan') return
@@ -212,11 +227,7 @@ export default function ChapterSidebar({
   }
 
   function setTreeExpanded(expanded: boolean) {
-    setNovelExpanded(expanded)
-    setPlanFolderExpanded(expanded)
-    setExpandedPlanKinds({ outline: expanded, detail: expanded, legacy: expanded })
-    setChapterFolderExpanded(expanded)
-    updateCollapsedVolumes(new Set(expanded ? [] : volumes.map((volume) => volume.id)))
+    updateCollapsedNodes(new Set(expanded ? [] : [...folderKeys, ...volumes.map(volume => volumeKey(volume.id))]))
   }
 
   function getTreeMenuItems({ target, anchor }: NonNullable<typeof contextMenu>): TreeMenuItem[] {
@@ -263,18 +274,18 @@ export default function ChapterSidebar({
         break
       case 'plan-folder':
         addNewPlan()
-        addToggle(planFolderExpanded, () => setPlanFolderExpanded((current) => !current))
+        addToggle(planFolderExpanded, () => toggleNode('plans'))
         break
       case 'plan-kind': {
         const kind = target.id
         if (onCreatePlanKind) add(`新建${planKindLabels[kind]}`, FilePlus2, () => onCreatePlanKind(kind))
-        addToggle(expandedPlanKinds[kind], () => setExpandedPlanKinds((current) => ({ ...current, [kind]: !current[kind] })))
+        addToggle(!collapsedNodes.has(kind), () => toggleNode(kind))
         break
       }
       case 'chapter-folder':
         if (onCreateVolume) add('新建卷', FolderPlus, onCreateVolume)
         add('新建章节', FilePlus2, onCreateChapter)
-        addToggle(chapterFolderExpanded, () => setChapterFolderExpanded((current) => !current))
+        addToggle(chapterFolderExpanded, () => toggleNode('chapters'))
         break
       case 'volume': {
         const id = target.id
@@ -282,7 +293,7 @@ export default function ChapterSidebar({
         if (onCreateChapterInVolume) add('在此卷新建章节', FilePlus2, () => onCreateChapterInVolume(id))
         addRename('卷', onRenameVolumeTitle ? (title) => onRenameVolumeTitle(id, title) : undefined, openSettings)
         if (openSettings) add('卷设置', Settings2, openSettings)
-        addToggle(!collapsedVolumes.has(id), () => toggleVolume(id))
+        addToggle(!collapsedNodes.has(volumeKey(id)), () => toggleNode(volumeKey(id)))
         if (onRequestDeleteVolume) add('删除', Trash2, () => onRequestDeleteVolume(id), true)
         break
       }
@@ -339,7 +350,7 @@ export default function ChapterSidebar({
           <div onContextMenu={(event) => openTreeContextMenu(event, novelTarget)} className="studio-tree-row flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 transition hover:bg-[var(--surface-muted)]">
             <button
               type="button"
-              onClick={() => setNovelExpanded((current) => !current)}
+              onClick={() => toggleNode('novel')}
               aria-expanded={novelExpanded}
               className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[13px] text-[var(--text-primary)]"
             >
@@ -378,7 +389,7 @@ export default function ChapterSidebar({
               <div onContextMenu={(event) => openTreeContextMenu(event, planFolderTarget)} className="studio-tree-row flex items-center rounded-[10px] transition hover:bg-[var(--surface-muted)]">
                 <button
                   type="button"
-                  onClick={() => setPlanFolderExpanded((current) => !current)}
+                  onClick={() => toggleNode('plans')}
                   aria-expanded={planFolderExpanded}
                   className="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-primary)]"
                 >
@@ -402,13 +413,13 @@ export default function ChapterSidebar({
                     const kindTarget = kind === 'legacy' ? null : { kind: 'plan-kind' as const, id: kind, title: planKindLabels[kind] }
                     return <div key={kind}>
                       <div onContextMenu={kindTarget ? (event) => openTreeContextMenu(event, kindTarget) : undefined} className="studio-tree-row flex items-center rounded-[10px] hover:bg-[var(--surface-muted)]">
-                        <button type="button" aria-expanded={expandedPlanKinds[kind]} onClick={() => setExpandedPlanKinds(current => ({ ...current, [kind]: !current[kind] }))} className="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-secondary)]">
-                          {expandedPlanKinds[kind] ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+                        <button type="button" aria-expanded={!collapsedNodes.has(kind)} onClick={() => toggleNode(kind)} className="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-secondary)]">
+                          {!collapsedNodes.has(kind) ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
                           <span className="truncate">{planKindLabels[kind]}</span><span className="ml-auto shrink-0 text-[10px]">共{plans.length}个</span>
                         </button>
                         {showExtendedMenus && kindTarget ? <div className={cn(rowActionsClass, 'mr-1')}>{treeMenuButton(kindTarget)}</div> : null}
                       </div>
-                    {expandedPlanKinds[kind] ? plans.map((plan) => {
+                    {!collapsedNodes.has(kind) ? plans.map((plan) => {
                       const index = savedPlans.findIndex(item => item.id === plan.id)
                       const planTarget = { kind: 'plan', id: plan.id, title: plan.title.trim() || `计划 ${savedPlans.length - index}` } as const
                       return (
@@ -492,7 +503,7 @@ export default function ChapterSidebar({
               <div onContextMenu={(event) => openTreeContextMenu(event, chapterFolderTarget)} className="studio-tree-row flex items-center rounded-[10px] transition hover:bg-[var(--surface-muted)]">
                 <button
                   type="button"
-                  onClick={() => setChapterFolderExpanded((current) => !current)}
+                  onClick={() => toggleNode('chapters')}
                   aria-expanded={chapterFolderExpanded}
                   className="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-primary)]"
                 >
@@ -533,8 +544,8 @@ export default function ChapterSidebar({
                           dropTarget === `volume:${volume.id}` && 'border-[var(--border-strong)] bg-[var(--surface-muted)]',
                         )}
                       >
-                        <button type="button" onClick={() => toggleVolume(volume.id)} aria-expanded={!collapsedVolumes.has(volume.id)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-                          {collapsedVolumes.has(volume.id) ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                        <button type="button" onClick={() => toggleNode(volumeKey(volume.id))} aria-expanded={!collapsedNodes.has(volumeKey(volume.id))} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+                          {collapsedNodes.has(volumeKey(volume.id)) ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
                           <NotebookText className="h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
                           <span className="truncate">第 {volume.orderIndex} 卷 · {volume.title}</span>
                         </button>
@@ -562,7 +573,7 @@ export default function ChapterSidebar({
                         )}
                         {showExtendedMenus && <div className={rowActionsClass}>{treeMenuButton(volumeTarget)}</div>}
                       </div>
-                      {!collapsedVolumes.has(volume.id) ? <div className="studio-tree-guide ml-2.5 pl-1">
+                      {!collapsedNodes.has(volumeKey(volume.id)) ? <div className="studio-tree-guide ml-2.5 pl-1">
                   {volumeChapters.map((chapter) => {
                     const chapterTarget = { kind: 'chapter', id: chapter.id, title: chapter.title.trim() || `第 ${chapter.orderInVolume} 章` } as const
                     const chapterActive =

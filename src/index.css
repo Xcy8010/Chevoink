@@ -1139,6 +1139,25 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 
 /* One horizontal grid for the conversation and floating controls, with a narrower reading column. */
 .agent-conversation-body { display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); flex: 1; min-height: 0; }
+/* Fade only the scrolling text at the title edge, inside the initial 16px gutter. */
+.agent-conversation-header + .agent-conversation-body::before {
+  --agent-edge-color: var(--surface-default);
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 1;
+  height: 16px;
+  pointer-events: none;
+  background: linear-gradient(var(--agent-edge-color), color-mix(in srgb, var(--agent-edge-color) 40%, transparent) 36%, transparent);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+  mask-image: linear-gradient(to bottom, black, rgb(0 0 0 / 58%) 36%, transparent);
+}
+.agent-conversation-header[data-agent-mobile-header] + .agent-conversation-body::before {
+  --agent-edge-color: var(--app-bg);
+  height: 12px;
+}
+.work-agent-compact .agent-conversation-body::before { content: none; }
 .agent-conversation-width { width: 100%; max-width: 952px; min-width: 0; margin-inline: auto; }
 .agent-reading-column { width: 100%; max-width: 48rem; margin-inline: auto; }
 .agent-conversation-scroll { grid-area: 1 / 1; padding: 16px 0 calc(var(--agent-footer-height, 180px) + 16px); scroll-padding-bottom: calc(var(--agent-footer-height, 180px) + 16px); }

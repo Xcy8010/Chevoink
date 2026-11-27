@@ -79,7 +79,8 @@ it('keeps a read row moving during the next private turn while its details confi
     textRevealTargets={{ [nextTurn.id]: reply }} />)
   expect(screen.getByRole('button', { name: '已查看创作资料', expanded: true })).toBe(step)
   expect(step.querySelector('.agent-processing-shimmer')).toBeNull()
-  expect(screen.getByText('我会接')).toBeTruthy()
+  const opening = view.container.querySelector('p:has(.agent-reply-ink)')
+  expect(opening?.textContent).toBe('我会接')
 })
 
 it('hands the existing review row to a preparation and clears the continuation when work stops', () => {
@@ -360,6 +361,7 @@ it.each([
   fireEvent.click(button)
   view.rerender(<Transcript active="r" messages={[read, staged({ ...next, status: 'running' })]} />)
   expect(screen.getByRole('button', { name: running, expanded: true })).toBe(button)
+  expect(button.querySelector('svg[data-agent-tool-motion]')).toBeTruthy()
   expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
   expect(view.container.querySelectorAll('.agent-processing-shimmer')).toHaveLength(1)
   expect(screen.getByText('查看章节未完成')).toBeTruthy()
@@ -368,6 +370,7 @@ it.each([
   const history = completed([read, staged(next), message('answer', [final])])
   view.rerender(<Transcript messages={history} />)
   expect(screen.getByRole('button', { name: finished, expanded: true })).toBe(button)
+  expect(button.querySelector('svg[data-agent-tool-motion]')).toBeNull()
   expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(2)
   expect(screen.getByText('查看章节未完成')).toBeTruthy()
   expect(screen.getByText(final.text)).toBeTruthy()
@@ -706,8 +709,9 @@ it('shows one parameter preview and uses actual call events to advance the visib
   const timeline = (...parts: ActivityCall[]) => <Transcript active="r" messages={[message('batch', parts)]} liveToolReceiptIds={recent} />
   const view = render(timeline(plan, chapter, next))
   const toggle = screen.getByRole('button', { name: '正在准备 · 查看创作资料' })
-  const animate = vi.fn(() => ({ cancel: vi.fn() }))
-  Object.defineProperty(toggle.firstElementChild, 'animate', { value: animate })
+  const ink = () => toggle.querySelector('[data-activity-ink]')!
+  const preparingInk = ink()
+  expect(preparingInk).toBeTruthy()
   toggle.focus()
   fireEvent.click(toggle)
   expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
@@ -716,6 +720,8 @@ it('shows one parameter preview and uses actual call events to advance the visib
   expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(1)
   view.rerender(timeline({ ...plan, preparing: false }, chapter, next))
   expect(screen.getByRole('button', { name: '正在查看创作资料', expanded: true })).toBe(toggle)
+  const readingInk = ink()
+  expect(readingInk).not.toBe(preparingInk)
   expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(1)
   expect(view.container.querySelector('[data-activity-preparing]')).toBeNull()
   view.rerender(timeline({ ...plan, status: 'success', preparing: false }, { ...chapter, preparing: false }, next))
@@ -724,7 +730,32 @@ it('shows one parameter preview and uses actual call events to advance the visib
     .toEqual(['plan_read', 'chapter_read'])
   expect(screen.getByRole('button', { name: '正在查看章节', expanded: true })).toBe(toggle)
   expect(document.activeElement).toBe(toggle)
-  expect(animate).toHaveBeenCalledTimes(2)
+  expect(ink()).not.toBe(readingInk)
+  const glyphs = Array.from(ink().querySelectorAll<HTMLElement>('[data-glyph]'))
+  expect(glyphs.map(node => node.dataset.glyph).join('')).toBe('正在查看章节')
+  expect(parseFloat(glyphs[1].style.animationDelay)).toBeGreaterThan(parseFloat(glyphs[0].style.animationDelay))
+  // React 18 listens for the WebKit event in DOMs without AnimationEvent.
+  const endEvent = 'AnimationEvent' in window ? 'animationend' : 'webkitAnimationEnd'
+  fireEvent(glyphs[glyphs.length - 1], new Event(endEvent, { bubbles: true }))
+  expect(ink()).toBeNull()
+  expect(screen.getByRole('button', { name: '正在查看章节', expanded: true })).toBe(toggle)
+})
+
+it('replays the ink when a different live tool uses the same author-facing label', () => {
+  const row = (name: string) => <AuthorActivityParts messageId="tools" runActive
+    parts={[call(name, name, { status: 'running', args: {} })]}
+    liveToolReceiptIds={new Set([JSON.stringify(['tools', null, name])])} />
+  const view = render(row('chapter_read'))
+  const step = screen.getByRole('button', { name: '正在核对前文' })
+  const first = step.querySelector('[data-activity-ink]')
+  expect(first).toBeTruthy()
+  view.rerender(row('project_search'))
+  expect(screen.getByRole('button', { name: '正在核对前文' })).toBe(step)
+  const second = step.querySelector('[data-activity-ink]')
+  expect(second).toBeTruthy()
+  expect(second).not.toBe(first)
+  view.rerender(row('project_search'))
+  expect(step.querySelector('[data-activity-ink]')).toBe(second)
 })
 
 it('keeps a live opening visible and revealing when its tool arrives in the same paint', () => {
@@ -751,7 +782,7 @@ it('keeps a live opening visible and revealing when its tool arrives in the same
     const firstFrame = paragraph.textContent!
     expect(firstFrame).toBe(opening.slice(0, 3))
     expect(paragraph.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(row.querySelector('.agent-tool-enter')).toBeTruthy()
+    expect(row.querySelector('[data-activity-ink]')).toBeTruthy()
     act(() => vi.advanceTimersByTime(48))
     expect(paragraph.textContent!.length).toBeGreaterThan(firstFrame.length)
     expect(paragraph.textContent!.length).toBeLessThan(opening.length)
@@ -763,6 +794,8 @@ it('keeps a live opening visible and revealing when its tool arrives in the same
     expect(row.querySelector('[data-activity-continuing]')).toBeTruthy()
     expect(paragraph.textContent).not.toBe(opening)
     act(() => vi.advanceTimersByTime(600))
+    expect(paragraph.textContent).toBe(opening)
+    act(() => vi.advanceTimersByTime(200)) // Let the last visible glyphs settle.
     expect(screen.getByText(opening)).toBe(paragraph)
     expect(useAgentStore.getState().textRevealTargets).toEqual({})
   } finally {
@@ -777,10 +810,10 @@ it('animates new receipts only in their own message even when a replayed receipt
   const messages = [old, fresh]
   const recent = new Set([JSON.stringify([fresh.id, null, sharedId])])
   const view = render(<Transcript active="r" messages={messages} liveToolReceiptIds={recent} />)
-  expect(screen.getByRole('button', { name: /已查看/ }).querySelector('.agent-tool-enter')).toBeNull()
-  expect(screen.getByRole('button', { name: `正在${goalTitle}` }).querySelector('.agent-tool-enter')).toBeTruthy()
+  expect(screen.getByRole('button', { name: /已查看/ }).querySelector('[data-activity-ink]')).toBeNull()
+  expect(screen.getByRole('button', { name: `正在${goalTitle}` }).querySelector('[data-activity-ink]')).toBeTruthy()
   view.rerender(<Transcript key="restored" active="r" messages={JSON.parse(JSON.stringify(messages))} />)
-  expect(view.container.querySelector('.agent-tool-enter')).toBeNull()
+  expect(view.container.querySelector('[data-activity-ink]')).toBeNull()
 })
 
 it('reveals an answer after an untitled tool settles, including a terminal history refresh during the reveal', () => {
@@ -817,6 +850,8 @@ it('reveals an answer after an untitled tool settles, including a terminal histo
     expect(next.length).toBeGreaterThan(first.length)
     expect(next.length).toBeLessThan(report.length / 2)
     act(() => vi.advanceTimersByTime(2000))
+    expect(view.container.querySelector('p')?.textContent).toBe(report)
+    act(() => vi.advanceTimersByTime(200))
     expect(screen.getByText(report)).toBeTruthy()
     expect(useAgentStore.getState().textRevealTargets).toEqual({})
     expect(screen.getByRole('button', { name: '已核对前文' })).toBe(row)
@@ -842,6 +877,7 @@ it('animates a held handoff as soon as the next real stage makes it visible', ()
   const report = view.container.querySelector('p')!
   const saving = screen.getByRole('button', { name: '正在写入创作计划' })
   expect(report.textContent).toBe(prose.text.slice(0, 3))
+  expect(report.querySelector('.agent-reply-ink')).toBeTruthy()
   expect(report.compareDocumentPosition(saving) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   act(() => vi.advanceTimersByTime(48))
   expect(report.textContent!.length).toBeGreaterThan(3)
@@ -1137,7 +1173,7 @@ it('shows the shimmer only on actual tool work and preserves the completed recei
   expect(shimmer()).toHaveLength(1)
   const step = screen.getByRole('button', { name: `正在查看《${title}》` })
   expect(step.closest('[data-author-step]')).toBeTruthy()
-  expect(step.querySelector('.agent-tool-enter')).toBeTruthy()
+  expect(step.querySelector('[data-activity-ink]')).toBeTruthy()
   expect(screen.getByText(opening.text)).toBe(openingNode)
   fireEvent.click(step!)
   expect(step?.getAttribute('aria-expanded')).toBe('true')

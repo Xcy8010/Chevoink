@@ -41,3 +41,47 @@ it('keeps volume settings and chapter drop targets reachable while collapsed', (
   fireEvent.drop(screen.getByRole('button', { name: '第 1 卷 · 开篇' }).parentElement!, { dataTransfer })
   expect(onMoveChapter).toHaveBeenCalledWith('c2', 'v1', 2)
 })
+
+it('restores the folder hierarchy after remount and keeps legacy volume choices', () => {
+  localStorage.setItem('chevoink:volume-collapse:user:n:task-a', JSON.stringify(['v1']))
+  const button = (name: RegExp) => screen.getByRole('button', { name, expanded: true })
+  const closed = (name: RegExp) => screen.getByRole('button', { name, expanded: false })
+  const view = render(<ChapterSidebar {...props} />)
+  expect(closed(/^第 1 卷/)).toBeTruthy()
+  fireEvent.click(closed(/^计划\s*共/))
+  fireEvent.click(button(/^细纲\s*共/))
+  fireEvent.click(button(/^全部章节\s*共/))
+  fireEvent.click(button(/^合成作品$/))
+  view.unmount()
+
+  const restored = render(<ChapterSidebar {...props} />)
+  fireEvent.click(closed(/^合成作品$/))
+  expect(button(/^计划\s*共/)).toBeTruthy()
+  expect(button(/^大纲\s*共/)).toBeTruthy()
+  expect(closed(/^细纲\s*共/)).toBeTruthy()
+  fireEvent.click(closed(/^全部章节\s*共/))
+  expect(closed(/^第 1 卷/)).toBeTruthy()
+  restored.rerender(<ChapterSidebar {...props} taskScope="other:n:task-a" />)
+  expect(closed(/^计划\s*共/)).toBeTruthy()
+  expect(button(/^第 1 卷/)).toBeTruthy()
+})
+
+it('persists expand-all and collapse-all from the work tree menu', () => {
+  const choose = (action: string) => {
+    fireEvent.contextMenu(screen.getByRole('button', { name: '合成作品' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: action }))
+  }
+  const view = render(<ChapterSidebar {...props} />)
+  choose('全部折叠')
+  view.unmount()
+  const collapsed = render(<ChapterSidebar {...props} />)
+  expect(screen.getByRole('button', { name: '合成作品', expanded: false })).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '合成作品' }))
+  expect(screen.getByRole('button', { name: /^全部章节\s*共/, expanded: false })).toBeTruthy()
+  choose('全部展开')
+  collapsed.unmount()
+  render(<ChapterSidebar {...props} />)
+  for (const name of [/^计划\s*共/, /^大纲\s*共/, /^细纲\s*共/, /^全部章节\s*共/, /^第 1 卷/]) {
+    expect(screen.getByRole('button', { name, expanded: true })).toBeTruthy()
+  }
+})

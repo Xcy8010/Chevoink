@@ -5,6 +5,25 @@ import { AgentMarkdownText } from '../../src/features/studio/agent/components/Ag
 
 afterEach(() => { cleanup(); vi.useRealTimers() })
 describe('J4 assistant Markdown', () => {
+  it('adds ink only to newly revealed prose and keeps Markdown semantics when it settles', () => {
+    vi.useFakeTimers()
+    const history = '先前已经收到。'
+    const view = render(<AgentMarkdownText text={history} identity="report" />)
+    expect(view.container.querySelector('.agent-reply-ink')).toBeNull()
+    const source = history + '\n\n**确认**，见[资料](https://example.com)，保留 `a + b`。'
+    view.rerender(<AgentMarkdownText text={source} identity="report" replyInk />)
+    expect(view.container.querySelector('p')!.querySelector('.agent-reply-ink')).toBeNull()
+    expect(view.container.querySelector('strong .agent-reply-ink')?.textContent).toBe('确')
+    const link = view.container.querySelector('a')!
+    expect(link.textContent).toBe('资料')
+    expect(link.getAttribute('href')).toBe('https://example.com/')
+    expect(view.container.querySelector('code')?.textContent).toBe('a + b')
+    expect(view.container.querySelector('code .agent-reply-ink')).toBeNull()
+    view.rerender(<AgentMarkdownText text={source} identity="report" />)
+    act(() => vi.advanceTimersByTime(200))
+    expect(view.container.querySelector('.agent-reply-ink')).toBeNull()
+    expect(view.container.querySelector('a')).toBe(link)
+  })
   it('lays out real paragraphs and code in the first render, without hidden tool-status line boxes', () => {
     const view = render(<AgentMarkdownText text={'核对前章。\n[调用工具 novel_get_context：读取上下文]\n[调用工具 chapter_read：读取正文]\n[调用工具 memory_search：检索]\n\n[调用工具 other：准备]\n\n第一行\n第二行\n\n```text\n[调用工具 example：保留代码]\n```'} />)
     expect([...view.container.querySelectorAll('p')].map(p => p.textContent)).toEqual(['核对前章。', '第一行\n第二行'])

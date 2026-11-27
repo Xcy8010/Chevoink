@@ -1,0 +1,119 @@
+/* Keep one complete label for assistive technology while the ink settles. */
+.agent-ink-glyphs { display: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .agent-ink-source {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .agent-ink-glyphs { display: inline; }
+  .agent-ink-glyphs > span {
+    display: inline-block;
+    white-space: pre;
+    color: var(--text-secondary);
+    transform-origin: 42% 72%;
+    animation: agent-status-ink 300ms cubic-bezier(.16,.68,.22,1) both;
+  }
+  .agent-ink-glyphs > span::before { content: attr(data-glyph); }
+}
+
+@keyframes agent-status-ink {
+  from { opacity: 0; filter: blur(1.6px); transform: translateY(.045em) scale(1.24); }
+  44% { opacity: .94; filter: blur(.3px); }
+  to { opacity: 1; filter: none; transform: none; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .agent-reply-ink {
+    display: inline-block;
+    transform-origin: center 70%;
+    animation: agent-reply-ink 165ms cubic-bezier(.18,.65,.28,1) backwards;
+  }
+}
+
+@keyframes agent-reply-ink {
+  from { opacity: .7; filter: blur(.65px); transform: scale(1.09); }
+  to { opacity: 1; filter: none; transform: none; }
+}
+
+/* Keep the 16px icon slot fixed. Only the working part of each glyph moves. */
+@media (prefers-reduced-motion: no-preference) {
+  [data-agent-tool-motion] .agent-turning-page {
+    transform-origin: 12px 12px;
+    animation: agent-page-turn 1.8s ease-in-out infinite;
+  }
+
+  [data-agent-tool-motion].lucide-globe > path:first-of-type {
+    transform-origin: center;
+    animation: agent-meridian 1.8s ease-in-out infinite;
+  }
+
+  [data-agent-tool-motion].lucide-search {
+    animation: agent-search-sweep 1.6s ease-in-out infinite;
+  }
+
+  [data-agent-tool-motion].lucide-file-pen-line > path:nth-child(2) {
+    animation: agent-pencil-stroke 1.5s ease-in-out infinite;
+  }
+
+  [data-agent-tool-motion].lucide-file-text > path:nth-child(n+3),
+  [data-agent-tool-motion].lucide-clipboard-check > path:last-child {
+    stroke-dasharray: 12;
+    animation: agent-draw-line 1.8s ease-in-out infinite;
+  }
+  [data-agent-tool-motion].lucide-file-text > path:last-child { animation-delay: .18s; }
+
+  [data-agent-tool-motion].lucide-download > path:not(:nth-child(2)) {
+    animation: agent-download-arrow 1.4s ease-in-out infinite;
+  }
+
+  [data-agent-tool-motion].lucide-bot > path:nth-last-child(-n+2) {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: agent-blink 2s ease-in-out infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-turning-page { display: none; }
+}
+
+@keyframes agent-page-turn {
+  0%, 90%, 100% { transform: scaleX(1); opacity: 0; }
+  15% { transform: scaleX(.95); opacity: 1; }
+  72% { transform: scaleX(-.95); opacity: 1; }
+  84% { transform: scaleX(-1); opacity: 0; }
+}
+@keyframes agent-meridian {
+  0%, 100% { transform: scaleX(1); }
+  50% { transform: scaleX(.15); }
+}
+@keyframes agent-search-sweep {
+  0%, 100% { transform: translate(-.8px, .6px); }
+  35% { transform: translate(.4px, -1px); }
+  65% { transform: translate(1px, .5px); }
+}
+@keyframes agent-pencil-stroke {
+  0%, 88%, 100% { transform: translate(0, 0); }
+  20% { transform: translate(-3px, 1px); }
+  36% { transform: translate(-2px, -.8px); }
+  60% { transform: translate(1px, -.5px); }
+  74% { transform: translate(1px, -2px); }
+}
+@keyframes agent-draw-line {
+  0%, 12% { stroke-dashoffset: 12; }
+  55%, 82% { stroke-dashoffset: 0; }
+  100% { stroke-dashoffset: -12; }
+}
+@keyframes agent-download-arrow {
+  0%, 100% { transform: translateY(-1px); }
+  60% { transform: translateY(2px); }
+}
+@keyframes agent-blink {
+  0%, 55%, 75%, 100% { transform: scaleY(1); }
+  65% { transform: scaleY(.1); }
+}

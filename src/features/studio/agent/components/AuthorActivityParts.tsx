@@ -1,5 +1,6 @@
 import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { BookOpenText, Bot, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, ListCollapse, Search } from 'lucide-react'
+import { BookOpenText, Bot, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe, ListCollapse, Search } from 'lucide-react'
+import './activity-tool-motion.css'
 
 import { cn } from '@/lib/utils'
 import { useStreamingTextState } from '../../components/use-streaming-text'
@@ -36,7 +37,7 @@ const actionNames: Record<string, string> = {
 
 function toolIcon(part: ActivityCall) {
   const { phase } = getAgentToolPresentation(part.toolName)
-  if (['web_search', 'web_read', 'web_fetch'].includes(part.toolName)) return Globe2
+  if (['web_search', 'web_read', 'web_fetch'].includes(part.toolName)) return Globe
   if (['project_search', 'memory_search', 'platform_novel_search'].includes(part.toolName)) return Search
   if (part.toolName === 'novel_export') return Download
   if (part.toolName === 'ask_user') return CircleHelp
@@ -45,6 +46,13 @@ function toolIcon(part: ActivityCall) {
   if (phase === 'write' || phase === 'revise') return FilePenLine
   if (phase === 'read') return BookOpenText
   return FileText
+}
+
+function ActivityToolIcon({ part, moving, className }: { part: ActivityCall; moving: boolean; className: string }) {
+  const Icon = toolIcon(part)
+  return <Icon aria-hidden className={className} data-agent-tool-motion={moving || undefined}>
+    {moving && Icon === BookOpenText && <path className="agent-turning-page" d="M12 7q3-4 9-4v14q-6 0-9 4z" />}
+  </Icon>
 }
 
 export type ActivityChapters = ReadonlyMap<string, Pick<ChapterListItem, 'title' | 'orderIndex'> & Partial<Pick<ChapterListItem, 'revision'>>>
@@ -189,15 +197,14 @@ function memorySearchSourceTitle({ title, preview, memoryType }: ReadSource, req
   return name ? `第 ${chapter.orderIndex} 章 · ${name}` : `第 ${chapter.orderIndex} 章`
 }
 
-const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters, readOnly, stale, reviewChapterRevisions }: {
-  part: ActivityCall; runActive: boolean; chapters?: ActivityChapters; readOnly?: boolean; stale?: boolean
+const ActivityDetail = memo(function ActivityDetail({ part, runActive, moving, chapters, readOnly, stale, reviewChapterRevisions }: {
+  part: ActivityCall; runActive: boolean; moving: boolean; chapters?: ActivityChapters; readOnly?: boolean; stale?: boolean
   reviewChapterRevisions?: ReadonlyMap<string, number>
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
   const navigate = useAgentStore(state => state.requestToolNavigation)
   const spotlight = useAgentStore(state => state.requestMemorySpotlight)
-  const Icon = toolIcon(part)
   const display = observedReviewDisplay(part.display, reviewChapterRevisions, chapters)
   const qualityChapter = display?.kind === 'qualityReport' ? chapters?.get(display.chapterId) : undefined
   const qualityStatus = part.status !== 'success' || activityReviewProblem(part) === 'incomplete' ? 'incomplete'
@@ -253,7 +260,7 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters,
   </div> : null
   return <li className="min-w-0 font-normal" data-activity-tool={part.toolName}>
     {display?.kind !== 'reviewBatch' && <div className="agent-activity-line min-h-7 items-start py-1 text-xs leading-5 text-[var(--text-secondary)]">
-      <Icon aria-hidden className="mt-0.5 h-4 w-4 text-[var(--text-tertiary)]" />
+      <ActivityToolIcon part={part} moving={moving} className="mt-0.5 h-4 w-4 text-[var(--text-tertiary)]" />
       <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
         {collapsible ? <button type="button" aria-expanded={open} aria-controls={detailsId} onClick={() => setOpen(value => !value)}
           data-activity-detail-toggle className="min-w-0 break-words text-left underline-offset-2 hover:underline focus-visible:underline">
@@ -270,6 +277,25 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, chapters,
   </li>
 })
 
+const glyphSegmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter() : null
+
+function ActivityStatusText({ text, live }: { text: string; live: boolean }) {
+  const [revealing, setRevealing] = useState(() => live && document.visibilityState !== 'hidden'
+    && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
+  if (!revealing) return <>{text}</>
+
+  const glyphs = glyphSegmenter ? Array.from(glyphSegmenter.segment(text), item => item.segment) : Array.from(text)
+  const stagger = Math.min(34, 480 / Math.max(1, glyphs.length - 1))
+  return <span data-activity-ink>
+    <span className="agent-ink-source">{text}</span>
+    <span aria-hidden="true" className="agent-ink-glyphs">
+      {glyphs.map((glyph, index) => <span key={index} data-glyph={glyph}
+        style={{ animationDelay: `${Math.round(index * stagger)}ms` }}
+        onAnimationEnd={index === glyphs.length - 1 ? () => setRevealing(false) : undefined} />)}
+    </span>
+  </span>
+}
+
 const ActivityRow = memo(function ActivityRow({ group, runActive, active, continuing, chapters, readOnly, awaitingApprovalCallId, animateLive }: {
   group: ActivityGroup; runActive: boolean; active: boolean; chapters?: ActivityChapters; readOnly?: boolean
   continuing: boolean
@@ -283,7 +309,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
   const unresolved = group.unsettled
   const running = runActive ? [...calls].reverse().find(part => part.status === 'running') : undefined
   const part = running ?? unresolved ?? calls.at(-1)
-  const iconPart = group.title ? calls[group.stageStart] : part
+  const iconPart = running ?? (group.title ? calls[group.stageStart] : part)
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
   const waitingForAnswer = runActive && calls.some(call => call.toolName === 'ask_user' && call.status === 'running')
   const waitingForApproval = runActive && awaitingApprovalCallId !== undefined
@@ -291,7 +317,6 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
   const settledBatch = !running && part?.display?.kind === 'reviewBatch'
   const namedInProgress = Boolean(group.title && runActive && !settledBatch && (running || active && !group.closed && !group.completed))
   const waiting = Boolean(importWaiting || waitingForAnswer || waitingForApproval)
-  const Icon = iconPart && toolIcon(iconPart)
   const stageCalls = calls.slice(group.stageStart)
   const readChapterIds = grouped && stageCalls.every(call => call.toolName === 'chapter_read' && activityChapterId(call))
     ? new Set(stageCalls.map(activityChapterId)) : undefined
@@ -320,37 +345,26 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
   }
   const showingActivity = Boolean(running && !waiting)
   const shimmer = runActive && Boolean(showingActivity || namedInProgress || continuing) && !waiting && !settledBatch
-  const step = group.title ? label : part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : ''
-  const enter = useRef<boolean | undefined>(undefined)
-  if (enter.current === undefined) {
-    enter.current = Boolean(animateLive && document.visibilityState !== 'hidden'
-      && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
-  }
-  const previousStep = useRef(step)
-  const headline = useRef<HTMLSpanElement>(null)
+  // A terminal receipt can clear the live set in the same paint as its final label.
+  const wasLive = useRef(false)
   useLayoutEffect(() => {
-    const changed = previousStep.current !== step
-    previousStep.current = step
-    if (!changed || !animateLive || document.visibilityState === 'hidden' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
-    const animation = headline.current?.animate?.(
-      [{ opacity: 0.5, transform: 'translateY(2px)' }, { opacity: 1, transform: 'translateY(0)' }],
-      { duration: 160, easing: 'ease-out' },
-    )
-    return () => animation?.cancel()
-  }, [animateLive, step])
+    wasLive.current = Boolean(animateLive)
+  }, [animateLive])
 
   return <div className="min-w-0" data-author-activity data-author-step>
     <button type="button" aria-expanded={open} aria-controls={detailsId}
       onClick={() => setOpen(value => !value)}
       className="agent-activity-step min-h-7 w-fit max-w-full text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
-      <span ref={headline} className={cn('agent-activity-line items-center', enter.current && 'agent-tool-enter')}>
-        {Icon && <Icon aria-hidden className="h-4 w-4" />}
+      <span className="agent-activity-line items-center">
+        {iconPart && <ActivityToolIcon part={iconPart} moving={showingActivity} className="h-4 w-4" />}
         <span className="min-w-0 break-words text-balance">
           <span aria-live={group.title || active || running ? 'polite' : undefined}
             data-activity-continuing={runActive && continuing && !waiting && !settledBatch || undefined}
             data-activity-preparing={showingActivity && running?.preparing || undefined}
             data-activity-running={showingActivity && !running?.preparing || undefined}
-            className={cn('agent-activity-label', shimmer && 'agent-processing-shimmer')}>{label}</span>
+            className={cn('agent-activity-label', shimmer && 'agent-processing-shimmer')}>
+            {label && <ActivityStatusText key={`${iconPart?.toolName}:${label}`} text={label} live={!readOnly && Boolean(animateLive || wasLive.current)} />}
+          </span>
           <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} />
         </span>
       </span>
@@ -362,6 +376,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
           const key = group.callKeys[index]
           const receipts = [call, ...(group.childrenByCall.get(key) ?? [])].map(detail =>
             <ActivityDetail key={JSON.stringify([key, detail.subagentCallId ?? null, detail.callId])} part={detail} runActive={runActive} chapters={chapters} readOnly={readOnly}
+              moving={open && runActive && !waiting && detail.status === 'running' && detail.toolName !== 'ask_user' && !isOpenImport(detail, runActive) && detail.callId !== awaitingApprovalCallId}
               stale={group.staleReviewCalls?.has(detail)} reviewChapterRevisions={group.reviewChapterRevisions} />)
           const reports = group.reportsAfterCall.get(key)?.filter(report => isActivityDetailReport(report, runActive, awaitingApprovalCallId))
           return [...receipts, ...reports?.map(report => <li key={report.id} data-activity-report className="ml-6 text-[var(--text-secondary)]">
@@ -452,7 +467,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
         textOffset += part.text.length
         const inProcess = collapseText || index < lastToolIndex
         return <AgentProcessRegion key={identity} open={!inProcess || processOpen !== false}>
-          <AgentMarkdownText text={text} identity={identity} />
+          <AgentMarkdownText text={text} identity={identity} replyInk={!readOnly && revealText !== undefined} />
         </AgentProcessRegion>
       }
       if (part.type !== 'tool-call' || part.subagentCallId) return null
