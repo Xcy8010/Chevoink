@@ -76,7 +76,9 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
   currentKeyRef.current = resetKey
   const readOnlyRef = useRef(readOnly)
   readOnlyRef.current = readOnly
-  const authorCommitRef = useRef<{ key: string | undefined; commit: (value: string) => void } | null>(null)
+  const authorCommitRef = useRef<{ key: string | undefined; base: string; chapter: boolean; commit: (value: string) => void } | null>(null)
+  const externalValueRef = useRef(value)
+  externalValueRef.current = value
   const lastSelectionCollapsedRef = useRef<boolean | null>(null)
   const onCommitRef = useRef(onCommit)
   const onSelectionChangeRef = useRef(onSelectionChange)
@@ -96,7 +98,9 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
       const author = authorCommitRef.current
       if (author && author.key !== currentKeyRef.current) return
       committedRef.current = localRef.current
-      const commit = readOnlyRef.current ? author?.commit ?? onCommitRef.current : onCommitRef.current
+      // Preserve the revision that owned this input when another writer changed the chapter.
+      const commit = author && (readOnlyRef.current || (author.chapter && author.base !== externalValueRef.current))
+        ? author.commit : onCommitRef.current
       commit(localRef.current)
     }
   }, [clearCommitTimer])
@@ -154,7 +158,7 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
     if (documentKeyRef.current !== resetKey || composingRef.current) return
     if (value === committedRef.current && !readOnly) return
     // Preserve a pending author edit before an Agent lock supersedes the displayed buffer.
-    if (readOnly && !composingRef.current) flushPending()
+    if (readOnly || authorCommitRef.current?.chapter) flushPending()
     clearCommitTimer()
     committedRef.current = value
     localRef.current = value
@@ -197,17 +201,11 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
   // 卸载时上报最后一批输入并清掉定时器，防止切视图丢字。
   useEffect(
     () => () => {
-      if (commitTimerRef.current !== null) window.clearTimeout(commitTimerRef.current)
       if (selectionTimerRef.current !== null) window.clearTimeout(selectionTimerRef.current)
-      if (!composingRef.current && localRef.current !== committedRef.current) {
-        const author = authorCommitRef.current
-        if (!author || author.key === currentKeyRef.current) {
-          const commit = readOnlyRef.current ? author?.commit ?? onCommitRef.current : onCommitRef.current
-          commit(localRef.current)
-        }
-      }
+      if (composingRef.current) clearCommitTimer()
+      else flushPending()
     },
-    [],
+    [clearCommitTimer, flushPending],
   )
 
   const reportSelection = useCallback((target: HTMLTextAreaElement) => {
@@ -233,8 +231,13 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
     reportSelection(input)
   }, [local, readOnly, reportSelection, reviewEvidence])
 
+  const captureAuthor = () => {
+    if (!authorCommitRef.current || localRef.current === committedRef.current) {
+      authorCommitRef.current = { key: resetKey, base: value, chapter: Boolean(recoveryKey), commit: onCommitRef.current }
+    }
+  }
   const handleChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
-    authorCommitRef.current = { key: resetKey, commit: onCommitRef.current }
+    if (!composingRef.current) captureAuthor()
     const next = event.currentTarget.value
     setLocal(next)
     localRef.current = next
@@ -243,7 +246,7 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
 
   const handleCompositionStart = () => {
     clearCommitTimer()
-    authorCommitRef.current = { key: resetKey, commit: onCommitRef.current }
+    captureAuthor()
     composingRef.current = true
   }
 

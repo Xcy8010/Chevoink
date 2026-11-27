@@ -67,6 +67,22 @@ it('rejects an empty draft without issuing a mutation', async () => {
   expect(options.setChapterSaveMessage).toHaveBeenCalledWith('章节标题和正文都不能为空。')
 })
 
+it('surfaces a failed save for the open chapter and silences a late error after changing chapters', async () => {
+  const onSaveError = vi.fn()
+  const { result, options, draft } = fixture({ onSaveError })
+  api.update.mockRejectedValueOnce(new Error('offline'))
+  await act(async () => { await result.current('manual') })
+  expect(onSaveError).toHaveBeenCalledExactlyOnceWith('offline')
+  let fail!: (error: Error) => void
+  api.update.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject }))
+  let pending!: Promise<void>
+  act(() => { pending = result.current('auto') })
+  options.chapterDraftStateRef.current = { ...draft, id: 'other' }
+  options.selectedChapterIdStateRef.current = 'other'
+  await act(async () => { fail(new Error('late error')); await pending })
+  expect(onSaveError).toHaveBeenCalledTimes(1)
+})
+
 it('skips absent drafts and keeps automatic empty saves silent', async () => {
   const { result, options, draft } = fixture()
   options.chapterDraftStateRef.current = null

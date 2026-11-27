@@ -40,7 +40,6 @@ type EditorCanvasProps = {
   onStatusChange: (nextStatus: ChapterStatus) => void
   onChange: (next: ChapterDraftState) => void
   onWorkspaceDocumentChange?: (next: { title: string; content: string }) => void
-  onRetrySave?: () => void
   onEditorBlur?: () => void
   pendingChapterReview?: ChapterPendingReview | null
   pendingChapterReviewBusy?: boolean
@@ -97,7 +96,6 @@ export default function EditorCanvas({
   onStatusChange: _onStatusChange,
   onChange: sourceOnChange,
   onWorkspaceDocumentChange: sourceOnWorkspaceDocumentChange,
-  onRetrySave: _onRetrySave,
   onEditorBlur,
   pendingChapterReview = null,
   pendingChapterReviewBusy = false,

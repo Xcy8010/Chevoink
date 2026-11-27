@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, type Dispatch, type SetStateAction, type MutableRefObject } from 'react'
 import type { Chapter, Novel, StudioPayload } from '../../../../shared/contracts/index.js'
-import { createChapterDraft, updateChapterDraft } from '../api'
+import { createChapterDraft, getChapterContent, updateChapterDraft } from '../api'
+import { ApiClientError } from '@/app/api-client'
 import { buildChapterDraft } from '../lib/form-state'
 import { formatDateTime } from '../lib/agent-session'
 import { replaceChapterItem, toChapterListItem } from '../lib/plan-review'
@@ -19,6 +20,8 @@ type ChapterPersistence = {
   pendingChapterReviewsRef: MutableRefObject<ChapterPendingReview[]>
   setPendingChapterReviews?: Dispatch<SetStateAction<ChapterPendingReview[]>>
   syncSavedChapter?: (chapter: Chapter) => void
+  recoveryPending?: boolean
+  onSaveError?: (message: string) => void
   selectedChapterIdStateRef: MutableRefObject<string | null>
   promptConfirmPendingChapterReview: (label: string) => void
   setChapterSaveState: Dispatch<SetStateAction<SaveState>>
@@ -63,6 +66,10 @@ export function useChapterPersistence(options: ChapterPersistence) {
       if (!draft) {
         return
       }
+      if (latest.current.recoveryPending) {
+        if (reason === 'switch') throw new Error('请先选择要恢复的章节草稿。')
+        return
+      }
 
       // 仅拦截待审查的那些章，其他章节正常保存
       if (reason !== 'switch' && pendingChapterReviewsRef.current.some((item) => item.chapterId === draft.id)) {
@@ -101,9 +108,24 @@ export function useChapterPersistence(options: ChapterPersistence) {
           ...(draft.localOnly ? {} : { expectedRevision: draft.revision }),
         }
 
-        const savedChapter = draft.localOnly
-          ? await createChapterDraft(activeNovelId, payload)
-          : await updateChapterDraft(activeNovelId, draft.id, payload)
+        let savedChapter: Chapter
+        try {
+          savedChapter = draft.localOnly ? await createChapterDraft(activeNovelId, payload)
+            : await updateChapterDraft(activeNovelId, draft.id, payload)
+        } catch (error) {
+          if (draft.localOnly || !(error instanceof ApiClientError) || error.code !== 'CHAPTER_REVISION_CONFLICT'
+            || owner !== epoch.current || !syncSavedChapter || selectedChapterIdStateRef.current !== draft.id) throw error
+          const remote = await getChapterContent(activeNovelId, draft.id)
+          if (owner !== epoch.current) return
+          if (sameChapterEdits(draft, buildChapterDraft(remote))) savedChapter = remote
+          else {
+            // Feed the authoritative revision to the same reconciliation used on reload.
+            syncSavedChapter(remote)
+            failure.current = { owner, error }
+            if (reason === 'switch') throw error
+            return
+          }
+        }
 
         if (owner !== epoch.current) return
         syncSavedChapter?.(savedChapter)
@@ -197,8 +219,12 @@ export function useChapterPersistence(options: ChapterPersistence) {
       } catch (error) {
         if (owner !== epoch.current) return
         failure.current = { owner, error }
-        setChapterSaveState('error')
-        setChapterSaveMessage(error instanceof Error ? error.message : '章节保存失败，请稍后重试。')
+        if (selectedChapterIdStateRef.current === draft.id) {
+          const message = error instanceof Error ? error.message : '章节保存失败，请稍后重试。'
+          setChapterSaveState('error')
+          setChapterSaveMessage(message)
+          if (reason !== 'switch') latest.current.onSaveError?.(message)
+        }
         if (reason === 'switch') throw error
       } finally {
         if (owner === epoch.current) chapterSavingRef.current = false
@@ -230,7 +256,7 @@ export function useChapterPersistence(options: ChapterPersistence) {
   }, [persistChapter])
 
   useEffect(() => {
-    if (!chapterDraft || !chapterDirty) {
+    if (!chapterDraft || !chapterDirty || options.recoveryPending) {
       return
     }
 
@@ -241,14 +267,16 @@ export function useChapterPersistence(options: ChapterPersistence) {
     }, 800)
 
     return () => window.clearTimeout(timer)
-  }, [chapterDirty, chapterDraft, persistChapter, setChapterSaveState, setChapterSaveMessage])
+  }, [chapterDirty, chapterDraft, options.recoveryPending, persistChapter, setChapterSaveState, setChapterSaveMessage])
   useEffect(() => registerDesktopSave(async () => {
     const owner = epoch.current
     const deadline = Date.now() + 6500
     while (Date.now() < deadline) {
       if (owner !== epoch.current) return false
       if (!latest.current.chapterDirty && !chapterSavingRef.current) return true
+      if (latest.current.recoveryPending) return false
       if (!chapterSavingRef.current) await persistChapter('auto')
+      if (failure.current?.owner === owner) return false
       await new Promise((resolve) => window.setTimeout(resolve, 40))
     }
     return false

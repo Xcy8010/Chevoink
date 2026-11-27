@@ -1239,9 +1239,6 @@ export default function StudioWorkspace() {
     hydratedScope: workPanelScope, draftRef: chapterDraftStateRef, dirtyRef: chapterDirtyRef,
     setDraft: setChapterDraft, setDirty: setChapterDirty, setSaveState: setChapterSaveState,
     setLastSavedAt: setChapterLastSavedAt, setSaveMessage: setChapterSaveMessage })
-  const { rendered: visibleDraftChoice } = useStudioPresence(chapterDraftChoice && {
-    choice: chapterDraftChoice, scope: taskUiScope, chapterId: selectedChapterId,
-  })
   // 切章守卫与编辑器 blur flush 可能几乎同时触发保存，in-flight 期间直接跳过，避免并发写同一章节。
   const selectedChapterIdStateRef = useRef(selectedChapterId)
   selectedChapterIdStateRef.current = selectedChapterId
@@ -1910,6 +1907,11 @@ export default function StudioWorkspace() {
   const chapterUnavailable = chapterQuery.error instanceof ApiClientError && [401, 403, 404].includes(chapterQuery.error.status)
   const workChapterDraft = workViewerMode === 'chapter' && chapterDraft?.id === viewerChapterId
     && !(chapterUnavailable && viewerChapterId === selectedChapterId) ? chapterDraft : null
+  const showingChapter = workDesktop ? Boolean(workChapterDraft)
+    : (desktopLayout || mobileView === 'editor') && Boolean(chapterDraft && !activeWorkspaceDocument)
+  const { rendered: visibleDraftChoice } = useStudioPresence(showingChapter && chapterDraftChoice ? {
+    choice: chapterDraftChoice, scope: taskUiScope, chapterId: selectedChapterId,
+  } : null)
   const workChapterLoadError = workViewerMode === 'chapter' && viewerChapterId === selectedChapterId
     && !workChapterDraft && chapterQuery.isError
     ? (chapterQuery.error instanceof Error ? chapterQuery.error.message : '章节暂时无法打开，请重试。')
@@ -2774,6 +2776,7 @@ export default function StudioWorkspace() {
 
   const persistChapter = useChapterPersistence({
     activeNovelId, userId: taskUiUserId, scope: taskUiScope, chapterDraft, chapterDirty, chapterDraftStateRef, chapterDirtyStateRef: chapterDirtyRef,
+    recoveryPending: Boolean(chapterDraftChoice), onSaveError: toast.error,
     pendingChapterReviewsRef, setPendingChapterReviews,
     syncSavedChapter: chapter => queryClient.setQueryData(['studio-chapter', activeNovelId, chapter.id], chapter),
     selectedChapterIdStateRef, promptConfirmPendingChapterReview, setChapterSaveState, setChapterSaveMessage, setChapters, setSelectedTreeItemId, setSelectedChapterId, setChapterDraft, setChapterDirty, setChapterLastSavedAt, setCurrentNovel, syncStudioPayload,
@@ -3619,10 +3622,6 @@ export default function StudioWorkspace() {
     })
   }
 
-  function handleRetrySave() {
-    void persistChapter('manual')
-  }
-
   // 失焦即刷保存：配合 800ms 防抖，保证有改动就落盘。
   // LocalFirstTextarea 在失焦时先同步上报最后一批输入（同一事件批处理内排队），
   // 等 React 提交完成后再读最新 dirty 触发保存。
@@ -4382,7 +4381,6 @@ export default function StudioWorkspace() {
       onStatusChange={handleEditorStatusChange}
       onChange={handleChapterDraftChange}
       onWorkspaceDocumentChange={handleWorkspaceDocumentChange}
-      onRetrySave={handleRetrySave}
       onEditorBlur={handleEditorBlurFlush}
       pendingChapterReview={activeChapterPendingReview}
       pendingChapterReviewBusy={pendingChapterReviewBusy}
@@ -4442,12 +4440,6 @@ export default function StudioWorkspace() {
       >
         <SiteAnnouncements scope="studio" ready={workPanelReady && !switchingWork && !agentSessionsResolving && !studioSettingsOpen} />
         {studioQuery.isRefetchError ? <AppStateRefreshNotice retry={studioQuery.refetch} busy={studioQuery.isFetching} /> : null}
-        {chapterDirty && chapterSaveState === 'error' && !activeWorkspaceDocument && (
-          <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-4 py-2 text-sm">
-            <span>章节尚未同步。{chapterSaveMessage}</span>
-            <button type="button" className="shrink-0 underline" onClick={handleRetrySave}>重试保存</button>
-          </div>
-        )}
         {!desktopLayout && <div
           ref={mobileSwipe.root}
           data-studio-content-focus tabIndex={-1}
@@ -5015,7 +5007,7 @@ export default function StudioWorkspace() {
         />
       ) : null}</StudioPresence>
       {visibleDraftChoice && visibleDraftChoice.scope === taskUiScope && visibleDraftChoice.chapterId === selectedChapterId
-        && <ChapterDraftChoice {...visibleDraftChoice.choice} open={Boolean(chapterDraftChoice)} />}
+        && <ChapterDraftChoice {...visibleDraftChoice.choice} open={Boolean(showingChapter && chapterDraftChoice)} />}
       <StudioPresence kind="dialog">{planCreateOwner === workspaceOwnerRef.current ? <CreatePlanDialog onClose={() => setPlanCreateOwner(current => current === planCreateOwner ? null : current)} onCreate={handleCreatePlanFile} /> : null}</StudioPresence>
       <StudioPresence kind="dialog">{planSettingsPlan ? (
         <PlanSettingsPanel

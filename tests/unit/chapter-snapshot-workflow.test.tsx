@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useRef, useState } from 'react'
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { useChapterPersistence } from '../../src/features/studio/components/use-chapter-persistence'
@@ -8,7 +8,8 @@ import { useChapterSnapshot } from '../../src/features/studio/components/use-cha
 import LocalFirstTextarea from '../../src/features/studio/components/LocalFirstTextarea'
 import { adoptChapterResult } from '../../src/features/studio/components/chapter-stream-handoff'
 import { getChapterContent } from '../../src/features/studio/api'
-import { chapterRecoveryKey, listChapterCopies, readChapterEdits, storeChapterEdits } from '../../src/features/studio/lib/chapter-recovery'
+import { ApiClientError } from '../../src/app/api-client'
+import { chapterRecoveryKey, listChapterCopies, readChapterEdits, retireChapterCopy, storeChapterEdits, viewSyncedChapter } from '../../src/features/studio/lib/chapter-recovery'
 import ChapterDraftChoice from '../../src/features/studio/components/ChapterDraftChoice'
 import type { AgentStreamEvent, Chapter } from '../../shared/contracts/index.js'
 import type { ChapterDraftState, ChapterPendingReview, SaveState } from '../../src/features/studio/types'
@@ -40,20 +41,40 @@ it('selects review evidence only when it uniquely matches the visible chapter te
   expect(onCommit).not.toHaveBeenCalled()
 })
 
+it.each([false, true])('preserves chapter input against its original revision when a newer snapshot arrives before commit (IME %s)', async ime => {
+  const original = vi.fn(), newer = vi.fn()
+  const editor = (value: string, commit: (text: string) => void) =>
+    <LocalFirstTextarea aria-label="正文" resetKey="chapter" recoveryKey="author-chapter" value={value} onCommit={commit} />
+  const view = render(editor('初稿', original))
+  const input = screen.getByRole('textbox', { name: '正文' })
+  if (ime) fireEvent.compositionStart(input)
+  fireEvent.change(input, { target: { value: '作者正在输入' } })
+  view.rerender(editor('其他位置已保存', newer))
+  if (ime) {
+    fireEvent.change(input, { target: { value: '作者正在输入的' } })
+    fireEvent.compositionEnd(input)
+    fireEvent.change(input, { target: { value: '作者正在输入的字' } })
+  }
+  await waitFor(() => expect(original).toHaveBeenCalledWith(ime ? '作者正在输入的字' : '作者正在输入'))
+  expect(newer).not.toHaveBeenCalled()
+})
+
 function Workflow({ novelId = 'novel', userId, scope = 'task-a', hydratedScope = scope }: { novelId?: string; userId?: string; scope?: string; hydratedScope?: string }) {
   const [draft, setDraft] = useState<ChapterDraftState | null>({ ...base, id: 'a', content: 'A原文' })
   const [dirty, setDirty] = useState(false), [selected, setSelected] = useState<string | null>('a')
   const [saveState, setSaveState] = useState<SaveState>('idle'), [, setMessage] = useState(''), [, setSavedAt] = useState<string | null>(null)
   const draftRef = useRef(draft), dirtyRef = useRef(dirty), selectedRef = useRef(selected), reviews = useRef<ChapterPendingReview[]>([])
   draftRef.current = draft; dirtyRef.current = dirty; selectedRef.current = selected
+  const client = useQueryClient()
+  const query = useQuery({ queryKey: ['workflow', novelId, scope, selected], queryFn: () => getChapterContent(novelId, selected!), enabled: Boolean(scope && scope === hydratedScope && selected === 'b'), retry: false })
+  const choice = useChapterSnapshot({ data: query.data, selectedChapterId: selected, novelId, userId, scope, hydratedScope, draftRef, dirtyRef,
+    setDraft, setDirty, setSaveState, setLastSavedAt: setSavedAt, setSaveMessage: setMessage })
   const persist = useChapterPersistence({ activeNovelId: novelId, userId, chapterDraft: draft, chapterDirty: dirty,
+    recoveryPending: Boolean(choice), syncSavedChapter: row => client.setQueryData(['workflow', novelId, scope, row.id], row),
     chapterDraftStateRef: draftRef, pendingChapterReviewsRef: reviews, selectedChapterIdStateRef: selectedRef,
     setChapterDraft: setDraft, setChapterDirty: setDirty, setSelectedChapterId: setSelected,
     setChapterSaveState: setSaveState, setChapterSaveMessage: setMessage, setChapterLastSavedAt: setSavedAt,
     setChapters: vi.fn(), setSelectedTreeItemId: vi.fn(), setCurrentNovel: vi.fn(), syncStudioPayload: vi.fn(), promptConfirmPendingChapterReview: vi.fn() })
-  const query = useQuery({ queryKey: ['workflow', novelId, scope, selected], queryFn: () => getChapterContent(novelId, selected!), enabled: Boolean(scope && scope === hydratedScope && selected === 'b'), retry: false })
-  const choice = useChapterSnapshot({ data: query.data, selectedChapterId: selected, novelId, userId, scope, hydratedScope, draftRef, dirtyRef,
-    setDraft, setDirty, setSaveState, setLastSavedAt: setSavedAt, setSaveMessage: setMessage })
   return <><button onClick={() => { if (dirtyRef.current) void persist('auto'); setSelected('b'); setDraft(null) }}>打开B</button>
     <button onClick={() => {
       const owner = { novelId, scope, sessionId: 'session' }
@@ -82,7 +103,7 @@ it('captures typing and selection before debounce on expiry and resumes only the
   const open = async (userId: string) => {
     const view = mount({ userId })
     fireEvent.click(screen.getByRole('button', { name: '打开B' }))
-    const input = await screen.findByRole<HTMLTextAreaElement>('textbox')
+    const input = await screen.findByRole<HTMLTextAreaElement>('textbox', { name: '正文' })
     return { ...view, input }
   }
   api.read.mockResolvedValue(saved('b', '已同步'))
@@ -101,14 +122,18 @@ it('captures typing and selection before debounce on expiry and resumes only the
   expect(other.input.scrollTop).toBe(0)
   other.unmount()
   api.read.mockResolvedValue(saved('b', '服务端新版本', 'novel', 2))
-  api.update.mockRejectedValue(new Error('章节版本冲突'))
+  api.update.mockResolvedValue(saved('b', '仍未同步的最后输入', 'novel', 3))
   const resumed = await open('writer')
+  expect(resumed.input.value).toBe('服务端新版本')
+  expect((await screen.findByRole<HTMLTextAreaElement>('textbox', { name: '所选草稿正文' })).value).toBe('仍未同步的最后输入')
+  expect(api.update).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: '恢复所选草稿' }))
   expect(resumed.input.value).toBe('仍未同步的最后输入')
   expect([resumed.input.selectionStart, resumed.input.selectionEnd, resumed.input.scrollTop]).toEqual([2, 6, 125])
   expect(document.activeElement).toBe(resumed.input)
-  await waitFor(() => expect(screen.getByTestId('state').textContent).toBe('b:dirty:error'), { timeout: 2400 })
-  expect(api.update).toHaveBeenCalledWith('novel', 'b', expect.objectContaining({ expectedRevision: 1 }))
-  expect(readChapterEdits(key)?.content).toBe('仍未同步的最后输入')
+  await waitFor(() => expect(screen.getByTestId('state').textContent).toBe('b:clean:saved'), { timeout: 2400 })
+  expect(api.update).toHaveBeenCalledExactlyOnceWith('novel', 'b', expect.objectContaining({ expectedRevision: 2, content: '仍未同步的最后输入' }))
+  expect(readChapterEdits(key)).toBeUndefined()
 })
 
 it('reopens independent drafts from closed browser tabs and saves only the explicitly selected copy', async () => {
@@ -150,6 +175,21 @@ it('keeps a quota-failed draft in memory through reauthentication and prompts be
   expect(listChapterCopies(key)).toHaveLength(1)
 })
 
+it('keeps a shelved memory-only draft after typing into the synced chapter', () => {
+  const key = chapterRecoveryKey('full-storage', 'novel', 'b')!
+  const failure = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+  storeChapterEdits(key, { ...base, content: '未落盘的草稿' })
+  const [original] = listChapterCopies(key)
+  viewSyncedChapter(key, [original])
+  expect(readChapterEdits(key)).toBeUndefined()
+  failure.mockRestore()
+  storeChapterEdits(key, { ...base, revision: 2, content: '从已同步版本继续' })
+  expect(listChapterCopies(key).map(c => c.edits.content)).toContain('未落盘的草稿')
+  expect(window.dispatchEvent(new Event('beforeunload', { cancelable: true }))).toBe(false)
+  retireChapterCopy(key, original)
+  expect(window.dispatchEvent(new Event('beforeunload', { cancelable: true }))).toBe(true)
+})
+
 it('removes a local draft when the server already has the same edits after a lost save response', async () => {
   const key = chapterRecoveryKey('writer', 'novel', 'b')
   storeChapterEdits(key, { ...base, content: '已经落盘' })
@@ -160,6 +200,65 @@ it('removes a local draft when the server already has the same edits after a los
   expect(readChapterEdits(key)).toBeUndefined()
   expect(screen.getByTestId('state').textContent).toBe('b:clean:saved')
   expect(api.update).not.toHaveBeenCalled()
+})
+
+it('reads a concurrent save once, lets the author view the server version, and keeps the local copy across refresh', async () => {
+  const userId = 'concurrent-writer'
+  const key = chapterRecoveryKey(userId, 'novel', 'b')
+  api.read.mockResolvedValueOnce(saved('b', '共同底稿')).mockResolvedValue(saved('b', '另一个窗口的修订', 'novel', 2))
+  api.update.mockRejectedValue(new ApiClientError('版本冲突', 409, undefined, 'CHAPTER_REVISION_CONFLICT'))
+  const open = () => fireEvent.click(screen.getByRole('button', { name: '打开B' }))
+  const view = mount({ userId })
+  open()
+  const input = await screen.findByDisplayValue('共同底稿')
+  fireEvent.change(input, { target: { value: '本窗口未提交的修改' } })
+  fireEvent.blur(input)
+  await waitFor(() => expect(screen.getByRole('button', { name: '查看已同步正文' })).toBeTruthy(), { timeout: 2400 })
+  expect(api.read).toHaveBeenCalledTimes(2)
+  expect(api.update).toHaveBeenCalledTimes(1)
+  expect(readChapterEdits(key)?.content).toBe('本窗口未提交的修改')
+  fireEvent.click(screen.getByRole('button', { name: '查看已同步正文' }))
+  expect(await screen.findByDisplayValue('另一个窗口的修订')).toBeTruthy()
+  view.unmount()
+  mount({ userId })
+  open()
+  expect(await screen.findByDisplayValue('另一个窗口的修订')).toBeTruthy()
+  expect(screen.queryByRole('button', { name: '恢复所选草稿' })).toBeNull()
+  expect(listChapterCopies(key).map(copy => copy.edits.content)).toEqual(['本窗口未提交的修改'])
+  const current = screen.getByRole('textbox', { name: '正文' })
+  fireEvent.change(current, { target: { value: '接着同步稿编辑' } })
+  fireEvent.blur(current)
+  expect(listChapterCopies(key).map(copy => copy.edits.content)).toContain('本窗口未提交的修改')
+  expect(api.update).toHaveBeenCalledTimes(1)
+})
+
+it('restores text against the selected current revision without publishing a previously public local copy', async () => {
+  const userId = 'changed-visibility'
+  const key = chapterRecoveryKey(userId, 'novel', 'b')
+  storeChapterEdits(key, { ...base, content: '保留此正文', status: 'published', visibility: 'public' })
+  api.read.mockResolvedValue(saved('b', '已撤回的章节', 'novel', 5))
+  api.update.mockResolvedValue(saved('b', '保留此正文', 'novel', 6))
+  mount({ userId })
+  fireEvent.click(screen.getByRole('button', { name: '打开B' }))
+  fireEvent.click(await screen.findByRole('button', { name: '恢复所选草稿' }))
+  await waitFor(() => expect(screen.getByTestId('state').textContent).toBe('b:clean:saved'), { timeout: 2400 })
+  expect(api.update).toHaveBeenCalledExactlyOnceWith('novel', 'b', expect.objectContaining({
+    expectedRevision: 5, content: '保留此正文', status: 'draft', visibility: 'private',
+  }))
+})
+
+it('accepts an identical conflict readback after a lost acknowledgement without a second write', async () => {
+  api.read.mockResolvedValueOnce(saved('b', '旧稿')).mockResolvedValue(saved('b', '已保存的输入', 'novel', 2))
+  api.update.mockRejectedValue(new ApiClientError('版本冲突', 409, undefined, 'CHAPTER_REVISION_CONFLICT'))
+  mount({ userId: 'lost-ack' })
+  fireEvent.click(screen.getByRole('button', { name: '打开B' }))
+  const input = await screen.findByDisplayValue('旧稿')
+  fireEvent.change(input, { target: { value: '已保存的输入' } })
+  fireEvent.blur(input)
+  await waitFor(() => expect(screen.getByTestId('state').textContent).toBe('b:clean:saved'), { timeout: 2400 })
+  expect(api.update).toHaveBeenCalledTimes(1)
+  expect(api.read).toHaveBeenCalledTimes(2)
+  expect(screen.queryByRole('button', { name: '恢复所选草稿' })).toBeNull()
 })
 
 it('loads B through a null draft and inherited dirty while A saves, preserving A payload and newer B typing', async () => {
