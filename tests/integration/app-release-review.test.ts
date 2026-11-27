@@ -122,6 +122,7 @@ describe('actual release and admin routers on isolated PostgreSQL',()=>{
   } finally {
    await prisma.appReleaseChannel.deleteMany({where:{channel:'test',releaseId:ids[1]}})
    await prisma.governanceMail.deleteMany({where:{userId:{in:[stable,tester,peer]}}})
+   await prisma.agentSession.deleteMany({where:{userId:{in:[stable,tester]}}})
    await prisma.novel.deleteMany({where:{authorId:{in:[stable,tester]}}})
    await prisma.user.deleteMany({where:{id:{in:[stable,tester,peer]}}})
   }
