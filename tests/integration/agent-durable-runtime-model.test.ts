@@ -91,8 +91,9 @@ describe.runIf(available)('model tool model durable execution chain', () => {
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
         messages: [{ role: 'user', content: '修改本章' }], successfulToolSignatures: [] } })).frame
       let calls = 0
+      const modelOpening = scenario === 'default-target' ? '这次改动会写入当前章。' : ''
       const fetchMock = vi.fn(async () => {
-        const response = calls++ === 0 ? { choices: [{ delta: { tool_calls: [{ index: 0, id: 'write-call', type: 'function', function: { name: tool.name, arguments: raw } }] },
+        const response = calls++ === 0 ? { choices: [{ delta: { ...(modelOpening && { content: modelOpening }), tool_calls: [{ index: 0, id: 'write-call', type: 'function', function: { name: tool.name, arguments: raw } }] },
           finish_reason: scenario === 'incomplete' ? 'length' : 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 0 } }
           : { choices: [{ delta: { content: scenario === 'stale' ? '版本冲突，需要重新读取' : '处理完成' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } }
         return new Response(`data: ${JSON.stringify(response)}\n\ndata: [DONE]\n\n`)
@@ -220,7 +221,7 @@ describe.runIf(available)('model tool model durable execution chain', () => {
       expect(replay.filter(event => event.type === 'message.start')).toHaveLength(2)
       expect(replay.filter(event => event.type === 'text.final')).toHaveLength(2)
       const opening = replay.find(event => event.type === 'text.final')
-      expect(opening?.text).toMatch(/^我先/)
+      expect(opening?.text).toBe(modelOpening)
       expect(opening!.seq).toBeLessThan(replay.find(event => event.type === 'tool.call')!.seq)
       expect(replay.filter(event => event.type === 'tool.call')).toHaveLength(1)
       expect(replay.filter(event => event.type === 'tool.result')).toEqual([expect.objectContaining({ ok: scenario !== 'stale', callId: 'write-call' })])
