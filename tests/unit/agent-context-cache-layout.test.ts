@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../../api/lib/prisma.js', () => ({
   prisma: {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(async () => []),
     agentRun: { findFirst: vi.fn(async () => null) },
     agentRunEvent: { findFirst: vi.fn(async () => null) },
     // Context assembly covers ordinary runs; no persisted goal execution is
@@ -265,13 +266,16 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
       record('archived', [{ type: 'text', text: '过去的讨论。'.repeat(2000) + quote }]),
       record('author', [{ type: 'text', text: '只改日期，保留人物动机。' }], 'user')]
     vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(rows as never)
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([{ id: 'prior', requestId: 'author' }])
     const first = await assembleContext(buildInput())
     const original = first.messages.filter(m => 'historySourceId' in m && m.historySourceId)
     expect(original.map(m => 'historySourceId' in m && m.historySourceId)).toEqual(['archived:text'])
     const plan = planSemanticCompaction(original, 1000, estimateChatMessagesTokens)!
     const historyDigest = plan.receipt(plan.apply(JSON.stringify({ notes: [{ source: 1, quote }] }))!)
     vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([record('checkpoint', [{ type: 'context-compaction', state: 'completed', historyDigest }]), ...rows] as never)
-    const next = await assembleContext(buildInput())
+    const nextInput = buildInput()
+    nextInput.taskSpec.scope.clientTimeZone = 'Asia/Shanghai'
+    const next = await assembleContext(nextInput)
     const text = next.messages.map(m => m.content).join('\n')
     expect(text).toContain('[archived] ' + quote)
     expect(text).not.toContain('过去的讨论。')
@@ -296,6 +300,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-11-03T04:00:00.000Z'))
     vi.clearAllMocks()
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([])
     vi.mocked(isAgent2FeatureEnabled).mockReturnValue(false)
     vi.mocked(readWritingContinuityReference).mockResolvedValue(null)
     vi.mocked(resolveRuntimeSkillContext).mockResolvedValue({ catalog: skillCatalog, routerVersion: SKILL_ROUTER_VERSION })
@@ -383,12 +388,32 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(system).toContain('随即发出对应的原生工具调用。拿到结果后再细化后续步骤')
     expect(system).toContain('作者明确要求省略进展时遵从')
     expect(system).toContain('进度标题和内部思考不能代替这句汇报')
-    expect(system).toContain('工具变更本身无需另发一句')
+    expect(system).toContain('发现会改变写法的事实、完成一项作者可查看的成果，或下一步需要换做法时')
     expect(system).toContain('常规查阅、保存和同目标重试不逐个播报')
     expect(system).toContain('直接交付最终答复时，从交付内容起笔，省略活动标题')
     expect(system).toContain('无需执行工具的简单问答直接回答')
     expect(system).toContain('单章或计划有多个值得说明的变化时，可用 Markdown 短列表')
     expect(String(messages.at(-1)?.content)).toContain(prompt)
+  })
+
+  it('keeps one progress instruction in the same system position with short or long session history', async () => {
+    const prompt = '核对末章的送信安排和人物已知的线索。'
+    const history = Array.from({ length: 501 }, (_, index) => ({
+      id: `prior-${index}`, runId: `task-${Math.floor(index / 5)}`, role: index % 5 === 4 ? 'user' : 'assistant',
+      createdAt: new Date(Date.UTC(2026, 10, 20, 0, 0, 501 - index)),
+      parts: [{ type: 'text', text: `第${index}条记录。` + '合成历史资料中的人物和时间。'.repeat(20) }],
+    }))
+    const assemble = async (rows: typeof history) => {
+      vi.mocked(prisma.agentMessage.findMany).mockResolvedValue(rows as never)
+      return (await assembleContext(interpretedInput(prompt))).messages
+    }
+    const short = await assemble(history.slice(0, 1))
+    const long = await assemble(history)
+    expect(long.length).toBeGreaterThan(short.length)
+    expect(long[0]).toEqual(short[0])
+    expect(String(long[0].content).split('在下一次工具调用的同一轮用自己的话说明具体发现和下一步')).toHaveLength(2)
+    expect(long.at(-1)?.content).toEqual(short.at(-1)?.content)
+    expect(String(long.at(-1)?.content)).toContain(prompt)
   })
 
   it('leaves the same author-facing progress contract available in the legacy planning fallback', async () => {
@@ -603,12 +628,13 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     ] as never)
     const input = buildInput()
     input.prompt = '里面其中一个题材写小说推荐哪个？'
+    input.taskSpec.scope.clientTimeZone = 'Asia/Shanghai'
     input.attachments = []
     input.taskSpec.writingPacing = 'conversation_only'
     input.taskSpec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: false, structure: false }
     const { messages } = await assembleContext(input)
-    expect(messages[1]).toEqual({ role: 'user', content: `[服务端历史发言时间：2026-11-01T02:00:00.000Z（UTC）]\n${question}` })
-    expect(messages[2]).toEqual({ role: 'assistant', content: `[服务端历史发言时间：2026-11-01T02:01:00.000Z（UTC）]\n${answer}` })
+    expect(messages[1]).toEqual({ role: 'user', content: `[服务端历史发言时间：2026-11-01 10:00:00 GMT+08:00]\n${question}` })
+    expect(messages[2]).toEqual({ role: 'assistant', content: `[服务端历史发言时间：2026-11-01 10:01:00 GMT+08:00]\n${answer}` })
     expect(String(messages[0].content)).toContain('指代先对应最近相关会话中的候选')
     expect(messages.at(-1)?.content).toBe(input.prompt)
     expect(readWritingContinuityReference).not.toHaveBeenCalled()
@@ -692,6 +718,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
 
   it('keeps a short follow-up lean without reconstructing previous reads or borrowing old context usage', async () => {
     const { input, chapter, plan, report, original } = await previousReadingFixture()
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([original.runId, report.runId].map(id => ({ id, requestId: original.id })))
     vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([report, original] as never)
     const next = { ...input, runId: 'next', prompt: '第三处转折再收紧一点。' }
     vi.mocked(prisma.agentArtifact.findMany).mockClear()
@@ -861,6 +888,50 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const resumed = await assembleContext({ ...input, includeCurrentRunHistory: true })
     const resumedWorkspace = resumed.messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))
     expect(String(resumedWorkspace?.content)).toContain(longEntry)
+  })
+
+  it.each([[false, false], [false, true], [true, false], [true, true]])(
+    'attributes the prior tool-only opening without quoting an earlier task (long: %s, final speech: %s)', async (long, hasFinal) => {
+    const at = new Date('2026-11-27T03:25:42Z')
+    const row = (id: string, role: string, runId: string, parts: unknown[]) => ({ id, role, runId, parts, createdAt: at })
+    const call = [{ type: 'tool-call', toolName: 'chapter_read', status: 'success', summary: '读取合成章节' }]
+    const prose = (text: string) => [{ type: 'text', text }]
+    vi.mocked(prisma.$queryRaw).mockResolvedValueOnce([{ id: 'previous', requestId: 'source' }, { id: 'resumed', requestId: 'source' }])
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValueOnce([
+      ...(hasFinal ? [row('finish', 'assistant', 'resumed', prose('核对完毕。'))] : []),
+      row('tool-2', 'assistant', 'resumed', call), row('tool-1', 'assistant', 'previous', call),
+      row('source', 'user', 'previous', prose('核对计划。')),
+      row('old-speech', 'assistant', 'earlier', prose('我先拟订计划。' + (long ? '更早的合成记录。'.repeat(30_000) : ''))),
+      row('old-source', 'user', 'earlier', prose('拟订计划。')),
+    ] as never)
+    const result = await assembleContext({ ...buildInput(), prompt: '上一个任务开头说了什么？' })
+    const history = result.messages.slice(1, result.messages.findIndex(m => String(m.content).startsWith('[当前作品上下文快照]')))
+    expect(history.filter(m => String(m.content).includes('上个任务·开头连续2条仅工具'))).toHaveLength(1)
+    expect(history.find(m => String(m.content).includes('上个任务·'))?.content).toContain('核对计划。')
+    expect(history.map(m => m.content).join('\n').includes('核对完毕。')).toBe(hasFinal)
+    if (long) expect(history.map(m => m.content).join('\n')).not.toContain('我先拟订计划。')
+  })
+
+  it('does not promote a surviving older reply when the actual preceding task is absent from the window', async () => {
+    vi.mocked(prisma.$queryRaw).mockResolvedValueOnce([{ id: 'missing-run', requestId: 'missing-source' }])
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValueOnce([{ id: 'older', role: 'assistant', runId: 'older-run',
+      parts: [{ type: 'text', text: '我先拟订计划。'.repeat(20_000) }] }] as never)
+    const window = (await assembleContext(buildInput())).messages.map(m => m.content).join('\n')
+    expect(window).toContain('上一个任务的原始请求未进入此窗口')
+    expect(window).not.toContain('我先拟订计划。')
+    expect(window).not.toContain('最近发言消息 ID：older')
+  })
+
+  it('never infers a tool-only opening from the surviving tail after a checkpoint', async () => {
+    vi.mocked(prisma.$queryRaw).mockResolvedValueOnce([{ id: 'prior', requestId: 'omitted-original' }])
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValueOnce([
+      { id: 'tail', role: 'assistant', runId: 'prior', parts: [{ type: 'tool-call', toolName: 'plan_read', status: 'success' }] },
+      { id: 'steer', role: 'user', runId: 'prior', createdAt: new Date(), parts: [{ type: 'text', text: '补核第三段。' }] },
+    ] as never)
+    const history = (await assembleContext(buildInput())).messages.map(m => m.content).join('\n')
+    expect(history).toContain('上个任务·后续作者发言')
+    expect(history).toContain('上一个任务的原始请求未进入此窗口')
+    expect(history).not.toContain('开头连续')
   })
 
   it('indicates earlier history is available when the database read limit is reached even if all 500 returned messages fit', async () => {

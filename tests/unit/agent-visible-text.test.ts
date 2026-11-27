@@ -28,6 +28,17 @@ describe('author text classification before publication', () => {
       'The variable get_user_input calls printHello. 12345678901234567890.',
       '她说：“调用 get_user_input 和 printHello。”']) expect(humanizeAgentVisibleText(text)).toBe(text)
   })
+  it('keeps an already complete action sentence while holding the following parameter at every split', () => {
+    const opening = '我先读取第十七章，确认寄信时间。'
+    const raw = opening + '调用参数：chapterId=private-id。'
+    expect(humanizeAgentVisibleText(raw)).toBe(opening)
+    for (let split = 0; split <= raw.length; split++) {
+      const stream = createVisibleTextStreamer()
+      const beforeTool = stream.push(raw.slice(0, split)) + stream.push(raw.slice(split))
+      expect(beforeTool).toBe(opening)
+      expect(stream.finish()).toBe('')
+    }
+  })
   it('preserves source links, reference labels and code examples exactly', () => {
     const example = '来源：[chapter_read](https://example.com/?chapterId=cmttleebg03h9wqox9lieracs)\n\n```json\n{"chapterId":"cmttleebg03h9wqox9lieracs","tool":"chapter_read"}\n```\n\n参数示例：`chapterId`。'
     expect(humanizeAgentVisibleText(example)).toBe(example)

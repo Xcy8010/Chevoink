@@ -140,6 +140,7 @@ import {
  */
 
 export type ExecuteAgentRunParams = {
+  clientTimeZone?: string
   /** Dedicated server goal activation resume; no manual budget grant. */
   activationResume?: { goalId: string; epoch: bigint }
   toolAuthorityCeiling?: import('./tool-authority.js').ToolAuthority
@@ -1365,6 +1366,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     let taskSpec: TaskSpec = parsedTaskSpec.success
       ? { ...parsedTaskSpec.data, runId }
       : buildTaskSpec({
+          clientTimeZone: params.clientTimeZone,
           runId,
           novelId: params.novelId,
           chapterId: params.chapterId,
@@ -2001,6 +2003,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       continuityOwnerSeq: continuityOwner?.seq,
       assertCurrentExecution: async tx => { await assertLegacyOwnerReceipt(tx) },
       writingScope: taskSpec.scope,
+      clientTimeZone: taskSpec.scope.clientTimeZone,
       protectedChapterIds: protectsEarlierContent ? new Set(taskSpec.scope.chapterIds ?? []) : undefined,
       toolAuthority: snapshotToolAuthority(availableTools, params.mode),
       callId: '',

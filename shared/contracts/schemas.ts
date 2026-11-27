@@ -128,6 +128,7 @@ const agentAttachmentsSchema = z.array(agentAttachmentMetaSchema)
 
 /** POST /api/agent/runs（原校验：四字段齐全；mode 管道保留但后端恒 build，见 agent.ts） */
 export const startAgentLoopRunSchema = z.object({
+  clientTimeZone: z.string().trim().min(1).max(128).optional().catch(undefined),
   agentWritingProtocol: z.literal(1).optional(),
   agentQuestionProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   predictNextPrompt: z.literal(true).optional(),

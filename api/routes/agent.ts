@@ -927,6 +927,7 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
 
     const payload = await startLoopRun(userId, {
       clientRequestId: body.clientRequestId,
+      clientTimeZone: body.clientTimeZone,
       sessionId: body.sessionId,
       novelId: body.novelId,
       chapterId: body.chapterId ?? null,

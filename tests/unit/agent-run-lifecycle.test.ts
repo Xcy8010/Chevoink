@@ -2691,6 +2691,34 @@ describe('original task context on resume', () => {
     expect(events().filter(event => event.type === 'tool.call').map(event => event.callId)).toEqual(['preparing-read'])
     expect(mocks.tools[0].execute).toHaveBeenCalledOnce()
   })
+  it.each([
+    '我先核对「寄信」发生的时间，再看下一章。',
+    '我先读取第十七章，确认寄信时间。',
+    '我先读取《第二十章细纲｜送信》，核对交件期限（含送达日）。',
+  ])(
+    'shows a received opening before the native tool finishes generating its arguments: %s', async opening => {
+      const store = useAgentStore.getState
+      store().resetRun()
+      store().resumeRun('run', 'session')
+      let seq = 0
+      mocks.emit.mockImplementation((body: AgentStreamEventBody) => store().applyEvent({
+        ...body, runId: 'run', seq: ++seq, ts: new Date().toISOString(),
+      }))
+      mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+        input.onChunk?.({ type: 'text-delta', delta: opening })
+        input.onChunk?.({ type: 'tool-call-start', id: 'read', name: 'chapter_read' })
+        expect(store().messages.at(-1)?.parts).toEqual([
+          { type: 'text', text: opening }, expect.objectContaining({ type: 'tool-call', callId: 'read', preparing: true }),
+        ])
+        input.onChunk?.({ type: 'tool-call-arguments-delta', id: 'read', delta: '{}' })
+        return response(opening, [call('read')])
+      })
+      queue(response('已核对。'))
+      await run()
+      expect(mocks.chat).toHaveBeenCalledTimes(2)
+      expect(mocks.tools[0].execute).toHaveBeenCalledOnce()
+    },
+  )
   it('ends replaced preview identities before admitting the accepted streamed call', async () => {
     mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
       input.onChunk?.({ type: 'tool-call-start', id: 'old-preview', name: 'chapter_read' })

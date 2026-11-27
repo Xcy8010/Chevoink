@@ -385,6 +385,7 @@ export const taskSpawnTool = defineTool({
             chapterId: null,
             mode: args.mode as AgentExecutionMode,
             prompt: composeSpawnPrompt(task.brief, args.inherit),
+            clientTimeZone: ctx.clientTimeZone,
             creativeFreedom: ctx.creativeFreedom,
             qualityMode: ctx.qualityMode,
             ...selectedModel,
@@ -600,6 +601,7 @@ export const taskSendTool = defineTool({
         {
           sessionId: target.id,
           novelId: target.novelId,
+          clientTimeZone: ctx.clientTimeZone,
           chapterId: null,
           mode: args.mode as AgentExecutionMode,
           prompt: `${args.prompt.trim()}\n\n【返工要求】改完后仍需在最后一条回复里给出自包含的交付摘要（完成状态、改了哪些章节与字数、遗留问题），主控窗口会再次审查。`,

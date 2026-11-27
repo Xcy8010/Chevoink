@@ -897,6 +897,7 @@ export function AgentPanel({
         objective,
         options: {
           mode: 'build' as const,
+          clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           attachments: attachments.length > 0 ? attachments : undefined,
           creativeFreedom: freedom,
           qualityMode: selectedQualityMode,
@@ -1233,6 +1234,7 @@ export function AgentPanel({
         const startRun = async (targetChapterId: string | null) => {
           const input = {
             clientRequestId,
+            clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
             sessionId: resolvedSessionId,
             novelId,
             chapterId: targetChapterId,

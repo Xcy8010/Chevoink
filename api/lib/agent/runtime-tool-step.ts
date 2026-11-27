@@ -284,6 +284,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       qualityMode: current.configuration.qualityMode, protectedChapterIds: new Set(current.configuration.protectedChapterIds),
       chapterReviewWorkflowEnabled: chapterReviewWorkflowEnabled(originalSpec),
       sequentialWritingEnabled: sequentialWritingEnabled(originalSpec),
+      clientTimeZone: originalSpec.scope.clientTimeZone,
       toolAuthority: new Map(effective.toolAuthority.map(item => [item.name, item])), signal, emit: () => {},
       modelSelection: { ...(current.configuration.model.tokenPrice ? { tokenPrice: current.configuration.model.tokenPrice } : {}), ...(current.configuration.model.modelConfigId ? { modelConfigId: current.configuration.model.modelConfigId, modelConfigRevision: current.configuration.model.modelConfigRevision } : {}), ...(current.configuration.model.weightedRoute ? { weightedRoute: current.configuration.model.weightedRoute } : {}), tier: current.configuration.model.tier as CreditModelTier,
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,

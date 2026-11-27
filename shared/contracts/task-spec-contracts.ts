@@ -47,6 +47,7 @@ export const taskScopeSchema = z.object({
   chapterReviewWorkflow: z.literal(1).optional(),
   sequentialWriting: z.literal(1).optional(),
   /** Fresh main-Agent interpretation. Absence of a binding is not a denied user request. */
+  clientTimeZone: z.string().optional(),
   agentWritingProtocol: z.literal(1).optional(),
   agentQuestionProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   agentWritingBinding: z.object({ sourceRunId: z.string().min(1), receiptHash: z.string().regex(/^[a-f0-9]{64}$/),

@@ -208,7 +208,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     const current = await lockOwnedRun(tx, userId, runId)
     if (current.status !== 'queued') throw new DataAccessError(409, 'RUN_IN_PROGRESS', '初始化期间任务状态已变化。')
     if (current.taskSpec) return taskSpecSchema.parse(current.taskSpec)
-    let task = buildTaskSpec({ runId, novelId: run.novelId, chapterId: run.chapterId, prompt: input.prompt, selection: input.selection,
+    let task = buildTaskSpec({ runId, clientTimeZone: input.clientTimeZone, novelId: run.novelId, chapterId: run.chapterId, prompt: input.prompt, selection: input.selection,
       creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
     if (task.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')) {
       const chapters = await tx.chapter.findMany({ where: { ...activeChapterScope(run.novelId), authorId: userId }, select: { id: true } })
@@ -624,7 +624,7 @@ export async function startLoopRunLocked(
       await syncBuiltinSkillCatalog(tx)
       const volumeCreateIntent = options.humanOrigin === 'http' && !options.goal
         ? await (await import('./volume-create-intent.js')).readVolumeCreateIntent(tx, { userId, novelId: session.novelId, sessionId: session.id, runId: created.id, prompt: input.prompt }) : undefined
-      let fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
+      let fresh = buildTaskSpec({ runId: created.id, clientTimeZone: input.clientTimeZone, novelId: session.novelId, chapterId,
         prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1,
         // A delayed first goal start retains its creation-time contract. The
         // historical v1 HTTP envelope cannot acquire today's paid phases.
@@ -737,6 +737,7 @@ export async function startLoopRunLocked(
   } else void executeAgentRun({
     runId: run.id,
     admittedMessageId,
+    clientTimeZone: input.clientTimeZone,
     sessionId: session.id,
     userId,
     novelId: session.novelId,
@@ -961,6 +962,7 @@ export async function resolveLoopRunQuestion(
           mode: run.mode === 'act' ? 'build' : run.mode,
           modelTier: run.modelTier as CreditModelTier, customModelId: run.customModelId ?? undefined,
           reasoningEffort: run.reasoningEffort as ModelReasoningEffort, modelSelectionExplicit: true, agentQuestionProtocol: 2, predictNextPrompt: true,
+          clientTimeZone: admitted?.clientTimeZone,
           ...(admitted?.agentProfile ? { agentProfile: admitted.agentProfile } : {}),
           ...(admitted?.qualityMode ? { qualityMode: admitted.qualityMode } : {}),
           ...(admitted?.creativeFreedom !== undefined ? { creativeFreedom: admitted.creativeFreedom } : {}),

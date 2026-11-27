@@ -86,6 +86,7 @@ it.each([null, 'chapter-a'])('only sends a manuscript selection with a chapter t
 
   expect(context.startAgentLoopRun).toHaveBeenCalledWith(expect.objectContaining({
     chapterId,
+    clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     prompt: '合成请求',
     selection: chapterId ? selection : null,
   }))

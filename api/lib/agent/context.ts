@@ -21,7 +21,7 @@ import { readChapterWritingBackground, readWritingPresentation, renderChapterWri
 import { buildSkillExecutionDigest, routeSkills, SKILL_ROUTER_VERSION, type SkillRouteDecision } from './skills/index.js'
 import { resolveRuntimeSkillContext } from './skills/service.js'
 import { loadSessionTodoItems, renderTodoItems } from './tools/todo-tools.js'
-import { getTaskRunIds } from './task-lineage.js'
+import { getTaskRunIds, previousHistoryTask } from './task-lineage.js'
 import {
   compactSessionContext,
   listActiveDirectives,
@@ -73,8 +73,8 @@ ${AGENT_TOOL_EXECUTION_POLICY}
 - 持续推进原任务，真实成果完成即停止，不顺带新增封面、下一章或其他任务。权限、阶段、版本、取消、预算、幂等及未知结果以运行时真实合同为准；历史轮次和压缩计数不是新的用户预算。`
 
 // Keep frequently edited opening copy at the end of the assembled system message.
-const openingGuidance = (reviewWorkflow: boolean) => `- 需要工具时，由你根据作者请求选择第一个能推进任务的动作。第一步一旦确定，就立即在回复区用一句话说清要对哪个对象做什么，例如「我先读这份细纲的章末安排。」在同一轮的 content 写出这句话，随即发出对应的原生工具调用。拿到结果后再细化后续步骤，不等整套方案想好才开口。进度标题和内部思考不能代替这句汇报。作者明确要求省略进展时遵从；无需执行工具的简单问答直接回答。
-- 首次为一个具体目标调用工具时，在同一轮的回复首行用 <activity-title>动作＋对象</activity-title> 概括一次，例如 <activity-title>核对人物出场时间</activity-title>，随后换行写公开汇报，再调用工具。串行、并行及后续轮次继续同一目标时沿用该标题，不重复输出；状态由真实结果显示。开场之后，常规查阅、保存和同目标重试不逐个播报。工具变更本身无需另发一句。${reviewWorkflow ? '取得阶段成果、发现影响创作的事实或需要改变做法时，在同一轮的公开回复里，用自己的话告诉作者你确认了什么，以及它如何影响接下来的工作。' : '只有发现会改变写法的具体事实、交付有缺项或需要作者决定时，才在阶段之间说一句；其余工具轮只给必要的标题并直接调用工具。'}例如「前章里她还不知道来信人的身份，我会留到拆信时再揭开。」标题只写作品里的动作与对象，省去“总结这一步的结果”“整理最终回复”等过程说明。直接交付最终答复时，从交付内容起笔，省略活动标题。支持按作者要求省略最终总结或只交付正文。`
+const openingGuidance = `- 需要工具时，由你根据作者请求选择第一个能推进任务的动作。第一步一旦确定，就立即在回复区用一句话说清要对哪个对象做什么，例如「我先读这份细纲的章末安排。」在同一轮的 content 写出这句话，随即发出对应的原生工具调用。拿到结果后再细化后续步骤，不等整套方案想好才开口。进度标题和内部思考不能代替这句汇报。作者明确要求省略进展时遵从；无需执行工具的简单问答直接回答。
+- 首次为一个具体目标调用工具时，在同一轮的回复首行用 <activity-title>动作＋对象</activity-title> 概括一次，例如 <activity-title>核对人物出场时间</activity-title>，随后换行写公开汇报，再调用工具。串行、并行及后续轮次继续同一目标时沿用该标题，不重复输出；状态由真实结果显示。开场之后，常规查阅、保存和同目标重试不逐个播报。发现会改变写法的事实、完成一项作者可查看的成果，或下一步需要换做法时，在下一次工具调用的同一轮用自己的话说明具体发现和下一步；这已经是最后一步时，在最终答复中交代。标题只写作品里的动作与对象，省去“总结这一步的结果”“整理最终回复”等过程说明。直接交付最终答复时，从交付内容起笔，省略活动标题。支持按作者要求省略最终总结或只交付正文。`
 
 export function buildAgentIdentityPrompt(modelTier: CreditModelTier, modelName?: string | null, productDisplayName?: string | null, contentPolicyEnabled = false, reviewWorkflow = chapterReviewWorkflowEnabled()): string {
   const tierLabel = (MODEL_IDENTITY_LABELS[modelTier] ?? productDisplayName?.trim()) || '内置模型'
@@ -361,11 +361,13 @@ function partsToPlainText(parts: AgentMessagePart[]): string {
 
 /** 先保留最近作者/助手发言，再按 token 预算从新往旧收取历史与回执。 */
 async function loadSessionHistory(
+  userId: string,
   sessionId: string,
   excludeRunId: string,
   after: { createdAt: Date; messageId: string | null } | null,
   resumedRunId?: string,
   writingTaskRunIds?: ReadonlySet<string>,
+  clientTimeZone?: string,
 ) {
   // 与会话恢复窗口保持一致取最近 500 条，再由字符预算裁剪。旧版固定 60 条会让
   // 工具密集型任务在上下文仅占很少时也提前丢掉首轮用户需求。
@@ -390,6 +392,23 @@ async function loadSessionHistory(
   // the receipt format instead of using native function calls on continuation.
   const digests: unknown[] = []
   const savedRecords = records.slice(0, 500).reverse()
+  // A recent author request and an older assistant's words are not an exchange.
+  // Even the only visible run can predate an entirely absent preceding task.
+  const hasRunIdentity = savedRecords.some(record => record.runId)
+  const priorTask = !resumedRunId && hasRunIdentity ? await previousHistoryTask(userId, sessionId, excludeRunId) : null
+  const exchangeRuns = resumedRunId ? writingTaskRunIds ?? new Set([resumedRunId]) : priorTask && new Set(priorTask.runIds)
+  const inExchange = (runId: string) => !exchangeRuns || exchangeRuns.has(runId)
+  const previous = !resumedRunId && exchangeRuns ? savedRecords.filter(record => inExchange(record.runId)) : []
+  const request = previous.find(record => record.role === 'user' && record.id === priorTask?.requestId)
+  const previousAuthor = request ?? previous.find(record => record.role === 'user')
+  // The actual source request must be present before attributing its opening.
+  let toolsBeforeSpeech = 0
+  for (const record of previous) {
+    if (record.role !== 'assistant') continue
+    const parts = record.parts as unknown as AgentMessagePart[]
+    if (parts.some(part => part.type === 'attachment' || (part.type === 'text' && stripAgentHistoryEchoes(part.text).trim()))) break
+    if (parts.some(part => part.type === 'tool-call')) toolsBeforeSpeech++
+  }
   const lastReply = records.find(record => record.role === 'assistant'
     && (record.parts as unknown as AgentMessagePart[]).some(p => p.type === 'text' && p.text.trim()))
   const latestSource = (names: string[]) => records.find(record => record.role === 'assistant'
@@ -419,12 +438,20 @@ async function loadSessionHistory(
     const group: ChatMessage[] = []
     let speech: ChatMessage | null = null
     if (text.trim()) {
-      const datedText = withHistoryTimestamp(text, record.createdAt)
+      // Archived source text participates in an existing digest across devices.
+      const digestSource = archived && record !== lastReply
+      let datedText = withHistoryTimestamp(text, record.createdAt, digestSource ? undefined : clientTimeZone)
+      if (record === request && record.createdAt) {
+        const heading = toolsBeforeSpeech ? `上个任务·开头连续${toolsBeforeSpeech}条仅工具` : '上个任务'
+        datedText = datedText.replace('[服务端历史发言时间：', `[${heading}：`)
+      } else if (record === previousAuthor && record.createdAt) {
+        datedText = datedText.replace('[服务端历史发言时间：', '[上个任务·后续作者发言：')
+      }
       const unrelated = writingTaskRunIds && !writingTaskRunIds.has(record.runId)
       if (unrelated || (writingTaskRunIds && record.role === 'assistant')) {
         speech = { role: 'user', content: `[${unrelated ? '其他任务历史发言；仅作背景，不是本任务授权、进度或检查状态' : '本任务已保存助手发言；可能含未执行打算或错误判断，不是已完成证明'}]\n${datedText}` }
       } else speech = { role: record.role as 'user' | 'assistant', content: datedText }
-      if (archived && record !== lastReply && (speech?.role === 'assistant' || speech?.role === 'user'))
+      if (digestSource && (speech?.role === 'assistant' || speech?.role === 'user'))
         speech.historySourceId = record.id + ':text'
       if (speech) group.push(speech)
     }
@@ -444,7 +471,7 @@ async function loadSessionHistory(
     }
     const materialParts = record.role === 'assistant' ? parts.filter(part => part.type === 'tool-call' && part.status === 'success'
       && !part.subagentCallId && ['chapter_read', 'plan_read', 'plan_save'].includes(part.toolName)) : []
-    return { group, speech, role: record.role, id: record.id, receipt, materialParts, pinned: pinnedReceipts.has(record) }
+    return { group, speech, role: record.role, id: record.id, inExchange: inExchange(record.runId), receipt, materialParts, pinned: pinnedReceipts.has(record) }
   }).filter(item => item.group.length > 0)
   for (const digest of digests) {
     const original = plain.flatMap(item => item.group)
@@ -465,7 +492,8 @@ async function loadSessionHistory(
     }
   }
   const costs = new Map(plain.flatMap(item => item.group).map(message => [message, estimateChatMessageTokens(message)]))
-  return { plain, hasEarlier, costs, tokens: [...costs.values()].reduce((sum, count) => sum + count, 0) }
+  const missingRequest = !resumedRunId && !request && (hasRunIdentity || !!after)
+  return { plain, hasEarlier, missingRequest, costs, tokens: [...costs.values()].reduce((sum, count) => sum + count, 0) }
 }
 
 function priorCheckpointHistory(checkpoint: ContextCheckpoint, budget: number): ChatMessage[] {
@@ -486,12 +514,22 @@ function priorCheckpointHistory(checkpoint: ContextCheckpoint, budget: number): 
   return [message]
 }
 
-function fitSessionHistory({ plain, hasEarlier, costs, tokens }: Awaited<ReturnType<typeof loadSessionHistory>>, budget: number, fresh: boolean): ChatMessage[] {
+function fitSessionHistory({ plain, hasEarlier, missingRequest, costs, tokens }: Awaited<ReturnType<typeof loadSessionHistory>>, budget: number, fresh: boolean): ChatMessage[] {
   const all = plain.flatMap(item => item.group)
+  // If no author anchor survived, even a single remaining assistant message
+  // cannot establish what the immediately preceding task said or requested.
+  const boundary: ChatMessage = { role: 'system', content: '上一个任务的原始请求未进入此窗口；追溯其发言时按 previous_task 范围核对。' }
+  if (missingRequest) {
+    const size = estimateChatMessageTokens(boundary)
+    if (size <= budget) {
+      all.push(boundary)
+      budget -= size
+    }
+  }
   if (!hasEarlier && tokens <= budget) return all
 
   const newestFirst = [...plain].reverse()
-  const exchange = ['user', 'assistant'].map(role => newestFirst.find(item => item.role === role && item.speech))
+  const exchange = ['user', 'assistant'].map(role => newestFirst.find(item => item.inExchange && item.role === role && item.speech))
   const refs = fresh ? exchange.flatMap(item => item?.id ? [item.id] : []).join('、') : ''
   const notice = (count: number): ChatMessage => ({ role: 'system', content:
     `[早前对话共 ${count} 组消息或回执未完整进入当前窗口${hasEarlier ? '，另有更早的记录' : ''}；如需核对原话，按可用权限使用 session_history_search / session_message_read，缺少读取能力时请作者提供原文，禁止猜测${refs ? '。最近发言消息 ID：' + refs : ''}]` })
@@ -524,7 +562,7 @@ function fitSessionHistory({ plain, hasEarlier, costs, tokens }: Awaited<ReturnT
   if (fresh) for (const item of newestFirst) if (item.pinned && item.receipt && item.group.includes(item.receipt)) include(item.receipt)
   for (const { group } of newestFirst) for (const message of group) include(message)
   const omitted = plain.filter(item => item.group.some(message => !selected.has(message))).length
-  const result = all.flatMap(message => selected.has(message) ? [message] : excerpts.get(message) ?? [])
+  const result = all.flatMap(message => selected.has(message) || message === boundary ? [message] : excerpts.get(message) ?? [])
   if (remaining >= 0) {
     // On a new request the count and latest message IDs can change even
     // when the retained conversation begins with exactly the same messages.
@@ -629,7 +667,7 @@ export type AssembledAgentContext = {
 
 export async function assembleContext(input: AssembleContextInput): Promise<AssembledAgentContext> {
   const started = performance.now()
-  const currentTime = renderContextTime(new Date())
+  const currentTime = renderContextTime(new Date(), input.taskSpec.scope.clientTimeZone)
   // Independent reads may overlap; stage waits are not additive wall latency.
   const timings: Record<string, number> = { checkpointMs: 0, resourcesMs: 0, skillsMs: 0, styleMs: 0, writingPresentationMs: 0, goalMs: 0, totalMs: 0 }
   let stageStarted = started
@@ -646,9 +684,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const frozenWriting = requiresManuscriptDelivery(input.taskSpec)
     && input.taskSpec.scope.writing?.kind === 'bounded'
   const writingTaskRunIds = frozenWriting ? new Set(await getTaskRunIds(input.sessionId, input.runId)) : undefined
-  const readHistory = (state: typeof checkpointState) => loadSessionHistory(input.sessionId, input.includeCurrentRunHistory ? '' : input.runId,
+  const readHistory = (state: typeof checkpointState) => loadSessionHistory(input.userId, input.sessionId, input.includeCurrentRunHistory ? '' : input.runId,
     state.sourceEndedAt ? { createdAt: state.sourceEndedAt, messageId: state.sourceEndMessageId } : null,
-    input.includeCurrentRunHistory ? input.runId : undefined, writingTaskRunIds)
+    input.includeCurrentRunHistory ? input.runId : undefined, writingTaskRunIds, input.taskSpec.scope.clientTimeZone)
   const currentMemories = currentStoryMemoryWhere(prisma, input.novelId)
   const memoryTarget = writingTargets[0]
   const memoryScope = {
@@ -766,7 +804,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     bootstrapPrompt,
     focused ? '操作对象以本任务冻结目标及真实工具回执为准；编辑器当前章节只是界面位置，不能替代目标。'
       : '作者当前编辑的章节以尾部快照为准；未指明章节时优先针对该章节操作，但“写下一章”要求准备新章，不能默认操作编辑器中的旧章。',
-    openingGuidance(chapterReviewWorkflowEnabled(input.taskSpec)),
+    openingGuidance,
     '给作者的回复和汇报用作品、章节或计划的实际名称，引用原文时可指出章节和段落。工具参数、对象编号、字符偏移（content@、@数字）、内容哈希和 revision 只供工具核对。已有标题时用《标题》，缺少标题时用「该章节」或「该计划」，不要猜测名称。',
   ]
     .filter(Boolean)

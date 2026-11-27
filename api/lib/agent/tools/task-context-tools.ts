@@ -1,3 +1,4 @@
+import { formatAgentTime } from '../context-time.js'
 import { z } from 'zod'
 
 import type { AgentMessagePart } from '../../../../shared/contracts/index.js'
@@ -183,7 +184,7 @@ export const taskContextListTool = defineTool({
     return {
       output: tasks
         .map((task, index) =>
-          `${index + 1}. ${task.title}${task.isBranch ? '（分支）' : ''}\n   sessionId=${task.sessionId}\n   作品=${task.novelTitle}；对话数=${task.messageCount}；最近活跃=${task.lastActiveAt}`,
+          `${index + 1}. ${task.title}${task.isBranch ? '（分支）' : ''}\n   sessionId=${task.sessionId}\n   作品=${task.novelTitle}；对话数=${task.messageCount}；最近活跃=${formatAgentTime(task.lastActiveAt, ctx.clientTimeZone)}`,
         )
         .join('\n'),
       display: { kind: 'taskContext', mode: 'list', tasks, excerpts: [] },
@@ -244,7 +245,7 @@ export const taskContextReadTool = defineTool({
       `sessionId=${session.id}`,
       `作品=${taskCard.novelTitle}${session.novelId === ctx.novelId ? '（当前作品）' : '（其它作品）'}`,
       `状态=${session.status}；对话数=${messageCount}；执行轮数=${session._count.runs}`,
-      `创建=${session.createdAt.toISOString()}；最近活跃=${taskCard.lastActiveAt}`,
+      `创建=${formatAgentTime(session.createdAt, ctx.clientTimeZone)}；最近活跃=${formatAgentTime(taskCard.lastActiveAt, ctx.clientTimeZone)}`,
     ].join('\n')
 
     if (args.mode === 'keyword') {
@@ -271,7 +272,7 @@ export const taskContextReadTool = defineTool({
       const excerpts = matches.map((record) => ({ role: record.role, createdAt: record.createdAt.toISOString(), text: clip(record.text) }))
       return {
         output: `${header}\n\n关键词“${args.query}”命中 ${excerpts.length} 条：\n\n${excerpts
-          .map((item) => `${roleLabel(item.role)} · ${item.createdAt}\n${item.text}`)
+          .map((item) => `${roleLabel(item.role)} · ${formatAgentTime(item.createdAt, ctx.clientTimeZone)}\n${item.text}`)
           .join('\n\n')}`,
         display: { kind: 'taskContext', mode: 'read', tasks: [taskCard], excerpts },
         summary: `在任务「${session.title}」中命中 ${excerpts.length} 条`,
@@ -298,7 +299,7 @@ export const taskContextReadTool = defineTool({
       }
       return {
         output: `${header}\n\n最近 ${excerpts.length} 条对话：\n\n${excerpts
-          .map((item) => `${roleLabel(item.role)} · ${item.createdAt}\n${item.text}`)
+          .map((item) => `${roleLabel(item.role)} · ${formatAgentTime(item.createdAt, ctx.clientTimeZone)}\n${item.text}`)
           .join('\n\n')}`,
         display: { kind: 'taskContext', mode: 'read', tasks: [taskCard], excerpts },
         summary: `读取任务「${session.title}」最近 ${excerpts.length} 条对话`,
@@ -328,7 +329,7 @@ export const taskContextReadTool = defineTool({
       output: excerpts.length === 0
         ? `${header}\n\n该任务还没有对话记录。`
         : `${header}\n\n任务上下文（首条诉求 + 最近往来）：\n\n${excerpts
-            .map((item) => `${roleLabel(item.role)} · ${item.createdAt}\n${item.text}`)
+            .map((item) => `${roleLabel(item.role)} · ${formatAgentTime(item.createdAt, ctx.clientTimeZone)}\n${item.text}`)
             .join('\n\n')}\n\n需要更细的内容用 mode=recent 或 mode=keyword 继续读同一个 sessionId。`,
       display: { kind: 'taskContext', mode: 'read', tasks: [taskCard], excerpts },
       summary: `读取任务「${session.title}」上下文概览`,

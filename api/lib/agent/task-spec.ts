@@ -262,6 +262,7 @@ export function narrowLegacyResearchTask(spec: TaskSpec, originalPrompt: string)
 }
 
 export function buildTaskSpec(input: {
+  clientTimeZone?: string
   runId: string
   novelId: string
   chapterId?: string | null
@@ -364,6 +365,7 @@ export function buildTaskSpec(input: {
     researchBudget: !networkDenied && (freshResearch
       || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt)) ? 'extended' : 'standard',
     scope: {
+      ...(input.clientTimeZone ? { clientTimeZone: input.clientTimeZone } : {}),
       ...(input.novelInitializationProtocol ? { novelInitializationProtocol: input.novelInitializationProtocol } : {}), novelId: input.novelId, chapterIds, selection,
       ...(input.novelInitializationTarget ? { novelInitializationTarget: input.novelInitializationTarget } : {}),
       ...(input.novelInitializationProtocol === 2 && directionSetup && !existingDirection ? { novelDirectionRequired: true as const } : {}),

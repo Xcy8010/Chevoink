@@ -50,6 +50,7 @@ export type ToolContext = {
   assertCurrentExecution?: (tx: import('@prisma/client').Prisma.TransactionClient) => Promise<void>
   /** Verified original task scope for input guidance only; never model input. */
   writingScope?: import('../../../../shared/contracts/index.js').TaskSpec['scope']
+  clientTimeZone?: string
   /** Per-execution server observations; never populated from tool arguments. */
   planContentHashes?: Map<string, string>
   /** Same execution’s observed content+link version; never populated from tool arguments. */

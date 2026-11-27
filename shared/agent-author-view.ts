@@ -26,6 +26,11 @@ const scopeFailureLabels: Record<string, string> = {
   STORY_TASK_TARGET_MISMATCH: '章节目标不匹配',
 }
 
+// A complete sentence made only of ordinary prose cannot contain protocol
+// names, assignments, URL syntax or fenced payloads. Its classification stays
+// valid even if the same paragraph later continues with a tool parameter.
+const plainSentencePrefix = /^[\p{Script=Han}\p{Nd} \t，、；《》「」『』“”‘’（）｜·—…。！？]*[。！？]/u
+
 function isOperational(text: string): boolean {
   // Markdown list/heading syntax is structure, not part of the statement.
   // Quoted blocks remain author/source quotations and are never normalized.
@@ -114,7 +119,7 @@ export function projectAgentAuthorText(text: string): string {
       // Parameter clauses are operational input, even after translation. Hold
       // unsafe progress and rely on actual tool stages; never infer success.
       if (/\b[A-Za-z]\w*\s*[=:：]|(?:编译任务|编译编号|目标章节|章节编号|场景任务|任务窗口|任务编号)\s*[=＝:：]/.test(paragraph)
-        || protocolJson.test(paragraph)) return ''
+        || protocolJson.test(paragraph)) return plainSentencePrefix.exec(paragraph)?.[0] ?? ''
       let visible = paragraph.replace(opaqueId, '')
         .replace(/\b(?:AUTHOR_CHAPTER_SCOPE|AUTHOR_SELECTION_STALE|STORY_TASK_TARGET_MISMATCH)\b/g, name => scopeFailureLabels[name])
         .replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g, name =>
@@ -139,7 +144,12 @@ export function createAgentAuthorTextStream(options?: { filterLegacyActivityHead
     const introductions = ['现在', '接下来', '正在', '已经', '然后', '我', '我们', '调用', '工具参数', '调用参数', '参数', '编译', '校验', '重新发起', '落库', '协议', '执行', '提交', '读取', '写入', '进入', '拿到', '正文完成', '正文已完成']
     const remainder = start.replace(/^(?:(?:现在|接下来|正在|已经|然后|我(?:将|会|先|需要|已)?|我们(?:将|会|先|需要|已)?)\s*)+/, '')
     if (!remainder || introductions.some(prefix => prefix.startsWith(remainder)) || isOperational(pending)
-      || /^(?:I|We)\b/.test(start) || /[`~<>[\]{}"“”「」『』‘’\n]/.test(pending)) return ''
+      || /^(?:I|We)\b/.test(start) || /[`~<>[\]{}"“”「」『』‘’\n]/.test(pending)) {
+      const plain = plainSentencePrefix.exec(pending)?.[0] ?? ''
+      const increment = plain.slice(published)
+      published += increment.length
+      return increment
+    }
     // A trailing ASCII token may still become a tool name or identifier.
     const metadata = pending.search(authorMetadataStart)
     const stable = (metadata < 0 ? pending : pending.slice(0, metadata)).replace(/[A-Za-z0-9_]+$/, '').trimEnd()

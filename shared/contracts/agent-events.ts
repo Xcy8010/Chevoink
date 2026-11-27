@@ -662,6 +662,7 @@ export interface StartAgentLoopRunRequest {
   qualityMode?: import('./story-compiler-contracts.js').StoryCompilerMode
   /** 内置模型档位；用户侧永不接触真实供应商 model id。 */
   modelTier?: import('./credits.js').CreditModelTier
+  clientTimeZone?: string
   modelSelectionExplicit?: true
   /** 自定义模型配置 id；仅 modelTier=custom 时生效，后端校验归属。 */
   customModelId?: EntityId
