@@ -17,6 +17,8 @@ import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import * as toolCursor from '../../api/lib/agent/runtime-tool-cursor.js'
 import { qualityWorkContextProjection } from '../../api/lib/agent/tools/durable-quality.js'
 import { chapterReviewBatchTool } from '../../api/lib/agent/tools/durable-batch-review.js'
+import * as batchReview from '../../api/lib/agent/tools/batch-review.js'
+import { handleToolCall } from '../../api/lib/agent/loop.js'
 import { creativeCritiqueTool } from '../../api/lib/agent/tools/skill-tools.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 
@@ -1231,7 +1233,7 @@ describe.runIf(available)('既有章节独立检查', () => {
     await novelFixture(async f => {
       const first = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       const second = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: first.volumeId,
-        title: '第二章', content: '风把窗纸吹得作响。', wordCount: 9, orderIndex: 2, orderInVolume: 2 } })
+        title: '第二章', content: '风把窗纸吹得作响。\n风把窗纸吹得作响。', wordCount: 18, orderIndex: 2, orderInVolume: 2 } })
       const chapterIds = [first.id, second.id]
       const instruction = '在周宁的视角中核对人物称谓，信中直接引文按原文保留。'
       await prisma.agentSkillDefinition.create({ data: { id: skillId, ownerUserId: f.userId, name: '称谓复核', description: instruction,
@@ -1258,17 +1260,27 @@ describe.runIf(available)('既有章节独立检查', () => {
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '复查这两章' }, { role: 'assistant', content: null,
             toolCalls: [...[...families, ...families].map((reviewType, index) => ({ id: `batch-${index}`, name: chapterReviewBatchTool.name,
-              arguments: JSON.stringify(argsFor(reviewType)) })), ...readBack] }], successfulToolSignatures: [] } })
+              arguments: JSON.stringify(argsFor(reviewType)) })), ...readBack,
+            { id: 'batch-unknown-timeout', name: chapterReviewBatchTool.name,
+              arguments: JSON.stringify({ ...argsFor('continuity'), focus: '供应商超时合成样本' }) }] }], successfulToolSignatures: [] } })
       const window = getCreditWindow()
       await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
       vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'batch-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
-      const reply = JSON.stringify({ chapters: chapterIds.map(chapterId => ({ chapterId, findings: [] })) })
       const model = vi.fn(async (_url: unknown, init: RequestInit) => {
         const messages = JSON.parse(String(init.body)).messages
-        expect(JSON.parse(messages[1].content).targets).toHaveLength(2)
+        if (messages[1].content.includes('供应商超时合成样本')) return Response.json({ error: { message: 'Gateway timeout' } }, { status: 504 })
+        const targets = JSON.parse(messages[1].content).targets as Array<{ chapterId: string; anchors?: Array<{ id: string; text: string }> }>
+        expect(targets).toHaveLength(2)
         if (messages[0].content.includes('按选定技能审阅')) expect(messages[0].content).toContain(instruction)
+        const signal = messages[0].content.includes('中文网文质量编辑') ? 'explanation_echo' : 'object'
+        const anchor = targets[1].anchors?.find(entry => entry.text === '风把窗纸吹得作响。')
+        expect(anchor).toBeDefined()
+        const reply = JSON.stringify({ chapters: targets.map(({ chapterId }, index) => ({ chapterId, findings: index === 0 ? [] : [{
+          signal, severity: 'warning', sourceId: anchor!.id,
+          explanation: '该句在本章重复。', suggestion: '保留有剧情作用的一处。',
+        }] })) })
         if (!JSON.parse(String(init.body)).stream) return Response.json({
           choices: [{ message: { content: reply }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 9 },
         })
@@ -1276,9 +1288,14 @@ describe.runIf(available)('既有章节独立检查', () => {
           usage: { prompt_tokens: 10, completion_tokens: 9 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
       })
       vi.stubGlobal('fetch', model)
+      const projection = vi.spyOn(batchReview, 'saveBatchReview')
+      projection.mockRejectedValueOnce(new Error('本地投影中断'))
+      await expect(executeDurableToolStep(lease, new AbortController().signal)).rejects.toThrow('本地投影中断')
+      expect(model).toHaveBeenCalledTimes(1)
       for (const reviewType of [...families, ...families]) {
         expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool', result: {
-          display: { kind: 'reviewBatch', reviewType, chapters: chapterIds.map(chapterId => ({ chapterId, status: 'complete' })) },
+          display: { kind: 'reviewBatch', reviewType, chapters: [{ chapterId: first.id, status: 'complete' },
+            { chapterId: second.id, status: 'complete', findings: expect.arrayContaining([expect.objectContaining({ evidence: '风把窗纸吹得作响。' })]) }] },
         } })
       }
       expect(model).toHaveBeenCalledTimes(3)
@@ -1287,10 +1304,35 @@ describe.runIf(available)('既有章节独立检查', () => {
       const context: ToolContext = { ...f, callId: 'legacy-batch', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium',
         toolAuthority: new Map(tools.map(tool => [tool.name, { permission: 'allow', alwaysConfirm: false, dangerous: false }])),
         modelRuntime: selectedRuntime, emit: () => {}, signal: new AbortController().signal }
-      for (const callId of ['legacy-batch', 'legacy-cache']) expect(await chapterReviewBatchTool.execute({ ...context, callId }, argsFor('custom'))).toMatchObject({
+      const legacyToolCall = (callId: string, args: ReturnType<typeof argsFor> & { focus?: string }) =>
+        handleToolCall({ id: callId, name: chapterReviewBatchTool.name, arguments: JSON.stringify(args) }, tools,
+          { ...context, callId }, { emit: context.emit }, f.sourceMessageId, f.runId)
+      projection.mockRejectedValueOnce(new Error('旧执行器本地投影中断'))
+      const interrupted = await legacyToolCall('legacy-batch', argsFor('custom'))
+      expect(interrupted).toMatchObject({ failureCode: 'BATCH_REVIEW_PROJECTION_PENDING', part: { status: 'failed' } })
+      expect(interrupted.observation).toContain('读取原回包继续整理')
+      expect(interrupted.observation).not.toContain('换用其他工具')
+      expect(model).toHaveBeenCalledTimes(4)
+      projection.mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError('合成序列化冲突', { code: 'P2034', clientVersion: 'fixture' }))
+      const retried = await legacyToolCall('legacy-local-retry', { ...argsFor('custom'), focus: '同一请求本地事务恢复' })
+      expect(retried.part).toMatchObject({ status: 'success', display: { kind: 'reviewBatch', chapters: chapterIds.map(chapterId => ({ chapterId, status: 'complete' })) } })
+      expect(model).toHaveBeenCalledTimes(5)
+      const affected = { ...argsFor('custom'), focus: '断在结算之后的合成样本' }
+      const saveJournal = vi.spyOn(prisma.agentArtifact, 'create').mockRejectedValueOnce(new Error('已结算，原响应尚未写入'))
+      await expect(chapterReviewBatchTool.execute({ ...context, callId: 'legacy-journal-missing' }, affected))
+        .rejects.toThrow('已结算，原响应尚未写入')
+      saveJournal.mockRestore()
+      expect(model).toHaveBeenCalledTimes(6)
+      expect(await chapterReviewBatchTool.execute({ ...context, callId: 'legacy-journal-recover' }, affected)).toMatchObject({
+        display: { kind: 'reviewBatch', chapters: chapterIds.map(chapterId => ({
+          chapterId, status: 'incomplete', detail: '原复查请求已结算，本地没有可恢复的报告。',
+        })) },
+      })
+      expect(model).toHaveBeenCalledTimes(6)
+      for (const callId of ['legacy-recover', 'legacy-cache']) expect(await chapterReviewBatchTool.execute({ ...context, callId }, argsFor('custom'))).toMatchObject({
         display: { kind: 'reviewBatch', chapters: chapterIds.map(chapterId => ({ chapterId, status: 'complete' })) },
       })
-      expect(model).toHaveBeenCalledTimes(4)
+      expect(model).toHaveBeenCalledTimes(6)
       expect(await prisma.storyCompilation.count({ where: { novelId: f.novelId } })).toBe(0)
       expect(await prisma.chapter.findMany({ where: { novelId: f.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual([first, second])
       for (const chapter of [first, second]) {
@@ -1302,7 +1344,11 @@ describe.runIf(available)('既有章节独立检查', () => {
           kind: 'chapterRef', chapterId: chapter.id, revision: chapter.revision + 1,
         } } })
       }
-      expect(model).toHaveBeenCalledTimes(4)
+      expect(model).toHaveBeenCalledTimes(6)
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(executeDurableToolStep(lease, context.signal)).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+        expect(model).toHaveBeenCalledTimes(7)
+      }
     }).finally(async () => {
       await prisma.agentSkillDefinition.deleteMany({ where: { id: skillId } })
     })

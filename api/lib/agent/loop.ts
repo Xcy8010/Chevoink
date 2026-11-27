@@ -82,7 +82,7 @@ import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
 import { AttachmentReadStage, attachmentStageFindings, requestsSequentialAttachment, requestsWholeAttachment, type AttachmentResume } from './legacy-attachment-resume.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
-import { toolActivityReport } from './activity-report.js'
+import { readReviewTransitionReport, toolActivityReport } from './activity-report.js'
 import { SAVED_PLAN_CLOSING_GUIDANCE } from './task-guidance.js'
 import { createExecutionTextDetector, normalizeExecutionText } from './execution-text-detector.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
@@ -2601,15 +2601,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         forceWrapUpReason = deniedCommitObservation
         forceWrapUpLocal = false
       }
-      messages.push(...toolTurnHistory(textOnlyModel && !bootstrapCall ? { ...result, toolCalls: [] } : result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall),
-        recoveredText: recoveredToolCalls.length > 0 }))
-
       const cleanContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? modelText.text : normalizeExecutionText(stripAgentProtocolArtifacts(modelText.text))
       // This projection affects publication only. Empty-response, promise and
       // saved-delivery decisions below retain baseline execution normalization.
       const authorProse = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse && !firstActivityCall
         ? modelText.text : humanizeAgentVisibleText(stripAgentProtocolArtifacts(modelText.text))
-      const authorContent = authorProse.trim() || !firstActivityCall ? authorProse : toolActivityReport(firstActivityCall.name, activityTitle, hasPriorActivity)
+      const transitionReport = firstActivityCall && !authorProse.trim() && toolContext.chapterReviewWorkflowEnabled
+        ? await readReviewTransitionReport(prisma, runId, messages, effectiveToolCalls) : ''
+      const authorContent = authorProse.trim() || !firstActivityCall ? authorProse : transitionReport || toolActivityReport(firstActivityCall.name, activityTitle, hasPriorActivity)
+      messages.push(...toolTurnHistory(textOnlyModel && !bootstrapCall ? { ...result, toolCalls: [] } : result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall),
+        recoveredText: recoveredToolCalls.length > 0 }))
       if (firstActivityCall) hasPriorActivity = true
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；

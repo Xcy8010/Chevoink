@@ -2,6 +2,17 @@ import { DataAccessError } from '../../prisma.js'
 
 export type ChapterPatch = { oldText: string; newText: string }
 
+/** Tool-side offsets refer to the saved revision, including the effect of earlier replacements. */
+export function chapterEditReadback(chapterId: string, revision: number, ranges: { start: number; end: number; newText: string }[]): string {
+  let shift = 0
+  const spans = ranges.map(({ start, end, newText }) => {
+    const offset = start + shift
+    shift += newText.length - (end - start)
+    return `[${offset},${offset + newText.length})`
+  })
+  return `当前 chapterId=${chapterId}，r${revision}，修改位置 ${spans.join('、')}。本批修订完成后用 chapter_read 回读这些位置及邻文。`
+}
+
 /** Resolve against one immutable body. Validation finishes before composition,
  * so one bad/ambiguous/overlapping anchor can never apply a partial batch. */
 export function composeChapterEdit(before: string, args: {

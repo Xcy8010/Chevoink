@@ -8,7 +8,7 @@ import { originalTaskRunIds } from './original-request.js'
 import { readEffectiveWritingRequest } from './writing-scope.js'
 import { qualityReportCheckedCurrentContent } from './quality-report-contract.js'
 
-const SEQUENTIAL_WRITING_GUIDANCE = '创作协作：连写多章默认逐章建写：chapter_create 按目标位置建空章，chapter_write 用返回的 chapterId 写完本章，再建下一章。已有章按真实 ID 复用，回读前章只作参考。保留逐章交付回执；待办记录作者要求的产物和检查，例行可选检查不自动形成待办。'
+const SEQUENTIAL_WRITING_GUIDANCE = '创作协作：连写多章默认逐章建写：chapter_create 按目标位置建空章，chapter_write 用返回的 chapterId 写完本章，再建下一章。已有章按真实 ID 复用，回读前章只作参考。保留逐章保存回执。清单按实际交付安排；共用检查集中记录，保存和检查各按自己的回执更新，例行可选检查不自动形成待办。'
 const PREVIOUS_WRITING_GUIDANCE = '创作协作：完整理解原作者目标；多章按原目标保存并保留逐章交付回执。待办记录作者要求的产物和检查，例行的可选检查不自动形成待办。需要新章时先用 chapter_create 建立仅标题的空章，再把真实 chapterId 交给 chapter_write；已有章节、准备和正文复用，不重复创建或覆盖已完成稿。'
 export const WRITING_COLLABORATION_GUIDANCE = `${SEQUENTIAL_WRITING_GUIDANCE}
 按实际子任务发现并加载 Skill：目录元数据不等于已使用，写作、连续性审阅和表达质量各有职责；进入新子任务时读取相应 phase 的说明，并用于当前产出，不机械加载全部技能。按原请求与具体风险决定检查；作者明确要求的检查按要求完成，局部修改只核对实际受影响的要求。
@@ -40,6 +40,7 @@ export async function readWritingCollaborationDigest(db: Prisma.TransactionClien
   const runIds = await originalTaskRunIds(db, subject, original)
   const touched = new Set<string>()
   const chapterReads = new Map<string, { revision: number; range?: { start: number; end: number } }>()
+  const revised = new Map<string, number>()
   const batchReviews = new Map<string, Map<string, { version: number; status: string }>>()
   const observe = (name: unknown, result: unknown, args: unknown) => {
     const display = object(object(result).display), input = object(args)
@@ -59,6 +60,8 @@ export async function readWritingCollaborationDigest(db: Prisma.TransactionClien
     const id = typeof display.chapterId === 'string' ? display.chapterId : input.chapterId
     if (typeof id !== 'string') return
     touched.add(id)
+    if (name === 'chapter_edit_range' && display.kind === 'chapterDiff' && display.appliedDirectly
+      && typeof display.revision === 'number' && display.after !== display.before) revised.set(id, display.revision)
     if (name === 'chapter_read' && display.kind === 'chapterRef' && typeof display.revision === 'number' && !display.archiveOnly) {
       const range = object(display.range)
       chapterReads.set(id, { revision: display.revision, ...(typeof range.start === 'number' && typeof range.end === 'number'
@@ -126,7 +129,9 @@ export async function readWritingCollaborationDigest(db: Prisma.TransactionClien
       ...(artifact || !batch?.has('continuity') ? { continuity } : {}),
       ...(quality || !batch?.has('quality') ? { humanity: qualityState } : {}),
       ...(batch ? { batchReviewReceipts: Object.fromEntries(batch) } : {}),
-      ...(reviewWorkflow && read ? { lastRead: read } : {}) })
+      ...(reviewWorkflow && read ? { lastRead: read } : {}),
+      ...(reviewWorkflow && revised.get(chapter.id) === chapter.revision && read?.revision !== chapter.revision
+        ? { readback: '本次修改已保存，尚未回读这个版本的改动处' } : {}) })
   }
   return reviewWorkflow ? `${COLLABORATION_MARKER}\n原目标：${original.prompt}\n${guidance}\n当前任务真实章节：${JSON.stringify(facts)}\n继续原请求中的未完成事项，或处理有原文证据且影响交付的问题。未调用、未完成和过期是检查状态，不自动形成待办。本章推进了剧情时，先按当前补记规则处理相关档案，再按实际保存结果交付。结尾交代已保存成果与关键改动，只补充作者要求但未完成的具体检查，或确实影响交付、需要作者判断的问题。可选检查和旧版报告状态留在工具详情。`
     : `${COLLABORATION_MARKER}\n原目标：${original.prompt}\n${guidance}\n当前任务真实章节：${JSON.stringify(facts)}\n继续原请求中的未完成事项，或处理有原文证据且影响交付的问题。未调用、未完成和过期是检查状态，不自动形成待办。本章推进了剧情时，先按当前补记规则处理相关档案，再按实际保存结果交付。说明作者要求但尚未完成的检查。`

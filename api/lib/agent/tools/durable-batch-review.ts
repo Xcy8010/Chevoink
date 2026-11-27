@@ -9,13 +9,13 @@ import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } fr
 import { estimateChatMessagesTokens, resolveDurableInputLimit, resolveSessionContextWindow } from '../context-budget.js'
 import { REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
 import { auxiliaryRouteForRuntime, auxiliaryRouteSchema, callDurableAuxiliary, resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
-import { runtimeError, runtimeJson, type RuntimeTx } from '../runtime-common.js'
+import { runtimeError, runtimeJson, runtimeTransaction, type RuntimeTx } from '../runtime-common.js'
 import { withRunLease, withManuscriptRunLease, type RunLeaseToken } from '../runtime-lease.js'
 import { assertCurrentToolPolicy, commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
 import { prepareToolCursorOperation, readAdmittedToolOperation } from '../runtime-tool-cursor.js'
 import { reduceExecutionReceipt, failedToolResultSchema } from '../runtime-reducer.js'
-import { isKnownTextRequestBilling } from '../text-request-billing.js'
-import { readOriginalTaskRequest } from '../original-request.js'
+import { isKnownRejectedTextRequestAttempt, isKnownTextRequestBilling } from '../text-request-billing.js'
+import { originalTaskRunIds, readOriginalTaskRequest } from '../original-request.js'
 import { batchReviewArgsSchema, batchReviewWorkSchema, checkBatchReviewGrant, prepareBatchReview, projectBatchReview, saveBatchReview,
   type BatchReviewArgs } from './batch-review.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
@@ -64,6 +64,27 @@ function resolveBatchOutputLimit(review: { system: string; content: string }, ru
   return maxOutput
 }
 
+const batchObservationSchema = z.object({
+  version: z.literal(1), usageId: z.string(), complete: z.boolean(), rawHash: z.string(),
+  unavailableReason: z.string().optional(),
+}).strict()
+
+function observedBatchFailure(code: string) {
+  if (code === 'AI_PROVIDER_TIMEOUT') return '检查已超时，未取得完整报告。'
+  if (code === 'AI_PROVIDER_QUOTA_EXCEEDED') return '模型供应方额度不足，未取得报告。'
+  if (code === 'AI_PROVIDER_OUTPUT_LIMIT') return '模型输出达到上限，未取得完整报告。'
+  if (code === 'AI_PROVIDER_EMPTY_RESPONSE') return '模型返回了空报告。'
+  return '模型未返回检查报告。'
+}
+
+const settledResponseUnavailable = '原复查请求已结算，本地没有可恢复的报告。'
+const legacyBatchBillingSelect = {
+  targetId: true, usageSource: true, billingStatus: true, requestTokens: true, responseTokens: true,
+  reservedCreditMilli: true, creditChargeMilli: true, billingEvidence: true,
+} as const
+const hasSettledBatchResult = (usage: Parameters<typeof isKnownRejectedTextRequestAttempt>[0]) =>
+  usage.usageSource === 'reported' && isKnownTextRequestBilling(usage) && !isKnownRejectedTextRequestAttempt(usage)
+
 async function executeLegacyBatchReview(ctx: ToolContext, args: BatchReviewArgs): Promise<ToolResult> {
   const transaction = <T>(work: (tx: RuntimeTx) => Promise<T>) => prisma.$transaction(work, { timeout: 20_000 })
   checkBatchReviewGrant(ctx.toolAuthority, args.reviewType)
@@ -71,49 +92,107 @@ async function executeLegacyBatchReview(ctx: ToolContext, args: BatchReviewArgs)
     await ctx.assertCurrentExecution?.(tx)
     return prepareBatchReview(ctx, args, tx)
   })
-  let raw = '', complete = false, unavailableReason: string | undefined
+  let raw = '', complete = false, paidResult = false, unavailableReason: string | undefined
   if (frozen.content) {
-    const { runtime, selection } = await resolveDurableAuxiliaryRuntime(ctx)
-    const maxOutputTokens = resolveBatchOutputLimit(frozen, runtime)
     const task = await readOriginalTaskRequest(prisma, ctx)
-    const targetId = runtimeJson({ task: task.taskId, reviewType: args.reviewType }).hash
-    const trace = createTextRequestTrace()
-    try {
-      raw = await withTextRequestTrace(trace, () => generateTextCompletion(frozen.system, frozen.content, {
-        userId: ctx.userId, novelId: ctx.novelId, agentRunId: ctx.runId, action, targetType: 'chapter_review_batch', targetId,
-        signal: ctx.signal, modelRuntime: runtime, explicitModelSelection: true, operationPrice: selection.tokenPrice,
-        maxOutputTokens, temperature: 0.15, boundedReview: true, singlePhysicalRequest: true, responseFormat: 'json_object',
-        onObservedCompletion: value => { complete = value.transportComplete !== false && value.finishReason === 'stop' && !value.toolCalls.length },
-        beforeProviderDispatch: usageId => transaction(async tx => {
-          await ctx.assertCurrentExecution?.(tx)
-          const current = await prepareBatchReview(ctx, args, tx)
-          if (current.content !== frozen.content || current.system !== frozen.system) {
-            throw new DataAccessError(409, 'BATCH_REVIEW_SOURCE_CHANGED', '同组正文或来源已变化，本次检查尚未发送。')
-          }
-          const attempts = await tx.aiUsageLog.findMany({ where: { id: { not: usageId }, userId: ctx.userId, novelId: ctx.novelId,
-            action, targetType: 'chapter_review_batch', targetId },
-          select: { usageSource: true, billingStatus: true, requestTokens: true, responseTokens: true, reservedCreditMilli: true } })
-          if (attempts.some(attempt => !isKnownTextRequestBilling(attempt))) {
-            throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '这组章节的原复查请求尚待核对。')
-          }
-        }),
-      }))
-      if (!textRequestsFinished(trace)) throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '批量审阅原请求用量尚待核对。')
-    } catch (error) {
-      ctx.signal.throwIfAborted()
-      if (!(error instanceof DataAccessError)) throw error
-      if (error.code === 'BATCH_REVIEW_SOURCE_CHANGED') unavailableReason = error.message
-      else if (textRequestsFinished(trace) && ['AI_PROVIDER_ERROR', 'AI_PROVIDER_QUOTA_EXCEEDED', 'AI_PROVIDER_TIMEOUT',
-        'AI_PROVIDER_OUTPUT_LIMIT', 'AI_PROVIDER_EMPTY_RESPONSE'].includes(error.code)) unavailableReason = '模型未返回完整检查报告。'
-      else throw error
-      complete = false
+    const originalTargetId = runtimeJson({ task: task.taskId, reviewType: args.reviewType }).hash
+    const requestHash = runtimeJson({ originalTargetId, system: frozen.system, content: frozen.content,
+      targets: frozen.targets.map(target => target.contextHash), unavailable: frozen.unavailable }).hash
+    const runIds = await originalTaskRunIds(prisma, ctx, task)
+    const usageScope = { userId: ctx.userId, novelId: ctx.novelId, action, targetType: 'chapter_review_batch' }
+    const observation = await prisma.agentArtifact.findFirst({ where: {
+      runId: { in: runIds }, artifactType: 'continuityReview', run: { userId: ctx.userId, novelId: ctx.novelId },
+      metadata: { path: ['batchResponseRequestHash'], equals: requestHash },
+    }, select: { runId: true, content: true, metadata: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+    if (observation) {
+      const saved = z.object({ batchResponse: batchObservationSchema }).safeParse(observation.metadata)
+      if (!saved.success) throw new DataAccessError(409, 'BATCH_REVIEW_RECEIPT_INVALID', '原复查结果无法恢复。')
+      const data = saved.data.batchResponse
+      raw = z.string().parse(JSON.parse(observation.content))
+      if (runtimeJson({ raw }).hash !== data.rawHash) throw new DataAccessError(409, 'BATCH_REVIEW_RECEIPT_INVALID', '原复查结果无法恢复。')
+      const usage = await prisma.aiUsageLog.findFirst({ where: { ...usageScope, id: data.usageId, agentRunId: observation.runId, targetId: requestHash },
+        select: legacyBatchBillingSelect })
+      if (!usage || !isKnownTextRequestBilling(usage)) {
+        throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '这组章节的原复查请求尚待核对。')
+      }
+      complete = data.complete
+      paidResult = true
+      unavailableReason = data.unavailableReason
+    } else if ((await prisma.aiUsageLog.findMany({ where: { ...usageScope, targetId: requestHash, agentRunId: { in: runIds } },
+      select: legacyBatchBillingSelect })).some(hasSettledBatchResult)) {
+      unavailableReason = settledResponseUnavailable
+    } else {
+      const { runtime, selection } = await resolveDurableAuxiliaryRuntime(ctx)
+      const maxOutputTokens = resolveBatchOutputLimit(frozen, runtime)
+      const trace = createTextRequestTrace()
+      try {
+        raw = await withTextRequestTrace(trace, () => generateTextCompletion(frozen.system, frozen.content, {
+          ...usageScope, agentRunId: ctx.runId, targetId: requestHash,
+          signal: ctx.signal, modelRuntime: runtime, explicitModelSelection: true, operationPrice: selection.tokenPrice,
+          maxOutputTokens, temperature: 0.15, boundedReview: true, singlePhysicalRequest: true, responseFormat: 'json_object',
+          onObservedCompletion: value => {
+            raw = value.content
+            complete = value.transportComplete !== false && value.finishReason === 'stop' && !value.toolCalls.length
+          },
+          beforeProviderDispatch: usageId => transaction(async tx => {
+            await ctx.assertCurrentExecution?.(tx)
+            const current = await prepareBatchReview(ctx, args, tx)
+            if (current.content !== frozen.content || current.system !== frozen.system) {
+              throw new DataAccessError(409, 'BATCH_REVIEW_SOURCE_CHANGED', '同组正文或来源已变化，本次检查尚未发送。')
+            }
+            const attempts = await tx.aiUsageLog.findMany({ where: { ...usageScope, id: { not: usageId },
+              targetId: { in: [originalTargetId, requestHash] } }, select: legacyBatchBillingSelect })
+            if (attempts.some(attempt => attempt.targetId === requestHash && hasSettledBatchResult(attempt))) {
+              throw new DataAccessError(409, 'BATCH_REVIEW_RESPONSE_UNAVAILABLE', settledResponseUnavailable)
+            }
+            if (attempts.some(attempt => !isKnownTextRequestBilling(attempt))) {
+              throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '这组章节的原复查请求尚待核对。')
+            }
+          }),
+        }))
+        if (!textRequestsFinished(trace)) throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '批量审阅原请求用量尚待核对。')
+        if (!complete) unavailableReason = '模型输出不完整。'
+      } catch (error) {
+        ctx.signal.throwIfAborted()
+        if (!(error instanceof DataAccessError)) throw error
+        if (error.code === 'BATCH_REVIEW_SOURCE_CHANGED' || error.code === 'BATCH_REVIEW_RESPONSE_UNAVAILABLE') unavailableReason = error.message
+        else if (textRequestsFinished(trace) && ['AI_PROVIDER_ERROR', 'AI_PROVIDER_QUOTA_EXCEEDED', 'AI_PROVIDER_TIMEOUT',
+          'AI_PROVIDER_OUTPUT_LIMIT', 'AI_PROVIDER_EMPTY_RESPONSE'].includes(error.code)) {
+          unavailableReason = observedBatchFailure(error.code)
+          paidResult = error.code === 'AI_PROVIDER_EMPTY_RESPONSE'
+        }
+        else throw error
+        complete = false
+      }
+      // Keep the paid response before local parsing or reporting. Continuing
+      // the same input can then finish the projection without a model request.
+      const received = trace.records.find(record => record.status === 'terminal' && record.billingKnown)
+      if (received && (raw || paidResult)) {
+        await prisma.agentArtifact.create({ data: {
+          runId: ctx.runId, artifactType: 'continuityReview', title: '批量审阅原响应', content: JSON.stringify(raw),
+          metadata: { version: 1, batchResponseRequestHash: requestHash, batchResponse: { version: 1, usageId: received.usageId,
+            complete, rawHash: runtimeJson({ raw }).hash, ...(unavailableReason ? { unavailableReason } : {}) } },
+        } })
+        paidResult = true
+      }
     }
   }
-  return transaction(async tx => {
+  const project = async (tx: RuntimeTx) => {
+    ctx.signal.throwIfAborted()
     await ctx.assertCurrentExecution?.(tx)
     const current = await prepareBatchReview(ctx, args, tx, false)
-    return saveBatchReview(ctx, tx, frozen, projectBatchReview(frozen, raw, current, complete, unavailableReason, ctx), complete)
-  })
+    return saveBatchReview(ctx, tx, frozen, projectBatchReview(frozen, raw, current, complete, unavailableReason, ctx), paidResult)
+  }
+  if (!paidResult) return transaction(project)
+  try {
+    return await runtimeTransaction(project, { timeoutMs: 20_000, signal: ctx.signal })
+  } catch (error) {
+    ctx.signal.throwIfAborted()
+    if (error instanceof DataAccessError) throw error
+    console.warn('[agent-batch-review-projection]', { runId: ctx.runId, callId: ctx.callId, errorType: error instanceof Error ? error.name : 'unknown' })
+    return { outcome: 'failed', failureCode: 'BATCH_REVIEW_PROJECTION_PENDING', summary: '批量复查报告整理未确认',
+      output: '这批复查的用量已确认，原回包已在本地保留。若交付仍需要报告，且正文和检查依据保持原版本，可用 chapter_review_batch 按原章节、检查类型、技能和重点读取原回包继续整理，无须再次调用供应商。保留正文及其他已有结果，不因本地整理问题逐章重发检查。' }
+  }
 }
 
 async function executeDurableBatchReview(ctx: ToolContext, args: BatchReviewArgs): Promise<ToolResult> {
@@ -154,7 +233,7 @@ async function executeDurableBatchReview(ctx: ToolContext, args: BatchReviewArgs
   if (!receipt) {
     try {
       if (frozen.kind === 'rejected') throw new DataAccessError(409, frozen.code, frozen.message)
-      let raw = '', complete = false, unavailableReason: string | undefined
+      let raw = '', complete = false, paidResult = false, unavailableReason: string | undefined
       if (frozen.review.content) {
         if (!frozen.route || !frozen.price) return runtimeError('RUNTIME_RECEIPT_INVALID', '批量审阅原模型或价格记录缺失。')
         const readAttempt = () => withRunLease(lease, async tx => {
@@ -175,7 +254,16 @@ async function executeDurableBatchReview(ctx: ToolContext, args: BatchReviewArgs
           if (!['AI_PROVIDER_ERROR', 'AI_PROVIDER_QUOTA_EXCEEDED', 'AI_PROVIDER_TIMEOUT'].includes(error.code)) throw error
           const attempt = await readAttempt()
           if (attempt?.status !== 'failed' || !attempt.resultHash || runtimeJson(attempt.result).hash !== attempt.resultHash) throw error
-          unavailableReason = error.code === 'AI_PROVIDER_TIMEOUT' ? '检查已超时，未取得报告。' : '模型未返回检查报告。'
+          const failed = z.object({ outcome: z.literal('failed'), result: z.object({ httpStatus: z.number().int(), code: z.string().optional() }) })
+            .safeParse(attempt.result)
+          const usage = attempt.usageReceipt
+          const noCharge = !usage && failed.success && !failed.data.result.code
+            && [400, 401, 403, 404, 422, 429].includes(failed.data.result.httpStatus)
+          if (!noCharge && (usage?.source !== 'reported' || usage.settlementStatus !== 'settled'
+            || usage.promptTokens === null || usage.completionTokens === null)) {
+            return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '批量审阅原请求用量尚待核对。')
+          }
+          unavailableReason = observedBatchFailure(error.code)
           return null
         })
         if (response) {
@@ -184,14 +272,15 @@ async function executeDurableBatchReview(ctx: ToolContext, args: BatchReviewArgs
             return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '批量审阅原请求用量尚待核对。')
           }
           raw = response.content
-          complete = response.finishReason === 'stop' && !response.toolCalls.length
-          if (!complete) unavailableReason = '模型输出不完整。'
+          paidResult = true
+          complete = Boolean(raw.trim()) && response.finishReason === 'stop' && !response.toolCalls.length
+          if (!complete) unavailableReason = raw.trim() ? '模型输出不完整。' : observedBatchFailure('AI_PROVIDER_EMPTY_RESPONSE')
         }
       }
       receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {
         const current = await prepareBatchReview(ctx, args, tx, false)
         const display = projectBatchReview(frozen.review, raw, current, complete, unavailableReason, ctx)
-        return runtimeJson({ toolResult: await saveBatchReview(ctx, tx, frozen.review, display, complete) }).value
+        return runtimeJson({ toolResult: await saveBatchReview(ctx, tx, frozen.review, display, paidResult) }).value
       })
     } catch (error) {
       if (!(error instanceof DataAccessError) || !error.code.startsWith('BATCH_REVIEW_')) throw error

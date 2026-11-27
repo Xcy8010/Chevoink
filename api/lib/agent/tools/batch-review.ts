@@ -44,10 +44,12 @@ const storedFindings = z.array(z.object({
   evidence: z.string(), explanation: z.string(), suggestion: z.string(),
   related: relatedSchema.optional(),
 }).strict())
+const storedBatchResult = z.union([storedFindings,
+  z.object({ status: z.literal('incomplete'), detail: z.string(), findings: storedFindings }).strict()])
 const targetSchema = z.object({
   chapterId: z.string(), contextHash: z.string(), sourceIds: z.array(z.string()), context: z.array(z.string()),
   neighborStarts: z.record(z.string(), z.number().int().nonnegative()),
-  deterministic: storedFindings, cached: storedFindings.nullable(),
+  deterministic: storedFindings, cached: storedBatchResult.nullable(),
   plan: writingPlanContextSchema.optional(),
   planUnavailable: z.literal(true).optional(),
   anchors: z.array(z.object({ id: z.string(), text: z.string() })).optional(),
@@ -57,6 +59,12 @@ export const batchReviewWorkSchema = z.object({
   unavailable: z.array(z.string()), system: z.string(), content: z.string(),
 }).strict()
 type Work = z.infer<typeof batchReviewWorkSchema>
+
+// A paid incomplete result prevents repeating the same batch. A smaller batch
+// may inspect its missing chapters while still reusing completed assessments.
+function incompleteBatchCacheKey(contextHash: string, chapterIds: string[]) {
+  return runtimeJson({ contextHash, chapterIds: [...new Set(chapterIds)].sort() }).hash
+}
 
 const labels: Record<string, string> = {
   explanation_echo: '重复解释', character_voice: '人物声口', emotion_grounding: '情绪铺垫',
@@ -177,9 +185,12 @@ export async function prepareBatchReview(ctx: ToolContext, args: BatchReviewArgs
         tier: ctx.modelRuntime?.tier ?? null, model: ctx.modelRuntime?.modelName ?? null,
       } }).hash
     const saved = cache ? await db.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview',
-      run: { userId: ctx.userId, novelId: ctx.novelId }, metadata: { path: ['batchReviewContextHash'], equals: contextHash } },
+      run: { userId: ctx.userId, novelId: ctx.novelId }, OR: [
+        { metadata: { path: ['batchReviewContextHash'], equals: contextHash } },
+        { metadata: { path: ['batchReviewContextHash'], equals: incompleteBatchCacheKey(contextHash, args.chapterIds) } },
+      ] },
     select: { content: true }, orderBy: { createdAt: 'desc' } }) : null
-    const cached = saved ? storedFindings.safeParse(JSON.parse(saved.content)) : null
+    const cached = saved ? storedBatchResult.safeParse(JSON.parse(saved.content)) : null
     const table = buildQualityEvidenceSources({ userId: ctx.userId, novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: chapter.revision }, chapter.content)
     const anchors = table.entries.filter(entry => entry.text.trim() && (plan || chapter.content.indexOf(entry.text) !== chapter.content.lastIndexOf(entry.text)))
       .map(entry => ({ id: entry.id, text: entry.text }))
@@ -205,11 +216,12 @@ function reportRows(raw: string) {
   try {
     const parsed = z.object({ chapters: z.array(z.unknown()) })
       .parse(parseQualityJsonObject(raw, 'chapters', 3))
-    return parsed.chapters.flatMap(row => {
+    const rows = parsed.chapters.flatMap(row => {
       const item = z.object({ chapterId: z.string(), findings: z.unknown(), planAlignment: z.unknown().optional() }).safeParse(row)
       return item.success ? [item.data] : []
     })
-  } catch { return [] }
+    return { rows, malformed: false }
+  } catch { return { rows: [], malformed: true } }
 }
 
 function boundEvidence(source: Source, quote: string, start = source.sourceStart ?? 0) {
@@ -220,28 +232,33 @@ function boundEvidence(source: Source, quote: string, start = source.sourceStart
 
 export function projectBatchReview(work: Work, raw: string, current: Work, complete: boolean, unavailableReason?: string,
   identity?: { userId: string; novelId: string }): BatchDisplay {
-  const rows = complete ? reportRows(raw) : []
+  const { rows, malformed } = raw ? reportRows(raw) : { rows: [], malformed: false }
   const chapters = work.targets.map((target): DisplayChapter => {
     const source = work.sources.find(row => row.chapterId === target.chapterId)!
     const base = { chapterId: source.chapterId, title: source.title, orderIndex: source.orderIndex, revision: source.revision }
     const id = target.chapterId
+    const cached = target.cached
     if (!current.targets.some(row => row.chapterId === id && row.contextHash === target.contextHash)) {
-      return { ...base, status: 'stale', detail: '正文或相关来源已变化。', findings: target.cached ?? [] }
+      return { ...base, status: 'stale', detail: '正文或相关来源已变化。', findings: Array.isArray(cached) ? cached : cached?.findings ?? [] }
     }
-    if (target.cached !== null) return { ...base, status: 'complete', findings: target.cached }
+    if (cached !== null) return Array.isArray(cached) ? { ...base, status: 'complete', findings: cached } : { ...base, ...cached }
     const matches = rows.filter(row => row.chapterId === id)
     if (matches.length !== 1 || !Array.isArray(matches[0].findings)) {
-      return { ...base, status: 'incomplete', detail: unavailableReason ?? '未取得完整的逐章结论。' }
+      const detail = unavailableReason ?? (malformed ? '模型已返回结果，但报告格式无法读取。'
+        : matches.length > 1 ? '模型为该章节返回了多份结论。'
+          : matches.length === 1 ? '模型未给出可读取的章节意见。' : '模型响应未包含该章的完整结论。')
+      return { ...base, status: 'incomplete', detail }
     }
     const table = identity && (target.plan || target.anchors?.length)
-      ? buildQualityEvidenceSources({ ...identity, chapterId: id, chapterRevision: source.revision }, source.content) : undefined
+      ? buildQualityEvidenceSources({ userId: identity.userId, novelId: identity.novelId, chapterId: id, chapterRevision: source.revision }, source.content)
+      : undefined
     const findings: Finding[] = [...target.deterministic]
     let unresolved = 0
     for (const [order, item] of matches[0].findings.entries()) {
       const row = findingSchema.safeParse(item)
       if (!row.success) { unresolved++; continue }
       const { signal, severity, quote, sourceId, explanation, suggestion, related, confidence } = row.data
-      const spans = sourceId && target.anchors?.some(entry => entry.id === sourceId)
+      const spans = sourceId && target.anchors?.some(entry => entry.id === sourceId || /^q[a-f0-9]{12}$/u.test(sourceId) && entry.id.startsWith(sourceId))
         ? locateQualityFindingSpans(source.content, { sourceId, quote }, table) : []
       const evidence = sourceId ? spans.length === 1 ? source.content.slice(spans[0].start, spans[0].end) : null
         : quote ? boundEvidence(source, quote) : null
@@ -266,7 +283,7 @@ export function projectBatchReview(work: Work, raw: string, current: Work, compl
         evidence: spans.length ? source.content.slice(spans[0].start, spans[0].end) : '',
         explanation: finding.explanation, suggestion: finding.planEvidence.map(ref => `「${ref.quote}」`).join('、') })
     }
-    const detail = [unresolved ? `${unresolved} 条意见无法定位到原文。` : '',
+    const detail = [!complete ? unavailableReason ?? '模型输出不完整。' : '', unresolved ? `${unresolved} 条意见无法定位到原文。` : '',
       target.planUnavailable || target.plan && plan?.status !== 'reviewed' ? '提纲一致性检查未完成。' : ''].filter(Boolean).join(' ')
     return { ...base, status: detail ? 'incomplete' : 'complete', ...(detail ? { detail } : {}), findings }
   })
@@ -278,12 +295,16 @@ export function projectBatchReview(work: Work, raw: string, current: Work, compl
 export async function saveBatchReview(ctx: ToolContext, db: RuntimeTx, work: Work, display: BatchDisplay, cacheable: boolean): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
   if (cacheable) {
-    const completed = display.chapters.filter(chapter => chapter.status === 'complete' && work.targets.some(target => target.chapterId === chapter.chapterId && target.cached === null))
-    if (completed.length) await db.agentArtifact.createMany({ data: completed.map(chapter => ({
-      runId: ctx.runId, artifactType: 'continuityReview', title: chapter.title + ' · 章节审阅',
-      summary: `r${chapter.revision}`, content: JSON.stringify(chapter.findings ?? []),
-      metadata: { version: 1, batchReviewContextHash: work.targets.find(target => target.chapterId === chapter.chapterId)!.contextHash },
-    })) })
+    const received = display.chapters.filter(chapter => chapter.status !== 'stale' && work.targets.some(target => target.chapterId === chapter.chapterId && target.cached === null))
+    const chapterIds = [...work.targets.map(target => target.chapterId), ...work.unavailable]
+    if (received.length) await db.agentArtifact.createMany({ data: received.map(chapter => {
+      const contextHash = work.targets.find(target => target.chapterId === chapter.chapterId)!.contextHash
+      return { runId: ctx.runId, artifactType: 'continuityReview', title: chapter.title + ' · 章节审阅',
+        summary: `r${chapter.revision}`, content: JSON.stringify(chapter.status === 'complete' ? chapter.findings ?? []
+          : { status: 'incomplete', detail: chapter.detail, findings: chapter.findings ?? [] }),
+        metadata: { version: 1, batchReviewContextHash: chapter.status === 'complete' ? contextHash : incompleteBatchCacheKey(contextHash, chapterIds) },
+      }
+    }) })
   }
   const complete = display.chapters.filter(chapter => chapter.status === 'complete').length
   const detail = display.chapters.map(chapter => ({
@@ -294,5 +315,5 @@ export async function saveBatchReview(ctx: ToolContext, db: RuntimeTx, work: Wor
     })),
   }))
   return { display, summary: `章节审阅 · ${complete}/${display.chapters.length} 章完成`,
-    output: `${JSON.stringify(detail)}\n报告对应所列正文版本。集中处理有据问题，修改后回读相关原文；作者特别要求终稿独立检查时按要求执行。` }
+    output: `${JSON.stringify(detail)}\n报告对应所列正文版本。集中处理有据问题，修改后回读相关原文；原请求已返回但未形成完整报告时，保留可核对的结论并继续交付可用正文，避免原样重发。作者特别要求终稿独立检查时按要求执行。` }
 }

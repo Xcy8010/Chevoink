@@ -10,7 +10,7 @@ it('keeps private request/recovery journals out of deliverables without changing
   for (const metadata of [{ version: 1, kind: 'terminalCandidatePatch' }, ...[
     'continuityAssessmentRequestKey', 'assessmentRequestOwnerKey', 'assessmentResponseKey', 'assessmentApplicationKey',
     'firstAssessmentNotDispatchedKey', 'fullReassessmentKey', 'fullReassessmentNotDispatchedKey',
-    'evidenceCorrectionKey', 'correctionClaimKey',
+    'evidenceCorrectionKey', 'correctionClaimKey', 'batchResponseRequestHash',
     'assessmentReservationId', 'assessmentAppliedReservationId', 'correctionAppliedObservationId', 'continuityAssessmentAdmissionId',
   ].map(key => ({ version: 1, [key]: 'owned-request' }))]) {
     const artifact = { artifactType: 'continuityReview', metadata }, before = JSON.stringify(artifact)

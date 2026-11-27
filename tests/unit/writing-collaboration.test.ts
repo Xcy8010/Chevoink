@@ -101,6 +101,19 @@ it('does not swallow real receipt or ownership corruption as advisory staleness'
   native.snapshot.mockRejectedValue(new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '回执损坏'))
   await expect(read(db)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
 })
+it('distinguishes an earlier reference read from reading back the latest local revision', async () => {
+  const db = database()
+  const part = (toolName: string, display: object) => ({ type: 'tool-call', toolName, status: 'success', display: { chapterId: 'chapter', ...display } })
+  const edit = part('chapter_edit_range', { kind: 'chapterDiff', before: '旧文', after: content, appliedDirectly: true, revision: 3 })
+  const reread = (revision: number) => part('chapter_read', { kind: 'chapterRef', revision, range: { start: 0, end: 3 } })
+  db.agentMessage.findMany.mockResolvedValue([{ parts: [reread(2), edit] }])
+  expect(await read(db)).toContain('尚未回读这个版本的改动处')
+  db.agentMessage.findMany.mockResolvedValue([{ parts: [reread(2), edit, reread(3)] }])
+  const digest = await read(db)
+  expect(digest).not.toContain('尚未回读这个版本的改动处')
+  expect(digest).toContain('"lastRead":{"revision":3,"range":{"start":0,"end":3}}')
+})
+
 it('states collaboration responsibilities without creating a save or review permission gate', () => {
   expect(WRITING_COLLABORATION_GUIDANCE).toContain('部分检查失败时保留可用结果，其他正文与章节继续')
   expect(WRITING_COLLABORATION_GUIDANCE).toContain('局部回读只能说明实际核对的位置')

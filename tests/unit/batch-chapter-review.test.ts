@@ -4,6 +4,8 @@ import { estimateChatMessagesTokens } from '../../api/lib/agent/context-budget.j
 import { continuityReviewRequest } from '../../api/lib/agent/continuity-review.js'
 import { buildQualityEvidenceSources, locateQuoteSpans, renderQualityEvidenceSources } from '../../api/lib/agent/quality-evidence.js'
 import { buildCriticSystem } from '../../api/lib/agent/tools/humanity-quality-tools.js'
+import type { ToolContext } from '../../api/lib/agent/tools/types.js'
+import { writingPlanContextHash, type WritingPlanContext } from '../../api/lib/agent/writing-plan-context.js'
 import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
 import { V1_PRICING_VERSION } from '../../api/lib/billing/pricing.js'
 
@@ -68,18 +70,53 @@ describe('batch chapter review projection', () => {
   })
 })
 
-it('keeps a repeated quote reviewable by an exact source ID', () => {
-  const identity = { userId: 'author', novelId: 'novel' }
+const toolContext = {
+  userId: 'author', novelId: 'novel', chapterId: second.chapterId, runId: 'run', sessionId: 'session',
+  callId: 'batch', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
+  emit: () => {}, signal: new AbortController().signal,
+} satisfies ToolContext
+
+it.each(['continuity', 'quality', 'custom'] as const)('binds a repeated quote for %s with a full tool context', reviewType => {
   const source = { ...second, content: '门锁着。\n\n他先去了仓库，门锁着。\n\n门锁着。' }
-  const table = buildQualityEvidenceSources({ ...identity, chapterId: source.chapterId, chapterRevision: source.revision }, source.content)
+  const table = buildQualityEvidenceSources({ userId: toolContext.userId, novelId: toolContext.novelId,
+    chapterId: source.chapterId, chapterRevision: source.revision }, source.content)
   const anchor = table.entries.at(-1)!
-  const frozen = { ...work, sources: [first, source], targets: [work.targets[0], { ...work.targets[1], anchors: [{ id: anchor.id, text: anchor.text }] }] }
-  const { quote: _quote, related: _related, ...finding } = conflict
+  const frozen = { ...work, reviewType, sources: [first, source], targets: [work.targets[0], { ...work.targets[1], anchors: [{ id: anchor.id, text: anchor.text }] }] }
+  const { quote: _quote, related: _related, ...rest } = conflict
+  const finding = reviewType === 'quality' ? { ...rest, signal: 'explanation_echo', severity: 'warning' } : rest
   const response = JSON.stringify({ chapters: [
-    { chapterId: first.chapterId, findings: [] }, { chapterId: source.chapterId, findings: [{ ...finding, sourceId: anchor.id }] },
+    { chapterId: first.chapterId, findings: [] }, { chapterId: source.chapterId, findings: [{ ...finding, sourceId: anchor.id.slice(0, 13) }] },
   ] })
-  const report = projectBatchReview(frozen, response, frozen, true, undefined, identity)
+  const report = projectBatchReview(frozen, response, frozen, true, undefined, toolContext)
   expect(report.chapters[1]).toMatchObject({ status: 'complete', findings: [{ evidence: anchor.text }] })
+})
+
+it('rebuilds strict evidence identity for continuity plan alignment', () => {
+  const outline = { id: 'outline', title: '大纲', content: '找回钥匙。', planHash: 'outline-hash' }
+  const detail = { id: 'detail', title: '细纲', content: '老陈从袋中找回钥匙。', planHash: 'detail-hash' }
+  const plan: WritingPlanContext = { version: 1, outline, detail, target: { kind: 'chapter', chapterId: second.chapterId }, parentPlanHash: outline.planHash }
+  const frozen = { ...work, targets: [work.targets[0], { ...work.targets[1], plan }] }
+  const response = JSON.stringify({ chapters: [{ chapterId: first.chapterId, findings: [] },
+    { chapterId: second.chapterId, findings: [], planAlignment: {
+      version: 1, planContextHash: writingPlanContextHash(plan), status: 'reviewed', findings: [],
+    } }] })
+  expect(projectBatchReview(frozen, response, frozen, true, undefined, toolContext).chapters.map(chapter => chapter.status))
+    .toEqual(['complete', 'complete'])
+})
+
+it('keeps verified evidence and marks the affected chapter incomplete despite a paid response', () => {
+  const response = JSON.stringify({ chapters: [{ chapterId: first.chapterId, findings: [] },
+    { chapterId: second.chapterId, findings: [conflict, { ...conflict, quote: '虚构引文' }] }] })
+  const report = projectBatchReview(work, response, work, true)
+  expect(report.chapters[0].status).toBe('complete')
+  expect(report.chapters[1]).toMatchObject({ status: 'incomplete', detail: '1 条意见无法定位到原文。', findings: [{ evidence: conflict.quote }] })
+  const cached = { ...work, targets: [work.targets[0], { ...work.targets[1], cached: {
+    status: 'incomplete' as const, detail: report.chapters[1].detail!, findings: report.chapters[1].findings!,
+  } }] }
+  expect(projectBatchReview(cached, '', cached, false).chapters[1]).toEqual(report.chapters[1])
+  expect(projectBatchReview(work, '{"findings":[]}', work, true).chapters[1]).toMatchObject({
+    status: 'incomplete', detail: '模型已返回结果，但报告格式无法读取。',
+  })
 })
 
 it('compares the same synthetic review set before and after batching with a scripted provider', async () => {

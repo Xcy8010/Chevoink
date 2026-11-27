@@ -24,7 +24,7 @@ import { assertCraftOutputSafe } from '../craft-library.js'
 import { executeDurableChapter } from './durable-chapter.js'
 import { executeDurableCreate } from './durable-create.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
-import { composeChapterEdit } from './chapter-patches.js'
+import { chapterEditReadback, composeChapterEdit } from './chapter-patches.js'
 import { composeChapterBody } from './chapter-body.js'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
 import { writingNewVolumeSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
@@ -522,7 +522,8 @@ export const chapterEditRangeTool = defineTool({
     }
 
     return projectChapterBodyResult(ctx, {
-      output: `已一次合并改写《${chapter.title}》${edit.ranges.length} 处，当前正文 ${after.length} 字。写入回执仅证明实际文本变化，不代表全部意见已解决或新版已复核。`,
+      output: `已一次合并改写《${chapter.title}》${edit.ranges.length} 处，当前正文 ${after.length} 字。` + (ctx.chapterReviewWorkflowEnabled && after !== before
+        ? chapterEditReadback(chapter.id, updated.revision, edit.ranges) : '写入回执仅证明实际文本变化，不代表全部意见已解决或新版已复核。'),
       summary: `改写《${chapter.title}》${edit.ranges.length} 处`,
       display: {
         kind: 'chapterDiff',

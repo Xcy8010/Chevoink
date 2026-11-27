@@ -217,6 +217,103 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
   }))
 
+  it.each([false, true])('persists one change-of-method report before the matching individual check (author prose=%s)', async spoken => fixture(async f => {
+    const novel = await prisma.novel.create({ data: { authorId: f.userId, title: '合成审阅', slug: randomUUID(), summary: '' } })
+    const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '上卷', orderIndex: 1 } })
+    const chapters = await Promise.all([16, 17, 18].map(orderIndex => prisma.chapter.create({ data: {
+      novelId: novel.id, authorId: f.userId, volumeId: volume.id, title: '合成章' + orderIndex,
+      orderIndex, orderInVolume: orderIndex, content: '雨停了。雨停了。' } })))
+    const session = await prisma.agentSession.create({ data: { userId: f.userId, novelId: novel.id, title: '三章审阅' } })
+    const prompt = '核对现有三章的衔接并汇报结果。', runId = randomUUID()
+    await prisma.agentRun.create({ data: { id: runId, sessionId: session.id, userId: f.userId, novelId: novel.id,
+      mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', status: 'queued',
+      startRequest: withHumanAdmission({ sessionId: session.id, novelId: novel.id, prompt, mode: 'build' }) } })
+    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 0, provider: 'fixture',
+      modelName: 'fixture-main', baseUrl: 'https://provider.invalid/v1', apiKey: null, reasoningEffort: 'high',
+      reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: 128000 })
+    // The offline model has no auxiliary provider. Both author-prose cases
+    // see the same real failed tool receipt; only the main response differs.
+    vi.spyOn(storyMemory, 'syncNovelMemoryProjection').mockResolvedValue({
+      chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: true,
+    })
+    const authorReport = '三章的批查没有返回完整报告，我先单独核对其中一章。'
+    const calls = [
+      { name: 'chapter_review_batch', args: { chapterIds: chapters.map(chapter => chapter.id), reviewType: 'continuity' } },
+      { name: 'continuity_validate', args: { chapterId: chapters[0].id, readOnly: true } },
+      { name: 'continuity_validate', args: { chapterId: chapters[1].id, readOnly: true } },
+    ]
+    let turn = 0
+    const chat = vi.spyOn(aiService, 'chatWithTools').mockImplementation(async () => {
+      const call = calls[turn++]
+      if (turn > 4) throw new Error('Unexpected additional model request')
+      return { content: call ? spoken && turn === 2 ? authorReport : '' : '审阅没有取得完整结果。',
+        toolCalls: call ? [{ id: 'review-' + turn, name: call.name, arguments: JSON.stringify(call.args) }] : [],
+        reasoning: '', finishReason: call ? 'tool_calls' : 'stop',
+        usage: { promptTokens: 100, completionTokens: 10, totalTokens: 110, promptCacheHitTokens: null, promptCacheMissTokens: null } }
+    })
+    await executeAgentRun({ runId, sessionId: session.id, userId: f.userId, novelId: novel.id,
+      chapterId: null, mode: 'build', prompt, modelTier: 'speed' })
+    const rows = await prisma.agentMessage.findMany({ where: { runId, role: 'assistant' }, orderBy: { createdAt: 'asc' } })
+    const expected = spoken ? authorReport : '批量复查还有未完成的部分，我准备按章核对。'
+    const fallback = rows[1]?.parts
+    expect(fallback).toEqual(expect.arrayContaining([{ type: 'text', text: expected }]))
+    expect(Array.isArray(fallback) && fallback.findIndex(p => (p as { type?: string })?.type === 'text'))
+      .toBeLessThan(Array.isArray(fallback) ? fallback.findIndex(p => (p as { type?: string })?.type === 'tool-call') : -1)
+    expect(JSON.stringify(rows[2]?.parts)).not.toContain(expected)
+    const events = await prisma.agentRunEvent.findMany({ where: { runId, type: 'text.final', payload: { path: ['text'], equals: expected } } })
+    expect(events).toHaveLength(1)
+    expect(chat).toHaveBeenCalledTimes(4)
+  }), 60000)
+
+  it('updates existing deliverables while editing the next chapter and reads the saved revisions', async () => fixture(async f => {
+    const novel = await prisma.novel.create({ data: { authorId: f.userId, title: '合成改稿', slug: randomUUID(), summary: '' } })
+    const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '上卷', orderIndex: 1 } })
+    const chapters = await Promise.all([16, 17].map(orderIndex => prisma.chapter.create({ data: {
+      novelId: novel.id, authorId: f.userId, volumeId: volume.id, title: '合成章' + orderIndex,
+      orderIndex, orderInVolume: orderIndex, content: '清晨，钟响了。' } })))
+    const session = await prisma.agentSession.create({ data: { userId: f.userId, novelId: novel.id, title: '修订任务' } })
+    const prompt = '把第十六章和第十七章的清晨改成傍晚，回读改好的地方。', runId = randomUUID()
+    const subject = { runId, novelId: novel.id, userId: f.userId, sessionId: session.id }
+    await prisma.agentRun.create({ data: { userId: f.userId, novelId: novel.id, sessionId: session.id, id: runId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator',
+      engine: 'loop', status: 'queued', startRequest: withHumanAdmission({ prompt, novelId: novel.id, sessionId: session.id, mode: 'build' }) } })
+    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 0, provider: 'fixture', modelName: 'fixture-main',
+      baseUrl: 'https://provider.invalid/v1', apiKey: null, reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: 128000 })
+    vi.spyOn(storyMemory, 'syncNovelMemoryProjection').mockResolvedValue({ chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: true })
+    const todo = (...statuses: string[]) => ({ name: 'todo_write', args: { items: statuses.map((status, i) => ({
+      content: ['修订第十六章开头', '修订第十七章开头', '回读两处改文'][i], status })) } })
+    const read = (i: number) => ({ name: 'chapter_read', args: { chapterId: chapters[i].id, limit: 9 } })
+    const edit = (i: number) => ({ name: 'chapter_edit_range', args: { chapterId: chapters[i].id, oldText: '清晨', newText: '傍晚' } })
+    const turns = [
+      [todo('in_progress', 'pending', 'pending'), read(0), read(1)], [edit(0)],
+      [todo('completed', 'in_progress', 'pending'), edit(1)], [todo('completed', 'completed', 'in_progress'), read(0), read(1)],
+      [todo('completed', 'completed', 'completed')], [],
+    ]
+    let turn = 0
+    const chat = vi.spyOn(aiService, 'chatWithTools').mockImplementation(async request => {
+      const calls = turns[turn++]
+      if (!calls) throw new Error('Unexpected additional model request')
+      if (turn === 1) expect(request.messages.some(m => typeof m.content === 'string' && m.content.includes('同一工具轮更新进度'))).toBe(true)
+      return { content: calls.length ? '' : '两章的清晨都已改为傍晚，并已回读。',
+        toolCalls: calls.map((call, i) => ({ id: 'edit-' + turn + '-' + i, name: call.name, arguments: JSON.stringify(call.args) })),
+        reasoning: '', finishReason: calls.length ? 'tool_calls' : 'stop',
+        usage: { promptTokens: 100, completionTokens: 10, totalTokens: 110, promptCacheHitTokens: null, promptCacheMissTokens: null } }
+    })
+    await executeAgentRun({ ...subject, chapterId: null, mode: 'build', prompt, modelTier: 'speed' })
+    const rows = await prisma.agentRunEvent.findMany({ where: { runId, type: 'tool.result' }, orderBy: { seq: 'asc' } })
+    const results = rows.map(row => row.payload as { ok: boolean; toolName: string;
+      display?: { chapterId?: string; revision?: number; items?: { status: string }[] } })
+    expect(results.every(r => r.ok)).toBe(true)
+    expect(results.filter(r => r.toolName === 'todo_write').map(r => r.display?.items?.filter(i => i.status === 'completed').length)).toEqual([0, 1, 2, 3])
+    for (const chapter of chapters) {
+      const edits = results.filter(r => r.toolName === 'chapter_edit_range' && r.display?.chapterId === chapter.id)
+      const reads = results.filter(r => r.toolName === 'chapter_read' && r.display?.chapterId === chapter.id)
+      expect(edits).toHaveLength(1)
+      expect(reads.at(-1)?.display?.revision).toBe(edits[0].display?.revision)
+      expect(results.indexOf(reads.at(-1)!)).toBeGreaterThan(results.indexOf(edits[0]))
+    }
+    expect(chat).toHaveBeenCalledTimes(turns.length)
+  }), 60000)
+
   it.each(['plan', 'build'] as const)('sequential writing in %s mode settles the same requests for accurate and stale IDs', mode => fixture(async f => {
     const memoryRefresh = vi.spyOn(storyMemory, 'syncNovelMemoryProjection').mockResolvedValue({
       chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: true,

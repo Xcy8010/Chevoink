@@ -78,6 +78,9 @@ describe('author-ended run API boundary', () => {
         metadata: { handoff: { sourceMode: 'plan', targetMode: 'build', title: '继续', summary: '继续构建', confirmLabel: '确认' }, privateTrace: 'discard large diagnostics' } },
       { id: 'artifact-second', runId: 'run', artifactType: 'chapterDraft', title: '第二份', summary: null, content: '正文 B', createdAt, updatedAt: createdAt,
         metadata: { executionMode: 'build', actionPlan: { steps: [] }, privateTrace: 'discard large diagnostics' } },
+      { id: 'internal-batch-response', runId: 'run', artifactType: 'continuityReview', title: '批量审阅原响应',
+        summary: null, content: 'RAW_PROVIDER_BATCH_RESPONSE', createdAt, updatedAt: createdAt,
+        metadata: { version: 1, batchResponseRequestHash: 'verified-original-request' } },
     ]
     db.agentRun.findMany.mockResolvedValue([run])
     db.agentArtifact.findMany.mockResolvedValue(artifacts.map(artifact => ({ ...artifact, run })))
@@ -86,6 +89,10 @@ describe('author-ended run API boundary', () => {
     const full = await listAgentSessionHistoryData('user', 'session')
     const workspace = await listAgentSessionWorkspaceHistoryData('user', 'session')
     expect(buildArtifactsFromHistory(workspace.items)).toEqual(buildArtifactsFromHistory(full.items))
+    for (const history of [full, workspace]) {
+      expect(history.items[0].artifacts.map(artifact => artifact.id)).toEqual(['artifact-first', 'artifact-second'])
+      expect(JSON.stringify(history)).not.toContain('RAW_PROVIDER_BATCH_RESPONSE')
+    }
     expect(workspace.items[0].handoff).toMatchObject({ sourceRunId: 'run', sourceArtifactId: 'artifact-first' })
     expect(workspace.items[0].activeAgent).toEqual(full.items[0].activeAgent)
     expect(JSON.stringify(workspace).length).toBeLessThan(JSON.stringify(full).length)

@@ -12,7 +12,8 @@ export function isInternalAgentArtifact(record: { artifactType: string; metadata
     'continuitySupplementApplication', 'continuitySupplementExecution', 'continuityUsageAccounted', 'continuityProseRevision',
     'continuityMergedRevision', 'continuityRevisionApplied', 'legacyContinuityVerification',
   ].some(key => meta[key] !== null && typeof meta[key] === 'object' && !Array.isArray(meta[key])) || [
-    'continuityAssessmentRequestKey', 'assessmentRequestOwnerKey', 'assessmentResponseKey', 'assessmentApplicationKey', 'batchReviewContextHash',
+    'continuityAssessmentRequestKey', 'assessmentRequestOwnerKey', 'assessmentResponseKey', 'assessmentApplicationKey',
+    'batchReviewContextHash', 'batchResponseRequestHash',
     'firstAssessmentNotDispatchedKey', 'fullReassessmentKey', 'fullReassessmentNotDispatchedKey',
     'evidenceCorrectionKey', 'correctionClaimKey',
     'assessmentReservationId', 'assessmentAppliedReservationId', 'correctionAppliedObservationId', 'continuityAssessmentAdmissionId',

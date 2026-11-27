@@ -15,7 +15,7 @@ import { prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
 import { plainChapterTitle } from '../../../shared/structure/chapter-title.js'
 import type { AgentDefinition } from './agents.js'
-import { OPERATION_KNOWLEDGE } from './knowledge/operation.js'
+import { operationKnowledge } from './knowledge/operation.js'
 import { buildGeneralWritingDigest, buildGenreWritingDigest, MANUSCRIPT_WRITING_CORE, WRITING_REQUEST_GUIDANCE } from './knowledge/writing.js'
 import { readChapterWritingBackground, readWritingPresentation, renderChapterWritingBackground, renderWritingPresentation } from './writing-request-context.js'
 import { buildSkillExecutionDigest, routeSkills, SKILL_ROUTER_VERSION, type SkillRouteDecision } from './skills/index.js'
@@ -73,8 +73,8 @@ ${AGENT_TOOL_EXECUTION_POLICY}
 - 持续推进原任务，真实成果完成即停止，不顺带新增封面、下一章或其他任务。权限、阶段、版本、取消、预算、幂等及未知结果以运行时真实合同为准；历史轮次和压缩计数不是新的用户预算。`
 
 // Keep frequently edited opening copy at the end of the assembled system message.
-const OPENING_GUIDANCE = `- 需要工具时，由你根据作者请求选择第一个能推进任务的动作。第一步一旦确定，就立即在回复区用一句话说清要对哪个对象做什么，例如「我先读这份细纲的章末安排。」在同一轮的 content 写出这句话，随即发出对应的原生工具调用。拿到结果后再细化后续步骤，不等整套方案想好才开口。进度标题和内部思考不能代替这句汇报。作者明确要求省略进展时遵从；无需执行工具的简单问答直接回答。
-- 首次为一个具体目标调用工具时，在同一轮的回复首行用 <activity-title>动作＋对象</activity-title> 概括一次，例如 <activity-title>核对人物出场时间</activity-title>，随后换行写公开汇报，再调用工具。串行、并行及后续轮次继续同一目标时沿用该标题，不重复输出；状态由真实结果显示。开场之后，常规查阅、保存和同目标重试不逐个播报。工具变更本身无需另发一句。只有发现会改变写法的具体事实、交付有缺项或需要作者决定时，才在阶段之间说一句；其余工具轮只给必要的标题并直接调用工具。例如「前章里她还不知道来信人的身份，我会留到拆信时再揭开。」标题只写作品里的动作与对象，省去“总结这一步的结果”“整理最终回复”等过程说明。直接交付最终答复时，从交付内容起笔，省略活动标题。支持按作者要求省略最终总结或只交付正文。`
+const openingGuidance = (reviewWorkflow: boolean) => `- 需要工具时，由你根据作者请求选择第一个能推进任务的动作。第一步一旦确定，就立即在回复区用一句话说清要对哪个对象做什么，例如「我先读这份细纲的章末安排。」在同一轮的 content 写出这句话，随即发出对应的原生工具调用。拿到结果后再细化后续步骤，不等整套方案想好才开口。进度标题和内部思考不能代替这句汇报。作者明确要求省略进展时遵从；无需执行工具的简单问答直接回答。
+- 首次为一个具体目标调用工具时，在同一轮的回复首行用 <activity-title>动作＋对象</activity-title> 概括一次，例如 <activity-title>核对人物出场时间</activity-title>，随后换行写公开汇报，再调用工具。串行、并行及后续轮次继续同一目标时沿用该标题，不重复输出；状态由真实结果显示。开场之后，常规查阅、保存和同目标重试不逐个播报。工具变更本身无需另发一句。${reviewWorkflow ? '当阶段成果已经可查看、发现影响交付的事实，或原办法失效将改变结果、耗时或费用时，在下一次工具调用的同一轮面向作者简短说明事实和下一步；同一变化只说明一次，沿用作者对过程汇报的偏好。' : '只有发现会改变写法的具体事实、交付有缺项或需要作者决定时，才在阶段之间说一句；其余工具轮只给必要的标题并直接调用工具。'}例如「前章里她还不知道来信人的身份，我会留到拆信时再揭开。」标题只写作品里的动作与对象，省去“总结这一步的结果”“整理最终回复”等过程说明。直接交付最终答复时，从交付内容起笔，省略活动标题。支持按作者要求省略最终总结或只交付正文。`
 
 export function buildAgentIdentityPrompt(modelTier: CreditModelTier, modelName?: string | null, productDisplayName?: string | null, contentPolicyEnabled = false, reviewWorkflow = chapterReviewWorkflowEnabled()): string {
   const tierLabel = (MODEL_IDENTITY_LABELS[modelTier] ?? productDisplayName?.trim()) || '内置模型'
@@ -758,7 +758,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     hasCapability('novel_update_meta') ? TAG_LIBRARY_DIGEST : null,
     operatingGuidance ?? MODE_CONTRACTS[input.mode],
     operatingGuidance ? null : decisionStrategies(chapterReviewWorkflowEnabled(input.taskSpec)),
-    operatingGuidance ? null : OPERATION_KNOWLEDGE,
+    operatingGuidance ? null : operationKnowledge(chapterReviewWorkflowEnabled(input.taskSpec)),
     useWritingCore ? MANUSCRIPT_WRITING_CORE
       : operatingGuidance && !input.taskSpec.scope.authorEffects?.manuscript ? null : buildGeneralWritingDigest(),
     operatingGuidance || useWritingCore ? null : WRITING_REQUEST_GUIDANCE,
@@ -766,7 +766,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     bootstrapPrompt,
     focused ? '操作对象以本任务冻结目标及真实工具回执为准；编辑器当前章节只是界面位置，不能替代目标。'
       : '作者当前编辑的章节以尾部快照为准；未指明章节时优先针对该章节操作，但“写下一章”要求准备新章，不能默认操作编辑器中的旧章。',
-    OPENING_GUIDANCE,
+    openingGuidance(chapterReviewWorkflowEnabled(input.taskSpec)),
     '给作者的回复和汇报用作品、章节或计划的实际名称，引用原文时可指出章节和段落。工具参数、对象编号、字符偏移（content@、@数字）、内容哈希和 revision 只供工具核对。已有标题时用《标题》，缺少标题时用「该章节」或「该计划」，不要猜测名称。',
   ]
     .filter(Boolean)

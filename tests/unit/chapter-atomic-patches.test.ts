@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { composeChapterEdit } from '../../api/lib/agent/tools/chapter-patches.js'
+import { chapterEditReadback, composeChapterEdit } from '../../api/lib/agent/tools/chapter-patches.js'
 import { chapterEditArguments } from '../../api/lib/agent/tools/chapter-arguments.js'
 
 describe('one immutable chapter patch batch', () => {
+  it('locates review edits in the saved text after a length change and a deletion', () => {
+    const edited = composeChapterEdit('甲。乙。丙。', { patches: [{ oldText: '甲', newText: '开门' }, { oldText: '丙', newText: '' }] })
+    expect(edited.after).toBe('开门。乙。。')
+    expect(chapterEditReadback('c18', 7, edited.ranges)).toContain('chapterId=c18，r7，修改位置 [0,2)、[5,5)')
+  })
   it('identifies a repeated short anchor and permits a corrected non-overlapping batch', () => {
     const body = '上午还剩三天。\n夜里还剩三天。'
     expect(() => composeChapterEdit(body, { patches: [{ oldText: '上午还剩三天。', newText: '上午还剩两天。' },

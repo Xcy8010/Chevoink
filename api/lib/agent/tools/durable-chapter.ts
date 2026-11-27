@@ -18,6 +18,7 @@ import type { ToolContext, ToolResult, AgentTool } from './types.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
 import { chapterPatchSchema, chapterTargetOrderIndex, retainedFindingSchema } from './chapter-arguments.js'
 import { composeChapterBody } from './chapter-body.js'
+import { chapterEditReadback } from './chapter-patches.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { reduceExecutionReceipt, failedToolResultSchema } from '../runtime-reducer.js'
 import { DataAccessError, prisma } from '../../prisma.js'
@@ -192,7 +193,8 @@ export async function applyDurableChapterBody(ctx: ToolContext, tx: RuntimeTx, i
   const memoryJobId = changed && isAgent2FeatureEnabled('memory2', ctx.userId)
     ? await enqueueChapterMemoryExtraction({ novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: revision, before, after }, tx) : null
   ctx.signal.throwIfAborted()
-  return { toolResult: { output: changed ? `已更新章节《${chapter.title}》，当前正文 ${after.length} 字。` : `章节《${chapter.title}》正文未变化。`,
+  const readback = changed && ctx.chapterReviewWorkflowEnabled && editRanges ? chapterEditReadback(chapter.id, revision, editRanges) : ''
+  return { toolResult: { output: changed ? `已更新章节《${chapter.title}》，当前正文 ${after.length} 字。${readback}` : `章节《${chapter.title}》正文未变化。`,
     summary: `${changed ? '更新' : '未变化'}《${chapter.title}》 · ${after.length} 字`,
     display: { kind: 'chapterDiff' as const, chapterId: chapter.id, chapterTitle: chapter.title, before, after, appliedDirectly: true as const, revision },
     snapshot: { target: 'chapter' as const, targetId: chapter.id, field: 'content' as const, previousValue: before } }, memoryJobId,
