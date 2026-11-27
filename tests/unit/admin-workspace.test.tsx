@@ -19,7 +19,7 @@ function renderLayout(initialEntries = ['/admin'], title = '示例') {
   return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={initialEntries}><AdminLayout><h1>{title}</h1></AdminLayout></MemoryRouter></QueryClientProvider>)
 }
 it('maps management routes and searches only page/action definitions', () => {
-  expect(adminPages).toHaveLength(24)
+  expect(adminPages).toHaveLength(20)
   expect(new Set(adminPages.map(page => page.to)).size).toBe(adminPages.length)
   expect(adminPages.some(page => page.to === '/admin/testers')).toBe(false)
   expect(searchAdminPages('测试员').map(page => page.to)).toContain('/admin/users')
@@ -40,21 +40,16 @@ it('offers direct mobile models, grouped page search, and collapsible business g
   fireEvent.keyDown(document, { key: 'Escape' })
   expect(screen.queryByRole('dialog')).toBeNull()
 })
-it('exposes the same five governance routes in the desktop group and mobile directory', () => {
-  const routes = [
-    ['举报与投诉', 'reports'], ['Agent 安全记录', 'safety'], ['异常使用与对账', 'reconciliation'],
-    ['处罚管理', 'restrictions'], ['申诉管理', 'appeals'],
-  ] as const
-  renderLayout(['/admin/governance/reports'])
+it('opens the shared governance workspace from the desktop and mobile menus on a legacy deep link', () => {
+  renderLayout(['/admin/governance/appeals'])
   const desktop = within(screen.getByRole('navigation', { name: '后台业务导航' }))
-  expect(desktop.getByRole('button', { name: '内容治理' }).getAttribute('aria-expanded')).toBe('true')
+  expect(desktop.getByRole('button', { name: '内容与社区' }).getAttribute('aria-expanded')).toBe('true')
   fireEvent.click(screen.getByRole('button', { name: '全部' }))
   const mobile = within(screen.getByRole('dialog', { name: '全部管理页面' }))
   for (const nav of [desktop, mobile]) {
-    for (const [label, path] of routes) {
-      expect(nav.getByRole('link', { name: label }).getAttribute('href')).toBe('/admin/governance/' + path)
-    }
-    expect(nav.getByRole('link', { name: '举报与投诉' }).getAttribute('aria-current')).toBe('page')
+    const link = nav.getByRole('link', { name: '治理工作台' })
+    expect(link.getAttribute('href')).toBe('/admin/governance')
+    expect(link.getAttribute('aria-current')).toBe('page')
   }
 })
 function QueryProbe() {

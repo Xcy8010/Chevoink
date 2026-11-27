@@ -256,7 +256,7 @@ export default function NovelComments({ state }: NovelCommentsProps) {
                   <MessageSquare className="h-3.5 w-3.5" />
                   {comment.replyCount > 0 ? `回复 ${comment.replyCount}` : '回复'}
                 </button>
-                <ReportAction menu target={{kind:'comment',id:comment.id}}/>
+                <ReportAction menu ownerId={comment.author?.id} target={{kind:'comment',id:comment.id}}/>
                 {sessionUser?.id === comment.author?.id ? (
                   <>
                     {!comment.parentId ? (

@@ -185,7 +185,7 @@ const PostCard = memo(function PostCard({ post, compact = false, flat = false, t
           'absolute right-0 z-50 w-44 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] py-1.5 shadow-[var(--shadow-modal)]',
           'bottom-[42px]',
         )}>
-          <ReportAction target={{kind:'post',id:post.id}} onOpen={()=>setShareMenuOpen(false)}/>
+          <ReportAction ownerId={post.author.id} target={{kind:'post',id:post.id}} onOpen={()=>setShareMenuOpen(false)}/>
           {isOwnPost ? (
             <button
               type="button"

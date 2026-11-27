@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type ChangeEvent } from 'react'
 import { Eye, FilePlus2, FileUp, Mail, ChevronRight } from 'lucide-react'
 import { emailLibraryEntrySchema, emailVariables, type EmailLibraryEntry } from '../../../../shared/contracts/email-library'
-import { returnMail } from './email-composer'
+import { governanceLibrary, returnMail } from './email-composer'
 import approvedHtml from './creator-return.html?raw'
 const htmlEsc = (s: string) => s.replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]!))
 function documentHtml(body: string, vars: Record<string,string>) {
@@ -15,7 +15,7 @@ function documentHtml(body: string, vars: Record<string,string>) {
       if (/^on|^(href|src|srcset|background|target|action|ping|srcdoc)$/i.test(attr.name)) node.removeAttribute(attr.name)
     }
   })
-  if (body === approvedHtml) template.content.querySelector('img')?.setAttribute('src', location.origin + '/favicon.png')
+  if (body === approvedHtml || governanceLibrary.some(entry => entry.body === body)) template.content.querySelector('img')?.setAttribute('src', location.origin + '/favicon.png')
   return '<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src '+location.origin+'; base-uri \'none\'; form-action \'none\'"><style>body{margin:0;background:white;color:#222}*{box-sizing:border-box}table{max-width:100%}</style>' + template.innerHTML
 }
 export function MailProof({ template, values }: {template: EmailLibraryEntry; values: Record<string,string>}) {
@@ -82,6 +82,7 @@ export function TemplateLibrary({ items, choose, save, error, loading }: {
   const [draft,setDraft] = useState({id:'',name:'',subject:'',body:''})
   const [problem,setProblem] = useState('')
   const [saving,setSaving] = useState(false)
+  const selectedGovernance = governanceLibrary.find(entry => entry.id === selected.id)
   const sample = edit ? {...draft,id:Number(draft.id)} : selected
   const [values,setValues] = useState<Record<string,string>>({})
   async function persist() {
@@ -103,7 +104,7 @@ export function TemplateLibrary({ items, choose, save, error, loading }: {
       <TemplateBodyField body={draft.body} onChange={body => setDraft(old => ({ ...old, body }))}/>
       <div className="mail-actions"><button className="mail-primary" disabled={saving} onClick={()=>void persist()}>保存模板</button><button className="mail-secondary" onClick={()=>{setEdit(false);setProblem('')}}>取消</button></div>
     </div> : <><div className="mail-template-list">{items.map(t=><button key={t.id} aria-pressed={t.id===selected.id} onClick={()=>{setSelected(t);setValues({})}}><Mail size={18}/><span><b>{t.name}</b><small>{t.id ? 'SES · '+t.id : '内置模板'}</small></span><ChevronRight size={16}/></button>)}</div>
-    <button className="mail-primary" onClick={()=>choose(selected)}>使用此模板</button></>}
+    {selectedGovernance ? <div className="space-y-3"><p className="text-sm text-[var(--text-secondary)]">对应决定记录后，系统向当事人发送此通知。</p><a className="mail-primary" href={selectedGovernance.to}>{selectedGovernance.action}</a></div> : <button className="mail-primary" onClick={()=>choose(selected)}>使用此模板</button>}</>}
     {problem && <p role="alert">{problem}</p>}</section>
     <section className="mail-library-proof">{emailVariables(sample.subject+'\n'+sample.body).length>0 && <details className="mail-sheet"><summary>填写变量预览</summary><div className="mail-fields">{emailVariables(sample.subject+'\n'+sample.body).map(k=><label key={k}>{k}<input value={Object.prototype.hasOwnProperty.call(values,k)?values[k]:''} onChange={e=>setValues({...values,[k]:e.target.value})}/></label>)}</div></details>}<MailProof template={sample} values={values}/></section></div>
 }

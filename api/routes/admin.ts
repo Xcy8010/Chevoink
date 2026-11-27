@@ -562,60 +562,19 @@ router.get('/users/:userId', async (req: Request, res: Response): Promise<void> 
   }
 })
 
-router.post('/users/:userId/ban', async (req: Request, res: Response): Promise<void> => {
-  const requestId = createRequestId()
-
-  try {
-    const admin = await requireAdmin(req)
-    if (req.params.userId === admin.id) {
-      res.status(400).json(buildError(requestId, 'VALIDATION_ERROR', '不能封禁当前登录的管理员账号。'))
-      return
-    }
-
-    const result = await setUserBannedData(req.params.userId, true)
-    if (!result) {
-      res.status(404).json(buildError(requestId, 'NOT_FOUND', '用户不存在。'))
-      return
-    }
-
-    await recordAdminAuditLog({
-      adminId: admin.id,
-      action: 'user.ban',
-      targetType: 'user',
-      targetId: req.params.userId,
-      detail: { nickname: result.nickname },
-      ip: getRequestIp(req),
-    })
-    res.status(200).json(buildSuccess(requestId, { ok: true }))
-  } catch (error) {
-    sendRouteError(res, requestId, error)
-  }
-})
-
-router.post('/users/:userId/unban', async (req: Request, res: Response): Promise<void> => {
-  const requestId = createRequestId()
-
-  try {
-    const admin = await requireAdmin(req)
-    const result = await setUserBannedData(req.params.userId, false)
-    if (!result) {
-      res.status(404).json(buildError(requestId, 'NOT_FOUND', '用户不存在。'))
-      return
-    }
-
-    await recordAdminAuditLog({
-      adminId: admin.id,
-      action: 'user.unban',
-      targetType: 'user',
-      targetId: req.params.userId,
-      detail: { nickname: result.nickname },
-      ip: getRequestIp(req),
-    })
-    res.status(200).json(buildSuccess(requestId, { ok: true }))
-  } catch (error) {
-    sendRouteError(res, requestId, error)
-  }
-})
+const legacyBanInput = z.object({ operationId:z.string().uuid().optional(), reason: z.string().trim().min(1).max(1000).optional(), clause: z.string().trim().min(1).max(300).optional() }).strict()
+for (const action of ['ban','unban'] as const) {
+  router.post('/users/:userId/' + action, async (req, res) => {
+    const requestId = createRequestId()
+    try {
+      const admin = await requireAdmin(req)
+      const input = parseBody(legacyBanInput, req.body ?? {}, '请填写有效的处置理由和协议条款。')
+      const result = await setUserBannedData(req.params.userId, action === 'ban', admin.id, getRequestIp(req), input.reason, input.clause, input.operationId)
+      if (!result) throw new DataAccessError(404, 'NOT_FOUND', '用户不存在。')
+      res.json(buildSuccess(requestId, { ok:true, taskStopPending:result.taskStopPending }))
+    } catch (error) { sendRouteError(res, requestId, error) }
+  })
+}
 
 router.put('/users/:userId/identity', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()

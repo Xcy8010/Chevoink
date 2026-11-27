@@ -1,3 +1,4 @@
+import { isGovernanceMailTemplateId } from '../../shared/contracts/governance-mail.js'
 import { randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { ADMIN_EMAIL_PURPOSE, ADMIN_RETURN_EMAIL_PURPOSE, adminEmailPurposeSchema } from '../../shared/contracts/admin-email.js'
@@ -186,6 +187,9 @@ export async function processAdminEmailQueue(delivery: AdminEmailDelivery, clock
     if (hash === null) continue
     if (!hash) {
       try {
+        if (isGovernanceMailTemplateId(template.providerTemplateId) || isGovernanceMailTemplateId(template.customTemplate?.id)) {
+          throw new DataAccessError(409, 'ADMIN_EMAIL_TEMPLATE_UNAVAILABLE', '此模板已保留给治理事务通知。')
+        }
         hash = template.campaign || template.customTemplate
           ? adminEmailTemplateHash(await delivery.loadTemplate(template.campaign, template.customTemplate))
           : (invitationHash ??= adminEmailTemplateHash(await delivery.loadTemplate()))

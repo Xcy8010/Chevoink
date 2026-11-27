@@ -1,3 +1,5 @@
+import { isGovernanceMailTemplateId } from '../../shared/contracts/governance-mail.js'
+import { DataAccessError } from './prisma.js'
 import type { ADMIN_EMAIL_PURPOSE, ADMIN_RETURN_EMAIL_PURPOSE, AdminCustomEmailTemplate, AdminEmailCampaign, AdminEmailMode } from '../../shared/contracts/admin-email.js'
 import { mockEmailTemplate, returnEmailTemplate, customEmailTemplate, type AdminEmailTemplateSnapshot } from './admin-email-template.js'
 
@@ -64,5 +66,8 @@ export const mockAdminEmailProvider: AdminEmailProvider = {
 export const mockAdminEmailDelivery: AdminEmailDelivery = {
   mode: 'mock',
   provider: mockAdminEmailProvider,
-  loadTemplate: async (campaign, custom) => custom ? customEmailTemplate(custom) : campaign ? returnEmailTemplate(campaign) : mockEmailTemplate,
+  loadTemplate: async (campaign, custom) => {
+    if (isGovernanceMailTemplateId(custom?.id)) throw new DataAccessError(409, 'ADMIN_EMAIL_TEMPLATE_UNAVAILABLE', '该模板专用于治理事务通知。')
+    return custom ? customEmailTemplate(custom) : campaign ? returnEmailTemplate(campaign) : mockEmailTemplate
+  },
 }

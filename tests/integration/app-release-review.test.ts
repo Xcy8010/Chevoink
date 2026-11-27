@@ -84,6 +84,49 @@ describe('actual release and admin routers on isolated PostgreSQL',()=>{
   },{timeout:15_000})).rejects.toBe(rollback)
  })
 
+ it('preserves manual bans on stable accounts and requires explicit governance decisions for testers',async()=>{
+  const stable=randomUUID(), tester=randomUUID(), peer=randomUUID()
+  const profile={nickname:'Synthetic manual restriction',passwordHash:'unusable'}
+  const endpoint=(user:string,action:string,body:object={})=>request(app).post('/api/admin/users/'+user+'/'+action).set('Authorization','Bearer '+token).send(body)
+  try {
+   await prisma.appReleaseChannel.create({data:{channel:'test',releaseId:ids[1],revision:1,enabled:true}})
+   await prisma.user.createMany({data:[{...profile,id:stable},{...profile,id:peer,role:'admin'}]})
+   await prisma.user.create({data:{...profile,id:tester,testerEntitlement:{create:{enabled:true,reason:'Synthetic test',grantedById:adminId}}}})
+   expect((await endpoint(tester,'ban')).body.error.code).toBe('GOVERNANCE_REVIEW_REQUIRED')
+   expect((await endpoint(peer,'ban')).body.error.code).toBe('PROTECTED_ACCOUNT')
+   expect((await endpoint(adminId,'unban')).body.error.code).toBe('PROTECTED_ACCOUNT')
+   const work=async (userId:string)=>{
+    const novel=await prisma.novel.create({data:{authorId:userId,title:'Synthetic private draft',summary:'',slug:randomUUID(),visibility:'private'}})
+    const session=await prisma.agentSession.create({data:{userId,novelId:novel.id,title:'Synthetic session'}})
+    const queued=await prisma.agentQueuedRequest.create({data:{id:randomUUID(),sessionId:session.id,userId,payload:{prompt:'retained synthetic request'}}})
+    const scheduled=await prisma.agentSchedule.create({data:{userId,sessionId:session.id,novelId:novel.id,name:'Synthetic schedule',prompt:'synthetic',cadenceMinutes:60,nextRunAt:new Date(Date.now()+3600_000)}})
+    return {queued:queued.id,scheduled:scheduled.id}
+   }
+   const affected=await work(stable), unaffected=await work(tester)
+   const decision={reason:'Synthetic confirmed facts',clause:'Synthetic named clause',operationId:randomUUID()}
+   const replies=await Promise.all([endpoint(stable,'ban',decision),endpoint(stable,'ban',decision)])
+   expect(replies.map(reply=>reply.status)).toEqual([200,200])
+   const record=await prisma.accountRestriction.findFirstOrThrow({where:{userId:stable,legacyBan:true}})
+   expect(record).toMatchObject({reason:decision.reason,clause:decision.clause,sourceId:'legacy-admin',scope:'platform',revokedAt:null})
+   expect(await prisma.governanceMail.findMany({where:{userId:stable,kind:'enforcement'}})).toMatchObject([{eventId:record.id,reason:decision.reason,measure:'全平台访问；永久'}])
+   for(const [job,status,plan] of [[affected,'held','paused'],[unaffected,'pending','active']] as const) {
+    expect(await prisma.agentQueuedRequest.findUniqueOrThrow({where:{id:job.queued}})).toMatchObject({status,payload:{prompt:'retained synthetic request'}})
+    expect(await prisma.agentSchedule.findUniqueOrThrow({where:{id:job.scheduled}})).toMatchObject({status:plan})
+   }
+   const outcome=await endpoint(stable,'unban',{reason:'Synthetic review reversed ban'})
+   expect(outcome.status).toBe(200)
+   expect((await endpoint(stable,'ban',decision)).status).toBe(200)
+   expect((await prisma.user.findUniqueOrThrow({where:{id:stable}})).bannedAt).toBeNull()
+   expect((await prisma.accountRestriction.findUniqueOrThrow({where:{id:record.id}})).revokedAt).not.toBeNull()
+   expect(await prisma.governanceMail.count({where:{userId:stable}})).toBe(1)
+  } finally {
+   await prisma.appReleaseChannel.deleteMany({where:{channel:'test',releaseId:ids[1]}})
+   await prisma.governanceMail.deleteMany({where:{userId:{in:[stable,tester,peer]}}})
+   await prisma.novel.deleteMany({where:{authorId:{in:[stable,tester]}}})
+   await prisma.user.deleteMany({where:{id:{in:[stable,tester,peer]}}})
+  }
+ })
+
  it('requires binding only on the selected release and only for phone accounts without an email',async()=>{
   const previous=env.accountEmailAuthEnabled
   const fixtures:string[]=[]

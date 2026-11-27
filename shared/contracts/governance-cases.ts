@@ -24,6 +24,18 @@ export function allowedReasons(kind: ReportTarget): ReportReason[] {
   const reasons = Object.keys(reportReasons) as ReportReason[]
   return kind === 'platform' ? ['privacy', 'fraud', 'other'] : reasons
 }
+export function isReportReason(value: string): value is ReportReason {
+  return Object.prototype.hasOwnProperty.call(reportReasons, value)
+}
+// Single reasons retain their original storage key. Delimited multi-reason keys
+// support exact membership filters without changing existing case rows.
+export function formatReportReasons(category: string): string {
+  return category
+    .split(',')
+    .filter(Boolean)
+    .map((key) => (isReportReason(key) ? reportReasons[key] : key))
+    .join('、')
+}
 export const caseStatuses = {
   pending: '待受理',
   investigating: '调查中',

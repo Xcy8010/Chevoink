@@ -75,11 +75,11 @@ describe('listAdminUsersData 状态筛选（在线/封禁）', () => {
     expect(where.lastActiveAt).toBeUndefined()
   })
 
-  it('封禁维度回归：banned=true 只收窄 bannedAt，不下发在线条件', async () => {
+  it('封禁筛选纳入旧封禁及当前全平台限制，不下发在线条件', async () => {
     await listAdminUsersData({ banned: true, page: 1, pageSize: 20 })
 
     const where = capturedWhere()
-    expect(where.bannedAt).toEqual({ not: null })
+    expect(where.AND).toEqual([{ OR: [{ bannedAt: { not:null } }, { accountRestrictions: { some:{scope:'platform',revokedAt:null,OR:[{expiresAt:null},{expiresAt:{gt:expect.any(Date)}}]} } }] }])
     expect(where.lastActiveAt).toBeUndefined()
   })
 })
@@ -90,6 +90,6 @@ it('shares ID/nickname/phone/email search while retaining role, status, sorting 
     where: { OR: [
       { id: { contains: 'user_1', mode: 'insensitive' } }, { nickname: { contains: 'user_1', mode: 'insensitive' } },
       { phone: { contains: 'user_1' } }, { email: { contains: 'user_1', mode: 'insensitive' } },
-    ], role: 'user', bannedAt: null }, orderBy: { createdAt: 'desc' }, skip: 20, take: 10,
+    ], role: 'user', bannedAt: null, accountRestrictions:{none:expect.objectContaining({scope:'platform',revokedAt:null})} }, orderBy: { createdAt: 'desc' }, skip: 20, take: 10,
   }))
 })

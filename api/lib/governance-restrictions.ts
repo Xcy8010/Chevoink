@@ -18,6 +18,11 @@ export async function lockGovernanceAccount(tx: Tx, userId: string) {
   await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`
 }
 
+export async function holdRestrictedAgentWork(tx: Tx, userId: string) {
+  await tx.agentQueuedRequest.updateMany({ where: { userId, status: 'pending' }, data: { status: 'held', revision: { increment: 1 }, error: '账号受到使用限制，需求已保留。' } })
+  await tx.agentSchedule.updateMany({ where: { userId, status: 'active' }, data: { status: 'paused' } })
+}
+
 function deadline(value: string | null | undefined) {
   if (value == null) return null
   const date = new Date(value)
@@ -52,8 +57,7 @@ export async function issueRestrictions(tx: Tx, actorId: string, input: z.infer<
   }
   if (scopes.includes('platform')) await tx.user.update({ where: { id: userId }, data: { tokenVersion: { increment: 1 } } })
   if (scopes.includes('platform') || scopes.includes('agent')) {
-    await tx.agentQueuedRequest.updateMany({ where: { userId, status: 'pending' }, data: { status: 'held', revision: { increment: 1 }, error: '账号受到使用限制，需求已保留。' } })
-    await tx.agentSchedule.updateMany({ where: { userId, status: 'active' }, data: { status: 'paused' } })
+    await holdRestrictedAgentWork(tx, userId)
   }
   const measure = scopes.map(s => restrictionLabels[s]).join('、') + '；' + (expiresAt ? '截至 ' + expiresAt.toISOString() : '永久')
   await tx.userNotification.create({ data: { userId, title: '账号使用限制通知', body: reason + '。限制范围：' + measure + '。依据：' + clause + '。如有异议，可前往 /appeal。' } })
@@ -70,7 +74,9 @@ export async function changeRestriction(tx: Tx, actorId: string, id: string, inp
   const row = await tx.accountRestriction.findFirstOrThrow({ where })
   const target = await tx.user.findUniqueOrThrow({where:{id:row.userId},select:{role:true,isSuperAdmin:true}})
   if (actorId === row.userId || target.isSuperAdmin || target.role === 'admin') throw new DataAccessError(403,'PROTECTED_ACCOUNT','无法通过此入口处置管理员账号。')
-  if ((row.legacyBan || input.action !== 'revoke') && !await governanceAvailableFor(row.userId,tx)) throw new DataAccessError(403,'APP_RELEASE_CAPABILITY_DISABLED','目标账号当前版本未开放治理处置。')
+  const reviewedLegacyAppeal = expectedUserId === row.userId && row.legacyBan && row.sourceId === 'legacy-admin' &&
+    (input.action === 'revoke' || (input.action === 'adjust' && !row.expiresAt && Boolean(input.expiresAt)))
+  if (!reviewedLegacyAppeal && (row.legacyBan || input.action !== 'revoke') && !await governanceAvailableFor(row.userId,tx)) throw new DataAccessError(403,'APP_RELEASE_CAPABILITY_DISABLED','目标账号当前版本未开放治理处置。')
   const now = new Date()
   if (row.revokedAt || (input.action !== 'revoke' && row.expiresAt && row.expiresAt <= now)) throw new DataAccessError(409, 'RESTRICTION_CLOSED', '该限制已结束。')
   const expiry = input.action === 'revoke' ? row.expiresAt : deadline(input.expiresAt)

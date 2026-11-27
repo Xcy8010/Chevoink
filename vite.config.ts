@@ -39,7 +39,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': {
+      // Vite serves the approved governance HTML imports used by the email library.
+      '^/api\\b(?!/templates/governance/chevoink-(?:account-(?:warning|enforcement)|appeal-result)\\.html\\?)': {
         target: 'http://localhost:3001',
         changeOrigin: true,
         secure: false,

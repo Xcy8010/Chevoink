@@ -1,3 +1,4 @@
+import { isGovernanceMailTemplateId } from '../../shared/contracts/governance-mail.js'
 import { z } from 'zod'
 import { env } from '../config/env.js'
 import { ADMIN_EMAIL_BATCH_LIMIT } from '../../shared/contracts/admin-email.js'
@@ -34,7 +35,7 @@ export function configuredAdminEmailDelivery() {
   })
   if (!parsed.success || (parsed.data.recipientScope === 'consented' ? env.appEnv !== 'production' : !parsed.data.recipients.length)
     || parsed.data.templateId === parsed.data.returnTemplateId || parsed.data.from === env.emailTencentFromAddress?.toLowerCase()
-    || [parsed.data.templateId, parsed.data.returnTemplateId].some(id => id && id === env.emailTencentTemplateId)
+    || [parsed.data.templateId, parsed.data.returnTemplateId].some(id => id && (id === env.emailTencentTemplateId || isGovernanceMailTemplateId(id)))
     || (!useAccountEmail && parsed.data.secretId === env.emailTencentSecretId)) {
     throw invalid()
   }

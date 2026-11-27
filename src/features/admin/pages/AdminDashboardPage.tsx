@@ -6,7 +6,6 @@ import type { AdminAnalyticsPayload } from '../../../../shared/contracts/admin-a
 import { AdminCard, AdminPageHeader } from '../AdminLayout'
 import { listAdminFeedbacks } from '../api'
 import AdminAnalytics from '../components/AdminAnalytics'
-import GovernanceMailStatus from '../GovernanceMailStatus'
 import GovernanceSummary from '../governance/GovernanceSummary'
 
 export default function AdminDashboardPage() {
@@ -29,7 +28,7 @@ export default function AdminDashboardPage() {
       </AdminCard>)}</div>
       <details className="mt-2 text-xs text-[var(--text-secondary)]"><summary className="min-h-11 cursor-pointer py-3">异常统计口径</summary><p>异常统计快照：{execution.data ? new Date(execution.data.to).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '待取得'} · 反馈按当前状态读取。无样本不代表运行健康。</p></details>
     </section>
-    <AdminCard className="mb-4 space-y-2"><h2 className="font-semibold"><Link to="/admin/governance/reports">内容治理待办</Link></h2><GovernanceSummary/><GovernanceMailStatus/></AdminCard>
+    <AdminCard className="mb-4 space-y-2"><h2 className="font-semibold"><Link to="/admin/governance">内容治理待办</Link></h2><GovernanceSummary/></AdminCard>
     <h2 className="mb-3 text-base font-semibold">平台趋势</h2><AdminAnalytics scope="dashboard" />
   </div>
 }

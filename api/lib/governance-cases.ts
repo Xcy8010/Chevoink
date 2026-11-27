@@ -3,6 +3,7 @@ import type { GovernanceCase, Prisma } from '@prisma/client'
 import { env } from '../config/env.js'
 import {
   allowedReasons,
+  isReportReason,
   reportFeedback,
   type ReportReason,
   type ReportTarget,
@@ -56,6 +57,21 @@ export function workdayDue(
 }
 export function deadlines(start: Date) {
   return { acknowledgeBy: workdayDue(start, 3), materialsAt: start, feedbackBy: workdayDue(start, 15) }
+}
+
+export function overdueCases(now: Date): Prisma.GovernanceCaseWhereInput {
+  return {
+    OR: [
+      { status: 'pending', acknowledgeBy: { lt: now } },
+      { status: 'investigating', feedbackBy: { lt: now } },
+    ],
+  }
+}
+
+export function casesWithCategory(category: string): Prisma.GovernanceCaseWhereInput {
+  return isReportReason(category)
+    ? { OR: [{ category }, { kind: 'report', category: { contains: ',' + category + ',' } }] }
+    : { category }
 }
 
 type Tx = Prisma.TransactionClient
@@ -125,7 +141,8 @@ type Submission = {
   requestKey: string
   targetKind: ReportTarget
   targetId: string
-  category: ReportReason
+  category?: ReportReason
+  categories?: ReportReason[]
   statement: string
 }
 export function reporterReceipt(
@@ -138,10 +155,19 @@ export function reporterReceipt(
     message: item.publicProgress ?? reportFeedback[item.status],
   }
 }
+function assertReportSubject(reporterId: string | null, subjectId: string | null) {
+  if (reporterId && subjectId === reporterId)
+    throw new DataAccessError(400, 'SELF_REPORT', '无法举报自己的内容或个人主页。')
+}
 export async function createReport(userId: string | null, source: string, data: Submission) {
+  const { category, categories, ...submission } = data
+  const incoming = categories ?? (category ? [category] : [])
+  const reasons = allowedReasons(data.targetKind).filter((reason) => incoming.includes(reason))
   if (
-    !allowedReasons(data.targetKind).includes(data.category) ||
-    (['copyright', 'other'].includes(data.category) && !data.statement)
+    (category && categories) ||
+    !reasons.length ||
+    incoming.some((reason) => !reasons.includes(reason)) ||
+    (reasons.some((reason) => reason === 'copyright' || reason === 'other') && !data.statement.trim())
   )
     throw new DataAccessError(400, 'INVALID_REASON', '请补充举报理由或必要的权利证明。')
   const requesterKey = privateDigest(userId ? 'account:' + userId : 'guest:' + source)
@@ -157,6 +183,7 @@ export async function createReport(userId: string | null, source: string, data: 
         existing.targetId !== data.targetId
       )
         throw caseMissing()
+      assertReportSubject(userId, existing.subjectId)
       return reporterReceipt(existing)
     }
     await lockAccountKey(tx, 'report-rate:' + requesterKey)
@@ -168,9 +195,11 @@ export async function createReport(userId: string | null, source: string, data: 
     )
       throw new DataAccessError(429, 'RATE_LIMITED', '提交过于频繁，请稍后再试。')
     const snapshot = await evidence(tx, data.targetKind, data.targetId, userId)
+    assertReportSubject(userId, snapshot.subjectId)
     const item = await tx.governanceCase.create({
       data: {
-        ...data,
+        ...submission,
+        category: reasons.length === 1 ? reasons[0] : ',' + reasons.join(',') + ',',
         ...snapshot,
         ...deadlines(now),
         kind: 'report',

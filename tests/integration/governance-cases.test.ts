@@ -7,7 +7,7 @@ const ready = await verifyTestDatabase(isTestDatabaseRequired())
 describe.skipIf(!ready)('governance cases on isolated PostgreSQL', () => {
   it('preserves only selected evidence, protects private messages, merges independent reporter receipts and expires evidence', async () => {
     const { prisma } = await import('../../api/lib/prisma.js')
-    const { createReport, reviewReport, purgeDueCaseEvidence } =
+    const { createReport, reviewReport, purgeDueCaseEvidence, casesWithCategory, overdueCases } =
       await import('../../api/lib/governance-cases.js')
     const { supplementCase, updateCaseProgress } = await import('../../api/lib/governance-case-progress.js')
     const [reporter, author, other, admin] = Array.from({ length: 4 }, () => randomUUID())
@@ -106,6 +106,44 @@ describe.skipIf(!ready)('governance cases on isolated PostgreSQL', () => {
           targetId: 'platform',
         }),
       ).resolves.toMatchObject({ status: 'pending' })
+      for (const [kind, targetId] of [
+        ['post', post],
+        ['novel', novel],
+        ['profile', author],
+        ...commentIds.map((id) => ['comment', id] as const),
+      ] as const) {
+        await expect(
+          createReport(author, 'synthetic', { ...submit(0), targetKind: kind, targetId }),
+        ).rejects.toMatchObject({ code: 'SELF_REPORT' })
+      }
+      expect(await prisma.governanceCase.count({ where: { reporterId: author } })).toBe(0)
+      const multi = await createReport(other, 'synthetic', {
+        ...submit(0),
+        requestKey: requestKeys[11],
+        category: undefined,
+        categories: ['privacy', 'harassment', 'privacy'],
+      })
+      expect((await prisma.governanceCase.findUniqueOrThrow({ where: { id: multi.id } })).category).toBe(
+        ',harassment,privacy,',
+      )
+      await expect(
+        createReport(other, 'synthetic', {
+          ...submit(0),
+          requestKey: randomUUID(),
+          category: undefined,
+          categories: ['privacy', 'other'],
+          statement: ' ',
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_REASON' })
+      await expect(
+        createReport(other, 'synthetic', {
+          ...submit(0),
+          targetKind: 'platform',
+          targetId: 'platform',
+          category: undefined,
+          categories: ['privacy', 'harassment'],
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_REASON' })
       await prisma.novel.update({ where: { id: novel }, data: { visibility: 'private' } })
       await expect(
         createReport(reporter, 'synthetic', { ...submit(9), targetKind: 'comment', targetId: commentIds[2] }),
@@ -137,6 +175,7 @@ describe.skipIf(!ready)('governance cases on isolated PostgreSQL', () => {
         statement: '',
       }
       await expect(createReport(other, 'synthetic', dm)).rejects.toMatchObject({ status: 404 })
+      await expect(createReport(author, 'synthetic', dm)).rejects.toMatchObject({ code: 'SELF_REPORT' })
       const selected = await createReport(reporter, 'synthetic', dm)
       const stored = await prisma.governanceCase.findUniqueOrThrow({ where: { id: selected.id } })
       expect(stored.snapshot).toBe('Selected evidence')
@@ -151,6 +190,27 @@ describe.skipIf(!ready)('governance cases on isolated PostgreSQL', () => {
       expect(a).toEqual(retry)
       const b = await createReport(other, 'synthetic', submit(1))
       expect(b.receipt).not.toBe(a.receipt)
+      const clock = new Date()
+      await prisma.governanceCase.update({
+        where: { id: multi.id },
+        data: { acknowledgeBy: new Date(+clock - 1000) },
+      })
+      for (const reason of ['privacy', 'harassment']) {
+        expect(
+          await prisma.governanceCase.findMany({
+            where: { reporterId: other, AND: [casesWithCategory(reason), overdueCases(clock)] },
+            select: { id: true },
+          }),
+        ).toEqual([{ id: multi.id }])
+      }
+      expect(await prisma.governanceCase.count({ where: { id: b.id, ...casesWithCategory('other') } })).toBe(
+        1,
+      )
+      expect(
+        await prisma.governanceCase.count({
+          where: { reporterId: other, AND: [casesWithCategory('other'), overdueCases(clock)] },
+        }),
+      ).toBe(0)
       await updateCaseProgress(a.id, admin, 'request_materials', 'Please clarify the selected passage')
       await expect(
         supplementCase(a.id, { kind: 'report', receipt: b.receipt }, 'another case'),

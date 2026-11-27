@@ -1,16 +1,33 @@
 import { Flag, MoreHorizontal } from 'lucide-react'
+import { useShellStore } from '@/store/useShellStore'
 import type { ReportTarget } from '../../../shared/contracts/governance-cases'
-export type ReportContext = { kind: ReportTarget; id: string; messages?: { id: string; label: string }[] }
+export type ReportContext = {
+  kind: ReportTarget
+  id: string
+  messagesFor?: string
+  messages?: { id: string; label: string }[]
+}
 export const REPORT_EVENT = 'chevoink:report'
 export default function ReportAction({
   target,
   onOpen,
+  ownerId,
   menu = false,
 }: {
   target: ReportContext
+  ownerId?: string | null
   onOpen?: () => void
   menu?: boolean
 }) {
+  const viewer = useShellStore((state) => state.sessionUser?.id)
+  const checking = useShellStore((state) => state.authStatus === 'checking')
+  if (
+    checking ||
+    (target.kind === 'message'
+      ? !viewer || viewer !== target.messagesFor || !target.messages?.length
+      : !ownerId || ownerId === viewer)
+  )
+    return null
   const button = (
     <button
       type="button"

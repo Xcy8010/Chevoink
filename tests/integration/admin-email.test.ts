@@ -1,3 +1,4 @@
+import { adminEmailTemplateHash, customEmailTemplate } from '../../api/lib/admin-email-template.js'
 import app from '../../api/app.js'
 import request from 'supertest'
 import { env } from '../../api/config/env.js'
@@ -127,6 +128,22 @@ describe.skipIf(!dbAvailable)('directed email persistence with mock SES (isolate
       env.adminEmailMockEnabled = previousMock
       if (inserted) await prisma.$executeRaw`DELETE FROM admin_email_templates WHERE id = ${entry.id}`
     }
+  })
+
+  it('retains a historical custom template snapshot that now shares a governance ID without dispatching it',async()=>{
+    const at=new Date()
+    const account=await createRecipient('历史模板合成账号',at)
+    await prisma.adminEmailPermission.create({data:{purpose:ADMIN_CUSTOM_EMAIL_PURPOSE,email:account.email!,userId:account.id,consentedAt:at,source:'synthetic'}})
+    const custom={id:990030,name:'合成通知',subject:'业务邮件',body:'{{topic}}',values:{topic:'模拟内容'}}
+    const preview=await createEmailPreview(adminId,{mode:'manual',userIds:[account.id]},{now:at,customTemplate:custom})
+    await confirmEmailBatch(adminId,preview.id,preview.previewHash,null,at)
+    const old=customEmailTemplate({...custom,id:238309})
+    await prisma.adminEmailBatch.update({where:{id:preview.id},data:{template:JSON.parse(JSON.stringify(old)),templateHash:adminEmailTemplateHash(old)}})
+    const send=vi.fn(mockAdminEmailProvider.send)
+    await processAdminEmailQueue({...mockAdminEmailDelivery,provider:{...mockAdminEmailProvider,send}},()=>at)
+    expect(send.mock.calls.filter(([m])=>m.to===account.email)).toHaveLength(0)
+    expect((await getEmailBatch(adminId,preview.id)).recipients[0]).toMatchObject({state:'skipped',reason:'template_changed',attemptedAt:null})
+    expect((await prisma.adminEmailBatch.findUniqueOrThrow({where:{id:preview.id}})).template).toMatchObject({providerTemplateId:238309})
   })
 
   it('keeps custom template variables through JSONB and requires the matching consent at confirmation', async () => {

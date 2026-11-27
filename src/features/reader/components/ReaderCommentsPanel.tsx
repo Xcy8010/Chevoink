@@ -131,7 +131,7 @@ export default function ReaderCommentsPanel({ state }: ReaderCommentsPanelProps)
           回复
         </button>
       ) : null}
-      <ReportAction menu target={{kind:'comment',id:comment.id}}/>
+      <ReportAction menu ownerId={comment.author?.id} target={{kind:'comment',id:comment.id}}/>
       {sessionUser?.id === comment.author?.id ? (
         <button
           type="button"

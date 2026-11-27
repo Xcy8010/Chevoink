@@ -30,35 +30,33 @@
 }
 html.dark .admin-workspace, html.dark body:has(.admin-workspace) {
   color-scheme: dark;
-  --app-bg: #111318;
-  --surface-default: #1b1e25;
-  --surface-solid: #1b1e25;
-  --surface-muted: #272b35;
-  --surface-elevated: #303030;
-  --surface-contrast: #eef1f5;
-  --surface-contrast-hover: #ffffff;
-  --text-primary: #edf0f4;
-  --text-secondary: #abb3bf;
-  --text-tertiary: #969eaa;
-  --text-contrast: #111318;
-  --border-default: #333333;
-  --border-subtle: #383838;
-  --border-strong: #505050;
-  --color-brand: #d8dde5;
-  --color-brand-hover: #f1f3f6;
-  --color-brand-soft: #303236;
-  --accent-strong: #eef1f5;
-  --accent-soft: #303236;
-  --accent-border: #737b87;
-  --focus-ring: rgba(200,208,220,.14);
+  --app-bg: var(--studio-canvas);
+  --admin-sidebar-bg: var(--studio-sidebar-bg);
+  --surface-default: var(--studio-inset-bg);
+  --surface-solid: var(--studio-card-bg);
+  --border-default: var(--border-subtle);
+  --color-brand: var(--text-primary);
+  --color-brand-hover: var(--surface-contrast-hover);
+  --color-brand-soft: var(--studio-selection);
+  --accent-strong: var(--text-primary);
+  --accent-soft: var(--studio-selection);
+  --accent-border: var(--text-tertiary);
+  --color-danger: var(--color-error);
   --color-success: #9cbaa8;
   --color-warning: #c8b188;
   --color-error: #d59b9b;
   --color-info: #a3b3c6;
 }
 .admin-workspace main { background: var(--app-bg); }
-.admin-workspace .admin-sidebar { background: var(--surface-default); }
+.admin-workspace .admin-sidebar { background: var(--admin-sidebar-bg, var(--surface-default)); }
 .admin-workspace .admin-section { border: 1px solid var(--border-default); border-radius: 14px; padding: 18px; background: var(--surface-default); box-shadow: 0 2px 5px rgb(15 23 42 / .025); }
+/* The canvas uses the Studio shimmer. Raised cards need a lighter static shape
+   as well, since reduced motion removes the animated highlight entirely. */
+html.dark .admin-workspace :is(.admin-section, .admin-loading-card) {
+  background: var(--surface-elevated);
+  --skeleton-base: var(--border-strong);
+  --skeleton-highlight: color-mix(in srgb, var(--border-strong) 70%, var(--text-tertiary));
+}
 .admin-workspace main :where(button,select,textarea) { border-radius: 6px; box-shadow: none; }
 .admin-workspace .admin-section :where(h2,h3) { letter-spacing: -.01em; }
 .admin-workspace .admin-toolbar { background: transparent; }
@@ -99,6 +97,7 @@ html.dark .admin-workspace { --chart-1: #9ba6ff; --chart-2: #68c9b5; --chart-3: 
 .admin-workspace tbody tr:hover { background: color-mix(in srgb,var(--surface-muted) 45%,transparent); }
 .admin-workspace .admin-sidebar { transition: width .18s ease; }
 .admin-workspace .admin-nav-link.active { box-shadow: inset 3px 0 0 var(--chart-1); }
+html.dark .admin-workspace .admin-nav-link.active { box-shadow: inset 3px 0 0 var(--text-tertiary); }
 .admin-workspace .admin-stat-card { position: relative; overflow: hidden; }
 .admin-workspace .admin-stat-card:before { content: ''; position: absolute; top: 0; left: 22px; width: 32px; height: 3px; border-radius: 0 0 4px 4px; background: var(--chart-1); }
 .admin-workspace .admin-stat-card:nth-child(2):before { background: var(--chart-2); }

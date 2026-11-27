@@ -198,6 +198,8 @@ body:has([data-studio-route]),
 
 /* Include body portals while the workspace is mounted. Native window chrome
    has a lighter canvas than the edge-to-edge browser version. */
+html.dark body:has(.admin-workspace),
+html.dark .admin-workspace,
 html.dark body:has([data-studio-route]),
 html.dark .studio-workspace {
   --studio-rail-bg: #000000;
@@ -209,9 +211,6 @@ html.dark .studio-workspace {
   --studio-card-bg: #292929;
   --studio-inset-bg: #212121;
   --studio-user-bubble: #2d2d2d;
-  --app-bg: var(--studio-sidebar-bg);
-  --surface-default: var(--studio-canvas);
-  --surface-solid: var(--studio-canvas);
   --surface-muted: var(--studio-selection);
   --surface-elevated: var(--studio-card-bg);
   --studio-composer-bg: #212121;
@@ -229,6 +228,12 @@ html.dark .studio-workspace {
   --focus-ring: #ababab;
 }
 
+html.dark body:has([data-studio-route]),
+html.dark .studio-workspace {
+  --app-bg: var(--studio-sidebar-bg);
+  --surface-default: var(--studio-canvas);
+  --surface-solid: var(--studio-canvas);
+}
 html.dark[data-desktop-frame='studio'] :is(body, .studio-workspace) {
   --studio-rail-bg: #1b1c1f;
   --studio-rail-rule: #2e2f31;

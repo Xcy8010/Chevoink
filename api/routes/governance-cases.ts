@@ -11,6 +11,8 @@ import { DataAccessError, prisma } from '../lib/prisma.js'
 import {
   caseListSelect,
   caseMissing,
+  casesWithCategory,
+  overdueCases,
   auditCase,
   createReport,
   privateDigest,
@@ -72,6 +74,9 @@ publicGovernanceRouter.get(
   '/captcha',
   route(() => createAuthCaptchaChallenge()),
 )
+const reportReason = z.enum(
+  Object.keys(reportReasons) as [keyof typeof reportReasons, ...(keyof typeof reportReasons)[]],
+)
 publicGovernanceRouter.post(
   '/reports',
   route(async (req) => {
@@ -81,9 +86,8 @@ publicGovernanceRouter.post(
         requestKey,
         targetKind: z.enum(governanceTargets),
         targetId: nonempty.max(128),
-        category: z.enum(
-          Object.keys(reportReasons) as [keyof typeof reportReasons, ...(keyof typeof reportReasons)[]],
-        ),
+        category: reportReason.optional(),
+        categories: z.array(reportReason).min(1).max(reportReason.options.length).optional(),
         statement: z.string().trim().max(4000).default(''),
       }),
       req.body,
@@ -244,6 +248,7 @@ adminGovernanceCaseRouter.get(
         kind: z.enum(['report', 'appeal', 'usage']).optional(),
         status: nonempty.max(32).optional(),
         target: nonempty.max(32).optional(),
+        overdue: z.literal('true').optional(),
         category: nonempty.max(32).optional(),
         userId: nonempty.max(128).optional(),
         before: z.string().datetime().optional(),
@@ -252,12 +257,16 @@ adminGovernanceCaseRouter.get(
       }),
       req.query,
     )
+    const now = new Date()
     const rows = await prisma.governanceCase.findMany({
       where: {
         kind: q.kind,
         status: q.status,
         targetKind: q.target,
-        category: q.category,
+        AND: [
+          ...(q.category ? [casesWithCategory(q.category)] : []),
+          ...(q.overdue ? [overdueCases(now)] : []),
+        ],
         subjectId: q.userId,
         createdAt: { gte: q.after, lte: q.before },
       },
@@ -277,14 +286,7 @@ adminGovernanceCaseRouter.get(
       prisma.governanceCase.count({ where: { kind: 'report', status: 'pending' } }),
       prisma.governanceCase.count({ where: { kind: 'appeal', status: 'pending' } }),
       prisma.governanceCase.count({ where: { status: 'investigating' } }),
-      prisma.governanceCase.count({
-        where: {
-          OR: [
-            { status: 'pending', acknowledgeBy: { lt: now } },
-            { status: 'investigating', feedbackBy: { lt: now } },
-          ],
-        },
-      }),
+      prisma.governanceCase.count({ where: overdueCases(now) }),
     ])
     return { pending, appeals, review, overdue }
   }),

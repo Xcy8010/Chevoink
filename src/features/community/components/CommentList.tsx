@@ -228,7 +228,7 @@ export default function CommentList({ comments, onReplied, onReply }: CommentLis
               <Share2 className="h-3.5 w-3.5" />
               分享
             </button>
-            <ReportAction menu target={{kind:'comment',id:comment.id}}/>
+            <ReportAction menu ownerId={comment.author.id} target={{kind:'comment',id:comment.id}}/>
             {sessionUser?.id === comment.author.id ? (
               <button
                 type="button"

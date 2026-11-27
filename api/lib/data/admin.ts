@@ -30,7 +30,10 @@ import { loadServerRunNotices } from '../agent/events.js'
 import { MAIN_RUN_FILTER } from '../agent/runtime-child.js'
 import { hashPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
 import { evictUserBanCache } from '../auth-session.js'
-import { prisma } from '../prisma.js'
+import { DataAccessError, prisma } from '../prisma.js'
+import { effectiveRestrictionWhere } from '../governance-access.js'
+import { governanceAvailableFor, holdRestrictedAgentWork, lockGovernanceAccount, stopRestrictedAgentWork } from '../governance-restrictions.js'
+import { queueGovernanceMail } from '../governance-mail.js'
 import { presentAdminAuditDetail } from '../admin-audit-detail.js'
 import { adminUserSearchWhere } from '../admin-user-search.js'
 import { buildPagination, excerptContent, isUserOnline, onlineWindowStart, toIso } from './internal.js'
@@ -428,27 +431,53 @@ export async function resetUserPasswordData(userId: string): Promise<string | nu
 
 
 export async function setUserBannedData(
-  userId: string,
-  banned: boolean,
-): Promise<{ nickname: string } | null> {
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, nickname: true } })
-  if (!user) {
-    return null
-  }
-
-  await prisma.user.update({
-    where: { id: userId },
-    data: {
-      bannedAt: banned ? new Date() : null,
-      // 封禁即吊销全部会话令牌；解封也 +1，避免解封后旧会话自动复活
-      tokenVersion: { increment: 1 },
-    },
+  userId: string, banned: boolean, actorId: string, ip: string | null,
+  reason = banned ? '管理员经核查执行账号封禁。' : '管理员复核后解除封禁。',
+  clause = '用户服务协议第五至七节', operationId?: string,
+): Promise<{ nickname: string; taskStopPending?:boolean } | null> {
+  const result = await prisma.$transaction(async tx => {
+    await lockGovernanceAccount(tx, userId)
+    const user = await tx.user.findUnique({ where: { id: userId }, select: { nickname: true, role: true, isSuperAdmin: true, bannedAt: true } })
+    if (!user) return null
+    if (actorId === userId || user.role === 'admin' || user.isSuperAdmin) throw new DataAccessError(403, 'PROTECTED_ACCOUNT', '无法通过此入口处置管理员账号。')
+    const operationKey = operationId ? 'legacy-ban-' + operationId : undefined
+    const action = banned ? 'user.ban' : 'user.unban'
+    if (operationKey) {
+      const prior = await tx.adminAuditLog.findUnique({where:{id:operationKey}})
+      if (prior) {
+        const saved = prior.detail as {reason?:string;clause?:string;action?:string}
+        if (prior.adminId !== actorId || prior.targetId !== userId || saved.action !== action || saved.reason !== reason || saved.clause !== clause)
+          throw new DataAccessError(409,'OPERATION_CONFLICT','操作编号已关联其他处置。')
+        return { nickname:user.nickname, started:false }
+      }
+    }
+    const audit = { adminId:actorId, targetType:'user', targetId:userId, detail:{nickname:user.nickname,reason,clause,action}, ip }
+    const governedBan = await tx.accountRestriction.findFirst({ where: { userId, scope:'platform', legacyBan:false, ...effectiveRestrictionWhere(new Date()) }, select:{id:true} })
+    if (governedBan || await governanceAvailableFor(userId, tx)) throw new DataAccessError(409, 'GOVERNANCE_REVIEW_REQUIRED', '请在用户使用限制中选择范围、期限、条款和处置理由，逐项管理此账号。')
+    if (Boolean(user.bannedAt) === banned) {
+      if (operationKey) await tx.adminAuditLog.create({data:{...audit,id:operationKey,action:'governance.legacy.receipt'}})
+      return { nickname:user.nickname, started:false }
+    }
+    await tx.user.update({ where: { id: userId }, data: { bannedAt: banned ? new Date() : null, tokenVersion: { increment: 1 } } })
+    await tx.adminAuditLog.create({ data: { ...audit, id:operationKey, action } })
+    if (banned) {
+      // The existing trigger created this ban in this transaction. Historical bans stay untouched.
+      const mirror = await tx.accountRestriction.findFirstOrThrow({ where:{ userId, legacyBan:true, revokedAt:null } })
+      await tx.accountRestriction.update({ where:{id:mirror.id}, data:{ sourceId:'legacy-admin', reason, clause } })
+      await holdRestrictedAgentWork(tx, userId)
+      const measure = '全平台访问；永久'
+      await queueGovernanceMail(tx, { eventId:mirror.id, userId, kind:'enforcement', reason, measure })
+      await tx.userNotification.create({ data:{userId,title:'账号使用限制通知',body:reason+' 限制范围：'+measure+'。依据：'+clause+'。可前往 /appeal 申请复核。'} })
+    } else {
+      await tx.userNotification.create({ data:{userId,title:'账号封禁已解除',body:reason} })
+    }
+    return { nickname:user.nickname, started:banned }
   })
   evictUserBanCache(userId)
-  return { nickname: user.nickname }
+  if (!result) return null
+  const taskStopPending = result.started && !await stopRestrictedAgentWork(userId).then(()=>true,()=>false)
+  return { nickname:result.nickname, taskStopPending }
 }
-
-
 
 export async function setUserRoleData(
   userId: string,
@@ -484,15 +513,15 @@ export async function listAdminUsersData(input: {
   if (input.role) {
     where.role = input.role as Prisma.UserWhereInput['role']
   }
-  if (input.banned === true) {
-    where.bannedAt = { not: null }
-  } else if (input.banned === false) {
-    where.bannedAt = null
-  }
-  if (input.online === true) {
-    // 「在线」取与 isUserOnline 相同的时间窗；封禁用户不计入在线，与状态列展示（已封禁优先）保持一致
-    where.bannedAt = null
+  const activePlatform = { scope:'platform', ...effectiveRestrictionWhere(new Date()) }
+  if (input.online) {
     where.lastActiveAt = { gte: onlineWindowStart() }
+  }
+  if (input.online || input.banned === false) {
+    where.bannedAt = null
+    where.accountRestrictions = { none:activePlatform }
+  } else if (input.banned === true) {
+    where.AND = [{ OR: [{ bannedAt:{ not:null } }, {accountRestrictions:{some:activePlatform}}] }]
   }
 
   const [total, records] = await Promise.all([
@@ -512,6 +541,7 @@ export async function listAdminUsersData(input: {
         isSuperAdmin: true,
         testerEntitlement: true,
         bannedAt: true,
+        accountRestrictions: { where: activePlatform, orderBy: { createdAt:'desc' }, take:1, select:{ createdAt:true } },
         createdAt: true,
         lastActiveAt: true,
         novelCount: true,
@@ -530,7 +560,7 @@ export async function listAdminUsersData(input: {
     role: record.role,
     isSuperAdmin: record.isSuperAdmin,
     tester: presentTesterIdentity(record),
-    bannedAt: toIso(record.bannedAt),
+    bannedAt: toIso(record.bannedAt ?? record.accountRestrictions?.[0]?.createdAt ?? null),
     createdAt: record.createdAt.toISOString(),
     lastActiveAt: toIso(record.lastActiveAt),
     isOnline: isUserOnline(record.lastActiveAt),
@@ -561,6 +591,7 @@ export async function getAdminUserDetailData(userId: string): Promise<{
       isSuperAdmin: true,
       testerEntitlement: true,
       bannedAt: true,
+      accountRestrictions: { where: { scope:'platform', ...effectiveRestrictionWhere(new Date()) }, orderBy:{createdAt:'desc'}, take:1, select:{createdAt:true} },
       createdAt: true,
       lastActiveAt: true,
       novelCount: true,
@@ -592,7 +623,7 @@ export async function getAdminUserDetailData(userId: string): Promise<{
       role: record.role,
       isSuperAdmin: record.isSuperAdmin,
       tester: presentTesterIdentity(record),
-      bannedAt: toIso(record.bannedAt),
+      bannedAt: toIso(record.bannedAt ?? record.accountRestrictions?.[0]?.createdAt ?? null),
       createdAt: record.createdAt.toISOString(),
       lastActiveAt: toIso(record.lastActiveAt),
       isOnline: isUserOnline(record.lastActiveAt),

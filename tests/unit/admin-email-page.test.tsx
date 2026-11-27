@@ -231,3 +231,38 @@ it('adds a template, previews its subject and body variables, and composes to ty
     JSON.stringify(JSON.parse(init.body).selection)===JSON.stringify({mode:'emails',emails:['creator@example.test']}) &&
     JSON.parse(init.body).customTemplate.values.reader==='作者甲')).toBe(true))
 })
+
+it('previews the three original governance templates and keeps their variables, destinations and delivery separate from campaigns',async()=>{
+  const original = mocks.request.getMockImplementation()!
+  mocks.request.mockImplementation(async (path:string, options?:RequestInit) => {
+    if (path === endpoint+'/templates') return {items:[{id:238308,name:'旧库同号记录',subject:'合成旧主题',body:'合成旧模板'}]}
+    return original(path, options)
+  })
+  mount('/admin/email?tab=library')
+  const cases = [
+    {name:'账号使用提醒',id:238307,vars:['reason'],link:'前往安全复核',to:'/admin/governance/safety'},
+    {name:'账号使用限制通知',id:238308,vars:['reason','measure'],link:'前往账号处置',to:'/admin/governance/restrictions'},
+    {name:'申诉处理结果通知',id:238309,vars:['reason','measure','result'],link:'前往申诉处理',to:'/admin/governance/appeals'},
+  ]
+  for (const item of cases) {
+    fireEvent.click(await screen.findByRole('button',{name:new RegExp(item.name+'.*'+item.id)}))
+    expect(screen.getByRole('link',{name:item.link}).getAttribute('href')).toBe(item.to)
+    expect(screen.queryByRole('button',{name:'使用此模板'})).toBeNull()
+    expect(screen.getByText('【启创墨域】'+item.name)).toBeTruthy()
+    const frame = screen.getByTitle('邮件正文预览')
+    expect(frame.getAttribute('sandbox')).toBe('')
+    const source = frame.getAttribute('srcdoc')!
+    const keys = [...new Set(Array.from(source.matchAll(/{{(\w+)}}/g),m=>m[1]))].sort()
+    expect(keys).toEqual([...item.vars].sort())
+    for (const key of item.vars) fireEvent.change(screen.getByLabelText(key),{target:{value:'<合成'+key+'>'}})
+    const rendered = frame.getAttribute('srcdoc')!
+    for (const key of item.vars) expect(rendered).toContain('&lt;合成'+key+'&gt;')
+    expect(rendered).not.toContain('{{')
+  }
+  expect(screen.queryByText('旧库同号记录')).toBeNull()
+  fireEvent.click(screen.getByRole('button',{name:'编写邮件'}))
+  const select = await screen.findByLabelText('选择模板') as HTMLSelectElement
+  const ids = Array.from(select.options, option=>Number(option.value))
+  for (const item of cases) expect(ids).not.toContain(item.id)
+  expect(mocks.request.mock.calls.every(([, options]) => !options?.method || options.method==='GET')).toBe(true)
+})

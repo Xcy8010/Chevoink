@@ -17,6 +17,7 @@ type ShareMenuProps = {
   triggerClassName: string
   triggerContent: ReactNode
   ariaLabel?: string
+  ownerId?: string | null
   /** 菜单弹出方向：底部操作栏用 up，页面顶部按钮用 down */
   placement?: 'up' | 'down'
   wrapperClassName?: string
@@ -42,6 +43,7 @@ export default function ShareMenu({
   ariaLabel = '分享',
   placement = 'down',
   wrapperClassName,
+  ownerId,
 }: ShareMenuProps) {
   const navigate = useNavigate()
   const toast = useToast()
@@ -95,7 +97,7 @@ export default function ShareMenu({
               <UserRoundPlus className="h-4 w-4 text-[var(--text-secondary)]" />
               发给好友
             </button>
-            <ReportAction target={share.kind==='novel'?{kind:'novel',id:share.novel.id}:{kind:'profile',id:share.author.id}} onOpen={()=>setOpen(false)}/>
+            <ReportAction ownerId={share.kind==='author'?share.author.id:ownerId} target={share.kind==='novel'?{kind:'novel',id:share.novel.id}:{kind:'profile',id:share.author.id}} onOpen={()=>setOpen(false)}/>
             <button type="button" onClick={handleShareToCommunity} className={menuItemClass}>
               <Send className="h-4 w-4 text-[var(--text-secondary)]" />
               分享到社区

@@ -1,7 +1,6 @@
 import { auditCase, caseMissing, notifyCase, reporterReceipt, workdayDue } from './governance-cases.js'
 import { prisma, DataAccessError } from './prisma.js'
 import { lockAccountKey } from './email-verification.js'
-import { queueGovernanceMail } from './governance-mail.js'
 
 export async function updateCaseProgress(
   id: string,
@@ -32,7 +31,7 @@ export async function updateCaseProgress(
       action === 'extend'
         ? '处理进展：' + reason + '。预计完成时间 ' + until!.toISOString()
         : '请补充必要材料：' + reason
-    const event = await auditCase(tx, actor, id, action, item.status, 'investigating', message)
+    await auditCase(tx, actor, id, action, item.status, 'investigating', message)
     await tx.governanceCase.update({
       where: { id },
       data: {
@@ -44,13 +43,6 @@ export async function updateCaseProgress(
       },
     })
     await notifyCase(tx, item.reporterId, id, message)
-    if (item.kind === 'appeal' && item.reporterId)
-      await queueGovernanceMail(tx, {
-        userId: item.reporterId,
-        eventId: event.id,
-        kind: 'appeal_result',
-        reason: message,
-      })
     return { id, message }
   })
 }

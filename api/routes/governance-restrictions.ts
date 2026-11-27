@@ -8,7 +8,7 @@ import { parseBody } from '../lib/parse-body.js'
 import { prisma, DataAccessError } from '../lib/prisma.js'
 import { sendRouteError } from '../lib/route-error.js'
 import { requireAppReleaseCapability } from '../lib/app-releases.js'
-import { changeRestriction, issueRestrictions, stopRestrictedAgentWork } from '../lib/governance-restrictions.js'
+import { changeRestriction, governanceAvailableFor, issueRestrictions, stopRestrictedAgentWork } from '../lib/governance-restrictions.js'
 import { reviewSafetyEvent } from '../lib/governance-safety.js'
 
 const router = Router()
@@ -50,7 +50,8 @@ router.get('/restrictions', async (req, res) => {
     const { userId, scope, cursor } = parseBody(filters, req.query, '筛选条件无效。')
     const items = await prisma.accountRestriction.findMany({ where: { userId, scope }, take: 51,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}), orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-    res.json(buildSuccess(requestId, { items: items.slice(0, 50), nextCursor: items.length > 50 ? items[49].id : null }))
+    const legacyOnly = Boolean(userId && !await governanceAvailableFor(userId))
+    res.json(buildSuccess(requestId, { items: items.slice(0, 50), legacyOnly, nextCursor: items.length > 50 ? items[49].id : null }))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 router.post('/restrictions', async (req, res) => {

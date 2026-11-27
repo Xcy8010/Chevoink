@@ -1,3 +1,4 @@
+import { UserRestrictionPanel } from '../governance/GovernanceRestrictionsView'
 import AdminUserIdentityDialog from '../components/AdminUserIdentityDialog'
 import { useAdminNumberQuery } from './admin-page-query'
 import { useAdminQueryState } from '../admin-query-state'
@@ -12,10 +13,8 @@ import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
 import type { AdminUserRow } from '../../../../shared/contracts/index.js'
 import {
-  banAdminUser,
   listAdminUsers,
   resetAdminUserPassword,
-  unbanAdminUser,
 } from '../api'
 import { AdminCard, AdminConfirmDialog, AdminPageHeader, AdminPager, AdminPanelState, StatusPill } from '../AdminLayout'
 import { formatDateTime, useAdminSession } from '../admin-shared'
@@ -58,25 +57,6 @@ export default function AdminUsersPage() {
     void queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
   }
 
-  const banMutation = useMutation({
-    mutationFn: (userId: string) => banAdminUser(userId),
-    onSuccess: () => {
-      toast.success('已封禁该用户，其登录态立即失效')
-      invalidate()
-      setPendingBan(null)
-    },
-    onError: (error) => toast.error(error instanceof ApiClientError ? error.message : '封禁失败'),
-  })
-
-  const unbanMutation = useMutation({
-    mutationFn: (userId: string) => unbanAdminUser(userId),
-    onSuccess: () => {
-      toast.success('已解封该用户')
-      invalidate()
-    },
-    onError: (error) => toast.error(error instanceof ApiClientError ? error.message : '解封失败'),
-  })
-
   const resetMutation = useMutation({
     mutationFn: (userId: string) => resetAdminUserPassword(userId),
     onSuccess: (result) => {
@@ -96,6 +76,7 @@ export default function AdminUsersPage() {
         description="查看用户、管理身份与测试资格、处理账号状态"
       />
 
+      {pendingBan && <UserRestrictionPanel key={pendingBan.id} user={pendingBan} onClose={() => setPendingBan(null)} onSaved={invalidate} />}
       <AdminCard className="mb-4">
         <div className="flex flex-wrap items-center gap-3">
           <form
@@ -178,18 +159,14 @@ export default function AdminUsersPage() {
                       <span className="text-sm text-[var(--text-secondary)]">{user.isSuperAdmin?'超级管理员':user.role === 'admin' ? '管理员' : '用户'}</span>{user.tester?.effective||user.isSuperAdmin?<StatusPill tone="success">测试员</StatusPill>:user.tester?.enabled?<StatusPill>测试已过期</StatusPill>:null}
                       <AdminRowActions label="用户操作">
 <Link to={"/admin/users/"+user.id} state={{adminReturnTo:location.pathname+location.search}} className="inline-flex items-center rounded-md px-2 text-sm hover:underline">查看</Link><Button size="sm" onClick={()=>setIdentityUser(user)}>编辑身份</Button>
-                        {user.bannedAt ? (
-                          <Button size="sm" onClick={() => unbanMutation.mutate(user.id)} disabled={unbanMutation.isPending}>
-                            解封
-                          </Button>
-                        ) : user.role !== 'admin' ? (
+                        {user.role !== 'admin' && !user.isSuperAdmin && user.id !== admin?.id ? (
                           <>
                             <Button size="sm" variant="ghost" onClick={() => setPendingBan(user)}>
-                              封禁
+                              管理使用限制
                             </Button>
-                            <Button size="sm" variant="ghost" onClick={() => setPendingReset(user)}>
+                            {!user.bannedAt && <Button size="sm" variant="ghost" onClick={() => setPendingReset(user)}>
                               重置密码
-                            </Button>
+                            </Button>}
                           </>
                         ) : null}
                       </AdminRowActions>
@@ -244,18 +221,14 @@ export default function AdminUsersPage() {
                         <td className="py-2.5">
                           <AdminRowActions label="用户操作">
 <Link to={"/admin/users/"+user.id} state={{adminReturnTo:location.pathname+location.search}} className="inline-flex items-center rounded-md px-2 text-sm hover:underline">查看</Link><Button size="sm" onClick={()=>setIdentityUser(user)}>编辑身份</Button>
-                            {user.bannedAt ? (
-                              <Button size="sm" onClick={() => unbanMutation.mutate(user.id)} disabled={unbanMutation.isPending}>
-                                解封
-                              </Button>
-                            ) : user.role !== 'admin' ? (
+                            {user.role !== 'admin' && !user.isSuperAdmin && user.id !== admin?.id ? (
                               <>
                                 <Button size="sm" variant="ghost" onClick={() => setPendingBan(user)}>
-                                  封禁
+                                  管理使用限制
                                 </Button>
-                                <Button size="sm" variant="ghost" onClick={() => setPendingReset(user)}>
+                                {!user.bannedAt && <Button size="sm" variant="ghost" onClick={() => setPendingReset(user)}>
                                   重置密码
-                                </Button>
+                                </Button>}
                               </>
                             ) : null}
                           </AdminRowActions>
@@ -278,23 +251,6 @@ export default function AdminUsersPage() {
       </AdminCard>
 
       {identityUser?<AdminUserIdentityDialog key={identityUser.id} user={identityUser} adminId={admin?.id ?? ""} isSuperAdmin={Boolean(admin?.isSuperAdmin)} onClose={()=>setIdentityUser(null)} onSaved={()=>{invalidate();setIdentityUser(null);toast.success("身份已更新")}}/>:null}
-      <AdminConfirmDialog
-        open={pendingBan !== null}
-        title="封禁用户"
-        description={
-          pendingBan ? (
-            <>
-              封禁后 <span className="font-medium text-[var(--text-primary)]">{pendingBan.nickname}</span>{' '}
-              的登录态立即失效且无法再访问平台，其已发布内容暂时保留。确定要封禁吗？
-            </>
-          ) : null
-        }
-        confirmLabel="确认封禁"
-        loading={banMutation.isPending}
-        onCancel={() => setPendingBan(null)}
-        onConfirm={() => pendingBan && banMutation.mutate(pendingBan.id)}
-      />
-
       <AdminConfirmDialog
         open={pendingReset !== null}
         title="重置用户密码"

@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { AdminLoading, AdminRouteLoading } from './AdminLoading'
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutDashboard, Menu, Search, Users, Workflow, Mail, Pin, X, FileText, MessageSquare, CreditCard, Activity, Settings, Shield, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import Button from '@/components/ui/Button'
@@ -19,13 +20,7 @@ import { clearAdminModelHistoryDrafts } from './components/AdminModelDraftRecove
 let draftSessionOwner: string | null = null
 const scrollPositions = new Map<string, number>()
 const pageIcons: Record<string, typeof Users> = { '/admin/content': FileText, '/admin/site-settings': Settings, '/admin/app-releases': Workflow, '/admin/users': Users, '/admin/credits': CreditCard, '/admin/novels': BookOpen, '/admin/posts': MessageSquare, '/admin/comments': MessageSquare, '/admin/feedback': MessageSquare, '/admin/email': Mail, '/admin/messages': MessageSquare, '/admin/creation-records': Activity, '/admin/evals': Activity, '/admin/craft': FileText, '/admin/models': Workflow, '/admin/tokens': Activity, '/admin/settings': Settings, '/admin/logs': Shield }
-Object.assign(pageIcons, {
-  '/admin/governance/reports': MessageSquare,
-  '/admin/governance/safety': Shield,
-  '/admin/governance/reconciliation': Activity,
-  '/admin/governance/restrictions': Users,
-  '/admin/governance/appeals': FileText,
-})
+pageIcons['/admin/governance'] = Shield
 const mobileItems = [
   { to: '/admin', label: '总览', icon: LayoutDashboard },
   { to: '/admin/users', label: '用户', icon: Users },
@@ -100,7 +95,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
   }, [location.pathname, location.search, isLoading])
   useEffect(() => { if (currentGroup) setExpanded(value => value.includes(currentGroup) ? value : [currentGroup]) }, [currentGroup])
   if (denied) return <Navigate to="/admin/login" replace />
-  if (isLoading) return <div role="status" className="flex h-[100dvh] items-center justify-center text-sm">正在校验管理员身份…</div>
+  if (isLoading) return <AdminRouteLoading shell collapsed={sidebarCollapsed}/>
   if (!admin) return <div role="alert" className="p-8">暂时无法校验管理员身份，请刷新重试。</div>
   const logout = async () => {
     if (isLoggingOut) return
@@ -139,7 +134,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
           <details className="relative shrink-0"><summary aria-label="管理员账号菜单" className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-[var(--border-default)] px-3 text-sm"><span className="max-w-24 truncate">{admin.nickname || '管理员'}</span><ChevronDown size={14} /></summary><div className="absolute right-0 z-50 mt-2 w-44 rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-2 shadow-lg"><button type="button" className="admin-menu-item" onClick={toggleTheme}>{theme === 'light' ? '切换深色主题' : '切换浅色主题'}</button><Link to="/" className="admin-menu-item">返回主站</Link><button type="button" className="admin-menu-item" disabled={isLoggingOut} onClick={() => void logout()}>{isLoggingOut ? '正在退出…' : '退出登录'}</button></div></details>
         </div>
       </header>
-      <main id="admin-main" ref={mainRef} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overscroll-contain"><div ref={contentRef} className="mx-auto w-full max-w-[1680px] px-4 pb-[calc(96px+var(--bottom-bar-inset))] pt-6 md:px-8 md:pb-10 md:pt-8">{children ?? <Outlet />}</div></main>
+      <main id="admin-main" ref={mainRef} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overscroll-contain"><div ref={contentRef} className="mx-auto w-full max-w-[1680px] px-4 pb-[calc(96px+var(--bottom-bar-inset))] pt-6 md:px-8 md:pb-10 md:pt-8"><Suspense fallback={<AdminRouteLoading/>}>{children ?? <Outlet />}</Suspense></div></main>
       <nav aria-label="手机后台导航" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t border-[var(--border-default)] bg-[var(--surface-default)] pb-[var(--bottom-bar-inset)] md:hidden">{mobileItems.map(item => <NavLink key={item.to} to={item.to} end={item.to === '/admin'} className={({ isActive }) => cn('flex min-h-16 flex-col items-center justify-center gap-1 text-xs', isActive ? 'font-semibold text-[var(--color-brand)]' : 'text-[var(--text-secondary)]')}><item.icon size={20} />{item.label}</NavLink>)}<button type="button" aria-expanded={moreOpen} onClick={() => setMoreOpen(true)} className="flex min-h-16 flex-col items-center justify-center gap-1 text-xs"><Menu size={20} />全部</button></nav>
       {moreOpen ? <div ref={mobileDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="全部管理页面" className="fixed inset-0 z-[100] flex flex-col bg-[var(--surface-default)] md:hidden"><div className="flex min-h-16 items-center justify-between border-b border-[var(--border-default)] px-5"><h2 className="text-lg font-semibold">全部管理页面</h2><button type="button" aria-label="关闭全部管理页面" onClick={() => setMoreOpen(false)} className="flex h-11 w-11 items-center justify-center"><X size={20} /></button></div><nav aria-label="全部业务导航" className="overflow-y-auto p-5 pb-[calc(24px+var(--safe-bottom))]">{navigation(true)}</nav></div> : null}
     </div>
@@ -408,9 +403,9 @@ export function AdminConfirmDialog({
 
 /* ---------------- 加载与空态 ---------------- */
 
-export function AdminPanelState({ state, children }: { state: 'loading' | 'error' | 'empty' | 'ready'; children?: ReactNode }) {
+export function AdminPanelState({ state, children, loadingLayout = 'rows' }: { state: 'loading' | 'error' | 'empty' | 'ready'; children?: ReactNode; loadingLayout?: 'rows' | 'profile' }) {
   if (state === 'loading') {
-    return <div role="status" aria-live="polite" className="admin-panel-state py-16 text-center text-sm text-[var(--text-secondary)]">加载中…</div>
+    return <AdminLoading layout={loadingLayout}/>
   }
   if (state === 'error') {
     return <div role="alert" className="py-16 text-center text-sm text-[var(--color-error)]">加载失败，请刷新重试。</div>

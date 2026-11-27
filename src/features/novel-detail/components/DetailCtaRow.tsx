@@ -172,7 +172,7 @@ export default function DetailCtaRow({ state, compact = false }: DetailCtaRowPro
                   <Link2 className="h-4 w-4 text-[var(--text-secondary)]" />
                   复制链接
                 </button>
-                {novelId && <ReportAction target={{kind:'novel',id:novelId}} onOpen={()=>setMenuOpen(false)}/>}
+                {novelId && <ReportAction ownerId={state.authorId} target={{kind:'novel',id:novelId}} onOpen={()=>setMenuOpen(false)}/>}
               </div>
             </>
           ) : null}
@@ -180,6 +180,7 @@ export default function DetailCtaRow({ state, compact = false }: DetailCtaRowPro
       ) : shareDraft ? (
         <ShareMenu
           share={shareDraft}
+          ownerId={state.authorId}
           url={`${window.location.origin}/novel/${novelId}`}
           wrapperClassName="flex-none"
           placement="down"

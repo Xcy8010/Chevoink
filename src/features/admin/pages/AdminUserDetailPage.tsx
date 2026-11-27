@@ -1,3 +1,4 @@
+import { UserRestrictionPanel } from '../governance/GovernanceRestrictionsView'
 import AdminUserIdentityDialog from '../components/AdminUserIdentityDialog'
 import { AdminRowActions } from './AdminPageControls'
 import { Link, useLocation, useParams } from 'react-router-dom'
@@ -7,7 +8,7 @@ import { ArrowLeft } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
-import { banAdminUser, getAdminUserDetail, resetAdminUserPassword, unbanAdminUser } from '../api'
+import { getAdminUserDetail, resetAdminUserPassword } from '../api'
 import { AdminCard, AdminConfirmDialog, AdminPanelState, StatusPill } from '../AdminLayout'
 import { formatDateTime, formatTokens, useAdminSession } from '../admin-shared'
 import { useState } from 'react'
@@ -40,25 +41,6 @@ export default function AdminUserDetailPage() {
     void queryClient.invalidateQueries({ queryKey: ['admin', 'users', userId] })
   }
 
-  const banMutation = useMutation({
-    mutationFn: () => banAdminUser(userId),
-    onSuccess: () => {
-      toast.success('已封禁该用户')
-      invalidate()
-      setShowBanDialog(false)
-    },
-    onError: (error) => toast.error(error instanceof ApiClientError ? error.message : '封禁失败'),
-  })
-
-  const unbanMutation = useMutation({
-    mutationFn: () => unbanAdminUser(userId),
-    onSuccess: () => {
-      toast.success('已解封该用户')
-      invalidate()
-    },
-    onError: (error) => toast.error(error instanceof ApiClientError ? error.message : '解封失败'),
-  })
-
   const resetMutation = useMutation({
     mutationFn: () => resetAdminUserPassword(userId),
     onSuccess: (result) => {
@@ -78,7 +60,8 @@ export default function AdminUserDetailPage() {
         返回用户列表
       </Link>
 
-      <AdminPanelState state={query.isLoading ? 'loading' : query.isError ? 'error' : 'ready'}>
+      {showBanDialog && user && <UserRestrictionPanel key={user.id} user={user} onClose={() => setShowBanDialog(false)} onSaved={invalidate} />}
+      <AdminPanelState loadingLayout="profile" state={query.isLoading ? 'loading' : query.isError ? 'error' : 'ready'}>
         {user && detail ? (
           <div className="space-y-4">
             <AdminCard>
@@ -116,16 +99,9 @@ export default function AdminUserDetailPage() {
                     创作记录
                   </Link>
                   <AdminRowActions label="账户管理"><Button onClick={()=>setShowIdentity(true)}>编辑身份</Button>
-                  {user.role !== 'admin' ? (
+                  {user.role !== 'admin' && !user.isSuperAdmin && user.id !== admin?.id ? (
                     <>
-                      <Link className="text-sm underline" to={'/admin/governance/restrictions?userId='+encodeURIComponent(user.id)}>管理使用限制</Link>
-                      {user.bannedAt ? (
-                        <Button onClick={() => unbanMutation.mutate()} disabled={unbanMutation.isPending}>
-                          解封
-                        </Button>
-                      ) : (
-                        <Button onClick={() => setShowBanDialog(true)}>封禁账号</Button>
-                      )}
+                      <Button onClick={() => setShowBanDialog(true)}>管理使用限制</Button>
                       <Button variant="ghost" onClick={() => setShowResetDialog(true)}>
                         重置密码
                       </Button>
@@ -192,16 +168,6 @@ export default function AdminUserDetailPage() {
       </AdminPanelState>
 
       {showIdentity&&user?<AdminUserIdentityDialog key={user.id} user={user} adminId={admin?.id ?? ""} isSuperAdmin={Boolean(admin?.isSuperAdmin)} onClose={()=>setShowIdentity(false)} onSaved={()=>{invalidate();setShowIdentity(false);toast.success("身份已更新")}}/>:null}
-      <AdminConfirmDialog
-        open={showBanDialog}
-        title="封禁用户"
-        description={user ? <>封禁后 {user.nickname} 的登录态立即失效且无法再访问平台。确定要封禁吗？</> : null}
-        confirmLabel="确认封禁"
-        loading={banMutation.isPending}
-        onCancel={() => setShowBanDialog(false)}
-        onConfirm={() => banMutation.mutate()}
-      />
-
       <AdminConfirmDialog
         open={showResetDialog}
         title="重置用户密码"

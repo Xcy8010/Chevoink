@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
+import { useShellStore } from '@/store/useShellStore'
 import SupplementForm from './SupplementForm'
 
 import {
@@ -47,7 +48,7 @@ function ReceiptView({ value }: { value: Receipt }) {
 function ReportForm({ target }: { target?: ReportContext }) {
   const [kind, setKind] = useState<ReportTarget>(target?.kind ?? 'platform'),
     [id, setId] = useState(target?.id ?? '')
-  const [reason, setReason] = useState<ReportReason | ' '>(' '),
+  const [reasons, setReasons] = useState<ReportReason[]>([]),
     [statement, setStatement] = useState(''),
     [key] = useState(() => crypto.randomUUID())
   const [value, setValue] = useState<Receipt | null>(null),
@@ -56,7 +57,7 @@ function ReportForm({ target }: { target?: ReportContext }) {
 
   async function submit(e: FormEvent) {
     e.preventDefault()
-    if (busy) return
+    if (busy || !reasons.length) return
     setError('')
     setBusy(true)
     try {
@@ -65,7 +66,7 @@ function ReportForm({ target }: { target?: ReportContext }) {
           requestKey: key,
           targetKind: kind,
           targetId: kind === 'platform' ? 'platform' : id,
-          category: reason,
+          categories: reasons,
           statement,
         }),
       )
@@ -89,7 +90,7 @@ function ReportForm({ target }: { target?: ReportContext }) {
             onChange={(e) => {
               setKind(e.target.value as ReportTarget)
               setId('')
-              setReason(' ')
+              setReasons([])
             }}
           >
             {governanceTargets
@@ -129,41 +130,48 @@ function ReportForm({ target }: { target?: ReportContext }) {
           </label>
         )
       )}
-      <label>
-        主要理由
-        <select
-          className={control}
-          required
-          value={reason.trim()}
-          onChange={(e) => setReason(e.target.value as ReportReason)}
-        >
-          <option value="">请选择</option>
-          {allowedReasons(kind).map((r) => (
-            <option key={r} value={r}>
-              {reportReasons[r]}
-            </option>
+      <fieldset>
+        <legend className="mb-1">举报理由（可多选）</legend>
+        <div className="grid grid-cols-2 gap-x-3">
+          {allowedReasons(kind).map((reason) => (
+            <label key={reason} className="flex min-h-11 cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={reasons.includes(reason)}
+                onChange={(e) =>
+                  setReasons((current) =>
+                    e.target.checked ? [...current, reason] : current.filter((value) => value !== reason),
+                  )
+                }
+              />
+              {reportReasons[reason]}
+            </label>
           ))}
-        </select>
-      </label>
+        </div>
+      </fieldset>
       <label>
-        {reason === 'copyright' ? '权利依据与最小必要证明' : '补充说明'}
+        {reasons.includes('copyright') ? '权利依据与最小必要证明' : '补充说明'}
         <textarea
           className={control}
           rows={4}
           maxLength={4000}
-          required={reason === 'other' || reason === 'copyright'}
+          required={reasons.includes('other') || reasons.includes('copyright')}
           value={statement}
           onChange={(e) => setStatement(e.target.value)}
         />
       </label>
       {error && <p role="alert">{error}</p>}
-      <button className={action} disabled={busy}>
+      <button className={action} disabled={busy || !reasons.length}>
         {busy ? '提交中…' : '提交举报与投诉'}
       </button>
     </form>
   )
 }
 export function ReportDialogHost() {
+  const viewer = useShellStore((state) => state.sessionUser?.id)
+  return <ReportDialogForViewer key={viewer ?? ''} />
+}
+function ReportDialogForViewer() {
   const dialog = useRef<HTMLDialogElement>(null),
     [target, setTarget] = useState<ReportContext | null>(null)
   useEffect(() => {

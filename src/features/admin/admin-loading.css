@@ -1,0 +1,19 @@
+.admin-loading-card {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-default);
+}
+.admin-loading-mail { max-width: 1216px; margin-inline: auto; }
+.admin-loading-mail-columns {
+  display: grid;
+  grid-template-columns: minmax(285px, .88fr) minmax(330px, 1.12fr);
+  align-items: start;
+  gap: 20px;
+}
+@media (max-width: 1020px) {
+  .admin-loading-mail-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+}
+@media (max-width: 740px) {
+  .admin-loading-mail-columns { grid-template-columns: minmax(0, 1fr); }
+}

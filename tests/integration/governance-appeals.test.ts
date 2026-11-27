@@ -107,6 +107,9 @@ describe.skipIf(!ready)('independent appeal rights and manual abnormal-use cases
           where: { eventId: 'appeal:' + appeal.id, userId: owner, kind: 'appeal_result' },
         }),
       ).toBe(1)
+      const finalMail = await prisma.governanceMail.findFirstOrThrow({ where: { eventId:'appeal:'+appeal.id, userId:owner } })
+      expect(finalMail.reason).toBe('Synthetic review reversed this restriction')
+      expect(JSON.parse(finalMail.measure!)).toMatchObject({ version:1, result:'撤销相关限制', measure:'已撤销本次「全平台访问」限制。' })
       await expect(
         reviewAppeal(admin, appeal.id, { status: 'maintained', reason: 'duplicate' }),
       ).rejects.toMatchObject({ status: 409 })

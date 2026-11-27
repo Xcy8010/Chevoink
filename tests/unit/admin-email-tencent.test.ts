@@ -67,6 +67,14 @@ describe('directed Tencent SES adapter with mock HTTP transport', () => {
     try {
       Object.assign(env, values)
       expect(configuredAdminEmailDelivery()).toMatchObject({ mode: 'tencent', tencentPurposes: ['creator_return'], allowedRecipients: new Set([recipient]) })
+      for (const id of [238307,238308,238309]) {
+        env.adminEmailTencentTemplateId = id
+        expect(configuredAdminEmailDelivery).toThrow()
+        env.adminEmailTencentTemplateId = 0
+        env.adminEmailTencentReturnTemplateId = id
+        expect(configuredAdminEmailDelivery).toThrow()
+        env.adminEmailTencentReturnTemplateId = 237702
+      }
       env.adminEmailTencentRecipients = []
       expect(configuredAdminEmailDelivery).toThrow()
       env.adminEmailTencentRecipientScope = 'consented'

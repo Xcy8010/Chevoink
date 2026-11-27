@@ -5,7 +5,8 @@ import { requestJson } from '@/app/api-client'
 import { Mail, Layers, History, ChevronRight, ChevronDown, ArrowLeft } from 'lucide-react'
 import { type EmailLibraryEntry } from '../../../../shared/contracts/email-library'
 import { TemplateLibrary, MailProof } from './EmailTemplateEditor'
-import { returnMail, invitation, defaultReturn, resolvedDate } from './email-composer'
+import { AdminLoading } from '../AdminLoading'
+import { governanceLibrary, returnMail, invitation, defaultReturn, resolvedDate } from './email-composer'
 import { CampaignSettings } from './EmailCampaignSettings'
 import './admin-email.css'
 import Button from '@/components/ui/Button'
@@ -140,7 +141,7 @@ export default function AdminEmailPage() {
   const { admin } = useAdminSession()
   const client = useQueryClient()
   const [params, setParams] = useSearchParams()
-  const [view,setView] = useState<'content'|'audience'|'review'|'library'|'history'>(()=>params.get('batch')?'review':'content')
+  const [view,setView] = useState<'content'|'audience'|'review'|'library'|'history'>(()=>params.get('batch')?'review':params.get('tab')==='library'?'library':'content')
   const [templateId,setTemplateId] = useState(returnMail.id)
   const [reward,setReward] = useState(defaultReturn)
   const [variables,setVariables] = useState<Record<string,string>>({})
@@ -176,7 +177,7 @@ export default function AdminEmailPage() {
   const ready = !!admin?.isSuperAdmin && settings.isSuccess
   const deliveryMode = settings.data?.mode
   const library = useQuery({queryKey:[...adminScope,'templates'],enabled:ready,retry:false,queryFn:()=>requestJson<{items:EmailLibraryEntry[]}>(endpoint+'/templates')})
-  const templates=[returnMail, invitation, ...(library.data?.items ?? [])]
+  const templates=[returnMail, invitation, ...(library.data?.items ?? []).filter(entry=>!governanceLibrary.some(builtin=>builtin.id===entry.id))]
   const activeTemplate=templates.find(t=>t.id===templateId) ?? returnMail
   type Segment = {id:string;name:string;filters:Filters}
   const segments=useQuery({queryKey:[...adminScope,'segments'],enabled:ready,retry:false,queryFn:()=>requestJson<{items:Segment[]}>(endpoint+'/segments')})
@@ -287,7 +288,7 @@ export default function AdminEmailPage() {
     <header className="mail-page-head"><div><AdminPageHeader title="定向邮件"/></div><span className="mail-mode">{deliveryMode==='mock'?'模拟 SES': deliveryMode==='tencent'?'腾讯云 SES':'读取配置'}</span></header>
     {settings.isError && <p role="alert">{errorMessage(settings.error)}</p>}
     {admin && !admin.isSuperAdmin && <p>定向邮件仅限超级管理员。</p>}
-    {settings.isPending && admin?.isSuperAdmin && <p role="status">正在读取邮件配置…</p>}
+    {settings.isPending && admin?.isSuperAdmin && <AdminLoading layout={view === 'history' ? 'list' : 'mail'} label="正在读取邮件配置…"/>}
     {ready && <>
       <nav className="mail-tabs" aria-label="邮件管理">
         <button aria-current={!['library','history'].includes(view)?'page':undefined} onClick={()=>setView('content')}><Mail size={16}/>编写邮件</button>
@@ -295,7 +296,7 @@ export default function AdminEmailPage() {
         <button aria-current={view==='history'?'page':undefined} onClick={()=>setView('history')}><History size={16}/>发送记录</button>
       </nav>
       {!['library','history'].includes(view) && <nav className="mail-steps" aria-label="编写步骤">{(['content','audience','review'] as const).map((item,index)=><span key={item}><button aria-label={'步骤 '+(index+1)+' · '+['设置内容','选择收件人','核对发送'][index]} disabled={item==='review'?!batchId:item==='audience'&&view==='content'} aria-current={view===item?'step':undefined} onClick={()=>setView(item)}>{['设置内容','选择收件人','核对发送'][index]}</button>{index<2 && <ChevronRight size={14}/>}</span>)}</nav>}
-      {view==='library' && <TemplateLibrary items={templates} choose={chooseTemplate} loading={library.isLoading} error={library.isError?errorMessage(library.error):undefined} save={async item=>{await requestJson(endpoint+'/templates',post(item));await library.refetch()}}/>}
+      {view==='library' && <TemplateLibrary items={[...templates, ...governanceLibrary]} choose={chooseTemplate} loading={library.isLoading} error={library.isError?errorMessage(library.error):undefined} save={async item=>{await requestJson(endpoint+'/templates',post(item));await library.refetch()}}/>}
       {view==='content' && <CampaignSettings templates={templates} selected={activeTemplate} choose={id=>chooseTemplate(templates.find(t=>t.id===id)!)} fields={reward} update={v=>{clearPreview();setReward(v)}} values={variables} change={v=>{clearPreview();setVariables(v)}} next={()=>{
         if(campaign && (!/^studio(?:\/novel\/[a-z\d_-]+)?$/i.test(reward.path) || (reward.kind==='fixed' && !(resolvedDate(reward,new Date()).getTime()>Date.now())))){setProblem('请核对创作入口和未来的截止时间。');return}
         setProblem('');setView('audience')

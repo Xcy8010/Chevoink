@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ request: vi.fn(), tokens: vi.fn(), yunshu: vi.fn(), operations: vi.fn(), feedback: vi.fn(), logs: vi.fn() }))
@@ -11,6 +11,7 @@ vi.mock('../../src/features/admin/admin-shared', () => ({ formatTokens: (value: 
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }))
 import { adminYunshuOperationsFixture } from '../fixtures/admin-yunshu-operations'
 import AdminDashboardPage from '../../src/features/admin/pages/AdminDashboardPage'
+import AdminGovernance from '../../src/features/admin/governance/AdminGovernance'
 import AdminTokenManagementPage from '../../src/features/admin/pages/AdminTokenManagementPage'
 import AdminLogsPage from '../../src/features/admin/pages/AdminLogsPage'
 
@@ -21,6 +22,7 @@ beforeEach(() => {
   mocks.tokens.mockResolvedValue({ summary: { totalTokens: 0, requestTokens: 0, responseTokens: 0, cacheHitTokens: null, cacheMissTokens: null, cacheObservedTokens: 0, users: 0, webSearchCalls: 0, imageCalls: 0 }, models: [], runs: [], runTurns: [], users: [], actions: [], trend: [] })
   mocks.request.mockImplementation(async (url: string) => url.endsWith('/governance/summary')
     ? {pending:2,appeals:1,review:5,overdue:0}
+    : url.includes('/governance/cases?') ? {items:[],next:null}
     : url.endsWith('/governance/mail-status') ? {items:[{state:'delivered',mode:'mock',count:7}],expiring:3}
     : url.includes('/integrations/status') ? {resources:[]} : url.includes('/operations/health') ? { source:'provider_attempts',coverage:[],snapshotAt:'2026-11-01T10:00:00Z',window:{from:'2026-11-01T00:00:00Z',to:'2026-11-02T00:00:00Z',timeZone:'UTC+8',boundary:'created_at'},observation:'no_samples',counts:{total:0,success:0,failure:0,pending:0,cancelled:0,unknown:0},lastSampleAt:null } : url.includes('supplier-balances') ? [] : { labels: [], metrics: [{ key: 'failed', label: '失败执行', total: 2, values: [] }], tools: [], cost: { knownCalls: 0, unknownCalls: 4, models: [] }, to: '2026-11-01T10:00:00Z' })
   mocks.feedback.mockResolvedValue({ counts: { pending: 3 }, items: [] })
@@ -36,13 +38,28 @@ it('puts real attention counts before trends and labels unavailable health witho
   expect(await screen.findByText('3 条')).toBeTruthy()
   expect(await screen.findByText('2 次')).toBeTruthy()
   expect(await screen.findByText('4 次缺价格或用量')).toBeTruthy()
-  expect(await screen.findByText('待受理 2 · 待复核 5 · 待申诉处理 1 · 逾期 0')).toBeTruthy()
-  expect(await screen.findByText('24 小时内到期的限制 3 项')).toBeTruthy()
-  expect(await screen.findByText('模拟 · 已投递 7')).toBeTruthy()
+  const queues = within(screen.getByRole('navigation', {name:'治理待办'}))
+  expect((await queues.findByRole('link',{name:'待受理举报，2 件'})).getAttribute('href')).toBe('/admin/governance/reports?status=pending')
+  expect(queues.getByRole('link',{name:'待受理申诉，1 件'}).getAttribute('href')).toBe('/admin/governance/appeals?status=pending')
+  expect(queues.getByRole('link',{name:'调查中，5 件'}).getAttribute('href')).toBe('/admin/governance?status=investigating')
+  expect(queues.getByRole('link',{name:'已逾期，0 件'}).getAttribute('href')).toBe('/admin/governance?overdue=true')
   const attention = screen.getByRole('region', { name: '待办与异常' })
   expect(within(attention).getByText('未接入')).toBeTruthy()
   expect(within(attention).getByRole('link', { name: '查看待处理反馈' }).getAttribute('href')).toBe('/admin/feedback?status=pending')
   expect(attention.compareDocumentPosition(screen.getByRole('heading', { name: '平台趋势' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
+it.each([
+  ['待受理举报，2 件', {kind:'report',status:'pending'}],
+  ['待受理申诉，1 件', {kind:'appeal',status:'pending'}],
+  ['调查中，5 件', {status:'investigating'}],
+  ['已逾期，0 件', {overdue:'true'}],
+] as const)('opens the matching case list from the dashboard for %s', async (label, filters) => {
+  mount(<Routes><Route path="/admin" element={<AdminDashboardPage/>}/><Route path="/admin/governance/:section?" element={<AdminGovernance/>}/></Routes>)
+  fireEvent.click(await screen.findByRole('link', {name:label}))
+  expect(await screen.findByText('暂无符合条件的案件。')).toBeTruthy()
+  const request = mocks.request.mock.calls.map(([url])=>String(url)).find(url=>url.startsWith('/api/admin/governance/cases?'))
+  expect(Object.fromEntries(new URL(request!, 'https://synthetic.invalid').searchParams)).toEqual(filters)
 })
 
 it('keeps one period across usage tabs and fetches balances only after opening cost', async () => {

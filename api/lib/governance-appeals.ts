@@ -21,7 +21,7 @@ export async function eligibleForAppealPortal(userId: string) {
   if (await governanceAvailableFor(userId)) return true
   const [restriction, warning, appeal] = await Promise.all([
     prisma.accountRestriction.findFirst({
-      where: { userId, legacyBan: false },
+      where: { userId, OR: [{ legacyBan: false }, { legacyBan:true, sourceId:'legacy-admin' }] },
       select: { id: true },
     }),
     prisma.agentSafetyEscalation.findFirst({ where: { userId, level: 'warning' }, select: { id: true } }),
@@ -227,13 +227,25 @@ export async function reviewAppeal(
     })
     await auditCase(tx, adminId, id, 'review', row.status, status, input.reason)
     await notifyCase(tx, row.subjectId, id, input.reason)
-    if (closed)
+    if (status !== 'investigating') {
+      const results = { maintained: '维持原处理', adjusted: '调整原处理', lifted: '撤销相关限制', corrected: '纠正相关记录' }
+      let measure = '本次复核涉及账号使用提醒。提醒本身不限制账号功能。'
+      if (row.targetKind === 'restriction') {
+        const restriction = await tx.accountRestriction.findFirstOrThrow({ where: { id: row.targetId, userId: row.subjectId } })
+        const scope = measures[restriction.scope] ?? restriction.scope
+        if (restriction.revokedAt) measure = '已撤销本次「' + scope + '」限制。'
+        else if (restriction.expiresAt && restriction.expiresAt <= new Date()) measure = '本次「' + scope + '」限制已到期。'
+        else measure = '本次限制范围为「' + scope + '」，' + (restriction.expiresAt ? '截至 ' + restriction.expiresAt.toISOString() : '期限为永久') + '。'
+      }
       await queueGovernanceMail(tx, {
         eventId: 'appeal:' + id,
         userId: row.subjectId,
         kind: 'appeal_result',
+        result: results[status],
         reason: input.reason,
+        measure,
       })
+    }
     return { id, userId: row.subjectId, status }
   })
 }
