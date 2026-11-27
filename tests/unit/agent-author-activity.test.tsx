@@ -731,13 +731,16 @@ it('shows one parameter preview and uses actual call events to advance the visib
   expect(screen.getByRole('button', { name: '正在查看章节', expanded: true })).toBe(toggle)
   expect(document.activeElement).toBe(toggle)
   expect(ink()).not.toBe(readingInk)
-  const glyphs = Array.from(ink().querySelectorAll<HTMLElement>('[data-glyph]'))
-  expect(glyphs.map(node => node.dataset.glyph).join('')).toBe('正在查看章节')
-  expect(parseFloat(glyphs[1].style.animationDelay)).toBeGreaterThan(parseFloat(glyphs[0].style.animationDelay))
+  const writing = ink()
+  const shapedText = writing.firstChild
+  expect(shapedText?.textContent).toBe('正在查看章节')
+  expect(writing.childNodes).toHaveLength(1)
   // React 18 listens for the WebKit event in DOMs without AnimationEvent.
   const endEvent = 'AnimationEvent' in window ? 'animationend' : 'webkitAnimationEnd'
-  fireEvent(glyphs[glyphs.length - 1], new Event(endEvent, { bubbles: true }))
+  fireEvent(writing, new Event(endEvent, { bubbles: true }))
   expect(ink()).toBeNull()
+  expect(writing.firstChild).toBe(shapedText)
+  expect(toggle.contains(shapedText)).toBe(true)
   expect(screen.getByRole('button', { name: '正在查看章节', expanded: true })).toBe(toggle)
 })
 

@@ -282,18 +282,10 @@ const glyphSegmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter
 function ActivityStatusText({ text, live }: { text: string; live: boolean }) {
   const [revealing, setRevealing] = useState(() => live && document.visibilityState !== 'hidden'
     && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
-  if (!revealing) return <>{text}</>
-
-  const glyphs = glyphSegmenter ? Array.from(glyphSegmenter.segment(text), item => item.segment) : Array.from(text)
-  const stagger = Math.min(34, 480 / Math.max(1, glyphs.length - 1))
-  return <span data-activity-ink>
-    <span className="agent-ink-source">{text}</span>
-    <span aria-hidden="true" className="agent-ink-glyphs">
-      {glyphs.map((glyph, index) => <span key={index} data-glyph={glyph}
-        style={{ animationDelay: `${Math.round(index * stagger)}ms` }}
-        onAnimationEnd={index === glyphs.length - 1 ? () => setRevealing(false) : undefined} />)}
-    </span>
-  </span>
+  if (!revealing) return <span>{text}</span>
+  const length = glyphSegmenter ? Array.from(glyphSegmenter.segment(text)).length : Array.from(text).length
+  return <span data-activity-ink style={{ animationDuration: `${410 + Math.min(700, length * 42)}ms` }}
+    onAnimationEnd={() => setRevealing(false)}>{text}</span>
 }
 
 const ActivityRow = memo(function ActivityRow({ group, runActive, active, continuing, chapters, readOnly, awaitingApprovalCallId, animateLive }: {

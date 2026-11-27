@@ -1,30 +1,51 @@
-/* Keep one complete label for assistive technology while the ink settles. */
-.agent-ink-glyphs { display: none; }
+/* Paint the writing edge over a single shaped run so its baseline and line breaks stay fixed. */
+@property --agent-status-edge {
+  syntax: '<length-percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
 
 @media (prefers-reduced-motion: no-preference) {
-  .agent-ink-source {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
+  .agent-activity-label.agent-processing-shimmer {
+    --agent-status-tone: var(--text-secondary);
+    --agent-status-peak: #adb5c0;
+    background-image: linear-gradient(90deg, var(--agent-status-tone) 37%,
+      var(--agent-status-peak) 48%, var(--agent-status-peak) 51%, var(--agent-status-tone) 60%);
   }
-  .agent-ink-glyphs { display: inline; }
-  .agent-ink-glyphs > span {
-    display: inline-block;
-    white-space: pre;
-    color: var(--text-secondary);
-    transform-origin: 42% 72%;
-    animation: agent-status-ink 300ms cubic-bezier(.16,.68,.22,1) both;
+  html.dark .agent-activity-label.agent-processing-shimmer {
+    --agent-status-tone: color-mix(in srgb, var(--text-tertiary) 85%, var(--surface-default));
+    --agent-status-peak: #fff;
   }
-  .agent-ink-glyphs > span::before { content: attr(data-glyph); }
+  .agent-processing-shimmer:has([data-activity-ink]) {
+    background: none;
+    animation: none;
+  }
+  [data-activity-ink] {
+    background-image: linear-gradient(90deg,
+      var(--agent-status-tone, var(--text-secondary)) calc(var(--agent-status-edge) - 4.5em),
+      var(--agent-status-peak, var(--text-primary)) calc(var(--agent-status-edge) - 1.7em),
+      var(--agent-status-peak, var(--text-primary)) var(--agent-status-edge));
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    mask-image: linear-gradient(90deg, black calc(var(--agent-status-edge) - .35em), transparent var(--agent-status-edge));
+    animation: agent-status-ink linear both;
+  }
+  /* Only the newly arrived reply glyphs get this highlight. */
+  .agent-reply-ink {
+    background-color: currentColor;
+    background-image: linear-gradient(100deg, transparent 40%, rgb(255 255 255 / 34%) 50%, transparent 60%);
+    background-size: 300% 100%;
+    background-position: 0% 0;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
 }
 
 @keyframes agent-status-ink {
-  from { opacity: 0; filter: blur(1.6px); transform: translateY(.045em) scale(1.24); }
-  44% { opacity: .94; filter: blur(.3px); }
-  to { opacity: 1; filter: none; transform: none; }
+  from { --agent-status-edge: 0%; filter: blur(.7px); }
+  /* The text is fully visible here. Keep the last letters lit before the tail clears them. */
+  66%, 79% { --agent-status-edge: calc(100% + .4em); filter: blur(0); }
+  to { --agent-status-edge: calc(100% + 4.5em); filter: blur(0); }
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -36,8 +57,12 @@
 }
 
 @keyframes agent-reply-ink {
-  from { opacity: .7; filter: blur(.65px); transform: scale(1.09); }
-  to { opacity: 1; filter: none; transform: none; }
+  from { background-position: 100% 0; opacity: .7; filter: blur(.65px); transform: scale(1.09); }
+  to { background-position: 0% 0; opacity: 1; filter: none; transform: none; }
+}
+
+@media (forced-colors: active) {
+  [data-activity-ink], .agent-reply-ink { -webkit-text-fill-color: CanvasText; }
 }
 
 /* Keep the 16px icon slot fixed. Only the working part of each glyph moves. */

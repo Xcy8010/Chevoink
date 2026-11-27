@@ -858,22 +858,27 @@ html:not([data-boot-platform="windows"]) #app-loading[data-revealing] ~ #root [d
   animation: agent-fade-out var(--duration-normal) var(--easing-default) both;
 }
 
-/* Shared text shimmer for the active Agent step, in either theme. */
-.agent-processing-shimmer {
+/* One left-to-right pass, followed by a quiet interval before it repeats. */
+@keyframes agent-running-shimmer {
+  from { background-position: 100% 0; }
+  52%, to { background-position: 0% 0; }
+}
+.agent-processing-shimmer,
+.agent-tool-running-label {
   background: linear-gradient(
     90deg,
-    var(--text-secondary) 25%,
+    var(--text-secondary) 38%,
     var(--text-primary) 50%,
-    var(--text-secondary) 75%
+    var(--text-secondary) 62%
   );
-  background-size: 200% 100%;
+  background-size: 300% 100%;
   background-clip: text;
   -webkit-background-clip: text;
   color: transparent;
-  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  animation: agent-running-shimmer 2.8s ease-in-out infinite;
 }
 @media (prefers-reduced-motion: reduce) {
-  .agent-processing-shimmer { animation: none; background: none; color: var(--text-secondary); }
+  .agent-processing-shimmer, .agent-tool-running-label { animation: none; background: none; color: var(--text-secondary); }
 }
 
 /* Agent 工具执行态：保留 Harness 式紧凑流程行，只让一像素进度线和状态文字轻微移动，
@@ -881,15 +886,6 @@ html:not([data-boot-platform="windows"]) #app-loading[data-revealing] ~ #root [d
 @keyframes agent-tool-progress {
   from { transform: translateX(-72%); }
   to { transform: translateX(220%); }
-}
-
-.agent-tool-running-label {
-  background: linear-gradient(90deg, var(--text-secondary) 25%, var(--text-primary) 50%, var(--text-secondary) 75%);
-  background-size: 200% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  color: transparent;
-  animation: skeleton-shimmer 1.6s ease-in-out infinite;
 }
 
 .agent-tool-progress {
