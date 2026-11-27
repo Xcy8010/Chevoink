@@ -11,7 +11,7 @@ export async function openReservedAdminFixture() {
   url.searchParams.set('connection_limit', '1')
   const client = new PrismaClient({ datasourceUrl: databaseUrlWithUtcSession(url.href) })
   try {
-    const tables = ['users', 'account_device_sessions', 'email_verification_codes', 'chapters', 'volumes', 'posts',
+    const tables = ['users', 'account_restrictions', 'account_device_sessions', 'email_verification_codes', 'chapters', 'volumes', 'posts',
       'comments', 'conversations', 'conversation_members', 'cover_assets', 'novels']
     const statements = await client.$queryRaw<{ ddl: string }[]>`
       SELECT format('CREATE TEMP TABLE %I (LIKE %I.%I INCLUDING ALL)', name, ${source}::text, name) AS ddl
