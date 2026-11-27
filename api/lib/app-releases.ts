@@ -1,3 +1,4 @@
+import { env } from '../config/env.js'
 import { createHash } from 'node:crypto'
 import { appReleasePeriods } from '../../shared/app-release-periods.js'
 import { claimAppReleaseRetirement, pendingReleaseCandidates, planAppReleaseRetention, requireRetainedRelease, scheduleAppReleaseRetention } from './app-release-retention.js'
@@ -64,6 +65,12 @@ export async function hasGenerativeContentPolicyCapability(userId:string,tx:Tran
  const {manifest}=await readVerifiedRelease(tx,selected.releaseId)
  return manifest.capabilities.includes('generativeContentPolicy')
 }
+export async function hasPlatformGovernanceCapability(userId: string, tx: Transaction = prisma): Promise<boolean | null> {
+ const { selected } = await selectAccountAssignment(tx, userId)
+ if (!selected) return null
+ const { manifest } = await readVerifiedRelease(tx, selected.releaseId)
+ return manifest.capabilities.includes('platformGovernance')
+}
 export async function hasChapterReviewWorkflowCapability(userId:string,tx:Transaction=prisma):Promise<boolean>{
  return (await readWritingWorkflowCapabilities(userId,tx)).chapterReviewWorkflow
 }
@@ -115,7 +122,14 @@ export async function resolveEmailAuthPreview(req:Request,tx:Transaction=prisma)
   return undefined
  }
 }
-export async function requireAppReleaseCapability(req:Request,capability:AppReleaseCapability){const selection=await selectAppRelease(req);if(selection.mode==='artifact'&&!selection.release!.capabilities.includes(capability))throw new DataAccessError(403,'APP_RELEASE_CAPABILITY_DISABLED','当前应用版本尚未开放此功能。');return selection}
+export async function requireAppReleaseCapability(req: Request, capability: AppReleaseCapability) {
+ const selection = await selectAppRelease(req)
+ const available = selection.mode === 'artifact'
+   ? selection.release?.capabilities.includes(capability)
+   : capability !== 'platformGovernance' || env.appEnv !== 'production'
+ if (!available) throw new DataAccessError(403, 'APP_RELEASE_CAPABILITY_DISABLED', '当前应用版本尚未开放此功能。')
+ return selection
+}
 export async function listAppReleases(actorId:string){
  await superAdmin(prisma,actorId)
  const[releases,channels,operations,retired]=await Promise.all([prisma.appRelease.findMany({orderBy:{createdAt:'desc'}}),prisma.appReleaseChannel.findMany(),prisma.appReleaseOperation.findMany({where:{status:'applied'},orderBy:{createdAt:'asc'}}),prisma.appReleaseRetirement.findMany()])

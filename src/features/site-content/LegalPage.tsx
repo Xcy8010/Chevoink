@@ -35,6 +35,7 @@ export default function LegalPage() {
         </>
       ) : <p>正式政策尚未发布。</p>}
       <SiteSupportLink href={supportUrl} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-[var(--border-subtle)] px-3 text-sm hover:bg-[var(--surface-muted)]" />
+      <p><a href="/report" className="underline">公众举报与投诉</a> · <a href="/appeal" className="underline">提交申诉</a></p>
     </article>
   )
 }

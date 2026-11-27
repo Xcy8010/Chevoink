@@ -19,6 +19,13 @@ import { clearAdminModelHistoryDrafts } from './components/AdminModelDraftRecove
 let draftSessionOwner: string | null = null
 const scrollPositions = new Map<string, number>()
 const pageIcons: Record<string, typeof Users> = { '/admin/content': FileText, '/admin/site-settings': Settings, '/admin/app-releases': Workflow, '/admin/users': Users, '/admin/credits': CreditCard, '/admin/novels': BookOpen, '/admin/posts': MessageSquare, '/admin/comments': MessageSquare, '/admin/feedback': MessageSquare, '/admin/email': Mail, '/admin/messages': MessageSquare, '/admin/creation-records': Activity, '/admin/evals': Activity, '/admin/craft': FileText, '/admin/models': Workflow, '/admin/tokens': Activity, '/admin/settings': Settings, '/admin/logs': Shield }
+Object.assign(pageIcons, {
+  '/admin/governance/reports': MessageSquare,
+  '/admin/governance/safety': Shield,
+  '/admin/governance/reconciliation': Activity,
+  '/admin/governance/restrictions': Users,
+  '/admin/governance/appeals': FileText,
+})
 const mobileItems = [
   { to: '/admin', label: '总览', icon: LayoutDashboard },
   { to: '/admin/users', label: '用户', icon: Users },

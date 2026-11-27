@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import ReportAction from '@/features/governance/ReportAction'
 import { UserRoundPlus } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
@@ -627,6 +628,7 @@ export default function MessagesPage() {
                     <p className="mt-0.5 truncate text-xs text-[var(--text-tertiary)]">{selectedConversation.unreadCount} 条未读</p>
                   ) : null}
                 </div>
+                {selectedConversation.type==='direct' && <ReportAction menu target={{kind:'message',id:'',messages:activeMessages.filter(m=>m.senderId!==currentUserId).map(m=>({id:m.id,label:m.type==='text'?m.content.slice(0,80):new Date(m.createdAt).toLocaleString()+' · '+m.type}))}}/>}
               </div>
 
               {/* 回关横幅：对方关注了你而你未回关，实心红色长方形白字按钮一键回关 */}

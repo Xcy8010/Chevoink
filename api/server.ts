@@ -1,9 +1,12 @@
 import app from './app.js'
+import { governanceDelivery, processGovernanceMail } from './lib/governance-mail.js'
+import { purgeDueCaseEvidence } from './lib/governance-cases.js'
 import { enableAppReleaseRetention, scheduleAppReleaseRetention } from './lib/app-release-retention.js'
 import { dispatchStyleLearning } from './lib/agent/style-learning.js'
 import { env } from './config/env.js'
 import { recoverOrphanLoopRuns, recoverDurableLoopRuns, recoverStaleLoopRuns } from './lib/agent/run-service.js'
 import { runDueAgentSchedules } from './lib/agent/productivity.js'
+import { reconcileRestrictedAgentWork } from './lib/governance-restrictions.js'
 import { dispatchQueuedRequests } from './lib/agent/request-queue.js'
 import { dispatchAgentGoals } from './lib/agent/goal-supervisor.js'
 import { reconcileGoalUsage } from './lib/agent/goal-budget.js'
@@ -24,8 +27,15 @@ await recoverOrphanLoopRuns()
 // lease; live owners and stopped roots are never treated as startup orphans.
 let refundSweepRunning = false
 let importRecoveryRunning = false
+const noticeDelivery = governanceDelivery()
+let noticeSweep = false
 function recoverSavedTasks() {
+  if (noticeDelivery && !noticeSweep) {
+    noticeSweep = true
+    void processGovernanceMail(noticeDelivery).catch(() => console.error('[governance] 事务邮件待核对')).finally(() => { noticeSweep = false })
+  }
   scheduleAppReleaseRetention()
+  void purgeDueCaseEvidence().catch(() => console.error('[governance] 案件证据清理稍后重试'))
   // Durable completion/restoration notifications survive the upload kill switch.
   if (!importRecoveryRunning) {
     importRecoveryRunning = true
@@ -61,6 +71,7 @@ const server = app.listen(env.port, '127.0.0.1', () => {
 })
 
 const scheduleTimer = setInterval(() => {
+  void reconcileRestrictedAgentWork().catch(() => console.error('[governance] 等待核对受限任务'))
   void runDueAgentSchedules()
   recoverSavedTasks()
 }, 60_000)

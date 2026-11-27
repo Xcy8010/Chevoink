@@ -1,3 +1,4 @@
+import { assertGovernanceAllowed } from '../governance-access.js'
 import type { AgentQueuedRequest, Prisma } from '@prisma/client'
 import { startAgentLoopRunSchema, type StartAgentLoopRunRequest } from '../../../shared/contracts/index.js'
 import type { AgentQueueAction, AgentQueueSnapshot } from '../../../shared/contracts/agent-queue.js'
@@ -55,6 +56,7 @@ export async function listQueuedRequests(userId: string, sessionId: string): Pro
 }
 
 export async function enqueueRequest(userId: string, id: string, raw: StartAgentLoopRunRequest, humanOrigin?: 'http') {
+  await assertGovernanceAllowed(userId, 'agent')
   return withUserRunLock(userId, async () => {
     const input = startAgentLoopRunSchema.parse(raw)
     const session = await ownedSession(userId, input.sessionId)

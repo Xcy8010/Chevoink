@@ -3,7 +3,7 @@ const mocks = vi.hoisted(() => ({ create: vi.fn(), update: vi.fn(), updateMany: 
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), consumeTokenCredits: mocks.charge, reserveTokenCredits: mocks.reserve,
   consumeCredits: vi.fn(), getModelTierRuntime: mocks.runtime, resolveCustomReasoningEffort: (effort: string) => effort }))
 vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
-  prisma: { agentGoalUsage: { findUnique: vi.fn(async () => null) }, agentModelAssignment: { findMany: vi.fn(async () => []) },
+  prisma: { user:{findUnique:async()=>({accountRestrictions:[]})},agentGoalUsage: { findUnique: vi.fn(async () => null) }, agentModelAssignment: { findMany: vi.fn(async () => []) },
     aiModelConfig: { findFirst: vi.fn(async () => null) }, aiUsageLog: { create: mocks.create, findUnique: mocks.find, update: mocks.update, updateMany: mocks.updateMany } } }))
 vi.mock('../../api/lib/data-access.js', () => ({ ensureNovelOwner: vi.fn(), createCoverAssetsData: vi.fn() }))
 vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) => value, encryptSecret: (value: string) => value }))

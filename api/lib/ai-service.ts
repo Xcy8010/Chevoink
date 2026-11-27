@@ -1,5 +1,8 @@
+import { withCoverRequest } from './governance-cover-requests.js'
+import { recordRefusalLead } from './governance-observation.js'
+import { assertGovernanceAllowed } from './governance-access.js'
 import { publicImagePrice } from './billing/public-model-price.js'
-import { AGENT_PROVIDER_REFUSAL_MESSAGE, COVER_PROMPT_CONTENT_POLICY, COVER_PROVIDER_REFUSAL_MESSAGE, contentPolicyEnabledForUser, coverRefusalMessage, usesAgentContentPolicy } from './generative-content-policy.js'
+import { AGENT_PROVIDER_REFUSAL_MESSAGE, COVER_PROMPT_CONTENT_POLICY, COVER_PROVIDER_REFUSAL_MESSAGE, contentPolicyEnabledForUser, coverRefusalMessage, isFullContentRefusal, usesAgentContentPolicy } from './generative-content-policy.js'
 import { resolveSystemModelConfig } from './model-lifecycle.js'
 import { decryptSecret } from './secret-box.js'
 import { createHmac, randomUUID } from 'node:crypto'
@@ -18,6 +21,7 @@ import { buildResponsesToolRequest, createResponsesToolFrameAdapter, responsesUs
 import { requiresResponsesToolProtocol, resolveResponsesEndpoint } from './ai-responses-route.js'
 import type { ResponsesContinuation } from './ai-responses-continuation.js'
 import { createNextPromptStream, splitNextPrompt } from './agent/next-prompt.js'
+import { recordYunshuResponse } from './yunshu-request-link.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
 import { projectPersonalizedMessages, type PersonalizationContext } from './agent/personalization-context.js'
@@ -939,7 +943,18 @@ export async function chatWithTools(params: ChatWithToolsParams): Promise<ChatCo
   const frozenParams = snapshotDurableChatParams(params)
   const runId = frozenParams.usageLog.agentRunId ?? (frozenParams.usageLog.targetType === 'agentRun' ? frozenParams.usageLog.targetId : undefined)
   const context = currentGoalExecution() ?? (runId ? await readGoalExecution(frozenParams.usageLog.userId, runId) : undefined)
-  return withGoalExecutionContext(context, () => withoutGoalEffects(() => chatWithGoalAccounting(frozenParams)))
+  try {
+    const result = await withGoalExecutionContext(context, () => withoutGoalEffects(() => chatWithGoalAccounting(frozenParams)))
+    if (runId && usesAgentContentPolicy(frozenParams.messages) && result.finishReason === 'stop' && !result.toolCalls.length && (isFullContentRefusal(result.content) || result.content === AGENT_PROVIDER_REFUSAL_MESSAGE)) {
+      await recordRefusalLead(frozenParams.usageLog.userId, 'agent', runId, runId)
+    }
+    return result
+  } catch (error) {
+    if (runId && error instanceof DataAccessError && error.code === 'AGENT_CONTENT_REFUSED') {
+      await recordRefusalLead(frozenParams.usageLog.userId, 'agent_provider', runId, runId)
+    }
+    throw error
+  }
 }
 
 class ResponsesToolProtocolRequired extends Error {}
@@ -1138,6 +1153,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     price: params.durableExecution.price ?? await resolveDurableTokenPrice(params.durableExecution.lease, params.durableExecution.operationKey,
       tier, params.usageLog.multiplierBps ?? 10000),
     admit: async () => {
+      await assertGovernanceAllowed(params.usageLog.userId, 'agent')
       params.signal?.throwIfAborted()
       ensureTextProviderConfigured(params.providerApiKey)
       await assertCreditAccess(params.usageLog.userId, tier, false)
@@ -1146,6 +1162,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     },
   }) : undefined
   if (durable?.replay) return durable.replay
+  if (!durable) await assertGovernanceAllowed(params.usageLog.userId, 'agent')
   if (!durable && isLocalModelProvider(params.provider ?? '')) await assertLocalModelReady({ userId: params.usageLog.userId,
     provider: params.provider!, baseUrl: params.providerBaseUrl!, apiKey: params.providerApiKey!, body: encodedBody, signal: params.signal })
   params.signal?.throwIfAborted()
@@ -1210,6 +1227,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     throw error
   }
 
+  if (tier !== 'custom') await recordYunshuResponse(response, params.usageLog.userId, durable?.attemptId ? { kind: 'attempt', id: durable.attemptId } : prepared ? { kind: 'usage', id: prepared.id } : null)
   if (!response.ok || !response.body) {
     let payload: JsonProviderPayload
     const idleMs = reviewTransport ? env.aiTextStreamIdleMs : undefined
@@ -1634,6 +1652,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const outputTokenParameter = resolveTextOutputTokenParameter(modelRuntime.outputTokenParameter,
     { provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, model: modelRuntime.modelName ?? env.aiTextModel },
     options.maxOutputTokens != null)
+  await assertGovernanceAllowed(options.userId, 'agent')
   const prepared = await prepareTextUsage({ userId: options.userId, action: options.action,
     inputEstimate: estimateTokenCount(`${systemPrompt}\n${userPrompt}`), maxOutput: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,
     modelName: modelRuntime.modelName ?? env.aiTextModel, modelTier: modelRuntime.tier,
@@ -1696,6 +1715,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     throw error
   } finally { clearTimeout(firstResponseTimer) }
 
+  if (modelRuntime.tier !== 'custom') await recordYunshuResponse(response, options.userId, { kind: 'usage', id: prepared.id })
   const payload = response.ok
     ? await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion, routeEvidence, options.coverContentPolicy)
     : { ...await readProviderHttpRejection(response, options, env.aiTextStreamIdleMs), localOutputEstimate: undefined }
@@ -1997,6 +2017,7 @@ export async function chapterAssistData(userId: string, input: ChapterAssistRequ
 }
 
 export async function generateCoverPromptData(userId: string, input: GenerateCoverPromptRequest) {
+  await assertGovernanceAllowed(userId, 'agent')
   if (input.novelId && !await prisma.novel.findFirst({ where: { id: input.novelId, authorId: userId }, select: { id: true } }))
     throw new DataAccessError(404, 'NOT_FOUND', '作品不存在或无权访问。')
   const contentPolicy = await contentPolicyEnabledForUser(userId)
@@ -2022,7 +2043,10 @@ export async function generateCoverPromptData(userId: string, input: GenerateCov
     targetType: 'coverPrompt',
   })
   const refusal = contentPolicy ? coverRefusalMessage(prompt) : undefined
-  if (refusal) throw new DataAccessError(422, 'COVER_CONTENT_REFUSED', refusal)
+  if (refusal) {
+    await recordRefusalLead(userId,'cover_prompt',randomUUID(),currentGoalExecution()?.runId)
+    throw new DataAccessError(422, 'COVER_CONTENT_REFUSED', refusal)
+  }
 
   const visualKeywords = prompt
     .split(/[，,\n]/)
@@ -2037,11 +2061,11 @@ export async function generateCoverPromptData(userId: string, input: GenerateCov
   }
 }
 
-export async function generateCoverImageData(
-  userId: string,
-  input: GenerateCoverImageRequest & { novelId?: string | null; negativePrompt?: string | null },
-  options: { signal?: AbortSignal } = {},
-) {
+type CoverInput = GenerateCoverImageRequest & { novelId?: string | null; negativePrompt?: string | null }
+export async function generateCoverImageData(userId: string, input: CoverInput, options: { signal?: AbortSignal; origin?: 'http' } = {}) {
+  return withCoverRequest(userId, options.signal, signal => generateAccountCover(userId, input, { ...options, signal }))
+}
+async function generateAccountCover(userId: string, input: CoverInput, options: { signal: AbortSignal; origin?: 'http' }) {
   // This service is shared by HTTP and Agent callers. Validate before charging,
   // rather than relying on the HTTP route's count clamp or a tool's schema.
   if (!Number.isInteger(input.count) || input.count < 1 || input.count > 4) {
@@ -2051,7 +2075,8 @@ export async function generateCoverImageData(
     throw new DataAccessError(400, 'IMAGE_PROMPT_INVALID', '请提供封面提示词。')
   }
   if (input.novelId) await ensureNovelOwner(userId, input.novelId)
-  if (input.operationId) return (await import('./image-operation.js')).executeImageOperation(userId, input, options.signal)
+  if (!input.operationId) await assertGovernanceAllowed(userId, 'agent')
+  if (input.operationId) return (await import('./image-operation.js')).executeImageOperation(userId, input, options.signal, options.origin)
   options.signal?.throwIfAborted()
   const contentPolicy = await contentPolicyEnabledForUser(userId)
   const goal = currentGoalExecution()
@@ -2087,6 +2112,7 @@ export async function generateCoverImageData(
         }
         dispatched = false
       }, beforeDispatch: async runtime => {
+        await assertGovernanceAllowed(userId, 'agent')
       await assertGoalProviderAdmission()
       options.signal?.throwIfAborted()
       if (goal && !observation) {

@@ -15,6 +15,8 @@ import { executeAppRelease, previewAppRelease, reconcileAppRelease } from '../..
 import { getAdminModelLifecyclePreview } from '../../api/lib/admin-model-lifecycle.js'
 import { sealAppArtifact } from '../../scripts/app-release-artifact.mjs'
 import { verifyTestDatabase } from '../support/database-preflight.js'
+import { changeRestriction, issueRestrictions } from '../../api/lib/governance-restrictions.js'
+import { activeAgentRestriction } from '../../api/lib/governance-access.js'
 import { integrationLegalConsent } from '../support/legal-consent.js'
 import { readPublicSiteContent, verifyRegistrationConsent } from '../../api/lib/site-content.js'
 
@@ -43,7 +45,7 @@ beforeAll(async()=>{
  const response={append:()=>response} as unknown as Response
  token=(await createSession(adminId,response)).accessToken
  await integrationLegalConsent()
- await artifact(ids[0]);await artifact(ids[1],['siteContent','legacyEmailBinding'])
+ await artifact(ids[0]);await artifact(ids[1],['siteContent','legacyEmailBinding','platformGovernance'])
  await prisma.appReleaseChannel.create({data:{channel:'stable',releaseId:ids[0],revision:1,enabled:true}})
 })
 afterAll(async()=>{
@@ -62,6 +64,26 @@ afterAll(async()=>{
  await rm(root,{recursive:true,force:true});await prisma.$disconnect()
 })
 describe('actual release and admin routers on isolated PostgreSQL',()=>{
+ it('limits governance actions to eligible targets and leaves legacy bans out of the test-channel work sweep',async()=>{
+  const rollback=Error('synthetic governance rollback')
+  await expect(prisma.$transaction(async tx=>{
+   await tx.appReleaseChannel.create({data:{channel:'test',releaseId:ids[1],revision:1,enabled:true}})
+   const profile={nickname:'Synthetic governance target',passwordHash:'unusable'}
+   const stable=await tx.user.create({data:profile})
+   const tester=await tx.user.create({data:{...profile,testerEntitlement:{create:{enabled:true,reason:'Synthetic tester',grantedById:adminId}}}})
+   const input={userId:stable.id,scopes:['agent' as const],reason:'合成复核',clause:'合成测试条款',expiresAt:null}
+   await expect(issueRestrictions(tx,adminId,input)).rejects.toMatchObject({code:'APP_RELEASE_CAPABILITY_DISABLED'})
+   await expect(issueRestrictions(tx,adminId,{...input,userId:adminId})).rejects.toMatchObject({code:'PROTECTED_ACCOUNT'})
+   const [limited]=await issueRestrictions(tx,adminId,{...input,userId:tester.id})
+   await tx.user.update({where:{id:stable.id},data:{bannedAt:new Date()}})
+   const legacy=await tx.accountRestriction.findFirstOrThrow({where:{userId:stable.id,legacyBan:true}})
+   expect(await tx.accountRestriction.findMany({where:{...activeAgentRestriction(new Date()),userId:{in:[stable.id,tester.id]}},select:{id:true}})).toEqual([{id:limited.id}])
+   await expect(changeRestriction(tx,adminId,legacy.id,{action:'revoke',reason:'合成测试'})).rejects.toMatchObject({code:'APP_RELEASE_CAPABILITY_DISABLED'})
+   expect((await tx.user.findUniqueOrThrow({where:{id:stable.id}})).bannedAt).toBeTruthy()
+   throw rollback
+  },{timeout:15_000})).rejects.toBe(rollback)
+ })
+
  it('requires binding only on the selected release and only for phone accounts without an email',async()=>{
   const previous=env.accountEmailAuthEnabled
   const fixtures:string[]=[]

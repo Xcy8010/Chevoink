@@ -3,6 +3,7 @@ import { env } from '../../api/config/env.js'
 
 const mocks = vi.hoisted(() => {
   const tx = {
+    user: { findFirst: vi.fn() },
     agentRun: { findUnique: vi.fn() },
     agentGoalBudget: { findUniqueOrThrow: vi.fn() },
     agentGoalUsage: { count: vi.fn() },
@@ -95,11 +96,19 @@ function configure(candidate = goal()) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.tx.user.findFirst.mockResolvedValue(null)
   env.agentGoalEnabled = true
   configure()
 })
 
 describe('goal supervisor acceptance boundaries', () => {
+  it('pauses only a restricted active goal after reconciling existing usage', async () => {
+    mocks.tx.user.findFirst.mockResolvedValueOnce({ id: 'user-1' })
+    await superviseAgentGoal('user-1', 'session-1', 'goal-1')
+    expect(mocks.reconcileGoalUsage).toHaveBeenCalled()
+    expect(mocks.actOnAgentGoal).toHaveBeenCalledWith('user-1','session-1','goal-1',expect.objectContaining({ action:'pause' }))
+    expect(mocks.startLoopRun).not.toHaveBeenCalled()
+  })
   it('automatically continues unfinished work using the selected BYOK model', async () => {
     configure(goal({ executionOptions: { mode: 'build', modelTier: 'custom', customModelId: 'author-model', reasoningEffort: 'high' } }))
     mocks.inspectGoalEvidence.mockResolvedValue({ progressHash: 'chapter-one-done', blockers: [{ code: 'CHAPTER_NOT_COMMITTED', id: 'chapter-two' }],

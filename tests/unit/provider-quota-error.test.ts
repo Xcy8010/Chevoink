@@ -4,7 +4,9 @@ const mocks = vi.hoisted(() => ({ findModel: vi.fn(), create: vi.fn(), update: v
   runtime: vi.fn(), begin: vi.fn(), rejected: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message) }
-}, prisma: { agentModelAssignment: { findMany: vi.fn(async () => []) }, agentGoalExecution: { findUnique: vi.fn(async () => null) },
+}, prisma: { user: { findUnique: async () => ({ bannedAt: null, accountRestrictions: [] }) }, agentModelAssignment: { findMany: vi.fn(async () => []) }, agentGoalExecution: { findUnique: vi.fn(async () => null) },
+  appReleaseChannel: { findMany: vi.fn(async () => []) },
+  yunshuRequestLink: {createMany:vi.fn(async () => ({count:1}))},
   aiModelConfig: { findFirst: mocks.findModel },
   aiUsageLog: { create: mocks.create, update: mocks.update, updateMany: mocks.updateMany, findUnique: vi.fn(async () => null) } } }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.access, reserveTokenCredits: vi.fn(), consumeTokenCredits: mocks.charge,

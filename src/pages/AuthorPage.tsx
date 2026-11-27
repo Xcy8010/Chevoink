@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, ChevronRight, MessageSquareMore, Share2, UserCheck2, UserPlus2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, MessageSquareMore, MoreHorizontal, UserCheck2, UserPlus2 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
@@ -299,7 +299,7 @@ export default function AuthorPage() {
             <div className="absolute inset-0 bg-[linear-gradient(135deg,#28435f_0%,#16233a_58%,#1f2f47_100%)]" />
           )}
         </div>
-        {/* 分享按钮：X 风格浮层圆钮，压在封面右上角 */}
+        {/* 作者操作菜单固定在封面右上角。 */}
         <div className="absolute right-3 top-3 z-10">
           <ShareMenu
             share={{
@@ -314,8 +314,8 @@ export default function AuthorPage() {
             url={`${window.location.origin}/author/${author.id}`}
             placement="down"
             triggerClassName="press-feedback inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/35 text-white backdrop-blur-sm transition-colors hover:bg-black/50"
-            triggerContent={<Share2 className="h-4 w-4" />}
-            ariaLabel="分享作者主页"
+            triggerContent={<MoreHorizontal className="h-4 w-4" />}
+            ariaLabel="作者主页更多操作"
           />
         </div>
       </div>

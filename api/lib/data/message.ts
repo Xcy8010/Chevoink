@@ -1,3 +1,4 @@
+import { assertGovernanceAllowed } from '../governance-access.js'
 /**
  * 私信会话域数据访问
  * 由 data-access.ts 按域拆分而来（声明顺序与原文件一致）；
@@ -157,6 +158,7 @@ export async function listMessagesData(userId: string, conversationId: string, p
 
 
 export async function sendMessageData(userId: string, conversationId: string, input: SendMessageRequest): Promise<Message | null> {
+  await assertGovernanceAllowed(userId, 'direct_message')
   const conversation = await ensureConversationMember(userId, conversationId)
   ensureNonEmptyText(input.content, 'content')
 

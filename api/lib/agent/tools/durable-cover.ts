@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { assertGovernanceAllowed } from '../../governance-access.js'
+import { recordRefusalLead } from '../../governance-observation.js'
 import { z } from 'zod'
 import { FIXED_NOVEL_COVER_SIZE } from '../../../../shared/contracts/index.js'
 import { coverImageFailureMayRetry, parseCoverImageResponse, requestCoverImages, resolveCoverImageRuntime } from '../../ai-service.js'
@@ -109,6 +111,7 @@ async function generateRoute(ctx: ToolContext, lease: RunLeaseToken, parentId: s
     ctx.signal.throwIfAborted()
     await prepareImageResponseStorage(identity)
     const permit = await withManuscriptRunLease(lease, async tx => {
+      await assertGovernanceAllowed(ctx.userId, 'agent', tx)
       const parent = await readAdmittedToolOperation(lease, { operationId: parentId, action: 'cover_generate', novelId: ctx.novelId, callId: ctx.callId }, tx)
       await assertCurrentToolPolicy(tx, lease, parent.operation)
       await assertRouteAdvance(tx, parentId, frozenWork, index)
@@ -149,6 +152,7 @@ async function generateRoute(ctx: ToolContext, lease: RunLeaseToken, parentId: s
   catch (error) {
     if (!(error instanceof DataAccessError)) throw error
     failureCode = error.code
+    if (failureCode === 'COVER_CONTENT_REFUSED') await recordRefusalLead(ctx.userId, 'agent_cover', parentId, lease.runId)
     outcome = saved.pointer.httpStatus < 200 || saved.pointer.httpStatus >= 300 ? 'rejected'
       : failureCode === 'AI_PROVIDER_EMPTY_RESPONSE' ? 'empty' : 'invalid'
   }

@@ -118,6 +118,7 @@ export default function AdminUserDetailPage() {
                   <AdminRowActions label="账户管理"><Button onClick={()=>setShowIdentity(true)}>编辑身份</Button>
                   {user.role !== 'admin' ? (
                     <>
+                      <Link className="text-sm underline" to={'/admin/governance/restrictions?userId='+encodeURIComponent(user.id)}>管理使用限制</Link>
                       {user.bannedAt ? (
                         <Button onClick={() => unbanMutation.mutate()} disabled={unbanMutation.isPending}>
                           解封

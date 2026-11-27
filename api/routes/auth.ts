@@ -10,11 +10,13 @@ import type {
   SmsAccountStatus,
 } from '../../shared/contracts/index.js'
 import { createAuthCaptchaChallenge, verifyAuthCaptchaChallenge } from '../lib/auth-captcha.js'
+import { consumePasswordAttempt } from '../lib/password-attempts.js'
 import { observeOtherDeviceRemoval } from '../lib/account-security-observation.js'
 import {
   clearSession,
   createSession,
   getSessionUserId,
+  requireSessionUserId,
   issueDeviceVerification,
   readDeviceVerification,
   recordDeviceActivity,
@@ -25,7 +27,8 @@ import {
   accountIdentity, findAccountByIdentity, getUserByPhoneData, loginAccountSmsCodeData, loginAccountUserData,
   loginUserData, registerUserData,
 } from '../lib/data-access.js'
-import { DataAccessError } from '../lib/prisma.js'
+import { DataAccessError, prisma } from '../lib/prisma.js'
+import { effectiveRestrictionWhere } from '../lib/governance-access.js'
 import { listDevices, removeDevice } from '../lib/device-session.js'
 import { buildError, buildSuccess, createRequestId } from '../lib/http.js'
 import { parseBody } from '../lib/parse-body.js'
@@ -34,6 +37,15 @@ import { normalizePhoneNumber } from '../lib/phone.js'
 import { sendAuthSmsCode, verifyAuthSmsCode } from '../lib/sms-service.js'
 
 const router = Router()
+router.get('/governance-restrictions', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    const items = await prisma.accountRestriction.findMany({ where: { userId, ...effectiveRestrictionWhere(new Date()) },
+      select: { id:true, scope:true, expiresAt:true, reason:true, clause:true }, orderBy: { createdAt:'desc' } })
+    res.set('Cache-Control','private, no-store').json(buildSuccess(requestId, { items }))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
 router.get('/legal-policies',async(_req:Request,res:Response)=>{
   const requestId=createRequestId()
   try{const {legal}=await readPublicSiteContent();res.json(buildSuccess(requestId,{legal}))}catch(error){sendRouteError(res,requestId,error)}
@@ -119,19 +131,7 @@ function consumeSmsIpQuota(ip: string): boolean {
   return true
 }
 
-const passwordAttemptBuckets = new Map<string, number>()
-let passwordWindowEnd = 0
-function consumePasswordAttempt(ip: string) {
-  const now = Date.now()
-  if (now >= passwordWindowEnd) {
-    passwordAttemptBuckets.clear()
-    passwordWindowEnd = now + 5 * 60_000
-  }
-  const count = passwordAttemptBuckets.get(ip) ?? 0
-  if (count >= 20) return false
-  passwordAttemptBuckets.set(ip, count + 1)
-  return true
-}
+
 
 router.use(accountAuthRoutes(consumeSmsIpQuota, consumePasswordAttempt))
 

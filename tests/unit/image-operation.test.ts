@@ -34,7 +34,8 @@ beforeEach(async () => {
   })
   m.syncGoal.mockImplementation(async (id: string) => { const log = m.logs.get(id)!; m.goalUsages.set('legacy:' + id, log.billingStatus === 'provider_rejected' ? 'rejected' : log.billingStatus === 'observed' ? 'known' : 'unknown') })
   const { imageBlobSchema } = await import('../../api/lib/agent/provider-image-storage.js')
-  m.tx = { $queryRaw: async () => [], imageOperation: {
+  m.tx = { user: { findUnique: async () => ({ bannedAt: null, accountRestrictions: [] }) },
+    $queryRaw: async () => [], imageOperation: {
     findUnique: async ({ where }: { where: { userId_operationId: { operationId: string } } }) => m.operation?.operationId === where.userId_operationId.operationId ? copy(m.operation) : null, findUniqueOrThrow: async () => { if (!m.operation) throw new Error('missing'); return copy(m.operation) },
     create: async ({ data }: { data: Record<string, unknown> }) => copy(m.operation = { id: '11111111-1111-4111-8111-111111111111', state: 'prepared', routeIndex: 0, result: null, ...data }),
     update: async ({ data }: { data: Record<string, unknown> }) => copy(m.operation = { ...m.operation!, ...data }),

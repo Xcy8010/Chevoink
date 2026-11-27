@@ -74,6 +74,9 @@ const AdminAppReleasesPage = lazyPage(() => import('@/features/admin/pages/Admin
 const AppVersionPage = lazyPage(() => import('@/features/app-releases/AppVersionPage'))
 const AdminContentPage = lazyPage(() => import('@/features/admin/pages/AdminContentPage'))
 const AdminSiteSettingsPage = lazyPage(() => import('@/features/admin/pages/AdminContentPage').then(module => ({default:module.AdminSiteSettingsPage})))
+const PublicReports = lazyPage(() => import('@/features/governance/Reports'))
+const AppealsPage = lazyPage(() => import('@/features/governance/AppealsPage'))
+const AdminGovernance = lazyPage(() => import('@/features/admin/governance/AdminGovernance'))
 const LegalPage = lazyPage(() => import('@/features/site-content/LegalPage'))
 
 export type AppRouteDefinition = {
@@ -87,6 +90,9 @@ export type AppRouteDefinition = {
 }
 
 export const appRoutes: AppRouteDefinition[] = [
+  {path:'/report',title:'举报与投诉',description:'提交举报和查询进度。',element:<PublicReports/>,useShell:false},
+  {path:'/appeal',title:'提交申诉',description:'核验身份、提交申诉或查看复核结果。',element:<AppealsPage/>,useShell:false},
+  {path:'/admin/governance/:section?',title:'内容治理',description:'处理举报、限制与申诉。',element:<AdminLayout><AdminGovernance/></AdminLayout>,useShell:false},
   { path: '/return-reward', title: '回归奖励', description: '领取创作活动奖励额度。', element: <ReturnRewardPage/> },
   { path: '/admin/email', title: '定向邮件', description: '管理定向邮件。', element: <AdminLayout><AdminEmailPage /></AdminLayout>, useShell: false },
   {path:'/admin/app-releases',title:'应用版本',description:'管理具体应用产物与版本通道。',element:<AdminLayout><AdminAppReleasesPage/></AdminLayout>,useShell:false},

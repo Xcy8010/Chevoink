@@ -1,3 +1,4 @@
+import { publicGovernanceRouter, adminGovernanceCaseRouter } from './routes/governance-cases.js'
 import appReleaseRoutes, { publicAppReleaseRouter } from './routes/app-releases.js'
 import { appReleaseCapabilityGuard } from './lib/app-release-capabilities.js'
 import testerRoutes from './routes/testers.js'
@@ -114,10 +115,12 @@ app.use('/api', async (req, _res, next) => {
 app.use('/api/app-releases', publicAppReleaseRouter)
 app.use('/api/credits/return-reward', returnRewardLinkRoutes)
 app.use('/api/admin/app-releases', appReleaseRoutes)
+app.use('/api/governance', publicGovernanceRouter)
 app.use('/api', accountAccessGuard)
 app.use('/api', appReleaseCapabilityGuard)
 app.get(['/api/agent/runs/:runId/stream', '/api/agent/sessions/:sessionId/goal-events'], guardDeviceStreams)
 app.use('/api/agent', agentRoutes)
+app.use('/api/admin/governance', adminGovernanceCaseRouter)
 app.use('/api/admin/site-content', siteContentRoutes)
 app.use('/api/site-content', publicSiteContentRouter)
 app.use('/api/admin/testers', testerRoutes)

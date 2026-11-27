@@ -1,5 +1,6 @@
 import { Link2, Send, UserRoundPlus } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
+import ReportAction from '@/features/governance/ReportAction'
 import { useNavigate } from 'react-router-dom'
 
 import { useToast } from '@/components/ui/toast-context'
@@ -94,6 +95,7 @@ export default function ShareMenu({
               <UserRoundPlus className="h-4 w-4 text-[var(--text-secondary)]" />
               发给好友
             </button>
+            <ReportAction target={share.kind==='novel'?{kind:'novel',id:share.novel.id}:{kind:'profile',id:share.author.id}} onOpen={()=>setOpen(false)}/>
             <button type="button" onClick={handleShareToCommunity} className={menuItemClass}>
               <Send className="h-4 w-4 text-[var(--text-secondary)]" />
               分享到社区

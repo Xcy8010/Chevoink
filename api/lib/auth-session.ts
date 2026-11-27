@@ -420,16 +420,17 @@ async function readDeviceAuthState(userId: string, deviceId: string, tokenVersio
       ? Prisma.sql`AND NOT EXISTS (SELECT 1 FROM account_device_sessions WHERE id = ${legacyGroupId(userId, tokenVersion)} AND revoked_at IS NOT NULL)`
       : Prisma.empty
     const [row] = await prisma.$queryRaw<(DeviceValidity & {
-      accountVersion: number; bannedAt: Date | null; phone: string | null; email: string | null; emailVerifiedAt: Date | null
+      accountVersion: number; restricted: boolean; bannedAt: Date | null; phone: string | null; email: string | null; emailVerifiedAt: Date | null
     })[]>`
       SELECT d.user_id AS "userId", d.token_version AS "tokenVersion", d.expires_at AS "expiresAt",
              d.last_active_at AS "lastActiveAt", d.revoked_at AS "revokedAt", d.device_name AS "deviceName",
-             u.token_version AS "accountVersion", u.banned_at AS "bannedAt", u.phone, u.email, u.email_verified_at AS "emailVerifiedAt"
+             u.token_version AS "accountVersion", u.banned_at AS "bannedAt", EXISTS (SELECT 1 FROM account_restrictions r WHERE r.user_id = u.id
+               AND r.scope = 'platform' AND r.revoked_at IS NULL AND (r.expires_at IS NULL OR r.expires_at > CURRENT_TIMESTAMP)) AS "restricted", u.phone, u.email, u.email_verified_at AS "emailVerifiedAt"
       FROM account_device_sessions d JOIN users u ON u.id = d.user_id
       WHERE d.id = ${deviceId} AND d.user_id = ${userId} ${historicalGuard}`
     if (!row) return { status: 'notFound' }
     return { status: 'verified', device: row, state: {
-      banned: row.bannedAt !== null, tokenVersion: row.accountVersion, checkedAt: Date.now(),
+      banned: row.bannedAt !== null || row.restricted === true, tokenVersion: row.accountVersion, checkedAt: Date.now(),
       missingLegacyEmail: isLegacyAccountMissingEmail({ phone: row.phone, email: row.email, emailVerified: Boolean(row.emailVerifiedAt) })
     } }
   } catch {
@@ -447,12 +448,13 @@ export async function readUserAuthState(userId: string, options: { fresh?: boole
 
   try {
     const user = await prisma.user.findUnique({ where: { id: userId },
-      select: { bannedAt: true, tokenVersion: true, phone: true, email: true, emailVerifiedAt: true } })
+      select: { bannedAt: true, tokenVersion: true, phone: true, email: true, emailVerifiedAt: true,
+        accountRestrictions: { where: { scope: 'platform', revokedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, take: 1, select: { id: true } } } })
     if (!user) {
       evictUserBanCache(userId)
       return { status: 'notFound' }
     }
-    const state: UserAuthState = { banned: user.bannedAt !== null, tokenVersion: user.tokenVersion, checkedAt: Date.now(),
+    const state: UserAuthState = { banned: user.bannedAt !== null || Boolean(user.accountRestrictions?.length), tokenVersion: user.tokenVersion, checkedAt: Date.now(),
       missingLegacyEmail: isLegacyAccountMissingEmail({ phone: user.phone, email: user.email, emailVerified: Boolean(user.emailVerifiedAt) }) }
     userAuthStateCache.set(userId, state)
     evictOldestAuthStateIfOverLimit()

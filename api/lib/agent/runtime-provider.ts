@@ -152,6 +152,7 @@ export async function beginDurableChat(input: {
   let previousUsageHash: string | undefined
   return {
     replay,
+    attemptId: attempt.id,
     async observe(usage: ProviderUsageObservation) {
       const hash = runtimeJson(usage).hash
       if (hash === previousUsageHash) return

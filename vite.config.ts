@@ -25,6 +25,7 @@ export default defineConfig({
   ],
   build: {
     rollupOptions: {
+      input: ['index.html', 'appeal/index.html'],
       output: {
         // 把体积大且极少变化的基础库拆成独立 chunk，发版后用户可继续命中缓存
         manualChunks: {

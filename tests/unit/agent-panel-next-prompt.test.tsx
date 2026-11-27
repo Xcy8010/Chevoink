@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ToastProvider } from '../../src/components/ui/Toast'
+import * as clipboard from '../../src/lib/clipboard'
 import { AgentPanel } from '../../src/features/studio/agent/components/AgentPanel'
 import { WorkConversationContext } from '../../src/features/studio/components/work-conversation-context'
 import WorkPerspective from '../../src/features/studio/components/WorkPerspective'
@@ -20,6 +21,43 @@ afterEach(() => {
   window.localStorage.clear()
   vi.unstubAllGlobals()
   vi.useRealTimers()
+})
+
+it('copies only the selected saved task ID from the top menu', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  const copy = vi.spyOn(clipboard, 'copyToClipboard').mockResolvedValue(true)
+  vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ success: true, data: null })))
+  const client = new QueryClient({ defaultOptions: { queries: { enabled: false } } })
+  const panel = (sessionId: string | null, sessionResolving = false) => <QueryClientProvider client={client}><ToastProvider>
+    <AgentPanel novelId="book" novelName="合成作品" sessionId={sessionId} sessionResolving={sessionResolving}
+      ensureSession={async () => 'created-task'} onRenameTask={vi.fn()} />
+  </ToastProvider></QueryClientProvider>
+
+  try {
+    const view = render(panel('previous-task', true))
+    const menu = screen.getByRole('button', { name: '任务操作' })
+    const action = () => screen.getByRole('button', { name: '复制任务 ID' })
+    fireEvent.click(menu)
+    expect(action()).toHaveProperty('disabled', true)
+    view.rerender(panel(null))
+    expect(action()).toHaveProperty('disabled', true)
+    expect(copy).not.toHaveBeenCalled()
+
+    view.rerender(panel('current-task'))
+    fireEvent.click(action())
+    expect(copy).toHaveBeenCalledExactlyOnceWith('current-task')
+    expect(menu.getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(menu)
+    expect(await screen.findByText('任务 ID 已复制，可在对话里让 Agent 读取该任务的上下文。')).toBeTruthy()
+    copy.mockResolvedValueOnce(false)
+    fireEvent.click(menu)
+    fireEvent.click(action())
+    expect(await screen.findByText('复制失败，请手动选择文本复制。')).toBeTruthy()
+    view.unmount()
+    client.clear()
+  } finally {
+    copy.mockRestore()
+  }
 })
 
 it('moves changes and todos to the composer whenever the side dock is not visible', () => {

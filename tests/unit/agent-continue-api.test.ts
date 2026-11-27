@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(
 vi.mock('../../api/lib/agent/events.js', () => ({ prepareRunEventResume: mocks.prepare }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { agentSession: { findFirst: mocks.session }, aiModelConfig: { findFirst: mocks.catalog }, agentRunEvent: { findFirst: mocks.terminal }, $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) }, agentExecutionOutbox: { findFirst: mocks.pause } },
+  prisma: { user: { findUnique: async () => ({ bannedAt: null, accountRestrictions: [] }) }, agentSession: { findFirst: mocks.session }, aiModelConfig: { findFirst: mocks.catalog }, agentRunEvent: { findFirst: mocks.terminal }, $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) }, agentExecutionOutbox: { findFirst: mocks.pause } },
 }))
 vi.mock('../../api/lib/agent/legacy-continuation-target.js', () => ({
   isLegacyContinuationRun: (run: { startRequest?: { prompt?: string } }) => run.startRequest?.prompt === '继续',

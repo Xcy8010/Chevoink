@@ -1,3 +1,4 @@
+import { assertGovernanceAllowed } from '../governance-access.js'
 import { Prisma } from '@prisma/client'
 
 import type {
@@ -340,6 +341,7 @@ export async function listAgentSchedules(userId: string, novelId: string) {
 }
 
 export async function createAgentSchedule(userId: string, input: { novelId: string; sessionId: string; name: string; prompt: string; cadenceMinutes: number; nextRunAt?: string }) {
+  await assertGovernanceAllowed(userId, 'agent')
   const session = await requireSession(userId, input.sessionId)
   if (session.novelId !== input.novelId) throw new DataAccessError(400, 'SESSION_NOVEL_MISMATCH', '任务与作品不匹配。')
   const selected = await resolveSystemModelConfig('speed')
@@ -348,6 +350,7 @@ export async function createAgentSchedule(userId: string, input: { novelId: stri
 }
 
 export async function updateAgentSchedule(userId: string, scheduleId: string, input: { status?: 'active' | 'paused'; nextRunAt?: string; modelConfigId?: string }) {
+  if (input.status === 'active') await assertGovernanceAllowed(userId, 'agent')
   const schedule = await prisma.agentSchedule.findFirst({ where: { id: scheduleId, userId } })
   if (!schedule) throw new DataAccessError(404, 'SCHEDULE_NOT_FOUND', '定时任务不存在。')
   if (input.modelConfigId) {

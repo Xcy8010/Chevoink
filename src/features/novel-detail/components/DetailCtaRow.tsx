@@ -1,4 +1,5 @@
 import { BookOpen, Bookmark, BookmarkCheck, ChevronLeft, Heart, Link2, MoreHorizontal, PenLine, Send, Share2, UserRoundPlus } from 'lucide-react'
+import ReportAction from '@/features/governance/ReportAction'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -171,6 +172,7 @@ export default function DetailCtaRow({ state, compact = false }: DetailCtaRowPro
                   <Link2 className="h-4 w-4 text-[var(--text-secondary)]" />
                   复制链接
                 </button>
+                {novelId && <ReportAction target={{kind:'novel',id:novelId}} onOpen={()=>setMenuOpen(false)}/>}
               </div>
             </>
           ) : null}
@@ -182,8 +184,8 @@ export default function DetailCtaRow({ state, compact = false }: DetailCtaRowPro
           wrapperClassName="flex-none"
           placement="down"
           triggerClassName="press-feedback inline-flex h-11 w-11 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--surface-default)] text-[var(--text-secondary)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"
-          triggerContent={<Share2 className="h-4 w-4" />}
-          ariaLabel="分享这本书"
+          triggerContent={<MoreHorizontal className="h-4 w-4" />}
+          ariaLabel="作品更多操作"
         />
       ) : (
         <button

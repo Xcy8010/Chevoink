@@ -1,4 +1,5 @@
 import { Heart, Link2, MessageSquareMore, MoreHorizontal, Star, Trash2, UserRoundPlus } from 'lucide-react'
+import ReportAction from '@/features/governance/ReportAction'
 import { memo, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
@@ -182,8 +183,9 @@ const PostCard = memo(function PostCard({ post, compact = false, flat = false, t
       {shareMenuOpen ? (
         <div className={cn(
           'absolute right-0 z-50 w-44 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] py-1.5 shadow-[var(--shadow-modal)]',
-          timeline ? 'top-full mobile:mt-2.5' : 'bottom-[42px]',
+          'bottom-[42px]',
         )}>
+          <ReportAction target={{kind:'post',id:post.id}} onOpen={()=>setShareMenuOpen(false)}/>
           {isOwnPost ? (
             <button
               type="button"
@@ -271,7 +273,7 @@ const PostCard = memo(function PostCard({ post, compact = false, flat = false, t
               {post.topic.name}
             </span>
           ) : null}
-          {timeline ? moreActions : null}
+
         </div>
       </div>
 
@@ -433,7 +435,7 @@ const PostCard = memo(function PostCard({ post, compact = false, flat = false, t
             {formatCompactCount(favoriteCount)}
           </button>
         </div>
-        {timeline ? null : moreActions}
+        {moreActions}
       </div>
 
       {shareSheetOpen ? (

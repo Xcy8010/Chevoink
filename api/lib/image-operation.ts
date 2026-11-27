@@ -1,3 +1,5 @@
+import { recordRefusalLead } from './governance-observation.js'
+import { assertGovernanceAllowed } from './governance-access.js'
 import { currentGoalExecution, withoutGoalEffects } from './agent/goal-context.js'
 import { assertGoalProviderAdmission, reserveGoalUsageInTransaction, syncGoalLegacyUsage } from './agent/goal-budget.js'
 import { assertGoalFence } from './agent/goal-fence.js'
@@ -35,7 +37,7 @@ function publicRoute(route: z.infer<typeof coverRouteSchema>) {
   return route
 }
 /** Used dispatch permits recover sealed responses; they never grant another HTTP. */
-export async function executeImageOperation(userId: string, input: GenerateCoverImageRequest & { negativePrompt?: string | null }, signal?: AbortSignal): Promise<GenerateCoverImageResponse['data']> {
+export async function executeImageOperation(userId: string, input: GenerateCoverImageRequest & { negativePrompt?: string | null }, signal?: AbortSignal, origin?: 'http'): Promise<GenerateCoverImageResponse['data']> {
   return withoutGoalEffects(async () => {
   const goal = currentGoalExecution()
   if (goal && (goal.userId !== userId || goal.novelId !== input.novelId)) throw new DataAccessError(409, 'GOAL_SCOPE_MISMATCH', '图片请求与目标归属不一致。')
@@ -50,6 +52,7 @@ export async function executeImageOperation(userId: string, input: GenerateCover
       if (old.requestHash !== requestHash) throw new DataAccessError(409, 'IMAGE_OPERATION_CONFLICT', '原操作编号已绑定不同图片请求。')
       return old
     }
+    await assertGovernanceAllowed(userId, 'agent', tx)
     const runtime = await resolveCoverImageRuntime()
     const routes = [runtime, ...(runtime.fallbackRuntimes ?? [])].map(value => publicRoute(value.route))
     const contentPolicy = await contentPolicyEnabledForUser(userId, tx)
@@ -91,6 +94,7 @@ export async function executeImageOperation(userId: string, input: GenerateCover
     }
     if (operation.state === 'prepared') {
       signal?.throwIfAborted()
+      await assertGovernanceAllowed(userId, 'agent')
       await assertGoalProviderAdmission(goal)
       const runtime = await resolveCoverImageRuntime(route)
       const { modelConfigId: _id, modelConfigRevision: _revision, ...legacy } = runtime.route
@@ -156,7 +160,10 @@ export async function executeImageOperation(userId: string, input: GenerateCover
       })
       if (goal) await syncGoalLegacyUsage(work.attempts[index])
       await reconcileCreditRefunds({ userId, limit: 10 }).catch(() => undefined)
-      if (failure.code === 'COVER_CONTENT_REFUSED') throw failure
+      if (failure.code === 'COVER_CONTENT_REFUSED') {
+        await recordRefusalLead(userId, origin === 'http' ? 'cover_http' : 'agent_cover', operation.id, goal?.runId)
+        throw failure
+      }
       signal?.throwIfAborted()
       if (unknown) throw reconciliation()
       if (terminal) throw failure

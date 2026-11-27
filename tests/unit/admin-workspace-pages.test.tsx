@@ -19,7 +19,10 @@ beforeEach(() => {
   mocks.operations.mockImplementation(async query => adminYunshuOperationsFixture(query))
   mocks.yunshu.mockResolvedValue({source:'yunshu_admin_logs',scope:'configured_platform_tokens',period:'month',window:{from:'2026-11-01T00:00:00Z',to:'2026-11-04T00:00:00Z'},observedAt:null,state:'unconfigured',coverage:'partial',paginationComplete:false,message:'',lastAttemptAt:null,sources:{configured:0,verified:0,unresolved:0},models:[]})
   mocks.tokens.mockResolvedValue({ summary: { totalTokens: 0, requestTokens: 0, responseTokens: 0, cacheHitTokens: null, cacheMissTokens: null, cacheObservedTokens: 0, users: 0, webSearchCalls: 0, imageCalls: 0 }, models: [], runs: [], runTurns: [], users: [], actions: [], trend: [] })
-  mocks.request.mockImplementation(async (url: string) => url.includes('/integrations/status') ? {resources:[]} : url.includes('/operations/health') ? { source:'provider_attempts',coverage:[],snapshotAt:'2026-11-01T10:00:00Z',window:{from:'2026-11-01T00:00:00Z',to:'2026-11-02T00:00:00Z',timeZone:'UTC+8',boundary:'created_at'},observation:'no_samples',counts:{total:0,success:0,failure:0,pending:0,cancelled:0,unknown:0},lastSampleAt:null } : url.includes('supplier-balances') ? [] : { labels: [], metrics: [{ key: 'failed', label: '失败执行', total: 2, values: [] }], tools: [], cost: { knownCalls: 0, unknownCalls: 4, models: [] }, to: '2026-11-01T10:00:00Z' })
+  mocks.request.mockImplementation(async (url: string) => url.endsWith('/governance/summary')
+    ? {pending:2,appeals:1,review:5,overdue:0}
+    : url.endsWith('/governance/mail-status') ? {items:[{state:'delivered',mode:'mock',count:7}],expiring:3}
+    : url.includes('/integrations/status') ? {resources:[]} : url.includes('/operations/health') ? { source:'provider_attempts',coverage:[],snapshotAt:'2026-11-01T10:00:00Z',window:{from:'2026-11-01T00:00:00Z',to:'2026-11-02T00:00:00Z',timeZone:'UTC+8',boundary:'created_at'},observation:'no_samples',counts:{total:0,success:0,failure:0,pending:0,cancelled:0,unknown:0},lastSampleAt:null } : url.includes('supplier-balances') ? [] : { labels: [], metrics: [{ key: 'failed', label: '失败执行', total: 2, values: [] }], tools: [], cost: { knownCalls: 0, unknownCalls: 4, models: [] }, to: '2026-11-01T10:00:00Z' })
   mocks.feedback.mockResolvedValue({ counts: { pending: 3 }, items: [] })
 })
 afterEach(cleanup)
@@ -33,6 +36,9 @@ it('puts real attention counts before trends and labels unavailable health witho
   expect(await screen.findByText('3 条')).toBeTruthy()
   expect(await screen.findByText('2 次')).toBeTruthy()
   expect(await screen.findByText('4 次缺价格或用量')).toBeTruthy()
+  expect(await screen.findByText('待受理 2 · 待复核 5 · 待申诉处理 1 · 逾期 0')).toBeTruthy()
+  expect(await screen.findByText('24 小时内到期的限制 3 项')).toBeTruthy()
+  expect(await screen.findByText('模拟 · 已投递 7')).toBeTruthy()
   const attention = screen.getByRole('region', { name: '待办与异常' })
   expect(within(attention).getByText('未接入')).toBeTruthy()
   expect(within(attention).getByRole('link', { name: '查看待处理反馈' }).getAttribute('href')).toBe('/admin/feedback?status=pending')

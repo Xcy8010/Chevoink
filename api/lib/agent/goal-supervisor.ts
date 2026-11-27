@@ -1,3 +1,4 @@
+import { activeAgentRestriction } from '../governance-access.js'
 import { randomUUID } from 'node:crypto'
 import { agentGoalExecutionOptionsSchema } from '../../../shared/contracts/agent-goal.js'
 import { env } from '../../config/env.js'
@@ -25,7 +26,8 @@ export async function superviseAgentGoal(userId: string, sessionId: string, goal
   const action = await runtimeTransaction(async tx => {
     let goal = await lockOwnedGoal(tx, userId, sessionId, goalId)
     const now = await databaseNow(tx)
-    if (!env.agentGoalEnabled && goal.status === 'active') return { kind: 'pause' as const, version: goal.stateVersion }
+    const unavailable = goal.status === 'active' && await tx.user.findFirst({ where: { id: userId, accountRestrictions:{some:activeAgentRestriction(now)} }, select: { id: true } })
+    if ((!env.agentGoalEnabled || unavailable) && goal.status === 'active') return { kind: 'pause' as const, version: goal.stateVersion }
     const activation = await reconcileGoalActivation(tx, goal, now)
     if (activation) return activation === true ? null : activation
     if (['completed', 'cancelled'].includes(goal.status)) return null

@@ -337,6 +337,7 @@ enum SmsVerificationPurpose {
 }
 
 enum EmailVerificationPurpose {
+  appeal
   register
   login
   bind
@@ -376,6 +377,9 @@ model AccountDeviceSession {
 }
 
 model User {
+  accountRestrictions        AccountRestriction[]
+  agentSafetyEvents            AgentSafetyEvent[]
+  agentSafetyEscalations       AgentSafetyEscalation[]
   deviceSessions             AccountDeviceSession[]
   testerEntitlement TesterEntitlement?
   legalConsents UserLegalConsent[]
@@ -3862,4 +3866,145 @@ model AdminEmailSegment {
   filters Json
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   @@map("admin_email_segments")
+}
+
+model GovernanceCase {
+  id String @id @default(cuid())
+  requestKey String @unique
+  kind String
+  targetKind String
+  targetId String
+  subjectId String?
+  reporterId String?
+  requesterKey String
+  category String
+  statement String?
+  snapshot String?
+  status String @default("pending")
+  relatedId String?
+  conclusion String?
+  createdAt DateTime @default(now())
+  acknowledgeBy DateTime
+  feedbackBy DateTime?
+  materialsAt DateTime?
+  acknowledgedAt DateTime?
+  publicProgress String?
+  updatedAt DateTime @updatedAt
+  evidenceUntil DateTime?
+  events GovernanceCaseEvent[]
+  @@index([status, acknowledgeBy])
+  @@index([reporterId, createdAt])
+  @@index([requesterKey, createdAt])
+  @@index([targetKind, targetId])
+  @@index([evidenceUntil])
+}
+
+model GovernanceCaseEvent {
+  id String @id @default(cuid())
+  caseId String
+  actorId String?
+  action String
+  prior String?
+  result String?
+  reason String?
+  createdAt DateTime @default(now())
+  item GovernanceCase @relation(fields: [caseId], references: [id])
+  @@index([caseId, createdAt])
+}
+
+
+model AccountRestriction {
+  legacyBan Boolean @default(false) @map("legacy_ban")
+  id String @id @default(cuid()) @db.VarChar(64)
+  userId String @db.VarChar(64) @map("user_id")
+  scope String @db.VarChar(80)
+  reason String
+  clause String
+  sourceId String? @db.VarChar(64) @map("source_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime? @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, scope, revokedAt, expiresAt])
+  @@map("account_restrictions")
+}
+
+model AgentSafetyEvent {
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id String @id @default(cuid()) @db.VarChar(64)
+  userId String @db.VarChar(64) @map("user_id")
+  actionKey String @db.VarChar(180) @map("action_key")
+  source String @db.VarChar(80)
+  policyVersion String @db.VarChar(80) @map("policy_version")
+  category String @db.VarChar(80)
+  status String @db.VarChar(80)
+  evasion String @db.VarChar(80)
+  evidenceRef String? @map("evidence_ref")
+  reviewReason String? @map("review_reason")
+  reviewerId String? @db.VarChar(64) @map("reviewer_id")
+  reviewedAt DateTime? @map("reviewed_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([userId, status, createdAt])
+  @@unique([userId, actionKey])
+  @@map("agent_safety_events")
+}
+
+model AgentSafetyEscalation {
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  windowDays Int @map("window_days")
+  eventIds String[] @map("event_ids")
+  id String @id @default(cuid()) @db.VarChar(64)
+  userId String @db.VarChar(64) @map("user_id")
+  eventId String @db.VarChar(64) @map("event_id")
+  level String @db.VarChar(80)
+  restrictionId String? @db.VarChar(64) @map("restriction_id")
+  correctedAt DateTime? @map("corrected_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([userId, level, createdAt])
+  @@map("agent_safety_escalations")
+}
+
+model AgentSafetyPolicy {
+  id String @id @default(cuid()) @db.VarChar(64)
+  mode String @db.VarChar(80)
+  windowDays Int @map("window_days")
+  banDays Int @map("ban_days")
+  updatedAt DateTime @default(now()) @map("updated_at")
+  @@map("agent_safety_policy")
+}
+
+
+/// Transactional notice outbox; attempts of uncertain outcome are never redispatched.
+model GovernanceMail {
+  id          String   @id @default(cuid())
+  eventId     String
+  userId      String
+  kind        String
+  reason      String
+  measure     String?
+  recipient   String?
+  state       String   @default("pending")
+  mode        String?
+  attemptedAt DateTime?
+  requestId   String?
+  messageId   String?
+  detail      String?
+  nextCheckAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([eventId, kind, userId])
+  @@index([state, nextCheckAt, createdAt])
+  @@map("governance_mail")
+}
+
+/// A server-observed Yunshu response, associated with this specific local dispatch.
+model YunshuRequestLink {
+  kind      String   @db.VarChar(12)
+  localId   String   @db.VarChar(64)
+  requestId String   @db.VarChar(64)
+  createdAt DateTime @default(now())
+  @@id([kind, localId, requestId])
+  @@index([requestId])
+  @@map("yunshu_request_links")
 }

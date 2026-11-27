@@ -1,3 +1,4 @@
+import { assertGovernanceAllowed } from '../governance-access.js'
 /**
  * 作品域数据访问
  * 由 data-access.ts 按域拆分而来（声明顺序与原文件一致）；
@@ -69,6 +70,7 @@ export async function getNovelByIdData(novelId: string): Promise<Novel | null> {
 
 
 export async function createNovelData(userId: string, input: CreateNovelRequest): Promise<Novel> {
+  if (input.status && input.status !== 'draft' && input.visibility !== 'private') await assertGovernanceAllowed(userId, 'novel_publish')
   await ensureUserExists(userId)
   const baseSlug = buildSlug(input.title)
   // 靠 count 推算后缀会撞车：删过中间的作品后，count+1 可能正好是还存在的 slug（唯一约束报错）。
@@ -140,6 +142,7 @@ export async function updateNovelData(
     return null
   }
 
+  if ((input.visibility ?? existing.visibility) !== 'private' && (input.status ?? existing.status) !== 'draft') await assertGovernanceAllowed(userId, 'novel_publish')
   if (isNovelPublicationTransition(existing.status, input.status)) {
     requireNovelPublishMetadata({
       coverAssetId: input.coverAssetId === undefined ? existing.coverAssetId : input.coverAssetId,
@@ -201,6 +204,7 @@ export async function publishNovelData(
   chapterIds: string[],
   visibility: Visibility = 'public',
 ): Promise<{ novel: Novel; publishedChapterIds: string[] } | null> {
+  await assertGovernanceAllowed(userId, 'novel_publish')
   const now = new Date()
 
   const updated = await prisma.$transaction(async (tx) => {

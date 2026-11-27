@@ -11,3 +11,13 @@ prisma/migrations/20261115003000_personalization_rule_texts/migration.sql text e
 prisma/migrations/20261124090000_admin_directed_email/migration.sql text eol=lf
 prisma/migrations/20261125050000_admin_email_library/migration.sql text eol=lf
 prisma/migrations/20261125060000_admin_return_reward/migration.sql text eol=lf
+
+# Preserve approved transactional email originals byte for byte.
+api/templates/governance/chevoink-account-warning.html -text whitespace=cr-at-eol
+api/templates/governance/chevoink-account-enforcement.html -text whitespace=cr-at-eol
+
+# Freeze the audited governance migration checksums across supported checkouts.
+prisma/migrations/20261128090000_governance_restrictions/migration.sql text eol=lf
+prisma/migrations/20261128120020_governance_cases/migration.sql text eol=lf
+prisma/migrations/20261128120030_governance_mail/migration.sql text eol=lf
+prisma/migrations/20261128120040_yunshu_request_links/migration.sql text eol=lf

@@ -104,7 +104,7 @@ router.post('/cover-image', async (req: Request, res: Response): Promise<void> =
       count,
       novelId: body.novelId ?? null,
       negativePrompt: body.negativePrompt ?? null,
-    })
+    }, { origin:'http' })
 
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {

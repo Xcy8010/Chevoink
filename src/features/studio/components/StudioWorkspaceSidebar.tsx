@@ -9,7 +9,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 
 import { useToast } from '@/components/ui/toast-context'
 import { useStudioCredits } from '../hooks/useStudioCredits'
-import { copyToClipboard } from '@/lib/clipboard'
+import { COPY_TASK_ID_LABEL, UNSAVED_TASK_ID_HINT, copyStudioTaskId } from '../lib/copy-task-id'
 import { cn } from '@/lib/utils'
 import { groupTimelineTasks, type SidebarTask } from './studio-task-timeline'
 import { useShellStore } from '@/store/useShellStore'
@@ -338,11 +338,6 @@ export default function StudioWorkspaceSidebar(props: Props) {
       taskCardTimerRef.current = null
       setTaskCard({ task, x: rect.right + 10, y: rect.top })
     }, 320)
-  }
-  async function copyTaskId(taskId: string) {
-    setContext(null)
-    if (await copyToClipboard(taskId)) toast.success('任务 ID 已复制，可在对话里让 Agent 读取该任务的上下文。')
-    else toast.error('复制失败，请手动选择文本复制。')
   }
   function requestDeleteNovel(target: { id: string; title: string }) {
     setContext(null)
@@ -826,7 +821,13 @@ export default function StudioWorkspaceSidebar(props: Props) {
       </> : null}
       <button type="button" disabled={busy || ('temporary' in context && context.temporary)} onClick={() => void togglePin(context)} className={menuItem}>{context.pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}{context.pinned ? '取消置顶' : '置顶'}</button>
       <button type="button" disabled={busy} onClick={() => beginRename(context)} className={menuItem}><PencilLine className="h-3.5 w-3.5" />重命名</button>
-      {context.kind === 'task' ? <><button type="button" disabled={context.temporary} onClick={() => void copyTaskId(context.id)} className={menuItem} title={context.temporary ? '新对话发出第一条消息后才有任务 ID' : '复制任务 ID'}><Copy className="h-3.5 w-3.5" />复制任务 ID</button><button type="button" disabled={busy || context.temporary} onClick={() => { const target = { kind: 'forkTask' as const, id: context.id, title: context.title }; setContext(null); setDanger(target) }} className={menuItem} title={context.temporary ? '新对话还没有可复制的上下文' : '复制成同名分支任务'}><GitBranch className="h-3.5 w-3.5" />创建分支</button></> : null}
+      {context.kind === 'task' ? <>
+        <button type="button" disabled={context.temporary} className={menuItem} title={context.temporary ? UNSAVED_TASK_ID_HINT : COPY_TASK_ID_LABEL} onClick={() => {
+          setContext(null)
+          void copyStudioTaskId(context.id, toast)
+        }}><Copy aria-hidden="true" className="h-3.5 w-3.5" />{COPY_TASK_ID_LABEL}</button>
+        <button type="button" disabled={busy || context.temporary} onClick={() => { const target = { kind: 'forkTask' as const, id: context.id, title: context.title }; setContext(null); setDanger(target) }} className={menuItem} title={context.temporary ? '新对话还没有可复制的上下文' : '复制成同名分支任务'}><GitBranch className="h-3.5 w-3.5" />创建分支</button>
+      </> : null}
       {context.kind === 'novel' && context.id === props.currentNovelId ? <><div className={menuDivider} />{props.onOpenNovelMeta ? <button type="button" onClick={() => { setContext(null); props.onOpenNovelMeta?.() }} className={menuItem}><Settings2 className="h-3.5 w-3.5" />作品设置</button> : null}{props.onPublishNovel ? <button type="button" onClick={() => { setContext(null); props.onPublishNovel?.() }} className={menuItem}><Upload className="h-3.5 w-3.5" />{publishLabel}</button> : null}{props.onToggleNovelCompletion && props.currentNovelStatus ? <button type="button" onClick={() => { setContext(null); props.onToggleNovelCompletion?.() }} className={menuItem}>{novelCompleted ? <RotateCcw className="h-3.5 w-3.5" /> : <Flag className="h-3.5 w-3.5" />}{novelCompleted ? '继续连载' : '完结作品'}</button> : null}<button type="button" onClick={() => { contextTriggerRef.current?.focus(); setContext(null); props.onImportNovel() }} className={cn(menuItem, 'min-h-11')}><Upload className="h-3.5 w-3.5" />一键导入</button>{props.onExportNovel ? <button type="button" onClick={() => { setContext(null); props.onExportNovel?.() }} className={menuItem}><FolderDown className="h-3.5 w-3.5" />一键导出</button> : null}</> : null}
       <div className={menuDivider} />
       <button type="button" disabled={busy || ('temporary' in context && context.temporary)} onClick={() => requestArchive(context)} className={cn(menuItem, 'text-amber-700')}><Archive className="h-3.5 w-3.5" />归档</button>

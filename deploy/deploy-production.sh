@@ -73,6 +73,10 @@ if [[ "$MIGRATION_PLAN" == "20261119090000_story_profiles" && "$PUBLICATION" != 
   echo '[chevoink] story profiles migration requires API-only deployment' >&2
   exit 1
 fi
+if [[ "$MIGRATION_PLAN" == "20261128_platform_governance" && "$PUBLICATION" != api-only ]]; then
+  echo '[chevoink] governance migrations require API-only deployment' >&2
+  exit 1
+fi
 if [[ "$MIGRATION_PLAN" == "20261126010000_verified_credit_entitlements" && "$PUBLICATION" != api-only ]]; then
   echo '[chevoink] verified credit entitlements migration requires API-only deployment' >&2
   exit 1
@@ -92,7 +96,7 @@ verify_baseline
 [[ "$(snapshot_process)" == "$PROCESS_BEFORE" ]]
 printf '{"revision":"%s","archiveSha256":"%s"}\n' "$REVISION" "$ARCHIVE_HASH" > "$STAGE/.chevoink-release.json"
 phase prepared
-if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" || "$MIGRATION_PLAN" == "20261019120000_web_fetch_tool_config" || "$MIGRATION_PLAN" == "20261020120000_web_tool_billing" || "$MIGRATION_PLAN" == "20261101120000_admin_model_lifecycle" || "$MIGRATION_PLAN" == "20261106_admin_model_experience" || "$MIGRATION_PLAN" == "20261107010000_app_release_retention" || "$MIGRATION_PLAN" == "20261108120000_site_announcement_reads" || "$MIGRATION_PLAN" == "20261108140000_user_notifications" || "$MIGRATION_PLAN" == "20261112090000_email_account_auth" || "$MIGRATION_PLAN" == "20261114090000_agent_personalization" || "$MIGRATION_PLAN" == "20261114150000_personalization_memory_rules" || "$MIGRATION_PLAN" == "20261115003000_personalization_rule_texts" || "$MIGRATION_PLAN" == "20261119090000_story_profiles" || "$MIGRATION_PLAN" == "20261120000100_account_device_sessions" || "$MIGRATION_PLAN" == "20261125_directed_email" || "$MIGRATION_PLAN" == "20261126010000_verified_credit_entitlements" ]]; then
+if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" || "$MIGRATION_PLAN" == "20261019120000_web_fetch_tool_config" || "$MIGRATION_PLAN" == "20261020120000_web_tool_billing" || "$MIGRATION_PLAN" == "20261101120000_admin_model_lifecycle" || "$MIGRATION_PLAN" == "20261106_admin_model_experience" || "$MIGRATION_PLAN" == "20261107010000_app_release_retention" || "$MIGRATION_PLAN" == "20261108120000_site_announcement_reads" || "$MIGRATION_PLAN" == "20261108140000_user_notifications" || "$MIGRATION_PLAN" == "20261112090000_email_account_auth" || "$MIGRATION_PLAN" == "20261114090000_agent_personalization" || "$MIGRATION_PLAN" == "20261114150000_personalization_memory_rules" || "$MIGRATION_PLAN" == "20261115003000_personalization_rule_texts" || "$MIGRATION_PLAN" == "20261119090000_story_profiles" || "$MIGRATION_PLAN" == "20261120000100_account_device_sessions" || "$MIGRATION_PLAN" == "20261125_directed_email" || "$MIGRATION_PLAN" == "20261126010000_verified_credit_entitlements" || "$MIGRATION_PLAN" == "20261128_platform_governance" ]]; then
   DOTENV_CONFIG_QUIET=true node --import dotenv/config scripts/verify-release-migration.mjs before "$STAGE" "$CURRENT" "$STAGE/.release-migration-before.json"
   phase migrating
   npx prisma migrate deploy

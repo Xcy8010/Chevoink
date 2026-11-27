@@ -151,7 +151,7 @@ export default function AccountAccessGate({ children, studioPhoneRequired, close
   const user = useShellStore(state => state.sessionUser)
   const authenticated = useShellStore(state => state.authStatus === 'authenticated')
   const studioPhoneExempt = user?.studioPhoneVerificationRequired === false && !user.phoneVerified
-  const skipAccountDialogs = /^\/admin(?:\/|$)/i.test(pathname) || /^\/(?:login|register|account\/docs|legal)\/?$/i.test(pathname)
+  const skipAccountDialogs = /^\/admin(?:\/|$)/i.test(pathname) || /^\/(?:login|register|account\/docs|legal|report|appeal)\/?$/i.test(pathname)
   const skipSetup = skipAccountDialogs || (studioPhoneExempt && /^\/studio(?:\/|$)/i.test(pathname))
   let dialog: ReactNode = null
   if (authenticated && user) {

@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-quer
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
+  success: vi.fn(), error: vi.fn(), copy: vi.fn(),
   updateAgentSessionSettings: vi.fn(),
   deleteAgentSession: vi.fn(),
   fetchAgentSessions: vi.fn(),
@@ -31,7 +32,8 @@ vi.mock('../../src/features/studio/api', () => ({
 }))
 
 vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }))
-vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }))
+vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ success: mocks.success, error: mocks.error }) }))
+vi.mock('../../src/lib/clipboard', () => ({copyToClipboard:mocks.copy}))
 
 import StudioWorkspaceSidebar from '../../src/features/studio/components/StudioWorkspaceSidebar'
 import type { AgentSession, Novel, UserMePayload } from '../../shared/contracts/index.js'
@@ -162,4 +164,19 @@ it.each(['task', 'novel'] as const)('keeps the active %s visible when the archiv
   expect(onTaskDeleted).not.toHaveBeenCalled()
   expect(onNovelArchived).not.toHaveBeenCalled()
   expect(onSelectNovel).not.toHaveBeenCalled()
+})
+
+it('copies the selected saved task from the sidebar with the shared success and failure feedback', async () => {
+  mocks.copy.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+  renderFixture({activeTaskId:'current-task', currentTasks:[{...tasks[0],id:'current-task'}, {...tasks[0],id:'draft',title:'临时任务',temporary:true}]})
+  const project = within(screen.getByRole('group', { name: '作品A的任务' }))
+  for (let attempt = 0; attempt < 2; attempt++) {
+    fireEvent.contextMenu(project.getByRole('button', { name:'写第四章' }))
+    fireEvent.click(screen.getByRole('button', {name:'复制任务 ID'}))
+    await waitFor(()=>expect(mocks.copy).toHaveBeenNthCalledWith(attempt+1,'current-task'))
+  }
+  expect(mocks.success).toHaveBeenCalledWith('任务 ID 已复制，可在对话里让 Agent 读取该任务的上下文。')
+  expect(mocks.error).toHaveBeenCalledWith('复制失败，请手动选择文本复制。')
+  fireEvent.contextMenu(project.getByRole('button', { name:'临时任务' }))
+  expect(screen.getByRole('button', {name:'复制任务 ID'})).toHaveProperty('disabled',true)
 })

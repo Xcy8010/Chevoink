@@ -1,3 +1,4 @@
+import { assertGovernanceAllowed } from '../governance-access.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { freezeWritingScope, readWritingScope } from './writing-scope.js'
 import { enableAgentWritingScope } from './agent-writing-scope.js'
@@ -393,6 +394,7 @@ export async function startLoopRunLocked(
   input: StartAgentLoopRunRequest,
   options: StartLoopRunOptions = {},
 ): Promise<StartAgentLoopRunResponse> {
+  await assertGovernanceAllowed(userId, 'agent')
   input = persistedStartSchema.parse(JSON.parse(JSON.stringify(input)))
   if (!input.chapterId?.trim() && input.selection) input = { ...input, selection: null }
   let steering: StartAgentLoopRunRequest | undefined
@@ -919,6 +921,7 @@ export async function resolveLoopRunApproval(
   approvalId?: string,
 ): Promise<{ resolved: boolean }> {
   const run = await findOwnedLoopRun(userId, runId)
+  if (approved) await assertGovernanceAllowed(userId, 'agent')
   if ((run.runtimeProtocolVersion ?? 0) !== 0) {
     if (!approvalId) throw new DataAccessError(409, 'APPROVAL_ID_REQUIRED', '请刷新审批卡片后确认原审批请求。')
     return resolveDurableApproval({ userId, runId, requestId: approvalId, callId, approved, alwaysAllow })
@@ -943,6 +946,7 @@ export async function resolveLoopRunQuestion(
 ): Promise<ResolveAgentQuestionResponse> {
   const run = await findOwnedLoopRun(userId, runId)
   const decision = typeof response === 'string' ? { answer: response } : response
+  if (!('cancelled' in decision)) await assertGovernanceAllowed(userId, 'agent')
   if (run.runtimeProtocolVersion > 0) {
     if (!requestId) throw new DataAccessError(409, 'QUESTION_REQUEST_REQUIRED', '请刷新原提问卡片后回答。')
     return withUserRunLock(userId, async () => {
@@ -1196,6 +1200,7 @@ async function continueLoopRunLocked(
   activation?: { goalId: string; epoch: bigint },
 ): Promise<StartAgentLoopRunResponse> {
   let run = await findOwnedLoopRun(userId, runId)
+  await assertGovernanceAllowed(userId, 'agent')
   let continuationRetirements: LegacyContinuationRetirement[] = []
   if (!activation && !run.taskRootId && run.runtimeProtocolVersion === 0 && isLegacyContinuationRun(run)) {
     const resolution = await prisma.$transaction(tx => readLegacyContinuationResolution(tx, run))

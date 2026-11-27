@@ -1,3 +1,4 @@
+import { assertGovernanceAllowed } from '../governance-access.js'
 /**
  * 社区帖子域数据访问
  * 由 data-access.ts 按域拆分而来（声明顺序与原文件一致）；
@@ -282,6 +283,7 @@ export async function getPostDetailData(postId: string, viewerUserId?: string | 
 
 
 export async function createPostData(userId: string, input: CreatePostRequest): Promise<Post> {
+  await assertGovernanceAllowed(userId, 'post')
   await ensureUserExists(userId)
   ensureNonEmptyText(input.content, 'content')
 

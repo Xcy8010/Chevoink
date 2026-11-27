@@ -1,3 +1,4 @@
+import { assertGovernanceAllowed } from '../governance-access.js'
 /**
  * 章节与创作/阅读视图域数据访问
  * 由 data-access.ts 按域拆分而来（声明顺序与原文件一致）；
@@ -174,6 +175,7 @@ export async function createChapterData(
   input: CreateChapterRequest,
   defaultVisibility: Visibility,
 ): Promise<Chapter | null> {
+  if (input.status === 'published' && (input.visibility ?? defaultVisibility) !== 'private') await assertGovernanceAllowed(userId, 'novel_publish')
   await ensureNovelOwner(userId, novelId)
 
   const chapter = await prisma.$transaction(async (tx) => {
@@ -250,6 +252,8 @@ export async function updateChapterData(
 
   const nextStatus = input.status ?? existing.status
   const publishingForFirstTime = nextStatus === 'published' && existing.status !== 'published'
+  if (nextStatus === 'published' && (input.visibility ?? existing.visibility) !== 'private'
+    && (publishingForFirstTime || input.visibility !== undefined && input.visibility !== existing.visibility)) await assertGovernanceAllowed(userId, 'novel_publish')
   const nextTitle = input.title === undefined ? existing.title : ensureNonEmptyText(plainChapterTitle(input.title), 'title')
   const nextSummary = input.summary === undefined ? existing.summary : input.summary
   const nextContent = input.content ?? existing.content

@@ -1,3 +1,4 @@
+import ReportAction from '@/features/governance/ReportAction'
 import { useMemo, useState } from 'react'
 import { AlignLeft, Trash2, X } from 'lucide-react'
 
@@ -130,6 +131,7 @@ export default function ReaderCommentsPanel({ state }: ReaderCommentsPanelProps)
           回复
         </button>
       ) : null}
+      <ReportAction menu target={{kind:'comment',id:comment.id}}/>
       {sessionUser?.id === comment.author?.id ? (
         <button
           type="button"

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const db = vi.hoisted(() => ({
+  user: { findUnique: async () => ({ bannedAt: null, accountRestrictions: [] }) },
   agentRun: { findFirst: vi.fn(), findMany: vi.fn() },
   agentGoalExecution: { findUnique: vi.fn() },
   agentGoal: { findFirst: vi.fn() },

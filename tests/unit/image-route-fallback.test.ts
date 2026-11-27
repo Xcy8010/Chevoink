@@ -4,7 +4,7 @@ import { generateCoverImageData } from '../../api/lib/ai-service.js'
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), charge: vi.fn(), refund: vi.fn(), reconcile: vi.fn(), usage: vi.fn(), assets: vi.fn(), runtime: vi.fn() }))
 vi.mock('undici', async original => ({ ...await original<typeof import('undici')>(), fetch: mocks.fetch }))
 vi.mock('../../api/lib/tool-model-config.js', async original => ({ ...await original<object>(), getToolModelRuntime: mocks.runtime }))
-vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object>(), prisma: { aiUsageLog: { create: mocks.usage, findUnique: vi.fn(async () => null) } } }))
+vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object>(), prisma: { user: { findUnique: async () => ({ bannedAt: null, accountRestrictions: [] }) }, aiUsageLog: { create: mocks.usage, findUnique: vi.fn(async () => null) } } }))
 vi.mock('../../api/lib/credits.js', async original => ({ ...await original<object>(), consumeCredits: mocks.charge,
   recordImageRefundIntent: mocks.refund, reconcileCreditRefunds: mocks.reconcile }))
 vi.mock('../../api/lib/data-access.js', () => ({ createCoverAssetsData: mocks.assets, ensureNovelOwner: vi.fn() }))

@@ -1,3 +1,4 @@
+import { assertGovernanceAllowed } from '../governance-access.js'
 /**
  * 评论域数据访问
  * 由 data-access.ts 按域拆分而来（声明顺序与原文件一致）；
@@ -131,6 +132,7 @@ export async function listCommentsData(
 
 
 export async function createCommentData(userId: string, input: CreateCommentRequest): Promise<Comment> {
+  await assertGovernanceAllowed(userId, input.targetType === 'post' ? 'post_comment' : 'novel_comment')
   await ensureUserExists(userId)
   const targetIds = buildCommentTargetIds(input.targetType, input.targetId)
   ensureNonEmptyText(input.content, 'content')
@@ -266,6 +268,7 @@ export async function updateCommentData(
   if (existing.userId !== userId) {
     throw new DataAccessError(403, 'FORBIDDEN', '只能编辑自己的评论。')
   }
+  await assertGovernanceAllowed(userId, existing.targetType === 'post' ? 'post_comment' : 'novel_comment')
   ensureNonEmptyText(input.content, 'content')
 
   const isNovelRootComment = existing.targetType === 'novel' && !existing.parentId

@@ -240,18 +240,19 @@ export function createAdminYunshuUsageService(overrides: Partial<Dependencies> =
               try { const value: unknown = JSON.parse(row.other ?? '{}'); if (value && typeof value === 'object' && !Array.isArray(value)) other = value as Record<string, unknown> } catch { uncertain = true }
               const stream = other.stream_status && typeof other.stream_status === 'object' && !Array.isArray(other.stream_status) ? other.stream_status as Record<string, unknown> : null
               const duration = row.use_time !== undefined && row.use_time > 0 && Number.isSafeInteger(row.use_time * 1000) ? row.use_time * 1000 : null
-              records.push({ id: `${dedupe}:${occurrence}`, createdAt: new Date(row.created_at * 1000).toISOString(), modelName: model.modelName, group: model.group,
-                kind: row.type === 2 ? 'consume' : row.type === 5 ? 'error' : 'refund', requestId: row.request_id && /^[A-Za-z0-9_.:-]{1,128}$/.test(row.request_id) ? row.request_id : null,
-                requestTokens: row.type === 2 ? row.prompt_tokens ?? null : null, responseTokens: row.type === 2 ? row.completion_tokens ?? null : null,
-                durationMs: duration, streamOutcome: row.is_stream && (stream?.status === 'ok' || stream?.status === 'error') ? stream.status : 'unknown',
-                quota: row.quota !== undefined && row.quota >= 0 ? String(row.quota) : null })
-              if (row.type === 5) { model.errorCount++; continue }
-              if (row.type === 6) { model.refundCount++; continue }
-              model.requestCount++
               const tokenCount = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
               const writes = tokenCount(other.cache_creation_tokens)
               const short = tokenCount(other.cache_creation_tokens_5m), long = tokenCount(other.cache_creation_tokens_1h)
               const values = { requestTokens: row.prompt_tokens ?? null, responseTokens: row.completion_tokens ?? null, cacheHitTokens: tokenCount(other.cache_tokens), cacheWriteTokens: writes ?? (short !== null || long !== null ? (short ?? 0) + (long ?? 0) : null) }
+              records.push({ id: `${dedupe}:${occurrence}`, createdAt: new Date(row.created_at * 1000).toISOString(), modelName: model.modelName, group: model.group,
+                kind: row.type === 2 ? 'consume' : row.type === 5 ? 'error' : 'refund', requestId: row.request_id && /^[A-Za-z0-9_.:-]{1,128}$/.test(row.request_id) ? row.request_id : null,
+                requestTokens: row.type === 2 ? row.prompt_tokens ?? null : null, responseTokens: row.type === 2 ? row.completion_tokens ?? null : null,
+                durationMs: duration, streamOutcome: row.is_stream && (stream?.status === 'ok' || stream?.status === 'error') ? stream.status : 'unknown',
+                ...(row.type === 2 ? { cacheHitTokens: values.cacheHitTokens, cacheWriteTokens: values.cacheWriteTokens } : {}),
+                quota: row.quota !== undefined && row.quota >= 0 ? String(row.quota) : null })
+              if (row.type === 5) { model.errorCount++; continue }
+              if (row.type === 6) { model.refundCount++; continue }
+              model.requestCount++
               for (const field of ['requestTokens', 'responseTokens', 'cacheHitTokens', 'cacheWriteTokens'] as const) {
                 const value = values[field], old = model[field]
                 model[field] = old !== null && value !== null && Number.isSafeInteger(old + value) ? old + value : null
@@ -342,12 +343,16 @@ export function createAdminYunshuUsageService(overrides: Partial<Dependencies> =
     try { return structuredClone(await operation) }
     finally { if (auxActive.get(kind) === entry) auxActive.delete(kind) }
   }
-  const operations = async (query: AdminYunshuOperationsQuery, signal?: AbortSignal): Promise<AdminYunshuOperations> => {
+  const operations = async (query: AdminYunshuOperationsQuery, signal?: AbortSignal, requestIds?: ReadonlySet<string>): Promise<AdminYunshuOperations> => {
     const usage = await read(query.period, signal)
     const operationIdentity = scopeIdentity
     const snapshot = cache.get(query.period)
     const rows = snapshot?.identity === scopeIdentity && snapshot.value.observedAt === usage.observedAt ? snapshot.records : []
-    const filtered = rows.filter(row => query.kind === 'all' || row.kind === query.kind)
+    const consumptionCounts = new Map<string, number>()
+    for (const row of rows) {
+      if (row.kind === 'consume' && row.requestId) consumptionCounts.set(row.requestId, (consumptionCounts.get(row.requestId) ?? 0) + 1)
+    }
+    const filtered = rows.filter(row => (query.kind === 'all' || row.kind === query.kind) && (!requestIds || (row.requestId && requestIds.has(row.requestId))))
     const totalPages = Math.max(1, Math.ceil(filtered.length / query.pageSize))
     const page = Math.min(query.page, totalPages)
     const consume = rows.filter(row => row.kind === 'consume'), errors = rows.filter(row => row.kind === 'error'), refunds = rows.filter(row => row.kind === 'refund')
@@ -391,7 +396,7 @@ export function createAdminYunshuUsageService(overrides: Partial<Dependencies> =
     display = { ...display, deduction: displayQuota(deduction, liveUnit), refund: displayQuota(refund, liveUnit), net: displayQuota(net, liveUnit) }
     balance = { ...balance, displayRemaining: displayQuota(balance.remainingQuota, liveUnit), displayUsed: displayQuota(balance.usedQuota, liveUnit) }
     return structuredClone({ ...meta,
-      records: { items: filtered.slice((page - 1) * query.pageSize, page * query.pageSize), page, pageSize: query.pageSize, total: filtered.length, totalPages, hasMore: page < totalPages, totalObserved: rows.length, kind: query.kind },
+      records: { items: filtered.slice((page - 1) * query.pageSize, page * query.pageSize).map(row => row.requestId && (consumptionCounts.get(row.requestId) ?? 0) > 1 ? { ...row, ambiguousConsumption: true } : row), page, pageSize: query.pageSize, total: filtered.length, totalPages, hasMore: page < totalPages, totalObserved: rows.length, kind: query.kind },
       health: { observation: errors.length || streamError ? 'attention' : consume.length ? 'observed' : 'no_samples', consumeCount: consume.length, errorCount: errors.length, refundCount: refunds.length, streamSuccessCount: streamOk, streamErrorCount: streamError, unknownOutcomeCount: consume.length - streamOk - streamError,
         durationSamples: samples.length, p50Ms: samples.length ? samples[Math.ceil(samples.length * 0.5) - 1] : null, p95Ms: samples.length ? samples[Math.ceil(samples.length * 0.95) - 1] : null,
         lastSampleAt: [...consume, ...errors].reduce<string | null>((last, row) => last === null || row.createdAt > last ? row.createdAt : last, null) },

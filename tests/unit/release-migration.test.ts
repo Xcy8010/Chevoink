@@ -13,7 +13,7 @@ import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex,
   emailAccountMigrationName, emailAccountMigrationChecksum,
   agentPersonalizationMigrationName, agentPersonalizationMigrationChecksum,
   deviceSessionsMigrationName, deviceSessionsMigrationChecksum,
-  verifiedCreditMigrationName, verifiedCreditMigrationChecksum,
+  verifiedCreditMigrationName, verifiedCreditMigrationChecksum, governanceMigrations, governancePlan,
   storyProfilesMigrationName, storyProfilesMigrationChecksum, readStoryProfilesState, assertStoryProfilesState,
   assertAgentPersonalizationState, readAgentPersonalizationState } from '../../scripts/verify-release-migration.mjs'
 
@@ -566,10 +566,58 @@ model AgentPersonalizationMemory {
     for (const rows of [[old], [old, target, target], [old, target, { ...old, migration_name: 'extra' }], [{ ...old, historyHash: 'b'.repeat(32) }, target]]) expect(() => assert(rows, 'after', [old])).toThrow()
     expect(() => assert([old, target], 'after', [old, target])).toThrow()
   })
+  it('admits all four reviewed governance migrations as one API-only transition with unchanged history', () => {
+    const f = fixture()
+    try {
+      const frozen = readFileSync(new URL('../fixtures/release-verified-credit.schema.prisma', import.meta.url), 'utf8')
+      writeFileSync(path.join(f.baseline,'prisma/schema.prisma'), frozen)
+      const schema = readFileSync('prisma/schema.prisma', 'utf8')
+      writeFileSync(path.join(f.candidate,'prisma/schema.prisma'), schema)
+      const old = { migration_name:'old', checksum:'1'.repeat(64), historyHash:'a'.repeat(32), finished_at:new Date(), rolled_back_at:null, applied_steps_count:1 }
+      const changes = governanceMigrations.map(([name, checksum]) => {
+        const file = path.join('prisma/migrations', name, 'migration.sql')
+        const sql = readFileSync(file, 'utf8').replaceAll('\r\n', '\n')
+        mkdirSync(path.dirname(path.join(f.candidate, file)))
+        writeFileSync(path.join(f.candidate, file),sql)
+        return { file, sql, row:{ ...old, migration_name:name, checksum } }
+      })
+      expect(releaseMigrationPlan(f.candidate,f.baseline)).toBe(governancePlan)
+      for (const {file,sql} of changes) {
+        writeFileSync(path.join(f.candidate,file),sql+'\n')
+        expect(() => releaseMigrationPlan(f.candidate,f.baseline)).toThrow()
+        writeFileSync(path.join(f.candidate,file),sql)
+      }
+      for (const [file,contents] of [[path.join(f.candidate,'prisma/schema.prisma'),schema], [path.join(f.baseline,'prisma/schema.prisma'),frozen], [path.join(f.candidate,'prisma/migrations/old/migration.sql'),'SELECT 1;\n']]) {
+        writeFileSync(file, contents + '\n')
+        expect(() => releaseMigrationPlan(f.candidate,f.baseline)).toThrow()
+        writeFileSync(file,contents)
+      }
+      const sums = [['old',old.checksum],...governanceMigrations]
+      const rows = changes.map(item => item.row)
+      const verify = (history:unknown[], phase:string, before?:unknown[]) => assertMigrationState(history,sums,phase,before,governancePlan)
+      expect(() => verify([old], 'before')).not.toThrow()
+      expect(() => verify([old,...rows], 'after',[old])).not.toThrow()
+      for (const newRow of rows) {
+        expect(() => verify([old,newRow],'before')).toThrow()
+        expect(() => verify([old,...rows.filter(row => row !== newRow)],'after',[old])).toThrow()
+        expect(() => verify([old,...rows.map(row => row === newRow ? {...row,checksum:'0'.repeat(64)} : row)],'after',[old])).toThrow()
+      }
+      expect(() => verify([{...old,historyHash:'b'.repeat(32)},...rows], 'after', [old])).toThrow()
+      const sh = readFileSync('deploy/deploy-production.sh','utf8')
+      const condition = '"$MIGRATION_PLAN" == "'+governancePlan+'"'
+      const guard = sh.indexOf(condition+' && "$PUBLICATION" != api-only')
+      expect(guard).toBeGreaterThan(0)
+      expect(guard).toBeLessThan(sh.indexOf('phase preparing'))
+      expect(sh.slice(sh.indexOf('phase prepared'),sh.indexOf('phase migrating'))).toContain(condition)
+      expect(sh.slice(sh.indexOf('phase prepared'),sh.indexOf('phase migrated'))).toMatch(/verify-release-migration\.mjs before[^\n]*\s+phase migrating\s+npx prisma migrate deploy\s+[^\n]*verify-release-migration\.mjs after/)
+    } finally {
+      rmSync(path.dirname(f.candidate), { recursive:true })
+    }
+  })
   it('admits only the reviewed credit entitlement migration and requires API-only publication', () => {
     const f = fixture()
     const schemaFile = (root: string) => path.join(root, 'prisma/schema.prisma')
-    const candidate = readFileSync('prisma/schema.prisma', 'utf8').replaceAll('\r\n', '\n')
+    const candidate = readFileSync(new URL('../fixtures/release-verified-credit.schema.prisma', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
     // CI uses a shallow checkout. Reverse exactly the reviewed schema additions
     // and let the verifier check both frozen snapshots against their real hashes.
     const baseline = candidate

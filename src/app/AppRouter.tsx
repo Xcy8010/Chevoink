@@ -50,7 +50,7 @@ export function AppRoutes() {
       previousPage.current = null
       shell.setGuest()
       client.clear()
-      if (!/^\/(?:login|register)\/?$/i.test(location.pathname)) {
+      if (!/^\/(?:login|register|report|appeal)\/?$/i.test(location.pathname)) {
         const redirect = location.pathname + location.search + location.hash
         navigate('/login?' + new URLSearchParams({ redirect }), { replace: true, state: { resumeOwner: owner ?? '' } })
       }

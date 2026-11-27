@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const db = vi.hoisted(() => ({
+  user:{ findUnique:async()=>({accountRestrictions:[]}) },
   chapter: { findFirst: vi.fn(), findUnique: vi.fn(), findFirstOrThrow: vi.fn(), findMany: vi.fn(), count: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(), create: vi.fn() },
   volume: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(), create: vi.fn() },
   novel: { findUnique: vi.fn(), findFirst: vi.fn(), update: vi.fn() },

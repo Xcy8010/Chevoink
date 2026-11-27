@@ -24,6 +24,7 @@ export type AdminYunshuCall = {
   id: string; createdAt: string; modelName: string; group: string | null
   kind: Exclude<AdminYunshuRecordKind, 'all'>; requestId: string | null
   requestTokens: number | null; responseTokens: number | null
+  cacheHitTokens?: number | null; cacheWriteTokens?: number | null; ambiguousConsumption?: boolean
   durationMs: number | null; streamOutcome: 'ok' | 'error' | 'unknown'; quota: string | null
 }
 export type AdminYunshuAuxState = 'not_requested' | 'unconfigured' | 'ready' | 'stale' | 'error'

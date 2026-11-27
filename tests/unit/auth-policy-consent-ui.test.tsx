@@ -31,6 +31,8 @@ vi.mock('../../src/app/route-config', async () => {
   return {
     appRoutes: [
       { path: '/', useShell: false, element: <p>首页内容</p> },
+      { path: '/appeal', useShell: false, element: <p>独立申诉页</p> },
+      { path: '/report', useShell: false, element: <p>公众举报页</p> },
       { path: '/me', useShell: false, element: <><p>个人中心内容</p><Link to="/studio/novel/n1">进入创作区</Link><Link to="/administrator">普通页面</Link><Link to="/login">登录</Link><Link to="/register">注册</Link></> },
       { path: '/settings', useShell: false, element: <AccountSettings /> },
       { path: '/studio/novel/:novelId', useShell: false, element: <><p>创作内容</p><Link to="/me">返回个人中心</Link></> },
@@ -97,6 +99,16 @@ it.each([true, false])('opens real sign-in after expiry and returns to the priva
   expect(screen.queryByText('创作内容')).toBeNull()
   act(() => useShellStore.getState().setAuthenticated({ user: same ? owner : { ...owner, id: 'another-verified-account' } }))
   await waitFor(() => expect(window.location.pathname + window.location.search + window.location.hash).toBe(same ? path : '/'))
+})
+
+it.each([['/appeal', '独立申诉页'], ['/report', '公众举报页']])('keeps the public governance route available when the ordinary session expires (%s)', async (path, label) => {
+  mountApp(path, { ...legacyUser, emailVerified: true, phoneVerified: true })
+  expect(await screen.findByText(label)).toBeTruthy()
+  act(requestSessionSignIn)
+  expect(useShellStore.getState().authStatus).toBe('guest')
+  expect(window.location.pathname).toBe(path)
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(screen.getByText(label)).toBeTruthy()
 })
 
 function expectNewPasswordHint(dialog: HTMLElement, label: string) {

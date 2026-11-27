@@ -1,3 +1,6 @@
+import { readGovernanceReconciliation } from '../lib/governance-reconciliation.js'
+import { requireAppReleaseCapability } from '../lib/app-releases.js'
+import governanceRestrictionsRouter from './governance-restrictions.js'
 import { userIdentityUpdateSchema } from '../../shared/contracts/tester.js'
 import { updateUserIdentity } from '../lib/tester-entitlement.js'
 import { modelActivitiesSchema } from '../../shared/model-activity.js'
@@ -81,7 +84,7 @@ import {
 import { buildError, buildSuccess, createRequestId, parsePositiveInt } from '../lib/http.js'
 import { parseBody } from '../lib/parse-body.js'
 import { normalizePhoneNumber } from '../lib/phone.js'
-import { DataAccessError } from '../lib/prisma.js'
+import { DataAccessError, prisma } from '../lib/prisma.js'
 import { sendRouteError } from '../lib/route-error.js'
 import { notifyConfigurationChange } from '../lib/live-configuration.js'
 import { sendAuthSmsCode, verifyAuthSmsCode } from '../lib/sms-service.js'
@@ -124,6 +127,7 @@ import {
 } from '../lib/admin-credit-model.js'
 
 const router = Router()
+router.use('/governance', governanceRestrictionsRouter)
 
 /* ---------------- 请求体校验 schema（文案与历史提示保持一致） ---------------- */
 
@@ -1084,6 +1088,37 @@ router.get('/conversations/:conversationId/messages', async (req: Request, res: 
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
+})
+
+router.get('/governance/mail-status', async (req,res) => {
+  const requestId=createRequestId()
+  try {
+    await requireAdmin(req)
+    await requireAppReleaseCapability(req,'platformGovernance')
+    const now = new Date()
+    const [groups,expiring] = await Promise.all([
+      prisma.governanceMail.groupBy({by:['state','mode'],_count:{_all:true}}),
+      prisma.accountRestriction.count({where:{revokedAt:null,expiresAt:{gt:now,lte:new Date(+now+86400000)}}}),
+    ])
+    res.json(buildSuccess(requestId,{items:groups.map(r=>({state:r.state,mode:r.mode,count:r._count._all})),expiring}))
+  } catch (error) { sendRouteError(res,requestId,error) }
+})
+
+router.get('/governance/reconciliation', async (req, res) => {
+  const requestId = createRequestId()
+  const stop = new AbortController()
+  const close = () => { if (!res.writableEnded) stop.abort() }
+  res.once('close', close)
+  try {
+    const actor=await requireAdmin(req)
+    await requireAppReleaseCapability(req, 'platformGovernance')
+    const { page, userId, actionId } = parseBody(z.object({page:z.coerce.number().int().min(1).max(1000000).default(1),userId:z.string().min(1).max(64).optional(),actionId:z.string().min(1).max(64).optional()}).strict(), req.query, '查询条件无效。')
+    await recordAdminAuditLog({adminId:actor.id, action:'governance.reconciliation.read',targetType:'billing_review',targetId:actionId??userId??'upstream',detail:{page},ip:getRequestIp(req)})
+    const result = await readGovernanceReconciliation(page, stop.signal, userId, actionId)
+    if (!stop.signal.aborted) res.json(buildSuccess(requestId, result))
+  } catch (error) {
+    if (!stop.signal.aborted) sendRouteError(res,requestId,error)
+  } finally { res.removeListener('close',close) }
 })
 
 router.get('/yunshu-operations', async (req: Request, res: Response): Promise<void> => {

@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
+import { ActiveAccountRestrictions } from './settings/ActiveAccountRestrictions'
 import BottomSheet from '@/components/layout/BottomSheet'
 import AppState from '@/components/ui/AppState'
 import SettingsSkeleton from './settings/settings-skeleton'
@@ -741,6 +742,7 @@ export default function SettingsPage() {
       <SectionTitle>协议与政策</SectionTitle>
       <SettingsGroup>
         <SettingsRow icon={<FileText className="h-[18px] w-[18px]" />} title="用户协议" chevron="right" onClick={() => navigate('/legal?kind=terms', { state: { fromSettings: true } })} />
+        <SettingsRow icon={<ShieldCheck className="h-[18px] w-[18px]" />} title="举报与投诉" chevron="right" onClick={() => navigate('/report')} />
         <SettingsRow icon={<ShieldCheck className="h-[18px] w-[18px]" />} title="隐私政策" chevron="right" onClick={() => navigate('/legal?kind=privacy', { state: { fromSettings: true } })} />
       </SettingsGroup>
     </section>
@@ -886,6 +888,8 @@ export default function SettingsPage() {
           </SettingsGroup>
         </section>
       )}
+
+      {sessionUser && <ActiveAccountRestrictions key={sessionUser.id} userId={sessionUser.id}/>}
 
       <section id="settings-privacy">
         <SectionTitle>隐私</SectionTitle>

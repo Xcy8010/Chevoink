@@ -26,6 +26,8 @@ import {
 import { useWorkConversation } from '../../components/work-conversation-context'
 import { WorkConversationRestore } from '../../components/WorkConversationRestore'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { useToast } from '@/components/ui/toast-context'
+import { COPY_TASK_ID_LABEL, UNSAVED_TASK_ID_HINT, copyStudioTaskId } from '../../lib/copy-task-id'
 import { copyToClipboard } from '@/lib/clipboard'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
@@ -261,6 +263,8 @@ export function AgentPanel({
   referenceOptions = [],
 }: AgentPanelProps) {
   const queryClient = useQueryClient()
+  const toast = useToast()
+  const copyableTaskId = sessionResolving ? null : sessionId
   const workConversation = useWorkConversation()
   const dockExpanded = workConversation.activityDock === 'expanded'
   const dockAction = dockExpanded ? '折叠任务状态' : '展开任务状态'
@@ -1733,7 +1737,7 @@ export function AgentPanel({
             <path d="M12.5 6.5h9m-9 11h9" />
           </svg>
         </button> : null}
-        {!mobileIntegratedHeader && (onPinTask || onRenameTask || onOpenBranches || onOpenStudioSettings || onClose) ? <div ref={taskMenuRef} className="shrink-0" onKeyDown={event => {
+        {!mobileIntegratedHeader && (copyableTaskId || onPinTask || onRenameTask || onOpenBranches || onOpenStudioSettings || onClose) ? <div ref={taskMenuRef} className="shrink-0" onKeyDown={event => {
           if (event.key === 'Escape' && taskMenuOpen) {
             event.stopPropagation()
             setTaskMenuOpen(false)
@@ -1745,6 +1749,14 @@ export function AgentPanel({
             {onOpenStudioSettings ? <button type="button" onClick={openAgentOperations} className={taskMenuItem}><Workflow aria-hidden="true" className="h-4 w-4" />Agent 操作中心</button> : null}
             {onPinTask ? <button type="button" disabled={!sessionId} className={taskMenuItem} onClick={() => { setTaskMenuOpen(false); onPinTask() }}><Pin className="h-3.5 w-3.5" />置顶当前任务</button> : null}
             {onRenameTask ? <button type="button" className={taskMenuItem} onClick={() => { setTaskTitleDraft(taskTitle?.trim() || '新任务'); setTaskRenaming(true); setTaskMenuOpen(false) }}><PencilLine className="h-3.5 w-3.5" />编辑任务名称</button> : null}
+            <button type="button" disabled={!copyableTaskId} className={taskMenuItem}
+              title={sessionResolving ? '正在读取任务' : copyableTaskId ? COPY_TASK_ID_LABEL : UNSAVED_TASK_ID_HINT}
+              onClick={() => {
+                if (!copyableTaskId) return
+                setTaskMenuOpen(false)
+                taskMenuRef.current?.querySelector('button')?.focus()
+                void copyStudioTaskId(copyableTaskId, toast)
+              }}><Copy aria-hidden="true" className="h-3.5 w-3.5" />{COPY_TASK_ID_LABEL}</button>
             {onOpenBranches ? <button type="button" className={taskMenuItem} onClick={() => { setTaskMenuOpen(false); onOpenBranches() }}><GitBranch className="h-3.5 w-3.5" />创建分支与版本</button> : null}
             {onClose ? <button type="button" className={taskMenuItem} onClick={() => { setTaskMenuOpen(false); onClose() }}><X aria-hidden="true" className="h-3.5 w-3.5" />关闭面板</button> : null}
           </div> : null}</StudioPresence>

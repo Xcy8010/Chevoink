@@ -1,3 +1,4 @@
+import { assertGovernanceAllowed } from '../governance-access.js'
 import type { AgentGoal, Prisma } from '@prisma/client'
 import { actOnAgentGoalSchema, createAgentGoalSchema, goalIsTerminal, updateAgentGoalSchema,
   type ActOnAgentGoalRequest, type AgentGoalDetail, type AgentGoalSnapshot, type CreateAgentGoalRequest,
@@ -39,6 +40,7 @@ export async function createAgentGoal(userId: string, target: { sessionId: strin
   authorSource?: { authenticatedHttp: true }) {
   requireGoalEnabled()
   const body = createAgentGoalSchema.parse(input)
+  await assertGovernanceAllowed(userId, 'agent')
   if (body.limits && Object.keys(body.limits).length && !authorSource?.authenticatedHttp) return goalError('GOAL_LIMIT_AUTHORITY_REQUIRED', '执行限制需要作者明确设置。')
   await assertManagedAttachmentsAccess(body.options.attachments, userId)
   const hash = runtimeJson({ operation: 'create', target, body }).hash
@@ -178,6 +180,7 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
   const body = actOnAgentGoalSchema.parse(input)
   if (body.budgetChange && Object.keys(body.budgetChange).length && !authorSource?.authenticatedHttp) return goalError('GOAL_LIMIT_AUTHORITY_REQUIRED', '执行限制需要作者明确设置。')
   if (body.action === 'resume') requireGoalEnabled()
+  if (body.action === 'resume') await assertGovernanceAllowed(userId, 'agent')
   const hash = runtimeJson({ operation: 'action', sessionId, goalId, body }).hash
   // Authenticate and validate the author's version before reconciling. Usage
   // receipts increment stateVersion themselves, but cannot invalidate this resume.

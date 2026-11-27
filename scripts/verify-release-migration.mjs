@@ -50,6 +50,14 @@ export const directedEmailMigrations = [
 const directedEmailCandidateSchema = 'a55d3ee026715ce5c32cf9f46c2ddeb0be30e48d816af2f46d9a5577900dbee6'
 export const verifiedCreditMigrationName = '20261126010000_verified_credit_entitlements'
 export const verifiedCreditMigrationChecksum = 'c3aa054fed8e9418c8e3db00bf539c50942f62680ad0931507d95ee5640e58ea'
+export const governancePlan = '20261128_platform_governance'
+export const governanceMigrations = [
+  ['20261128090000_governance_restrictions', '65b8addb9da0183c375e8cd52f6316e3fb02ca607054c405033fabb11fadc639'],
+  ['20261128120020_governance_cases', 'f05029cdd8145909d2d11a40c0f17e8c94a24d5b4499f909b7cf68198f3ce443'],
+  ['20261128120030_governance_mail', '2b63bd10ee18bf6a80c04079ee1150ac01dd0c48d033ad300c9a90e1bf693516'],
+  ['20261128120040_yunshu_request_links', 'deaa15cce02085a4dc17d2e1d0da86d2f3ec830b3d328466e0bab650feb2ff8e'],
+]
+const governanceCandidateSchema = 'a5bf90a4cce94a9cf2e0d0098e2d75e93d79919d7bd96c96190988c7963a29ca'
 const verifiedCreditCandidateSchema = 'ff346a3d5845f97654b27000ee0028deef8d35057276f89aaf27df2bf09f1dcc'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
@@ -77,11 +85,13 @@ reviewed.set(personalizationRuleTextsMigrationName, personalizationRuleTextsMigr
 reviewed.set(deviceSessionsMigrationName, deviceSessionsMigrationChecksum)
 reviewed.set(directedEmailPlan, createHash('sha256').update(JSON.stringify(directedEmailMigrations)).digest('hex'))
 reviewed.set(verifiedCreditMigrationName, verifiedCreditMigrationChecksum)
+reviewed.set(governancePlan, createHash('sha256').update(JSON.stringify(governanceMigrations)).digest('hex'))
 reviewed.set(storyProfilesMigrationName, storyProfilesMigrationChecksum)
 const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName, agentPersonalizationMigrationName, personalizationRulesMigrationName, personalizationRuleTextsMigrationName, storyProfilesMigrationName, deviceSessionsMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 fullHistoryPlans.add(directedEmailPlan)
 fullHistoryPlans.add(verifiedCreditMigrationName)
+fullHistoryPlans.add(governancePlan)
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
 const newDeclaration = '@@unique([reportId, source, signal, startOffset, endOffset, evidenceHash], map: "quality_findings_report_source_signal_span_key")'
@@ -104,6 +114,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const governanceTargets = new Map(governanceMigrations.map(([name, sum]) => [`${name}/migration.sql`, sum]))
+  if (digest(previous.replaceAll('\r\n', '\n')) === verifiedCreditCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === governanceCandidateSchema
+    && !oldFiles.some(([name]) => governanceTargets.has(name))
+    && JSON.stringify(currentFiles.filter(([name]) => !governanceTargets.has(name))) === JSON.stringify(oldFiles)
+    && [...governanceTargets].every(([name, sum]) => currentFiles.some(([file, hash]) => file === name && hash === sum))) return governancePlan
   const verifiedCreditTarget = `${verifiedCreditMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === directedEmailCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === verifiedCreditCandidateSchema
@@ -205,6 +221,7 @@ export function assertMigrationState(rows, checksums, phase, before, plan = migr
   if (!['before', 'after'].includes(phase)) throw Error('Invalid migration verification phase')
   const expected = new Map(checksums)
   const additions = plan === adminExperiencePlan ? new Map(adminExperienceMigrations)
+    : plan === governancePlan ? new Map(governanceMigrations)
     : plan === directedEmailPlan ? new Map(directedEmailMigrations) : new Map([[plan, reviewed.get(plan)]])
   for (const [name, hash] of additions) {
     if (checksums.find(([key]) => key === name)?.[1] !== hash) throw Error('Approved migration files are missing or changed')
@@ -1012,6 +1029,285 @@ export function assertVerifiedCreditCatalog(state, phase, before, schema = 'publ
   }
 }
 
+// Expected catalog from the four reviewed migrations. Signatures contain column name,
+// SQL type, required flag and database default in ordinal order.
+const governanceTables = {
+  account_restrictions: {
+    columns: [
+      "legacy_ban|boolean|1|false",
+      "id|character varying(64)|1|",
+      "user_id|character varying(64)|1|",
+      "scope|character varying(80)|1|",
+      "reason|text|1|",
+      "clause|text|1|",
+      "source_id|character varying(64)|0|",
+      "created_at|timestamp(3) without time zone|1|CURRENT_TIMESTAMP",
+      "expires_at|timestamp(3) without time zone|0|",
+      "revoked_at|timestamp(3) without time zone|0|",
+    ],
+    indexes: [
+      "account_restrictions_pkey|unique|id",
+      "account_restrictions_user_id_scope_revoked_at_expires_at_idx|index|user_id,scope,revoked_at,expires_at",
+    ],
+    constraints: [
+      "PRIMARY KEY (id)",
+      "FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE",
+    ],
+  },
+  agent_safety_events: {
+    columns: [
+      "id|character varying(64)|1|",
+      "user_id|character varying(64)|1|",
+      "action_key|character varying(180)|1|",
+      "source|character varying(80)|1|",
+      "policy_version|character varying(80)|1|",
+      "category|character varying(80)|1|",
+      "status|character varying(80)|1|",
+      "evasion|character varying(80)|1|",
+      "evidence_ref|text|0|",
+      "review_reason|text|0|",
+      "reviewer_id|character varying(64)|0|",
+      "reviewed_at|timestamp(3) without time zone|0|",
+      "created_at|timestamp(3) without time zone|1|CURRENT_TIMESTAMP",
+    ],
+    indexes: [
+      "agent_safety_events_pkey|unique|id",
+      "agent_safety_events_user_id_status_created_at_idx|index|user_id,status,created_at",
+      "agent_safety_events_user_id_action_key_key|unique|user_id,action_key",
+    ],
+    constraints: [
+      "PRIMARY KEY (id)",
+      "FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE",
+    ],
+  },
+  agent_safety_escalations: {
+    columns: [
+      "window_days|integer|1|",
+      "event_ids|text[]|1|",
+      "id|character varying(64)|1|",
+      "user_id|character varying(64)|1|",
+      "event_id|character varying(64)|1|",
+      "level|character varying(80)|1|",
+      "restriction_id|character varying(64)|0|",
+      "corrected_at|timestamp(3) without time zone|0|",
+      "created_at|timestamp(3) without time zone|1|CURRENT_TIMESTAMP",
+    ],
+    indexes: [
+      "agent_safety_escalations_pkey|unique|id",
+      "agent_safety_escalations_user_id_level_created_at_idx|index|user_id,level,created_at",
+      "agent_safety_escalations_event_id_level_key|unique|event_id,level|corrected_at IS NULL",
+    ],
+    constraints: [
+      "PRIMARY KEY (id)",
+      "FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE",
+    ],
+  },
+  agent_safety_policy: {
+    columns: [
+      "id|character varying(64)|1|",
+      "mode|character varying(80)|1|",
+      "window_days|integer|1|",
+      "ban_days|integer|1|",
+      "updated_at|timestamp(3) without time zone|1|CURRENT_TIMESTAMP",
+    ],
+    indexes: [
+      "agent_safety_policy_pkey|unique|id",
+    ],
+    constraints: [
+      "PRIMARY KEY (id)",
+    ],
+  },
+  GovernanceCase: {
+    columns: [
+      "id|text|1|",
+      "requestKey|text|1|",
+      "kind|text|1|",
+      "targetKind|text|1|",
+      "targetId|text|1|",
+      "subjectId|text|0|",
+      "reporterId|text|0|",
+      "requesterKey|text|1|",
+      "category|text|1|",
+      "statement|text|0|",
+      "snapshot|text|0|",
+      "status|text|1|'pending'::text",
+      "relatedId|text|0|",
+      "conclusion|text|0|",
+      "createdAt|timestamp(3) without time zone|1|CURRENT_TIMESTAMP",
+      "updatedAt|timestamp(3) without time zone|1|",
+      "acknowledgeBy|timestamp(3) without time zone|1|",
+      "feedbackBy|timestamp(3) without time zone|0|",
+      "materialsAt|timestamp(3) without time zone|0|",
+      "acknowledgedAt|timestamp(3) without time zone|0|",
+      "publicProgress|text|0|",
+      "evidenceUntil|timestamp(3) without time zone|0|",
+    ],
+    indexes: [
+      "GovernanceCase_pkey|unique|id",
+      "GovernanceCase_requestKey_key|unique|requestKey",
+      "GovernanceCase_status_acknowledgeBy_idx|index|status,acknowledgeBy",
+      "GovernanceCase_reporterId_createdAt_idx|index|reporterId,createdAt",
+      "GovernanceCase_requesterKey_createdAt_idx|index|requesterKey,createdAt",
+      "GovernanceCase_targetKind_targetId_idx|index|targetKind,targetId",
+      "GovernanceCase_evidenceUntil_idx|index|evidenceUntil",
+    ],
+    constraints: [
+      "PRIMARY KEY (id)",
+      "UNIQUE (requestKey)",
+    ],
+  },
+  GovernanceCaseEvent: {
+    columns: [
+      "id|text|1|",
+      "caseId|text|1|",
+      "actorId|text|0|",
+      "action|text|1|",
+      "prior|text|0|",
+      "result|text|0|",
+      "reason|text|0|",
+      "createdAt|timestamp(3) without time zone|1|CURRENT_TIMESTAMP",
+    ],
+    indexes: [
+      "GovernanceCaseEvent_pkey|unique|id",
+      "GovernanceCaseEvent_caseId_createdAt_idx|index|caseId,createdAt",
+    ],
+    constraints: [
+      "PRIMARY KEY (id)",
+      "FOREIGN KEY (caseId) REFERENCES GovernanceCase(id) ON UPDATE CASCADE ON DELETE RESTRICT",
+    ],
+  },
+  governance_mail: {
+    columns: [
+      "id|text|1|",
+      "eventId|text|1|",
+      "userId|text|1|",
+      "kind|text|1|",
+      "reason|text|1|",
+      "measure|text|0|",
+      "recipient|text|0|",
+      "state|text|1|'pending'::text",
+      "mode|text|0|",
+      "attemptedAt|timestamp(3) without time zone|0|",
+      "requestId|text|0|",
+      "messageId|text|0|",
+      "detail|text|0|",
+      "nextCheckAt|timestamp(3) without time zone|0|",
+      "createdAt|timestamp(3) without time zone|1|CURRENT_TIMESTAMP",
+      "updatedAt|timestamp(3) without time zone|1|",
+    ],
+    indexes: [
+      "governance_mail_pkey|unique|id",
+      "governance_mail_eventId_kind_userId_key|unique|eventId,kind,userId",
+      "governance_mail_state_nextCheckAt_createdAt_idx|index|state,nextCheckAt,createdAt",
+    ],
+    constraints: [
+      "PRIMARY KEY (id)",
+    ],
+  },
+  yunshu_request_links: {
+    columns: [
+      "kind|character varying(12)|1|",
+      "localId|character varying(64)|1|",
+      "requestId|character varying(64)|1|",
+      "createdAt|timestamp(3) without time zone|1|CURRENT_TIMESTAMP",
+    ],
+    indexes: [
+      "yunshu_request_links_pkey|unique|kind,localId,requestId",
+      "yunshu_request_links_requestId_idx|index|requestId",
+    ],
+    constraints: [
+      "PRIMARY KEY (kind, localId, requestId)",
+    ],
+  },
+}
+const governanceMirrorBody = 'a57e2b0453b9ab8bf79f4ac80a5f2965'
+
+const governanceEnum = ['register', 'login', 'bind', 'reset_password', 'change_password']
+const expectedNames = Object.entries(governanceTables).flatMap(([name, table]) => [
+  [name, 'r'], ...table.indexes.map(index => [index.split('|')[0], 'i']),
+])
+const namesAndKinds = rows => rows.map(row => row.name + '|' + row.kind).sort()
+
+/** Catalog evidence contains no user IDs, messages, addresses, or live account data. */
+export async function readGovernanceCatalog(tx, phase) {
+  const tables = Object.keys(governanceTables)
+  const objects = await tx.$queryRawUnsafe(`SELECT c.relname AS name, c.relkind::text AS kind FROM pg_class c
+    JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname::text=ANY($1::text[])`,
+    expectedNames.map(([name]) => name))
+  const labels = await tx.$queryRawUnsafe(`SELECT e.enumlabel AS label FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid
+    JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname=current_schema() AND t.typname='EmailVerificationPurpose' ORDER BY e.enumsortorder`)
+  const functions = await tx.$queryRawUnsafe(`SELECT md5(p.prosrc) AS body, l.lanname AS language, p.prosecdef AS definer,
+    p.proconfig AS config, p.pronargs::int AS args, p.prorettype='trigger'::regtype AS "returnsTrigger"
+    FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname=current_schema() AND p.proname='mirror_legacy_governance_ban'`)
+  const triggers = await tx.$queryRawUnsafe(`SELECT t.tgenabled::text AS enabled, t.tgtype::int AS type, p.proname AS function,
+    n.nspname=current_schema() AS local, t.tgnargs::int AS args, t.tgqual IS NOT NULL AS filtered,
+    ARRAY(SELECT a.attname::text FROM unnest(t.tgattr) k(num) JOIN pg_attribute a ON a.attrelid=t.tgrelid AND a.attnum=k.num) AS columns
+    FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE t.tgrelid='users'::regclass AND t.tgname='mirror_legacy_ban'`)
+  const [bans] = await tx.$queryRawUnsafe(`SELECT count(*)::int AS count,
+    md5(coalesce(string_agg(md5(jsonb_build_array(id,banned_at,token_version)::text),'' ORDER BY id),''))
+      AS fingerprint FROM users WHERE banned_at IS NOT NULL`)
+  const evidence = { objects, labels: labels.map(row => row.label), functions, triggers, bans }
+  if (phase === 'before') return evidence
+  const [identity] = await tx.$queryRawUnsafe('SELECT current_schema() AS schema')
+  const catalog = {}
+  for (const table of tables) {
+    // Table names come exclusively from the frozen list, including mixed-case identifiers.
+    catalog[table] = await readAddedTableState(tx, 'before', table)
+    const [row] = await tx.$queryRawUnsafe(`SELECT count(*)::int AS count FROM "${table}"`)
+    catalog[table].rowCount = row.count
+  }
+  const policy = await tx.$queryRawUnsafe(`SELECT id,mode,window_days AS "windowDays",ban_days AS "banDays" FROM agent_safety_policy`)
+  const [mirror] = await tx.$queryRawUnsafe(`SELECT count(*)::int AS matched FROM users u JOIN account_restrictions r
+    ON r.user_id=u.id AND r.id='legacy-' || md5(u.id || u.banned_at::text)
+    WHERE u.banned_at IS NOT NULL AND r.created_at=u.banned_at AND r.legacy_ban AND r.scope='platform'
+      AND r.reason='历史账号封禁' AND r.clause='历史处置记录' AND r.source_id='legacy-ban' AND r.expires_at IS NULL AND r.revoked_at IS NULL`)
+  return { ...evidence, schema: identity.schema, catalog, policy, mirror }
+}
+
+export function assertGovernanceCatalog(state, phase, before) {
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  const fail = label => { throw Error('Governance migration mismatch: ' + label) }
+  if (!state || !Number.isInteger(state.bans.count) || !/^[a-f0-9]{32}$/.test(state.bans.fingerprint)) fail('historical bans')
+  if (phase === 'before') {
+    if (state.objects.length || state.triggers.length || state.functions.length || !same(state.labels, governanceEnum)) fail('pre-existing objects or unexpected email purposes')
+    return
+  }
+  if (phase !== 'after') fail('unknown phase')
+  assertGovernanceCatalog(before, 'before')
+  if (!same(state.labels, [...governanceEnum, 'appeal']) ||
+    !same(namesAndKinds(state.objects), expectedNames.map(pair => pair.join('|')).sort())) fail('objects or email purposes')
+  const fn = state.functions[0], trigger = state.triggers[0]
+  if (state.functions.length !== 1 || fn.body !== governanceMirrorBody || fn.language !== 'plpgsql' || fn.definer ||
+    fn.config !== null || fn.args !== 0 || !fn.returnsTrigger ||
+    state.triggers.length !== 1 || trigger.enabled !== 'O' || trigger.type !== 17 || !trigger.local ||
+    trigger.function !== 'mirror_legacy_governance_ban' || trigger.args !== 0 || trigger.filtered ||
+    !same(trigger.columns, ['banned_at'])) fail('legacy mirror trigger')
+  if (state.bans.count !== before.bans.count || state.bans.fingerprint !== before.bans.fingerprint || state.mirror.matched !== before.bans.count) fail('historical ban backfill')
+  const seed = state.policy[0]
+  if (state.policy.length !== 1 || seed.id !== 'active' || seed.mode !== 'observe' || seed.windowDays !== 30 || seed.banDays !== 7) fail('initial observation policy')
+  for (const [name, expected] of Object.entries(governanceTables)) {
+    const actual = state.catalog[name]
+    const count = name === 'account_restrictions' ? state.bans.count : name === 'agent_safety_policy' ? 1 : 0
+    if (actual.rowCount !== count || actual.tables.length !== 1 || actual.tables[0].name !== name || actual.tables[0].kind !== 'r') fail(name + ' rows')
+    const columns = actual.columns.map(c => [c.name, c.type, Number(c.required), c.defaultValue ?? ''].join('|'))
+    if (!same(columns, expected.columns)) fail(name + ' columns or defaults')
+    const constraints = actual.constraints.filter(c => c.kind !== 'n').map(c => c.definition.replaceAll('"', '')).sort()
+    if (actual.constraints.some(c => !c.valid) || !same(constraints, [...expected.constraints].sort())) fail(name + ' constraints')
+    if (actual.indexes.length !== expected.indexes.length) fail(name + ' indexes')
+    for (const signature of expected.indexes) {
+      const [index, kind, keys, predicate] = signature.split('|')
+      const row = actual.indexes.find(i => i.name === index)
+      const unique = kind === 'unique'
+      const definition = 'CREATE ' + (unique ? 'UNIQUE ' : '') + 'INDEX ' + index + ' ON ' + state.schema + '.' + name +
+        ' USING btree (' + keys.split(',').join(', ') + ')' + (predicate ? ' WHERE (' + predicate + ')' : '')
+      if (!row || row.definition.replaceAll('"', '') !== definition || row.unique !== unique || !row.valid || !row.ready || row.expression ||
+        row.partial !== Boolean(predicate) || !same(row.columns, keys.split(','))) fail(name + ' index ' + index)
+    }
+  }
+}
+
 async function main() {
   const [phase, candidate, baseline, receipt] = process.argv.slice(2)
   const plan = releaseMigrationPlan(candidate, baseline)
@@ -1043,6 +1339,11 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === governancePlan) {
+        const catalog = await readGovernanceCatalog(tx, phase)
+        assertGovernanceCatalog(catalog, phase, before?.catalog)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, catalog }
+      }
       if (plan === directedEmailPlan) {
         const catalog = await readDirectedEmailCatalog(tx, phase)
         return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, catalog }

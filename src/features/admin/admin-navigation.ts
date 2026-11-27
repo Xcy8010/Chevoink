@@ -1,4 +1,11 @@
 export const adminNavigation = [
+  {label:'内容治理',items:[
+    {to:'/admin/governance/reports',label:'举报与投诉',keywords:'内容治理 案件 调查'},
+    {to:'/admin/governance/safety',label:'Agent 安全记录',keywords:'警告 复核 误判'},
+    {to:'/admin/governance/reconciliation',label:'异常使用与对账',keywords:'云枢 异常用量 账本'},
+    {to:'/admin/governance/restrictions',label:'处罚管理',keywords:'账号 限制 期限'},
+    {to:'/admin/governance/appeals',label:'申诉管理',keywords:'申诉 复核 调整'},
+  ]},
   { label: '内容与社区', items: [
     { to: '/admin/content', label: '公告与帮助政策', keywords: '公告 帮助 文档 用户协议 服务条款 隐私政策 发布 草稿' },
     { to: '/admin/novels', label: '作品管理', keywords: '内容 下架 恢复' },

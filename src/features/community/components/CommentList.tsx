@@ -1,4 +1,5 @@
 import { Heart, MessageSquareMore, Share2, Trash2 } from 'lucide-react'
+import ReportAction from '@/features/governance/ReportAction'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -227,6 +228,7 @@ export default function CommentList({ comments, onReplied, onReply }: CommentLis
               <Share2 className="h-3.5 w-3.5" />
               分享
             </button>
+            <ReportAction menu target={{kind:'comment',id:comment.id}}/>
             {sessionUser?.id === comment.author.id ? (
               <button
                 type="button"
