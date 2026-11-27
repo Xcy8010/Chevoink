@@ -217,7 +217,7 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
   }))
 
-  it.each([false, true])('persists one change-of-method report before the matching individual check (author prose=%s)', async spoken => fixture(async f => {
+  it.each([false, true])('publishes only model prose around the same review results (model speaks=%s)', async spoken => fixture(async f => {
     const novel = await prisma.novel.create({ data: { authorId: f.userId, title: '合成审阅', slug: randomUUID(), summary: '' } })
     const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '上卷', orderIndex: 1 } })
     const chapters = await Promise.all([16, 17, 18].map(orderIndex => prisma.chapter.create({ data: {
@@ -243,10 +243,13 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
       { name: 'continuity_validate', args: { chapterId: chapters[1].id, readOnly: true } },
     ]
     let turn = 0
-    const chat = vi.spyOn(aiService, 'chatWithTools').mockImplementation(async () => {
+    const chat = vi.spyOn(aiService, 'chatWithTools').mockImplementation(async input => {
       const call = calls[turn++]
       if (turn > 4) throw new Error('Unexpected additional model request')
-      return { content: call ? spoken && turn === 2 ? authorReport : '' : '审阅没有取得完整结果。',
+      const content = call ? spoken && turn === 2 ? authorReport : '' : '审阅没有取得完整结果。'
+      if (call) input.onChunk?.({ type: 'tool-call-start', id: 'review-' + turn, name: call.name })
+      if (content) input.onChunk?.({ type: 'text-delta', delta: content })
+      return { content,
         toolCalls: call ? [{ id: 'review-' + turn, name: call.name, arguments: JSON.stringify(call.args) }] : [],
         reasoning: '', finishReason: call ? 'tool_calls' : 'stop',
         usage: { promptTokens: 100, completionTokens: 10, totalTokens: 110, promptCacheHitTokens: null, promptCacheMissTokens: null } }
@@ -254,14 +257,12 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
     await executeAgentRun({ runId, sessionId: session.id, userId: f.userId, novelId: novel.id,
       chapterId: null, mode: 'build', prompt, modelTier: 'speed' })
     const rows = await prisma.agentMessage.findMany({ where: { runId, role: 'assistant' }, orderBy: { createdAt: 'asc' } })
-    const expected = spoken ? authorReport : '批量复查还有未完成的部分，我准备按章核对。'
-    const fallback = rows[1]?.parts
-    expect(fallback).toEqual(expect.arrayContaining([{ type: 'text', text: expected }]))
-    expect(Array.isArray(fallback) && fallback.findIndex(p => (p as { type?: string })?.type === 'text'))
-      .toBeLessThan(Array.isArray(fallback) ? fallback.findIndex(p => (p as { type?: string })?.type === 'tool-call') : -1)
-    expect(JSON.stringify(rows[2]?.parts)).not.toContain(expected)
-    const events = await prisma.agentRunEvent.findMany({ where: { runId, type: 'text.final', payload: { path: ['text'], equals: expected } } })
-    expect(events).toHaveLength(1)
+    const parts = rows.flatMap(row => Array.isArray(row.parts) ? row.parts : []) as Array<{ type: string; text?: string; toolName?: string }>
+    expect(parts.filter(part => part.type === 'tool-call').map(part => part.toolName)).toEqual(calls.map(call => call.name))
+    const text = [...(spoken ? [authorReport] : []), '审阅没有取得完整结果。']
+    expect(parts.filter(part => part.type === 'text').map(part => part.text)).toEqual(text)
+    const events = await prisma.agentRunEvent.findMany({ where: { runId, type: 'text.final' }, orderBy: { seq: 'asc' } })
+    expect(events.map(event => (event.payload as { text: string }).text).filter(Boolean)).toEqual(text)
     expect(chat).toHaveBeenCalledTimes(4)
   }), 60000)
 
@@ -380,7 +381,11 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
         }
         const delta = calls.length ? { tool_calls: calls.map(({ name, args }, index) => ({ index, id: `r${requests}-${index}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })) } : { content: '三章均已保存，第十六章已补上收据，第十八章已补上回信。' }
         const frame = { choices: [{ delta, finish_reason: calls.length ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 2000, completion_tokens: 100, total_tokens: 2100 } }
-        return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
+        const lateProse = mode === 'plan' && !stale
+          ? ({ 2: '总纲把相邻两章连在桥上，我把过桥放在第十六章。', 3: '上一份细纲写到过桥，第十七章接着让信使出现。' } as Record<number, string>)[requests] : undefined
+        const frames = lateProse ? [{ choices: [{ delta }] }, { choices: [{ delta: { content: lateProse }, finish_reason: 'tool_calls' }], usage: frame.usage }] : [frame]
+        return new Response(frames.map(item => `data: ${JSON.stringify(item)}\n\n`).join('') + 'data: [DONE]\n\n',
+          { headers: { 'content-type': 'text/event-stream' } })
       })
       await executeAgentRun({ ...subject, chapterId: null, mode, prompt, modelTier: 'speed', reasoningEffort: 'high' })
       const result = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
@@ -388,6 +393,24 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
       const content = mode === 'plan' ? (await listNovelPlanArtifacts(f.userId, novel.id)).items.filter(item => item.planKind === 'detail')
         : await prisma.chapter.findMany({ where: { novelId: novel.id, orderIndex: { gte: 16 } }, orderBy: { orderIndex: 'asc' } })
       expect(content.map(item => item.content)).toEqual(['合成小节16\n\n补上收据。', mode === 'plan' ? '合成小节17\n\n回读前章后继续十七。' : '合成小节17', '合成小节18\n\n补上回信。'])
+      if (mode === 'plan') {
+        const events = (await prisma.agentRunEvent.findMany({ where: { runId }, orderBy: { seq: 'asc' }, select: { payload: true } }))
+          .map(row => row.payload as { type: string; callId?: string; text?: string; delta?: string; messageId?: string })
+        const at = (type: string, callId: string) => events.findIndex(event => event.type === type && event.callId === callId)
+        const authorText = stale ? [] : ['总纲把相邻两章连在桥上，我把过桥放在第十六章。', '上一份细纲写到过桥，第十七章接着让信使出现。']
+        expect(events.flatMap(event => event.type === 'text.final' && event.text ? [event.text] : [])).toEqual([
+          ...authorText, '三章均已保存，第十六章已补上收据，第十八章已补上回信。',
+        ])
+        for (const [index, text] of authorText.entries()) {
+          const report = events.findIndex(event => event.type === 'text.final' && event.text === text)
+          expect(report).toBeGreaterThan(at('tool.result', `r${index + 1}-0`))
+          expect(report).toBeLessThan(at('tool.call', `r${index + 2}-0`))
+          const liveText = events.slice(at('tool.result', `r${index + 1}-0`), report)
+            .flatMap(event => event.type === 'text.delta' && event.delta ? [event.delta] : []).join('')
+          expect(text.startsWith(liveText)).toBe(true)
+          expect(liveText.length).toBeGreaterThan(0)
+        }
+      }
       const payments = await prisma.aiUsageLog.findMany({ where: { agentRunId: runId }, orderBy: { turn: 'asc' } })
       expect(payments).toHaveLength(6)
       expect(payments.every(item => item.billingStatus === 'settled' && item.creditChargeMilli > 0)).toBe(true)

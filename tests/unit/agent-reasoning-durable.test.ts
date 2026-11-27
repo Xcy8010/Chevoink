@@ -146,10 +146,10 @@ it('recovers only final prose from a committed post-tool frame, without changing
 })
 
 it.each([
-  [undefined, 'chapter_read', null, '我先核对前文。'],
-  ['chapter_read', 'memory_search', '<activity-title>核对前章</activity-title>', ''],
-  ['chapter_read', 'plan_save', '<activity-title>核对前章</activity-title>', ''],
-] as const)('introduces only the first silent durable tool round: %s → %s', async (prior, name, priorText, report) => {
+  [undefined, 'chapter_read', null],
+  ['chapter_read', 'memory_search', '<activity-title>核对前章</activity-title>'],
+  ['chapter_read', 'plan_save', '<activity-title>核对前章</activity-title>'],
+] as const)('keeps every silent durable tool round silent: %s → %s', async (prior, name, priorText) => {
   const before = prior ? [{ role: 'assistant', content: priorText, toolCalls: [{ id: 'prior', name: prior, arguments: '{}' }] },
     { role: 'tool', toolCallId: 'prior', content: '已经核对。' }] : []
   const current = { role: 'assistant', content: null, toolCalls: [{ id: 'next', name, arguments: '{}' }] }
@@ -163,6 +163,6 @@ it.each([
   const source = { taskRootId: 'root', runId: 'run', type: 'execution.state.saved', eventKey: 'state:root:2',
     payload: { revision: 2, snapshotHash: 'frame', previousHash: null } } as AgentExecutionOutbox
   const events = await projectExecutionFrame(tx, source)
-  expect(events).toEqual([{ type: 'text.final', messageId: expect.any(String), text: report, asReasoning: false }])
+  expect(events).toEqual([{ type: 'text.final', messageId: expect.any(String), text: '', asReasoning: false }])
   expect(current.content).toBeNull()
 })

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import type { Response as ExpressResponse } from 'express'
@@ -22,8 +22,10 @@ import { loadDurableEvents, isDurablePauseResumed, publishDurableEvents } from '
 import { listLoopSessionMessages } from '../../api/lib/agent/session-messages.js'
 import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { streamDurableRun } from '../../api/lib/agent/runtime-stream.js'
+import type { AgentStreamEvent } from '../../shared/contracts/index.js'
 import { env } from '../../api/config/env.js'
 import { createAgentGoal, actOnAgentGoal, readAgentGoal } from '../../api/lib/agent/goal-service.js'
 import { superviseAgentGoal } from '../../api/lib/agent/goal-supervisor.js'
@@ -188,6 +190,142 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     expect((await loadDurableEvents(f.userId, run.runId, 0)).at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', nextPrompt })
     expect(fetcher).toHaveBeenCalledTimes(2)
   }))
+
+  it.each(['separate silent turns', 'same silent turn', 'separate speaking turns', 'same speaking turn'] as const)('replays only streamed model prose around saved outlines in %s', scenario => fixture(async f => {
+    await ready(f)
+    const orchestrator = getAgentDefinition('orchestrator')
+    const originalTools = orchestrator.tools
+    onTestFinished(() => { orchestrator.tools = originalTools })
+    orchestrator.tools = ['plan_read', 'plan_save']
+    const window = credits.getCreditWindow()
+    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000,
+      periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    const parent = await prisma.agentArtifact.create({ data: {
+      runId: f.runId, artifactType: 'chapterPlan', title: '合成总纲', content: '过桥之后回信。', metadata: { savedAsPlan: true, planKind: 'outline' },
+    } })
+    const save = (n: number) => ({ id: `outline-${n}`, name: 'plan_save', args: {
+      title: `第${n}章情节计划`, content: `合成情节${n}：信使检查封条。`, planKind: 'outline',
+    } })
+    const read = (id: string) => ({ id, name: 'plan_read', args: { planId: parent.id } })
+    const sameTurn = scenario.startsWith('same')
+    const speaks = scenario.includes('speaking')
+    const plans = sameTurn ? [[read('research')], [save(19), read('reference'), save(20)]]
+      : [[read('research')], [save(19), read('reference')], [save(20)]]
+    const authorText = ['总纲以过桥和回信串起两章。', '上一份已保存，接下来写第二份。']
+    const final = '两份情节计划已保存。'
+    let index = 0
+    const fetcher = vi.fn(async () => {
+      const turn = index++
+      const calls = plans[turn]
+      const content = speaks ? authorText[turn - 1] : undefined
+      const usage = { prompt_tokens: 20, completion_tokens: 5 }
+      const frames = calls ? [{ choices: [{ delta: { tool_calls: calls.map((call, offset) => ({ index: offset, id: call.id, type: 'function',
+        function: { name: call.name, arguments: JSON.stringify(call.args) } })) } }] },
+      { choices: [{ delta: { content }, finish_reason: 'tool_calls' }], usage }]
+        : [{ choices: [{ delta: { content: final }, finish_reason: 'stop' }], usage }]
+      return new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n')
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const run = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, mode: 'build',
+      prompt: '查看总纲后，依次制定并保存第十九和第二十章的情节计划。',
+    }, { humanOrigin: 'http' })
+    await realBootstrap.dispatchFreshDurableRun(f.userId, run.runId)
+    expect((await loadExecutionState(f.userId, run.runId)).frame.state.phase).toBe('completed')
+    const history = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
+    const events = await loadDurableEvents(f.userId, run.runId, 0)
+    const at = (type: string, id: string) => events.findIndex(event => event.type === type && 'callId' in event && event.callId === id)
+    const journal = events.flatMap(event => 'callId' in event ? [{ type: event.type, callId: event.callId,
+      ...('toolName' in event ? { tool: event.toolName } : {}), ...('ok' in event ? { ok: event.ok } : {}) }] : [])
+    expect(journal, JSON.stringify(journal)).toEqual(expect.arrayContaining(['research', 'outline-19', 'outline-20']
+      .map(callId => expect.objectContaining({ type: 'tool.result', callId, ok: true }))))
+    expect(at('tool.result', 'research'), JSON.stringify(journal)).toBeGreaterThanOrEqual(0)
+    expect(at('tool.result', 'outline-19')).toBeGreaterThan(at('tool.result', 'research'))
+    expect(at('tool.result', 'outline-20')).toBeGreaterThan(at('tool.result', 'outline-19'))
+    const prose = [...(speaks ? authorText.slice(0, sameTurn ? 1 : 2) : []), final]
+    expect(events.flatMap(event => event.type === 'text.final' && event.text ? [event.text] : [])).toEqual(prose)
+    expect(history.messages.filter(message => message.role === 'assistant').flatMap(message => message.parts
+      .flatMap(part => part.type === 'text' ? [part.text] : []))).toEqual(prose)
+    if (speaks) {
+      const firstReport = events.findIndex(event => event.type === 'text.final' && event.text === authorText[0])
+      expect(firstReport).toBeGreaterThan(at('tool.result', 'research'))
+      expect(firstReport).toBeLessThan(at('tool.call', 'outline-19'))
+      if (!sameTurn) {
+        const secondReport = events.findIndex(event => event.type === 'text.final' && event.text === authorText[1])
+        expect(secondReport).toBeGreaterThan(at('tool.result', 'outline-19'))
+        expect(secondReport).toBeLessThan(at('tool.call', 'outline-20'))
+      }
+    }
+    expect(fetcher).toHaveBeenCalledTimes(plans.length + 1)
+  }), 30_000)
+
+  it.each(['fresh', 'resumed'] as const)('starts the %s live clock at the same activation as history', scenario => fixture(async f => {
+    await ready(f)
+    const window = credits.getCreditWindow()
+    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000,
+      periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    const admitted = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, mode: 'build', prompt: '你好' }, { humanOrigin: 'http' })
+    await initializePersistedLoopRun(f.userId, admitted.runId)
+    const initial = await prisma.agentRun.findUniqueOrThrow({ where: { id: admitted.runId } })
+    let runId = initial.id, previousElapsed = 0
+    if (scenario === 'resumed') {
+      const first = vi.spyOn(executor, 'runReviewedDurableExecution').mockImplementationOnce(async lease => ({
+        kind: 'needs_attention', reason: '合成暂停前边界', frame: (await loadExecutionState(lease.userId, lease.runId)).frame,
+      }))
+      await runService.executePersistedLoopRun(f.userId, runId)
+      first.mockRestore()
+      await stopLoopRun(f.userId, runId)
+      const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { runId, type: 'run.paused' } })
+      const paused = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
+      const pausedTiming = paused.messages.find(message => message.runId === runId)?.runTiming
+      expect(pausedTiming).toMatchObject({ activeSince: null, status: 'paused' })
+      previousElapsed = pausedTiming!.elapsedMs!
+      expect(previousElapsed).toBeGreaterThan(0)
+      runId = (await resumeDurableTask({ userId: f.userId, runId, pauseEventId: pause.id })).run.id
+    }
+    const response = new StreamResponse()
+    const stream = streamDurableRun(f.userId, runId, 0, response as unknown as ExpressResponse, f.sessionId)
+    const streamed = (): AgentStreamEvent[] => response.chunks.flatMap(chunk => chunk.split('\n')
+      .flatMap(line => line.startsWith('data: ') ? [JSON.parse(line.slice(6)) as AgentStreamEvent] : []))
+    let resolveProvider!: () => void
+    const providerGate = new Promise<void>(resolve => { resolveProvider = resolve })
+    const fetcher = vi.fn(async () => {
+      await providerGate
+      return new Response('data: {"choices":[{"delta":{"content":"你好。"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":5}}\n\ndata: [DONE]\n\n')
+    })
+    vi.stubGlobal('fetch', fetcher)
+    let work: ReturnType<typeof runService.executePersistedLoopRun> | undefined
+    try {
+      await vi.waitFor(() => expect(streamed().find(event => event.type === 'run.started')).toMatchObject({
+        durableTiming: { sourceRunId: runId, activeSince: null, elapsedMs: previousElapsed },
+      }), { timeout: 4000 })
+      await new Promise(resolve => setTimeout(resolve, 5000))
+      expect(fetcher).not.toHaveBeenCalled()
+      expect(streamed().some(event => event.durableTiming?.activeSince)).toBe(false)
+      work = runService.executePersistedLoopRun(f.userId, runId)
+      await vi.waitFor(() => expect(streamed().find(event => event.type === 'execution.progress' && event.durableTiming?.activeSince)).toBeTruthy(), { timeout: 5000 })
+      const live = streamed().find(event => event.type === 'execution.progress' && event.durableTiming?.activeSince)!
+      const activated = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+      const initialEvent = (await loadDurableEvents(f.userId, runId, 0)).find(event => event.type === 'run.started')!
+      expect(initialEvent).not.toHaveProperty('durableTiming')
+      expect(streamed().find(event => event.type === 'run.started')?.ts).toBe(initialEvent.ts)
+      expect(activated.startedAt!.getTime() - Date.parse(initialEvent.ts)).toBeGreaterThanOrEqual(5000)
+      expect(live.durableTiming).toMatchObject({ activeSince: activated.startedAt!.toISOString(), elapsedMs: previousElapsed, status: 'running' })
+      const history = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
+      expect(history.messages.find(message => message.runId === initial.id)?.runTiming).toEqual(live.durableTiming)
+      resolveProvider()
+      await work
+      await stream
+      const terminal = streamed().find(event => event.type === 'run.finished')?.durableTiming
+      const after = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
+      expect(terminal).toMatchObject({ status: 'finished', activeSince: null })
+      expect(terminal).toEqual(after.messages.find(message => message.runId === initial.id)?.runTiming)
+      expect(fetcher).toHaveBeenCalledTimes(1)
+    } finally {
+      resolveProvider()
+      response.emit('close')
+      await Promise.allSettled([stream, work])
+    }
+  }), 30_000)
 
   it('does not opt a fresh durable HTTP task into legacy terminal response schemas', () => fixture(async f => {
     const runtime = { tier: 'speed' as const, multiplierBps: 0, provider: 'fixture', modelName: 'fixture-main',

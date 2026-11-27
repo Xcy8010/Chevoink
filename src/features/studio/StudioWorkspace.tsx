@@ -6,6 +6,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import type { ComponentProps } from 'react'
 import { hasComposerDraft, promoteComposerDraft } from './agent/composer-drafts'
 import { workspaceBodyChanges } from './agent/workspace-body-changes'
+import { observePlanFolderWrites } from './lib/plan-folder-writes'
 import { shouldRetainAgentTaskWindow } from './lib/agent-session'
 import { chapterRecoveryKey, storeChapterEdits } from './lib/chapter-recovery'
 import ChapterDraftChoice from './components/ChapterDraftChoice'
@@ -74,7 +75,7 @@ import { fetchAgentSessions, updateAgentSessionSettings } from './agent/agentApi
 import { refreshMemoryAfterWrite } from './agent/lib/memory-read'
 import { AgentActivityBar } from './agent/components/AgentActivityBar'
 import ContextDetailDialog from './agent/components/ContextDetailDialog'
-import { WORKSPACE_WRITE_TOOLS, useAgentStore, type ComposerReference } from './agent/agentStore'
+import { isPlanFolderWriteTool, WORKSPACE_WRITE_TOOLS, useAgentStore, type ComposerReference } from './agent/agentStore'
 import { selectAgentActivityRunActive, selectAgentGoalView } from './agent/goal-selectors'
 import { getMessageText } from './agent/lib/panel-helpers'
 import { PanelResizeHandle } from './panel-resize'
@@ -426,6 +427,13 @@ export default function StudioWorkspace() {
       setPlansLoadedNovelId(owner.novelId)
     }).catch(() => { /* Keep the saved response and retry links on the next refresh. */ })
   }, [])
+  useEffect(() => {
+    if (!agentSessionId) return
+    const owner = workspaceOwnerRef.current
+    return observePlanFolderWrites(agentSessionId, () => {
+      if (workspaceOwnerRef.current === owner) refreshPlanLinks()
+    })
+  }, [activeNovelId, taskScopeOwner, agentSessionId, refreshPlanLinks])
   const { flushPlanServerSync, schedulePlanServerSync, awaitPlanServerSync, savePlanMetadata } = usePlanSync((item, novelId, savedContent) => {
     if (novelId !== `${workspaceOwnerRef.current.novelId}:${workspaceOwnerRef.current.epoch}`) return
     setServerPlanFiles(current => current.map(plan => plan.backendArtifactId === item.id
@@ -1466,7 +1474,8 @@ export default function StudioWorkspace() {
     let wrote = false
     for (const message of messages) {
       for (const part of message.parts) {
-        if (part.type !== 'tool-call' || part.status !== 'success' || !WORKSPACE_WRITE_TOOLS.has(part.toolName)) continue
+        if (part.type !== 'tool-call' || part.status !== 'success' || !WORKSPACE_WRITE_TOOLS.has(part.toolName)
+          || isPlanFolderWriteTool(part.toolName)) continue
         wrote = true
         if (part.display && 'chapterId' in part.display && typeof part.display.chapterId === 'string') {
           agentChangedChapterIdsRef.current.add(part.display.chapterId)
@@ -1564,7 +1573,6 @@ export default function StudioWorkspace() {
 
       // plan_save：把规划文档直接写进左侧「计划」文件夹并选中，无需用户手动存入
       if (event.type === 'tool.result' && event.ok && event.display?.kind === 'planFile') {
-        refreshPlanLinks()
         const display = event.display
         const existing = pendingPlanReviewRef.current?.backendArtifactId === display.artifactId ? pendingPlanReviewRef.current : null
         if (isReviewStreamReplay(existing?.lastAppliedEvent, event)
@@ -1634,7 +1642,6 @@ export default function StudioWorkspace() {
 
       // plan_save 更新既有计划（planDiff）：先落库后审——同步新内容到计划夹，再挂出审查条供保留/撤销
       if (event.type === 'tool.result' && event.ok && event.display?.kind === 'planDiff') {
-        refreshPlanLinks()
         const display = event.display
         const existing = pendingPlanReviewRef.current?.backendArtifactId === display.artifactId ? pendingPlanReviewRef.current : null
         if (isReviewStreamReplay(existing?.lastAppliedEvent, event)
@@ -1776,7 +1783,7 @@ export default function StudioWorkspace() {
         void refreshWorkspaceAfterAgentWrite()
       }
     },
-    [activeNovelId, taskUiUserId, chapterStreamOwner, captureAgentChapterReview, queryClient, refreshWorkspaceAfterAgentWrite, refreshPlanLinks],
+    [activeNovelId, taskUiUserId, chapterStreamOwner, captureAgentChapterReview, queryClient, refreshWorkspaceAfterAgentWrite],
   )
 
   useEffect(

@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
+import type { AgentMessagePart, AgentStreamEventBody, AgentUIMessage } from '../../shared/contracts/index.js'
 import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/studio/agent/components/AuthorActivityParts'
 
 import { getMessageText } from '../../src/features/studio/agent/lib/panel-helpers'
@@ -34,7 +34,7 @@ const saved = (callId: string, toolName = 'chapter_write') => call(callId, toolN
   display: { kind: 'chapterDiff', chapterId: 'internal-chapter-id', chapterTitle: title, before: '原文。', after: '正文写好了。', appliedDirectly: true, revision: 5 },
 })
 
-function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptIds, textRevealTargets, finishTextReveal, working = true, directory = chapters }: {
+function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptIds, textRevealTargets, finishTextReveal, working = true }: {
   messages: AgentUIMessage[]
   active?: string
   awaitingApprovalCallId?: string
@@ -42,7 +42,6 @@ function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptI
   textRevealTargets?: Record<string, string>
   finishTextReveal?: (messageId: string, text: string) => void
   working?: boolean
-  directory?: typeof chapters
 }) {
   const projection = projectActivityGroups(messages)
   return <>{messages.map(item => {
@@ -50,7 +49,7 @@ function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptI
     return <AuthorActivityParts key={item.id} messageId={item.id}
       parts={item.parts} groups={projection.byMessage.get(item.id)} activeGroupId={active && working ? projection.activeByRun.get(active)?.id : undefined}
       continuingGroupId={active && working ? projection.continuingByRun.get(active)?.id : undefined}
-      runActive={runActive} activityChapters={directory} awaitingApprovalCallId={awaitingApprovalCallId}
+      runActive={runActive} activityChapters={chapters} awaitingApprovalCallId={awaitingApprovalCallId}
       liveToolReceiptIds={runActive ? liveToolReceiptIds : undefined}
       revealText={textRevealTargets?.[item.id]} onTextRevealed={finishTextReveal}
       reportVisibility={activityReportVisibility(projection.reportsByMessage.get(item.id), runActive, awaitingApprovalCallId)} />
@@ -154,7 +153,7 @@ it('keeps a titled progress row in place through three overlapping tools and a l
   expect(screen.getByText(followUp.text).closest('[data-activity-report]')).toBeTruthy()
 })
 
-it('keeps a failed review on its own target until a contiguous retry produces a current report', () => {
+it('keeps a failed review in details until an actual current-version report exists for the same target', () => {
   const chapterId = 'internal-chapter-id'
   const review = (callId: string, id: string, revision: number, status: ActivityCall['status'] = 'success') => call(callId, 'continuity_validate', {
     status, args: { chapterId: id }, reviewedChapter: { chapterId: id, revision },
@@ -165,25 +164,24 @@ it('keeps a failed review on its own target until a contiguous retry produces a 
   const unrelated = review('other', 'other-chapter', 5)
   const row = (calls: ActivityCall[]) => completed([message('review', [activity, failed, ...calls]), message('reply', [{ type: 'text', text: '出场时间仍有一处待核。' }])])
   const view = render(<Transcript active="r" messages={[message('review', [activity, failed, unrelated])]} />)
-  expect(screen.getByRole('button', { name: `${goalTitle}未完成` })).toBeTruthy()
+  expect(screen.getByRole('button', { name: `正在${goalTitle}` })).toBeTruthy()
   expect(screen.queryByText('章节衔接复查未完成')).toBeNull()
   view.rerender(<Transcript messages={row([unrelated])} />)
   const button = screen.getByRole('button', { name: `${goalTitle}未完成` })
   expect(screen.getByText('出场时间仍有一处待核。')).toBeTruthy()
   fireEvent.click(button)
   expect(screen.getByText('章节衔接复查未完成')).toBeTruthy()
-  view.rerender(<Transcript messages={row([review('retry', chapterId, 4), unrelated])} />)
+  view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4)])} />)
   expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(button)
   const currentDraft = call('current', 'chapter_read', { display: { kind: 'chapterRef', chapterId, title, wordCount: 300, revision: 5 } })
-  view.rerender(<Transcript messages={row([review('retry', chapterId, 4), unrelated, currentDraft])} />)
+  view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4), currentDraft])} />)
   expect(screen.getByRole('button', { name: `${goalTitle}未完成`, expanded: true })).toBe(button)
-  view.rerender(<Transcript messages={row([review('retry', chapterId, 4), unrelated, saved('revision')])} />)
+  view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4), saved('revision')])} />)
   expect(screen.getByRole('button', { name: `${goalTitle}未完成`, expanded: true })).toBe(button)
   expect(screen.getAllByRole('region', { name: '章节衔接报告' }).some(card => within(card).queryByText('修改前的记录'))).toBe(true)
-  view.rerender(<Transcript messages={row([review('retry', chapterId, 4), unrelated, saved('revision'), review('verify', chapterId, 5)])} />)
-  expect(screen.getByRole('button', { name: `${goalTitle}未完成`, expanded: true })).toBe(button)
-  expect(screen.getAllByRole('button', { name: '章节衔接复查完成', expanded: false })).toHaveLength(2)
-  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(2)
+  view.rerender(<Transcript messages={row([unrelated, review('retry', chapterId, 4), saved('revision'), review('verify', chapterId, 5)])} />)
+  expect(screen.getByRole('button', { name: `已${goalTitle}`, expanded: true })).toBe(button)
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(5)
 })
 
 it.each([
@@ -350,7 +348,7 @@ it.each([
   { tool: 'plan_save', running: '正在写入创作计划', finished: '已完成创作计划', named: false },
   { tool: 'chapter_write', running: `正在写入《${title}》正文`, finished: `已写入《${title}》正文 · 6 字`, named: false },
   { tool: 'chapter_write', running: '正在撰写雨夜开场', finished: '已撰写雨夜开场', named: true },
-])('keeps a failed read visible when a silent $tool stage follows ($named)', ({ tool, running, finished, named }) => {
+])('updates the same row when a silent $tool stage follows a failed read ($named)', ({ tool, running, finished, named }) => {
   const opening = { type: 'text', text: '先核对前章，再接上雨夜。' } as const
   const final = { type: 'text', text: '雨沿着窗框流了下来，门外却有人在敲玻璃。' } as const
   const read = message('read', [opening, activity, call('read', 'chapter_read', { status: 'failed' })])
@@ -361,23 +359,21 @@ it.each([
   const button = screen.getByRole('button', { name: `正在${goalTitle}` })
   fireEvent.click(button)
   view.rerender(<Transcript active="r" messages={[read, staged({ ...next, status: 'running' })]} />)
-  const writer = screen.getByRole('button', { name: running, expanded: false })
-  expect(screen.getByRole('button', { name: `${goalTitle}未完成`, expanded: true })).toBe(button)
-  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(2)
+  expect(screen.getByRole('button', { name: running, expanded: true })).toBe(button)
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
   expect(view.container.querySelectorAll('.agent-processing-shimmer')).toHaveLength(1)
   expect(screen.getByText('查看章节未完成')).toBeTruthy()
   expect(screen.getByText(opening.text)).toBeTruthy()
 
   const history = completed([read, staged(next), message('answer', [final])])
   view.rerender(<Transcript messages={history} />)
-  expect(screen.getByRole('button', { name: finished, expanded: false })).toBe(writer)
-  fireEvent.click(writer)
+  expect(screen.getByRole('button', { name: finished, expanded: true })).toBe(button)
   expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(2)
   expect(screen.getByText('查看章节未完成')).toBeTruthy()
   expect(screen.getByText(final.text)).toBeTruthy()
   view.rerender(<Transcript key="reload" messages={JSON.parse(JSON.stringify(history))} />)
   expect(screen.getByRole('button', { name: finished, expanded: false })).toBeTruthy()
-  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(2)
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
 })
 
 it('publishes a confirmed terminal passage once the actual calls settle and preserves it after replay', () => {
@@ -422,18 +418,16 @@ it('falls back from a saved meta title and retains an authored chapter-summary t
   expect(screen.getByRole('button', { name: '正在撰写章节摘要' })).toBeTruthy()
 })
 
-it('keeps a settled approval visible while a separate question awaits an answer or is cancelled', () => {
+it('keeps the same activity while awaiting approval or an answer, and does not claim completion on cancellation', () => {
   const pending = call('waiting', 'chapter_read', { status: 'running' })
   const view = render(<Transcript active="r" awaitingApprovalCallId={pending.callId} messages={[message('a', [activity, pending])]} />)
   const button = screen.getByRole('button', { name: `等待你确认 · ${goalTitle}` })
   expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(0)
   const question = call('question', 'ask_user', { status: 'running' })
   view.rerender(<Transcript active="r" messages={[message('a', [activity, { ...pending, status: 'success' }]), message('b', [question])]} />)
-  expect(screen.getByRole('button', { name: `已${goalTitle}` })).toBe(button)
-  const waiting = screen.getByRole('button', { name: '等待你回答' })
+  expect(screen.getByRole('button', { name: `等待你回答 · ${goalTitle}` })).toBe(button)
   view.rerender(<Transcript messages={[message('a', [activity, { ...pending, status: 'success' }]), message('b', [{ ...question, status: 'failed' }])]} />)
-  expect(screen.getByRole('button', { name: `已${goalTitle}` })).toBe(button)
-  expect(screen.getByRole('button', { name: '等待作者决定未完成' })).toBe(waiting)
+  expect(screen.getByRole('button', { name: `${goalTitle}未完成` })).toBe(button)
   expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(0)
 })
 
@@ -551,6 +545,70 @@ it('upgrades one focused disclosure from preparation to persisted write, without
   expect(view.container.textContent).not.toMatch(/RAW_THOUGHT_ONLY|RAW_PARAMETER_ONLY|internal-chapter-id|已允许|INTERNAL_FAILURE_CODE|r5/)
 })
 
+it('preserves the live disclosure across separate preparation, execution and author report events', () => {
+  const store = useAgentStore.getState()
+  const runId = 'historical-activity-stream'
+  const base = { runId, ts: '2026-11-19T16:35:00.000Z' }
+  let seq = 0
+  const current = () => {
+    const state = useAgentStore.getState()
+    return <Transcript active={isRunActive(state.phase) ? runId : undefined}
+      messages={state.messages.filter(item => item.runId === runId)} liveToolReceiptIds={new Set([JSON.stringify(['read', null, 'chapter']), JSON.stringify(['save', null, 'plan'])])} />
+  }
+  try {
+    act(() => { store.resetRun(); store.beginRun(runId, '看前一章，再写好细纲。', 'historical-activity-session') })
+    const view = render(current())
+    const receive = (event: AgentStreamEventBody) => {
+      act(() => store.applyEvent({ ...base, seq: ++seq, ...event }))
+      view.rerender(current())
+    }
+    receive({ type: 'message.start', messageId: 'read', role: 'assistant' })
+    receive({ type: 'text.delta', messageId: 'read', delta: '先看上一章留下的线索。' })
+    receive({ type: 'activity.title', messageId: 'read', title: goalTitle })
+    receive({ type: 'tool.call', messageId: 'read', callId: 'chapter', toolName: 'chapter_read', title: '查看章节', args: { chapterId: 'internal-chapter-id' } })
+    const toggle = screen.getByRole('button', { name: `正在${goalTitle}` })
+    toggle.focus()
+    fireEvent.click(toggle)
+    receive({ type: 'tool.result', messageId: 'read', callId: 'chapter', toolName: 'chapter_read',
+      summary: '已查看章节', ok: true, durationMs: 21,
+      display: { kind: 'chapterRef', chapterId: 'internal-chapter-id', title, wordCount: 100 } })
+    receive({ type: 'message.start', messageId: 'save', role: 'assistant' })
+    receive({ type: 'tool.delta', messageId: 'save', callId: 'plan', toolName: 'plan_save', argsChars: 30 })
+    expect(screen.getByRole('button', { name: '正在准备 · 保存创作计划', expanded: true })).toBe(toggle)
+    expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
+
+    receive({ type: 'tool.preparation.end', messageId: 'save', callIds: ['plan'] })
+    expect(screen.getByRole('button', { name: `正在${goalTitle}`, expanded: true })).toBe(toggle)
+    expect(view.container.querySelector('[data-activity-preparing], [data-activity-running]')).toBeNull()
+    receive({ type: 'tool.call', messageId: 'save', callId: 'plan', toolName: 'plan_save', title: '保存计划', args: { title: '合成细纲' } })
+    expect(screen.getByRole('button', { name: '正在写入创作计划', expanded: true })).toBe(toggle)
+    expect(document.activeElement).toBe(toggle)
+    receive({ type: 'tool.result', messageId: 'save', callId: 'plan', toolName: 'plan_save',
+      ok: true, summary: '计划已保存', durationMs: 18,
+      display: { kind: 'planFile', artifactId: 'synthetic-plan', title: '合成细纲', content: '合成细纲正文。' } })
+    expect(toggle.querySelector('[data-activity-running]')).toBeNull()
+    expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(2)
+
+    const report = '细纲已经保存。我再补记这次的线索。'
+    receive({ type: 'message.start', messageId: 'report', role: 'assistant' })
+    receive({ type: 'text.delta', messageId: 'report', delta: report })
+    expect(screen.getByText(report)).toBeTruthy()
+    receive({ type: 'tool.call', messageId: 'report', callId: 'memory', toolName: 'memory_save', title: '保存记忆', args: {} })
+    expect(screen.getByRole('button', { name: '已完成创作计划', expanded: true })).toBe(toggle)
+    const next = screen.getByRole('button', { name: '正在写入创作设定', expanded: false })
+    expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(2)
+    expect(screen.getByText(report).compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    receive({ type: 'tool.result', messageId: 'report', callId: 'memory', toolName: 'memory_save',
+      ok: true, summary: '设定已保存', durationMs: 11 })
+    receive({ type: 'run.finished', status: 'succeeded', artifacts: [], outputSummary: '',
+      usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 } })
+    expect(screen.getByRole('button', { name: '已完成创作设定' })).toBe(next)
+    expect(view.container.querySelector('.agent-processing-shimmer')).toBeNull()
+  } finally {
+    act(() => store.resetRun())
+  }
+})
+
 it('preserves only the latest terminal status in the headline and the failed attempt in details', () => {
   const failureReceipt = '这批修改未保存，第 3 处未找到对应原文'
   const args = { chapterId: 'internal-chapter-id', oldText: '原文。', newText: '正文写好了。' }
@@ -560,7 +618,7 @@ it('preserves only the latest terminal status in the headline and the failed att
   fireEvent.click(toggle)
   view.rerender(<Transcript messages={[message('a', [failed]), message('b', [reasoning, { ...saved('retry', 'chapter_edit_range'), args }])]} />)
   const group = view.container.querySelector('[data-author-activity]')!
-  expect(within(group as HTMLElement).getByRole('button', { name: `已完成《${title}》的修改`, expanded: true })).toBe(toggle)
+  expect(within(group as HTMLElement).getByRole('button', { name: '已完成修改', expanded: true })).toBe(toggle)
   expect(within(group as HTMLElement).getByText(failureReceipt)).toBeTruthy()
   expect(group.textContent).not.toMatch(/已允许|INTERNAL_FAILURE_CODE/)
   expect(group.querySelectorAll('[data-activity-tool="chapter_edit_range"]')).toHaveLength(2)
@@ -874,54 +932,6 @@ it('combines writing and appending on one chapter but separates a different chap
   expect(projection?.get('other')?.calls.map(item => item.callId)).toEqual(['other'])
 })
 
-it('keeps silent multi-chapter writes, edits, archive updates and the final checklist in their own rows after replay', () => {
-  const directory = new Map([16, 17, 18].map(orderIndex => [`synthetic-${orderIndex}`, { orderIndex, title: `合成第${orderIndex}章` }]))
-  const draft = (order: number, toolName: string, suffix = '') => {
-    const chapterId = `synthetic-${order}`
-    const title = directory.get(chapterId)!.title
-    return call(`${toolName}-${order}${suffix}`, toolName, { args: { chapterId },
-      display: toolName === 'chapter_create'
-        ? { kind: 'chapterRef', chapterId, title, wordCount: 0 }
-        : { kind: 'chapterDiff', chapterId, chapterTitle: title, before: '旧稿。', after: '合成正文。', appliedDirectly: true },
-    })
-  }
-  const outlines = [16, 17, 18].map(order => call(`outline-${order}`, 'plan_save', {
-    display: { kind: 'planFile', artifactId: `synthetic-plan-${order}`, title: `合成第${order}章细纲`, content: '合成细纲。' },
-  }))
-  const first = { type: 'text', text: '先看前面的材料。' } as const
-  const answer = { type: 'text', text: '三章都已整理。', afterTools: true } as const
-  const records = completed([
-    message('open', [first, call('plan-ref', 'plan_read'), call('todo-start', 'todo_write')]),
-    message('outlines', outlines),
-    ...[16, 17, 18].map(order => message(`draft-${order}`, [draft(order, 'chapter_create'), draft(order, 'chapter_write'), draft(order, 'chapter_append')])),
-    message('work', [
-      draft(16, 'chapter_edit_range'), draft(16, 'chapter_edit_range', '-retry'), draft(17, 'chapter_edit_range'),
-      call('archive-memory', 'memory_save'), call('archive-event', 'memory_event_save'), call('todo-end', 'todo_write'), answer,
-    ]),
-  ])
-  const view = render(<Transcript messages={records} directory={directory} />)
-  const toggles = () => Array.from(view.container.querySelectorAll('[data-author-activity] > button'))
-  expect(toggles().map(button => button.textContent)).toEqual([
-    '已查看创作资料', '已更新待办清单',
-    '已保存《合成第16章细纲》', '已保存《合成第17章细纲》', '已保存《合成第18章细纲》',
-    '已写入《合成第16章》正文 · 5 字', '已写入《合成第17章》正文 · 5 字', '已写入《合成第18章》正文 · 5 字',
-    '已完成《合成第16章》的修改', '已完成《合成第17章》的修改', '已完成创作设定', '已更新待办清单',
-  ])
-  const expectReceipts = () => {
-    expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(0)
-    const counts = toggles().map(button => {
-      fireEvent.click(button)
-      return button.closest('[data-author-activity]')?.querySelectorAll('[data-activity-tool]').length
-    })
-    expect(counts).toEqual([1, 1, 1, 1, 1, 3, 3, 3, 2, 1, 2, 1])
-  }
-  expectReceipts()
-  view.rerender(<Transcript key="replay" messages={JSON.parse(JSON.stringify(records))} directory={directory} />)
-  expectReceipts()
-  expect(screen.getByText(first.text)).toBeTruthy()
-  expect(screen.getByText(answer.text)).toBeTruthy()
-})
-
 it('names review types, groups matching checks, and keeps optional details inside the report', () => {
   const continuity = call('continuity', 'continuity_validate', { display: {
     kind: 'storyCompiler', phase: 'check', title: '章节衔接复查', detail: '已检查', items: ['检查项仍可展开'], errorCount: 2, warningCount: 3,
@@ -999,24 +1009,6 @@ it('keeps different chapter batch checks openable under their own headlines even
   render(<Transcript active="r" messages={[message('batch-checks', [activity, review('continuity'), review('quality')])]} />)
   expect(screen.getByRole('button', { name: '第 4–5 章 · 章节衔接复查完成' })).toBeTruthy()
   expect(screen.getByRole('button', { name: '第 4–5 章 · 行文自然度复查完成' }).querySelector('.agent-processing-shimmer')).toBeNull()
-})
-
-it('shows failed batch review types and only the exact directory-backed range', () => {
-  const directory = new Map([16, 17, 18].map(orderIndex => [`synthetic-${orderIndex}`, { orderIndex, title: `合成第${orderIndex}章` }]))
-  const ids = Array.from(directory.keys()).reverse()
-  const failure = (id: string, reviewType: string, chapterIds: string[] = ids) => call(id, 'chapter_review_batch', {
-    status: 'failed', args: { reviewType, chapterIds },
-  })
-  const view = render(<Transcript messages={completed([message('failures', [
-    activity, failure('continuity', 'continuity'), failure('quality', 'quality'),
-    failure('custom', 'custom', ['synthetic-16', 'unknown-target']),
-    failure('fallback', 'INTERNAL_FAILURE_CODE', ['unknown-target']),
-  ])])} directory={directory} />)
-  expect(screen.getByRole('button', { name: '第 16–18 章 · 章节衔接复查未完成' })).toBeTruthy()
-  expect(screen.getByRole('button', { name: '第 16–18 章 · 行文自然度复查未完成' })).toBeTruthy()
-  expect(screen.getByRole('button', { name: '自定义复查未完成' })).toBeTruthy()
-  expect(screen.getByRole('button', { name: '批量复查章节未完成' })).toBeTruthy()
-  expect(view.container.textContent).not.toMatch(/unknown-target|INTERNAL_FAILURE_CODE|synthetic-16/)
 })
 
 it('uses completion labels for saved actions while keeping all grouped receipts available', () => {

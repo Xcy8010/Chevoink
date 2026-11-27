@@ -13,8 +13,6 @@ import { formatNovelSetupRecap, hasNovelDirectionDelivery, isNovelSetupAuthority
 import { failedToolResultSchema, hasAnsweredQuestionBatch } from './runtime-reducer.js'
 import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { isDurablePublicWebOperation, projectDurablePublicWeb } from './runtime-public-web.js'
-import { readReviewTransitionReport, toolActivityReport } from './activity-report.js'
-import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import { semanticHistoryDigest } from './semantic-compaction.js'
 import { isChapterBodyWriter } from './saved-chapter-work.js'
 import { readSavedChapterWrapUp } from './writing-scope.js'
@@ -137,17 +135,9 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
         ? await readSavedChapterWrapUp(tx, { runId: source.runId, novelId: current.root.novelId, userId: current.root.userId }, metadata.text)
         : undefined
       const prose = humanizeAgentVisibleText(wrapUp ?? metadata.text)
-      let report = prose
-      if (toolCall && !prose.trim()) {
-        const hasPriorTool = previous.state.messages.some(message =>
-          message.role === 'assistant' && message.toolCalls?.some(call => call.name !== 'task_respond'))
-        const transition = chapterReviewWorkflowEnabled(current.originalSpec)
-          ? await readReviewTransitionReport(tx, source.runId, previous.state.messages, appended.toolCalls ?? []) : ''
-        report = transition || toolActivityReport(toolCall.name, title, hasPriorTool)
-      }
       if (title) events.push({ type: 'activity.title', messageId, title })
       if (appended.reasoning) events.push({ type: 'reasoning.delta', messageId, delta: appended.reasoning })
-      events.push({ type: 'text.final', messageId, text: report, asReasoning: false })
+      events.push({ type: 'text.final', messageId, text: prose, asReasoning: false })
       return events
     }
     if (appended.role === 'tool') {

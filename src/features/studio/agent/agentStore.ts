@@ -189,6 +189,10 @@ export const WORKSPACE_WRITE_TOOLS = new Set([
   'novel_delete',
 ])
 
+export function isPlanFolderWriteTool(toolName: string) {
+  return toolName === 'plan_save' || toolName === 'plan_rename' || toolName === 'plan_delete'
+}
+
 const WRITE_TOOL_LABELS: Record<string, string> = {
   chapter_create: '新建章节',
   chapter_write: '写入正文',
@@ -293,6 +297,8 @@ type AgentStoreState = {
   autoFollow: boolean
   /** 当前任务窗口（会话）累计的工作区写入活动（变更区） */
   workspaceActivities: WorkspaceActivity[]
+  /** Successful receipts from canonical assistant parts, including inline children. */
+  planFolderWriteReceipts: ReadonlySet<string>
   /** 工作区变更触发版本：仅 live 事件递增，驱动变更区自动展开（历史恢复不触发） */
   activitiesVersion: number
   /** 当前会话的任务待办清单（todo_write 全量维护） */
@@ -458,13 +464,17 @@ function activityFromDisplay(display: unknown): { label: string | null; chapterI
 /** 从历史消息的工具轨迹推导会话级的工作区变更与待办清单（刷新/切换会话后恢复） */
 function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
   workspaceActivities: WorkspaceActivity[]
+  planFolderWriteReceipts: ReadonlySet<string>
   todos: AgentTodoItem[]
 } {
   const workspaceActivities: WorkspaceActivity[] = []
+  const planFolderWriteReceipts = new Set<string>()
   let todos: AgentTodoItem[] = []
 
   for (const message of messages) {
     for (const part of message.parts) {
+      const receipt = planFolderWriteReceipt(message, part)
+      if (receipt) planFolderWriteReceipts.add(receipt)
       if (part.type !== 'tool-call' || part.preparing || part.subagentCallId) {
         continue
       }
@@ -492,7 +502,13 @@ function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
     }
   }
 
-  return { workspaceActivities, todos }
+  return { workspaceActivities, planFolderWriteReceipts, todos }
+}
+
+function planFolderWriteReceipt(message: Pick<AgentUIMessage, 'id' | 'runId' | 'role'>, part: AgentMessagePart) {
+  if (message.role !== 'assistant' || part.type !== 'tool-call' || part.preparing
+    || part.status !== 'success' || !isPlanFolderWriteTool(part.toolName)) return undefined
+  return JSON.stringify([message.runId, message.id, part.subagentCallId ?? null, part.callId])
 }
 
 // Browser state and caches retain returned reasoning separately from reply prose.
@@ -706,6 +722,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   }),
   autoFollow: readStoredAutoFollow(),
   workspaceActivities: [],
+  planFolderWriteReceipts: new Set(),
   activitiesVersion: 0,
   todos: [],
   todosVersion: 0,
@@ -790,6 +807,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // 工作区变更仍按会话累计；
       // 上一个任务若被停止后遗留了「执行中」的工具卡片（终态事件丢失时），开新任务前一并收尾
       workspaceActivities: settleRunningActivities(state.workspaceActivities),
+      ...(state.loadedSessionId === sessionId ? {} : { planFolderWriteReceipts: new Set<string>() }),
       messages: [
         ...settleRunningToolParts(state.messages, '已停止', runId),
         ...(existingUser ? [] : [userMessage]),
@@ -826,6 +844,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       nextPrompt: null,
       activeSessionId: sessionId,
       loadedSessionId: sessionId,
+      ...(state.loadedSessionId === sessionId ? {} : { planFolderWriteReceipts: new Set<string>() }),
       pendingApproval: null,
       pendingQuestion: null,
       usage: emptyUsage,
@@ -894,6 +913,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       toolNavigationRequest: null,
       // 工作区活动取历史轨迹，待办取任务级快照；分页不应覆盖此快照。
       workspaceActivities: derived.workspaceActivities,
+      planFolderWriteReceipts: derived.planFolderWriteReceipts,
       todos,
       // 只清除属于本会话的水合标记，避免覆盖后发起的其它会话
       hydratingSessionId: state.hydratingSessionId === sessionId ? null : state.hydratingSessionId,
@@ -940,10 +960,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         return {}
       }
       const merged = [...older, ...state.messages]
+      const derived = deriveSessionStateFromMessages(merged)
       return {
         messages: merged,
         // 分页仅补充会话活动，绝不把任务待办倒退到旧消息快照。
-        workspaceActivities: deriveSessionStateFromMessages(merged).workspaceActivities,
+        workspaceActivities: derived.workspaceActivities,
+        planFolderWriteReceipts: derived.planFolderWriteReceipts,
       }
     }),
 
@@ -976,6 +998,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       errorMessage: null,
       errorCode: null,
       workspaceActivities: [],
+      planFolderWriteReceipts: new Set(),
       todos: [],
       liveToolDrafts: {},
       toolNavigationRequest: null,
@@ -1267,15 +1290,22 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }
       // A late stream from another run cannot change the current message,
       // cursor or draft lifecycle, including preparation-end cleanup.
-      if (event.runId !== state.runId && ['run.started', 'message.start', 'activity.title', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.question_wait', 'run.finished', 'error'].includes(event.type)) return {}
+      if (event.runId !== state.runId && (event.durableTiming !== undefined || ['run.started', 'message.start', 'activity.title', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.question_wait', 'run.finished', 'error'].includes(event.type))) return {}
 
-      // Only accepted live events can establish a local response clock. Start
-      // metadata and historical replay cannot masquerade as model output.
+      // Only accepted live transitions may advance the local request clock.
       if (state.trackLocalRequestTiming && state.motionAfterSeq !== null && event.seq > state.motionAfterSeq) useOutgoingMessages.getState().observeEvent(event)
 
-      const timingEvent = ['run.started', 'run.paused', 'run.question_wait', 'run.finished'].includes(event.type) || event.type === 'error' && !event.recoverable
+      const timingEvent = event.durableTiming !== undefined || ['run.started', 'run.paused', 'run.question_wait', 'run.finished'].includes(event.type) || event.type === 'error' && !event.recoverable
       const timedMessages = timingEvent ? state.messages.map(message => {
         const timing = message.runTiming
+        if (event.durableTiming) {
+          const incoming = event.durableTiming
+          if ((timing?.sourceRunId ?? message.runId) === event.runId || incoming.scopeId && timing?.scopeId === incoming.scopeId) {
+            return { ...message, runTiming: incoming }
+          }
+          return message
+        }
+        if (event.durableTiming === null && (event.type === 'run.started' || event.type === 'execution.progress')) return message
         if ((timing?.sourceRunId ?? message.runId) !== event.runId) return message
         // A new durable attempt replays the original root's admission event.
         // Its actual start is supplied by the new attempt's history timing.
@@ -1591,9 +1621,20 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const messages = finalizeReplayedReasoning(owned, event)
           noteReplayedTool(event)
           const extracted = activityFromDisplay(event.display)
-          const previousCall = state.messages.find(message => message.id === event.messageId)?.parts
-            .find(part => matchesToolEvent(part, event))
+          const subject = owned.find(message => message.id === event.messageId)
+          const previousCall = subject?.parts.find(part => matchesToolEvent(part, event))
           const resultStatus = event.ok ? 'success' : 'failed'
+          const settled: AgentMessagePart = {
+            ...previousCall,
+            type: 'tool-call', callId: event.callId, toolName: event.toolName,
+            title: previousCall?.title ?? getAgentToolPresentation(event.toolName).label,
+            args: previousCall ? previousCall.args : null,
+            status: resultStatus, preparing: false,
+            summary: event.summary, display: event.display, durationMs: event.durationMs, reviewOutcome: event.reviewOutcome,
+            ...(event.reviewedChapter ? { reviewedChapter: event.reviewedChapter } : {}),
+            ...(event.subagentCallId ? { subagentCallId: event.subagentCallId } : {}),
+          }
+          const planReceipt = subject && planFolderWriteReceipt(subject, settled)
           const visibleResultChanged = !previousCall || previousCall.type === 'tool-call' && (previousCall.status !== resultStatus || previousCall.reviewOutcome !== event.reviewOutcome
             || projectAgentToolSummary(previousCall.summary ?? '', previousCall.status) !== projectAgentToolSummary(event.summary, resultStatus))
           const clearQuestion = state.pendingQuestion?.callId === event.callId
@@ -1606,6 +1647,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               : {}
           return {
             ...base,
+            ...(planReceipt && !state.planFolderWriteReceipts.has(planReceipt)
+              ? { planFolderWriteReceipts: new Set([...state.planFolderWriteReceipts, planReceipt]) } : {}),
             ...(!event.subagentCallId && visibleResultChanged ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
             // 工具结果到达同样证明正文流早已结束：兜底登记定稿，确保光标不残留
             ...(state.finalizedTextIds.includes(event.messageId) ? {} : { finalizedTextIds: [...state.finalizedTextIds, event.messageId] }),
@@ -1634,17 +1677,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ),
             messages: updateMessageParts(messages, event.messageId, (parts) => {
               const index = parts.findIndex(part => matchesToolEvent(part, event))
-              const previous = parts[index]
-              const settled: AgentMessagePart = {
-                ...(previous?.type === 'tool-call' ? previous : {}),
-                type: 'tool-call', callId: event.callId, toolName: event.toolName,
-                title: previous?.type === 'tool-call' ? previous.title : getAgentToolPresentation(event.toolName).label,
-                args: previous?.type === 'tool-call' ? previous.args : null,
-                status: event.ok ? 'success' : 'failed', preparing: false,
-                summary: event.summary, display: event.display, durationMs: event.durationMs, reviewOutcome: event.reviewOutcome,
-                ...(event.reviewedChapter ? { reviewedChapter: event.reviewedChapter } : {}),
-                ...(event.subagentCallId ? { subagentCallId: event.subagentCallId } : {}),
-              }
               return index < 0 ? [...parts, settled] : parts.map((part, at) => at === index ? settled : part)
             }),
           }

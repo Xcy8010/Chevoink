@@ -3,6 +3,9 @@ import { publicReviewExecution } from '../../../shared/review-lifecycle.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Response } from 'express'
 import { publishDurableEvents, loadDurableEvents, isDurablePauseResumed } from './runtime-event-projection.js'
+import { loadMessageTimings } from './message-timing.js'
+import { prisma } from '../prisma.js'
+import type { AgentRunTiming } from '../../../shared/contracts/index.js'
 
 const publishing = new Map<string, ReturnType<typeof publishDurableEvents>>()
 function publishForReaders(userId: string, runId: string) {
@@ -15,10 +18,16 @@ function publishForReaders(userId: string, runId: string) {
 }
 
 /** DB-backed live/replay; no process-local bus or synthetic failure fallback. */
-export async function streamDurableRun(userId: string, runId: string, sinceSeq: number, res: Response): Promise<void> {
+export async function streamDurableRun(userId: string, runId: string, sinceSeq: number, res: Response, sessionId?: string): Promise<void> {
   // Validate ownership/protocol/cursor before sending response headers.
   await publishForReaders(userId, runId)
   let page = await loadDurableEvents(userId, runId, sinceSeq)
+  const session = sessionId ?? (await prisma.agentRun.findFirst({ where: { id: runId, userId }, select: { sessionId: true } }))?.sessionId
+  const readTiming = async (): Promise<AgentRunTiming | null> => {
+    const timings = session ? await loadMessageTimings(userId, session, [runId]).catch(() => null) : null
+    const timing = timings?.get(runId)
+    return timing?.sourceRunId === runId ? timing : null
+  }
   const controller = new AbortController()
   const closed = () => controller.abort()
   res.once('close', closed)
@@ -40,6 +49,7 @@ export async function streamDurableRun(userId: string, runId: string, sinceSeq: 
     return !controller.signal.aborted
   }
   let cursor = sinceSeq, lastPing = Date.now()
+  let clockObserved = false
   try {
     while (!controller.signal.aborted && !res.writableEnded && !res.destroyed) {
       if (page.length === 0 && cursor > 0) {
@@ -47,9 +57,18 @@ export async function streamDurableRun(userId: string, runId: string, sinceSeq: 
         if (previous?.seq === cursor && (previous.type === 'run.paused' && !await isDurablePauseResumed(userId, runId, previous.seq) || previous.type === 'run.finished'
           || (previous.type === 'error' && !previous.recoverable))) return
       }
+      let timing: AgentRunTiming | null | undefined
+      let sentTiming = false
       for (const event of page) {
         if (event.type === 'run.paused' && await isDurablePauseResumed(userId, runId, event.seq)) { cursor = event.seq; continue }
-        const visible = publicAgentProgressEvent(publicReviewExecution(event))
+        const boundary = event.type === 'run.started' || event.type === 'run.question_wait' || event.type === 'run.paused'
+          || event.type === 'run.finished' || event.type === 'error' && !event.recoverable
+        // The durable model scheduling frame is projected before supplier output.
+        const activation = !clockObserved && !sentTiming && event.type === 'execution.progress'
+        if ((boundary || activation) && timing === undefined) timing = await readTiming()
+        if (timing && (timing.activeSince || timing.status === 'finished' || timing.status === 'waiting')) clockObserved = true
+        const visible = publicAgentProgressEvent(publicReviewExecution(boundary || activation ? { ...event, durableTiming: timing ?? null } : event))
+        if (boundary || activation) sentTiming = true
         if (!await write(`id: ${visible.seq}\nevent: ${visible.type}\ndata: ${JSON.stringify(visible)}\n\n`)) return
         cursor = event.seq
         if (event.type === 'run.paused' || event.type === 'run.finished' || (event.type === 'error' && !event.recoverable)) return

@@ -74,7 +74,7 @@ ${AGENT_TOOL_EXECUTION_POLICY}
 
 // Keep frequently edited opening copy at the end of the assembled system message.
 const openingGuidance = (reviewWorkflow: boolean) => `- 需要工具时，由你根据作者请求选择第一个能推进任务的动作。第一步一旦确定，就立即在回复区用一句话说清要对哪个对象做什么，例如「我先读这份细纲的章末安排。」在同一轮的 content 写出这句话，随即发出对应的原生工具调用。拿到结果后再细化后续步骤，不等整套方案想好才开口。进度标题和内部思考不能代替这句汇报。作者明确要求省略进展时遵从；无需执行工具的简单问答直接回答。
-- 首次为一个具体目标调用工具时，在同一轮的回复首行用 <activity-title>动作＋对象</activity-title> 概括一次，例如 <activity-title>核对人物出场时间</activity-title>，随后换行写公开汇报，再调用工具。串行、并行及后续轮次继续同一目标时沿用该标题，不重复输出；状态由真实结果显示。开场之后，常规查阅、保存和同目标重试不逐个播报。工具变更本身无需另发一句。${reviewWorkflow ? '当阶段成果已经可查看、发现影响交付的事实，或原办法失效将改变结果、耗时或费用时，在下一次工具调用的同一轮面向作者简短说明事实和下一步；同一变化只说明一次，沿用作者对过程汇报的偏好。' : '只有发现会改变写法的具体事实、交付有缺项或需要作者决定时，才在阶段之间说一句；其余工具轮只给必要的标题并直接调用工具。'}例如「前章里她还不知道来信人的身份，我会留到拆信时再揭开。」标题只写作品里的动作与对象，省去“总结这一步的结果”“整理最终回复”等过程说明。直接交付最终答复时，从交付内容起笔，省略活动标题。支持按作者要求省略最终总结或只交付正文。`
+- 首次为一个具体目标调用工具时，在同一轮的回复首行用 <activity-title>动作＋对象</activity-title> 概括一次，例如 <activity-title>核对人物出场时间</activity-title>，随后换行写公开汇报，再调用工具。串行、并行及后续轮次继续同一目标时沿用该标题，不重复输出；状态由真实结果显示。开场之后，常规查阅、保存和同目标重试不逐个播报。工具变更本身无需另发一句。${reviewWorkflow ? '取得阶段成果、发现影响创作的事实或需要改变做法时，在同一轮的公开回复里，用自己的话告诉作者你确认了什么，以及它如何影响接下来的工作。' : '只有发现会改变写法的具体事实、交付有缺项或需要作者决定时，才在阶段之间说一句；其余工具轮只给必要的标题并直接调用工具。'}例如「前章里她还不知道来信人的身份，我会留到拆信时再揭开。」标题只写作品里的动作与对象，省去“总结这一步的结果”“整理最终回复”等过程说明。直接交付最终答复时，从交付内容起笔，省略活动标题。支持按作者要求省略最终总结或只交付正文。`
 
 export function buildAgentIdentityPrompt(modelTier: CreditModelTier, modelName?: string | null, productDisplayName?: string | null, contentPolicyEnabled = false, reviewWorkflow = chapterReviewWorkflowEnabled()): string {
   const tierLabel = (MODEL_IDENTITY_LABELS[modelTier] ?? productDisplayName?.trim()) || '内置模型'

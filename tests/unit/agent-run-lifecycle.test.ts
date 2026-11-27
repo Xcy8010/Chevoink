@@ -517,10 +517,9 @@ it('publishes one activity title from an ordinary tool turn without streaming it
   ])
   expect(projected.filter(event => event.type === 'tool.call')).toHaveLength(1)
   expect(projected.filter(event => event.type === 'tool.result')).toMatchObject([{ callId: read.id, ok: true, summary: '已读取第三章' }])
-  const reportIndex = projected.findIndex(event => event.type === 'text.final' && event.text === `我先${title}。`)
-  expect(reportIndex).toBeGreaterThanOrEqual(0)
-  expect(reportIndex).toBeLessThan(projected.findIndex(event => event.type === 'tool.delta'))
-  expect(reportIndex).toBeLessThan(projected.findIndex(event => event.type === 'tool.call'))
+  expect(projected.filter(event => event.type === 'text.final' && event.text)).toEqual([
+    expect.objectContaining({ type: 'text.final', text }),
+  ])
   expect(projected.filter(event => event.type === 'text.delta' || event.type === 'text.final')).toEqual(expect.arrayContaining([
     expect.objectContaining({ type: 'text.final', text }),
   ]))
@@ -550,7 +549,7 @@ it('keeps a literal title-tag-only answer when the requested reply has no tool c
 it.each([
   { prompt: '写第十章细纲。', opening: '我先看《渡口》的章末，核对细纲从哪里接上。', closing: '第十章细纲已保存到原大纲下。这章接在渡口的夜班之后。守夜人捡到的信落到迟归的船夫手里，把两人的选择连了起来。' },
   { prompt: '写第十章细纲并保存，也把完整细纲给我。', opening: '', closing: '## 第十章细纲\n\n第一场，渡口的守夜人捡到一封信。\n\n第二场，守夜人将信交给迟归的船夫。' },
-])('introduces tools once, allows silent routine saves and honors the requested closing: $prompt', async ({ prompt, opening, closing }) => {
+])('shows only model prose around tool execution and preserves the requested closing: $prompt', async ({ prompt, opening, closing }) => {
   const { enableAgentWritingScope } = await import('../../api/lib/agent/agent-writing-scope.js')
   const taskSpec = enableAgentWritingScope(buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt, authorWritingProtocol: 2 }))
   mocks.currentOriginal = { prompt, taskSpec }
@@ -579,11 +578,11 @@ it.each([
   await run(prompt)
   expect(events().filter(event => event.type === 'error' || event.type === 'run.paused' || event.type === 'run.finished'))
     .toEqual([expect.objectContaining({ type: 'run.finished', status: 'succeeded', outputSummary: closing })])
-  const ordered = events().flatMap(event => event.type === 'text.final' ? [event.text]
-    : event.type === 'tool.delta' || event.type === 'tool.result' ? [`${event.type}:${event.callId}`] : [])
+  const ordered = events().flatMap(event => event.type === 'text.final' && event.text ? [event.text]
+    : event.type === 'tool.call' || event.type === 'tool.result' ? [`${event.type}:${event.callId}`] : [])
   expect(ordered).toEqual([
-    opening || '我先核对前文。', 'tool.delta:read', 'tool.result:read',
-    'tool.delta:save', 'tool.result:save', closing,
+    ...(opening ? [opening] : []), 'tool.call:read', 'tool.result:read',
+    'tool.call:save', 'tool.result:save', closing,
   ])
   expect(events().filter(event => event.type === 'activity.title')).toHaveLength(opening ? 1 : 0)
   expect(mocks.chat).toHaveBeenCalledTimes(3)
@@ -594,7 +593,7 @@ it.each([
   expect(persisted).toContainEqual({ type: 'text', text: closing })
 })
 
-it.each(['run', 'other-run'])('restores the opening only from this run’s own tool history: %s', async priorRun => {
+it.each(['run', 'other-run'])('keeps a resumed read silent regardless of prior tool history: %s', async priorRun => {
   const prompt = '核对前文的人物出场时间。'
   admitCurrentOriginal(prompt)
   const payload: AgentStreamEvent = { type: 'tool.call', runId: priorRun, seq: 1, ts: 1, messageId: 'old-message',
@@ -605,7 +604,9 @@ it.each(['run', 'other-run'])('restores the opening only from this run’s own t
   queue(response('', [call('new-read', read.name)]), response('人物在黄昏抵达。'))
   await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c',
     mode: 'build', prompt, resume: true })
-  expect(events().filter(event => event.type === 'text.final' && event.text === '我先核对前文。')).toHaveLength(priorRun === 'run' ? 0 : 1)
+  expect(events().filter(event => event.type === 'text.final' && event.text)).toEqual([
+    expect.objectContaining({ text: '人物在黄昏抵达。' }),
+  ])
   expect(read.execute).toHaveBeenCalledOnce()
   expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
 })
@@ -619,9 +620,10 @@ it('retains real prose received after a preview when the provider stream is canc
   })
   await run('核对前章并写细纲。')
   expect(events().filter(event => event.type === 'text.final')).toEqual([
-    expect.objectContaining({ text: '我先核对前文。' }),
     expect.objectContaining({ text }),
   ])
+  expect(events().findIndex(event => event.type === 'text.delta' && event.delta.includes('前一章')))
+    .toBeGreaterThan(events().findIndex(event => event.type === 'tool.delta'))
   expect(events().filter(event => event.type === 'tool.call')).toEqual([])
   expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
   expect(mocks.persist).toHaveBeenCalledWith(expect.objectContaining({
@@ -5199,7 +5201,6 @@ describe('author-directed task ending in the real execution loop', () => {
     expect(write.execute).not.toHaveBeenCalled()
     expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', errorMessage: null, currentTurn: 1, usage: { totalTokens: 31 } })
     expect(events().filter(event => event.type === 'text.final')).toEqual([
-      expect.objectContaining({ text: '这一步需要和你确认一个问题。' }),
       expect.objectContaining({ type: 'text.final', afterTools: true, text: expect.stringContaining('提问已超时，本轮已结束') }),
     ])
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
@@ -5228,7 +5229,6 @@ describe('author-directed task ending in the real execution loop', () => {
       ok: true, display: { kind: 'question', questions, cancelled: true, unanswered: true },
     })
     expect(events().filter(event => event.type === 'text.final')).toEqual([
-      expect.objectContaining({ text: '这一步需要和你确认一个问题。' }),
       expect.objectContaining({ text: '已取消提问，已保存的内容会保留。你希望接下来怎么处理？', afterTools: true }),
     ])
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
@@ -5307,7 +5307,6 @@ describe('author-directed task ending in the real execution loop', () => {
       expect(outline.execute).not.toHaveBeenCalled()
       expect(events().find(event => event.type === 'tool.call' && event.callId === 'guessed-save')).toBeUndefined()
       expect(events().filter(event => event.type === 'text.final')).toEqual([
-        expect.objectContaining({ text: '这一步需要和你确认一个问题。' }),
         expect.objectContaining({ type: 'text.final', afterTools: true,
           text: `已保存《${title}》的作品信息。\n\n**简介**\n\n${fields.summary}\n\n**标签** 都市\n\n要不要先设置一下作品封面，还是直接开始写大纲？` }),
       ])
@@ -5372,7 +5371,6 @@ describe('author-directed task ending in the real execution loop', () => {
       ])
       expect(outline.execute).not.toHaveBeenCalled()
       expect(events().filter(event => event.type === 'text.final')).toEqual([
-        expect.objectContaining({ text: '我先整理作品信息。' }),
         expect.objectContaining({ text: progress }),
         expect.objectContaining({ afterTools: true, text: recap }),
       ])
@@ -5443,7 +5441,6 @@ describe('author-directed task ending in the real execution loop', () => {
       expect(events().find(event => event.type === 'tool.result' && event.callId === 'failed-save'))
         .toMatchObject({ ok: false, failureCode: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
       expect(events().filter(event => event.type === 'text.final' && event.text)).toEqual([
-        expect.objectContaining({ text: '我先整理作品信息。' }),
         expect.objectContaining({ afterTools: true, text: expect.stringContaining('缺少修改这些作品信息的授权') }),
       ])
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })

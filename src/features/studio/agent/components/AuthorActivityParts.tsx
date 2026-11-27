@@ -18,7 +18,7 @@ import { AgentProcessRegion } from './AgentProcessRegion'
 import { ActivityScrollArea } from './ActivityScrollArea'
 import { ProcessDuration } from './ProcessDuration'
 import { ChapterReviewCard, ContinuityReviewDetails } from './ChapterReviewCard'
-import { reviewBatchFailureHeadline, reviewBatchHeadline } from '../lib/chapter-review-presentation'
+import { reviewBatchHeadline } from '../lib/chapter-review-presentation'
 
 const actionNames: Record<string, string> = {
   chapter_read: '查看章节', chapter_list_summaries: '查看章节摘要', project_search: '搜索前文',
@@ -89,7 +89,6 @@ function activitySummary(part: ActivityCall, runActive: boolean, chapters?: Acti
     return agentRunningToolLabel(part.toolName, title, detail ? action : undefined)
   }
   if (part.status !== 'success') {
-    if (part.toolName === 'chapter_review_batch') return reviewBatchFailureHeadline(part.args)
     // Old persisted results do not carry failureCode. Only the server's exact
     // author-facing anchor receipt is safe to render from the summary field.
     if (detail && part.toolName === 'chapter_edit_range'
@@ -103,8 +102,7 @@ function activitySummary(part: ActivityCall, runActive: boolean, chapters?: Acti
     if (isWrite) return grouped ? '已写入正文' : `已写入${named}正文 · ${display.after.length.toLocaleString('zh-CN')} 字`
     return named ? `已完成${named}的修改` : '已完成修改'
   }
-  if (display?.kind === 'memoryCard' && !grouped) return `已保存记忆「${display.title}」`
-  if (!detail && part.toolName === 'plan_save' && (display?.kind === 'planFile' || display?.kind === 'planDiff')) return `已保存《${display.title}》`
+  if (display?.kind === 'memoryCard') return `已保存记忆「${display.title}」`
   if (isWrite) return '写入正文'
   if (review) {
     const problem = stale ? 'stale' : activityReviewProblem(part)
@@ -281,11 +279,11 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
   const [open, setOpen] = useState(false)
   const detailsId = useId()
   const calls = group.calls
-  const grouped = calls.length > 1
+  const grouped = calls.length - group.stageStart > 1
   const unresolved = group.unsettled
   const running = runActive ? [...calls].reverse().find(part => part.status === 'running') : undefined
   const part = running ?? unresolved ?? calls.at(-1)
-  const iconPart = group.title ? calls[0] : part
+  const iconPart = group.title ? calls[group.stageStart] : part
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
   const waitingForAnswer = runActive && calls.some(call => call.toolName === 'ask_user' && call.status === 'running')
   const waitingForApproval = runActive && awaitingApprovalCallId !== undefined
@@ -294,19 +292,15 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
   const namedInProgress = Boolean(group.title && runActive && !settledBatch && (running || active && !group.closed && !group.completed))
   const waiting = Boolean(importWaiting || waitingForAnswer || waitingForApproval)
   const Icon = iconPart && toolIcon(iconPart)
-  const chapterId = part && activityChapterId(part)
-  const sharesChapter = Boolean(chapterId) && part?.display?.kind === 'chapterDiff'
-    && calls.every(call => activityChapterId(call) === chapterId)
-  const readChapterIds = grouped && calls.every(call => call.toolName === 'chapter_read' && activityChapterId(call))
-    ? new Set(calls.map(activityChapterId)) : undefined
+  const stageCalls = calls.slice(group.stageStart)
+  const readChapterIds = grouped && stageCalls.every(call => call.toolName === 'chapter_read' && activityChapterId(call))
+    ? new Set(stageCalls.map(activityChapterId)) : undefined
   const readLabel = group.readLabel
   const latestDisplay = observedReviewDisplay(part?.display, group.reviewChapterRevisions, chapters)
   const currentBatch = !running && !waiting && latestDisplay?.kind === 'reviewBatch' && latestDisplay.chapters.length ? latestDisplay : undefined
   let label: string | undefined
   if (currentBatch) {
     label = reviewBatchHeadline(currentBatch)
-  } else if (!running && !waiting && part?.toolName === 'chapter_review_batch' && part.status !== 'success') {
-    label = reviewBatchFailureHeadline(part.args, chapters)
   } else if (runActive && continuing && !running && !namedInProgress && !waiting && part) {
     label = group.readLabel === '查看创作资料' ? '核对创作资料' : getAgentToolPresentation(part.toolName).label
   } else if (group.title) {
@@ -321,8 +315,8 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, contin
     else if (readLabel) label = group.unfinished
       ? `${readLabel}有未完成项` : `已${readLabel}`
     else if (grouped && !running && unresolved) label = `${getAgentToolPresentation(part.toolName).label}有未完成项`
-    else if (readChapterIds && readChapterIds.size > 1 && calls.every(call => call.status === 'success' && !call.preparing)) label = `已查看 ${readChapterIds.size} 章正文`
-    else label = activitySummary(part, runActive, chapters, false, grouped && !readChapterIds && !sharesChapter, group.staleReviewCalls?.has(part))
+    else if (readChapterIds && readChapterIds.size > 1 && stageCalls.every(call => call.status === 'success' && !call.preparing)) label = `已查看 ${readChapterIds.size} 章正文`
+    else label = activitySummary(part, runActive, chapters, false, grouped && !readChapterIds, group.staleReviewCalls?.has(part))
   }
   const showingActivity = Boolean(running && !waiting)
   const shimmer = runActive && Boolean(showingActivity || namedInProgress || continuing) && !waiting && !settledBatch

@@ -800,7 +800,7 @@ export async function streamLoopRun(
     throw new DataAccessError(400, 'VALIDATION_ERROR', '该任务不是循环引擎运行，请走旧版事件回放。')
   }
 
-  if ((run.runtimeProtocolVersion ?? 0) !== 0) return streamDurableRun(userId, runId, sinceSeq, res)
+  if ((run.runtimeProtocolVersion ?? 0) !== 0) return streamDurableRun(userId, runId, sinceSeq, res, run.sessionId)
 
   const serverNotices = await loadServerRunNotices(userId, [runId])
   res.writeHead(200, {

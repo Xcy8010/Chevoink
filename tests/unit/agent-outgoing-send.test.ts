@@ -129,7 +129,7 @@ it('keeps preparation uncounted before configuration, ensureSession and HTTP, re
   expect(elapsed('session-a')).toBeNull()
 })
 
-it.each([false, true])('starts on actual response, preserves private activity=%s, excludes pauses and freezes without a final jump', privateMarker => {
+it.each([false, true])('keeps execution time through the first response (private activity=%s), pauses and completion', privateMarker => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
   const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
@@ -145,36 +145,35 @@ it.each([false, true])('starts on actual response, preserves private activity=%s
     return projectOutgoingMessages([user, assistant], state.items, 'scope', 'a', 's', state.requestClocks)[1].runTiming!
   }
   vi.setSystemTime(new Date('2026-11-05T00:00:10Z'))
-  // An empty assistant/start is admission, not the model's first response.
   assistant = { ...assistant, parts: [] }
-  expect(runElapsedMs(observe(), Date.now())).toBeNull()
+  expect(runElapsedMs(observe(), Date.now())).toBe(5000)
   apply({ type: 'reasoning.delta', runId: 'A', messageId: 'assistant', seq: 9, ts: '2026-11-05T00:00:09Z', delta: privateMarker ? '' : '开始分析', ...(privateMarker ? { activity: true as const } : {}) })
-  expect(runElapsedMs(observe(), Date.now())).toBe(0)
+  expect(runElapsedMs(observe(), Date.now())).toBe(5000)
   vi.advanceTimersByTime(3000)
-  expect(runElapsedMs(observe(), Date.now())).toBe(3000)
+  expect(runElapsedMs(observe(), Date.now())).toBe(8000)
   expect(useOutgoingMessages.getState().items).toEqual([])
-  apply({ type: 'run.paused', runId: 'A', seq: 10, ts: '2026-11-05T00:00:12Z', reason: 'user_stop' })
+  apply({ type: 'run.paused', runId: 'A', seq: 10, ts: new Date().toISOString(), reason: 'user_stop' })
   assistant = { ...assistant, runTiming: { elapsedMs: 8000, activeSince: null, status: 'paused', lastSeq: 10 } }
-  expect(runElapsedMs(observe(), Date.now())).toBe(3000)
+  expect(runElapsedMs(observe(), Date.now())).toBe(8000)
   vi.advanceTimersByTime(20000)
-  expect(runElapsedMs(observe(), Date.now())).toBe(3000)
+  expect(runElapsedMs(observe(), Date.now())).toBe(8000)
   useAgentStore.getState().resumeRun('A', 's', null, 10)
   apply({ type: 'run.started', runId: 'A', seq: 11, ts: new Date().toISOString(), mode: 'build', title: '继续', agent: { type: 'novelist', title: '助手', model: 'speed' } })
   assistant = { ...assistant, runTiming: { elapsedMs: 8000, activeSince: new Date().toISOString(), status: 'running', lastSeq: 11 } }
   vi.advanceTimersByTime(2000)
-  expect(runElapsedMs(observe(), Date.now())).toBe(5000)
+  expect(runElapsedMs(observe(), Date.now())).toBe(10000)
   apply({ type: 'run.finished', runId: 'A', seq: 12, ts: new Date().toISOString(), status: 'succeeded' })
   assistant = { ...assistant, runTiming: { elapsedMs: 10000, activeSince: null, status: 'finished', lastSeq: 12 } }
   const finished = observe()
   vi.advanceTimersByTime(30000)
-  expect(runElapsedMs(finished, Date.now())).toBe(5000)
-  expect(runElapsedMs(observe(), Date.now())).toBe(5000)
+  expect(runElapsedMs(finished, Date.now())).toBe(10000)
+  expect(runElapsedMs(observe(), Date.now())).toBe(10000)
   expect(assistant.runTiming?.elapsedMs).toBe(10000)
   const unknown: AgentUIMessage = { ...row('old', 'old-run'), runTiming: { elapsedMs: null, activeSince: null, status: 'unknown', lastSeq: 0 } }
   expect(projectOutgoingMessages([unknown], [], 'scope', 'a', 's', useOutgoingMessages.getState().requestClocks)[0]).toBe(unknown)
 })
 
-it('keeps unobserved response time unknown when finished history beats an unknown HTTP failure', async () => {
+it('uses known execution time when finished history beats an unknown HTTP failure', async () => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
   const failed = deferred<{ runId: string; runGoalId: null }>()
   const { send } = sending({ sessionId: 'session-a', viewSession: { current: 'session-a' }, startAgentLoopRun: () => failed.promise })
@@ -190,14 +189,14 @@ it('keeps unobserved response time unknown when finished history beats an unknow
   const projected = projectOutgoingMessages(history, state.items, 'u:a:local-task', 'a', 'session-a', state.requestClocks)
   expect(projected).toHaveLength(2)
   expect(state.items).toEqual([])
-  expect(runElapsedMs(projected[1].runTiming!, Date.now())).toBeNull()
+  expect(runElapsedMs(projected[1].runTiming!, Date.now())).toBe(4000)
 })
 it('retains history time once across an explicitly shared durable timing scope and its new execution run', () => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
   const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
   const user = { ...row('user', 'A', 'user'), clientRequestId }
-  const original: AgentUIMessage = { ...row('first', 'A'), runTiming: { scopeId: 'task', sourceRunId: 'A', elapsedMs: 0, activeSince: '2026-11-05T00:00:05Z', status: 'running', lastSeq: 1 } }
+  const original: AgentUIMessage = { ...row('first', 'A'), runTiming: { scopeId: 'root:task', sourceRunId: 'A', elapsedMs: 0, activeSince: '2026-11-05T00:00:05Z', status: 'running', lastSeq: 1 } }
   useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
   observeInitialStart('A', id)
   vi.setSystemTime(new Date('2026-11-05T00:00:09Z'))
@@ -208,7 +207,12 @@ it('retains history time once across an explicitly shared durable timing scope a
   useOutgoingMessages.getState().observeEvent({ type: 'run.paused', runId: 'A', seq: 9, ts: new Date().toISOString(), reason: 'user_stop' })
   const paused: AgentUIMessage = { ...original, runTiming: { ...original.runTiming!, elapsedMs: 8000, activeSince: null, status: 'paused', lastSeq: 9 } }
   useOutgoingMessages.getState().reconcile([user, paused], 'scope', 'a', 's')
-  const resumed: AgentUIMessage = { ...row('continued', 'B'), runTiming: { scopeId: 'task', sourceRunId: 'B', elapsedMs: 4000, activeSince: '2026-11-05T00:00:30Z', status: 'running', lastSeq: 3 } }
+  const resumed: AgentUIMessage = { ...row('continued', 'B'), runTiming: { scopeId: 'root:task', sourceRunId: 'B', elapsedMs: 8000, activeSince: '2026-11-05T00:00:30Z', status: 'running', lastSeq: 3 } }
+  const queued: AgentUIMessage = { ...resumed, runTiming: { ...resumed.runTiming!, activeSince: null, status: 'unknown', lastSeq: 0 } }
+  useOutgoingMessages.getState().reconcile([user, paused, queued], 'scope', 'a', 's')
+  useOutgoingMessages.getState().observeEvent({ type: 'run.started', runId: 'B', seq: 1, ts: '2026-11-05T00:00:05Z',
+    mode: 'build', title: '已回放原任务', agent: { type: 'novelist', title: '助手', model: 'speed' } })
+  expect(runElapsedMs(useOutgoingMessages.getState().requestClocks[0].timing, Date.now())).toBe(8000)
   vi.setSystemTime(new Date('2026-11-05T00:00:30Z'))
   useOutgoingMessages.getState().reconcile([user, paused, resumed], 'scope', 'a', 's')
   vi.advanceTimersByTime(2000)
@@ -216,7 +220,7 @@ it('retains history time once across an explicitly shared durable timing scope a
   const projected = projectOutgoingMessages([user, paused, resumed], state.items, 'scope', 'a', 's', state.requestClocks)
   const { blockInfoById } = projectMessages(projected)
   const timing = projectBlockTimings(projected, blockInfoById, 'B').get('first')!
-  expect(runElapsedMs(timing, Date.now())).toBe(6000)
+  expect(runElapsedMs(timing, Date.now())).toBe(10000)
   expect(projected[1].runTiming?.sourceRunId).toBe('B')
   expect(projected[2].runTiming).toEqual(projected[1].runTiming)
   useAgentStore.getState().resumeRun('B', 's', null, 3)
@@ -228,10 +232,10 @@ it('retains history time once across an explicitly shared durable timing scope a
   const unscopedOld: AgentUIMessage = { ...paused, runTiming: { elapsedMs: 8000, activeSince: null, status: 'paused', lastSeq: 100 } }
   useOutgoingMessages.getState().reconcile([user, unscopedOld], 'scope', 'a', 's')
   expect(useOutgoingMessages.getState().requestClocks[0]).toBe(before)
-  expect(runElapsedMs(before.timing, Date.now())).toBe(7000)
+  expect(runElapsedMs(before.timing, Date.now())).toBe(11000)
 })
 
-it('starts at the first observed history output after a long preparation instead of backfilling server admission time', () => {
+it('uses the confirmed server start when reconnect history is the first start witness', () => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
   const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
@@ -242,15 +246,22 @@ it('starts at the first observed history output after a long preparation instead
   vi.advanceTimersByTime(61000)
   useOutgoingMessages.getState().reconcile(history, 'scope', 'a', 's')
   let clock = useOutgoingMessages.getState().requestClocks[0]
-  expect(runElapsedMs(clock.timing, Date.now())).toBe(0)
+  expect(runElapsedMs(clock.timing, Date.now())).toBe(56000)
   vi.advanceTimersByTime(2000)
   useOutgoingMessages.getState().reconcile(history, 'scope', 'a', 's')
   clock = useOutgoingMessages.getState().requestClocks[0]
-  expect(runElapsedMs(clock.timing, Date.now())).toBe(2000)
+  expect(runElapsedMs(clock.timing, Date.now())).toBe(58000)
   expect(history[1].runTiming!.activeSince).toBe('2026-11-05T00:00:05Z')
 })
 
-it.each(['paused', 'finished'] as const)('rejects old running history after first observing a %s response with unknown duration', status => {
+it('restores the active request clock before the first assistant row without local delivery state', () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:10Z'))
+  const runTiming = { elapsedMs: 0, activeSince: '2026-11-05T00:00:05Z', status: 'running' as const, lastSeq: 7 }
+  const messages = projectOutgoingMessages([{ ...row('user', 'A', 'user'), runTiming }], [], 'scope', 'a', 's')
+  expect(runElapsedMs(messages[0].requestTiming!, Date.now())).toBe(5000)
+})
+
+it.each(['paused', 'finished'] as const)('rejects old running history after first observing a %s execution', status => {
   const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
   useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
@@ -262,9 +273,8 @@ it.each(['paused', 'finished'] as const)('rejects old running history after firs
     useOutgoingMessages.getState().reconcile([user, { ...assistant, runTiming: { status: 'running', elapsedMs: 0, activeSince: new Date().toISOString(), lastSeq } }], 'scope', 'a', 's')
     expect(useOutgoingMessages.getState().requestClocks[0]).toBe(before)
   }
-  expect(before.responded).toBe(false)
   expect(before.timing.status).toBe(status)
-  expect(before.timing.elapsedMs).toBeNull()
+  expect(before.timing.elapsedMs).toBe(10000)
 })
 
 it('resumes a confirmed new execution after failure without losing observed response time or counting the stopped gap', () => {
@@ -273,6 +283,7 @@ it('resumes a confirmed new execution after failure without losing observed resp
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
   useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
   observeInitialStart('A', id)
+  vi.setSystemTime(new Date('2026-11-05T00:00:05Z'))
   const user = { ...row('user', 'A', 'user'), clientRequestId }
   useOutgoingMessages.getState().observeEvent({ type: 'text.delta', runId: 'A', messageId: 'first', seq: 8, ts: new Date().toISOString(), delta: '实际响应' })
   vi.advanceTimersByTime(4000)
@@ -289,12 +300,12 @@ it('resumes a confirmed new execution after failure without losing observed resp
   expect(runElapsedMs(clock.timing, Date.now())).toBe(6000)
 })
 it.each([
-  ['paused', 4000, null, null],
-  ['finished', 6000, null, null],
-  ['running', 4000, '2026-11-05T00:00:30Z', 0],
-  ['running', 0, '2026-11-05T00:00:30Z', 0],
+  ['paused', 4000, null, 4000],
+  ['finished', 6000, null, 6000],
+  ['running', 4000, '2026-11-05T00:00:30Z', 6000],
+  ['running', 0, '2026-11-05T00:00:30Z', 2000],
   ['finished', null, null, null],
-] as const)('does not infer original submit latency from a first-seen %s snapshot with %s prior activity', (status, elapsedMs, activeSince, expected) => {
+] as const)('projects actual execution rather than local submit latency for %s history with %s prior activity', (status, elapsedMs, activeSince, expected) => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
   const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
@@ -306,13 +317,12 @@ it.each([
   vi.setSystemTime(new Date('2026-11-05T00:00:32Z'))
   useOutgoingMessages.getState().reconcile(history, 'scope', 'a', 's')
   const state = useOutgoingMessages.getState()
-  expect(state.requestClocks[0].eventOffsetMs).toBeNull()
   const projected = projectOutgoingMessages(history, state.items, 'scope', 'a', 's', state.requestClocks)
   expect(runElapsedMs(projected[1].runTiming!, Date.now())).toBe(expected)
   expect(projected[1].runTiming?.status).toBe(status)
 })
 
-it('does not invent response time from original or continued start metadata alone', () => {
+it('keeps confirmed elapsed time while rejecting a resume start older than terminal history', () => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
   const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
@@ -324,11 +334,11 @@ it('does not invent response time from original or continued start metadata alon
   vi.setSystemTime(new Date('2026-11-05T00:00:32Z'))
   useOutgoingMessages.getState().reconcile(history, 'scope', 'a', 's')
   let state = useOutgoingMessages.getState()
-  expect(runElapsedMs(projectOutgoingMessages(history, state.items, 'scope', 'a', 's', state.requestClocks)[1].runTiming!, Date.parse('2026-11-05T00:00:32Z'))).toBeNull()
+  expect(runElapsedMs(projectOutgoingMessages(history, state.items, 'scope', 'a', 's', state.requestClocks)[1].runTiming!, Date.parse('2026-11-05T00:00:32Z'))).toBe(6000)
   useAgentStore.getState().resumeRun('A', 's', null, 10)
   useAgentStore.getState().applyEvent({ type: 'run.started', runId: 'A', seq: 11, ts: '2026-11-05T00:00:30Z', mode: 'build', title: '继续合成任务', agent: { type: 'novelist', title: '合成助手', model: 'speed' } })
   state = useOutgoingMessages.getState()
-  expect(state.requestClocks[0].timing.elapsedMs).toBeNull()
+  expect(state.requestClocks[0].timing).toMatchObject({ elapsedMs: 6000, activeSince: null, status: 'finished' })
 })
 it('shows the outgoing request before configuration/session admission resolves and replaces it once on success', async () => {
   const ready = deferred<void>()
@@ -570,7 +580,7 @@ it('does not erase a newer unrelated error while reconciling an older accepted d
 })
 
 
-it.each([false, true])('observes a responding restored run with legacy/private marker=%s at the same local instant', privateMarker => {
+it.each([false, true])('preserves server execution time when history arrives with legacy/private activity marker=%s', privateMarker => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:20Z'))
   const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
@@ -582,25 +592,23 @@ it.each([false, true])('observes a responding restored run with legacy/private m
   } }
   useOutgoingMessages.getState().reconcile([user, assistant], 'scope', 'a', 's')
   let clock = useOutgoingMessages.getState().requestClocks[0]
-  expect(clock.responded).toBe(true)
-  expect(clock.timing.activeSince).toBe('2026-11-05T00:00:20.000Z')
-  expect(runElapsedMs(clock.timing, Date.now())).toBe(0)
+  expect(clock.timing.activeSince).toBe('2026-11-05T00:00:05Z')
+  expect(runElapsedMs(clock.timing, Date.now())).toBe(25000)
   vi.advanceTimersByTime(3000)
   useOutgoingMessages.getState().reconcile([user, assistant], 'scope', 'a', 's')
   clock = useOutgoingMessages.getState().requestClocks[0]
-  expect(runElapsedMs(clock.timing, Date.now())).toBe(3000)
+  expect(runElapsedMs(clock.timing, Date.now())).toBe(28000)
 })
 
 
-it('keeps a restored blank episode without response activity in preparation', () => {
+it('keeps an admitted but not started execution in preparation despite empty assistant history', () => {
   const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
   useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
-  observeInitialStart('A', id)
   const user: AgentUIMessage = { ...row('user', 'A', 'user'), clientRequestId }
   const assistant: AgentUIMessage = { ...row('assistant', 'A'), parts: [{ type: 'reasoning', text: '' }], runTiming: {
-    elapsedMs: 10000, activeSince: '2026-11-05T00:00:05Z', status: 'running', lastSeq: 8,
+    elapsedMs: null, activeSince: null, status: 'unknown', lastSeq: 0,
   } }
   useOutgoingMessages.getState().reconcile([user, assistant], 'scope', 'a', 's')
-  expect(useOutgoingMessages.getState().requestClocks[0]).toMatchObject({ responded: false, timing: { elapsedMs: null, activeSince: null } })
+  expect(useOutgoingMessages.getState().requestClocks[0].timing).toMatchObject({ elapsedMs: null, activeSince: null })
 })

@@ -196,7 +196,6 @@ export function projectDurablePublicWeb(operation: AgentOperation, previous: Fra
   if (current.state.pendingOperationId === operation.id) return [
     ...(step.name === 'web_search' ? [
       { type: 'message.start' as const, messageId, role: 'assistant' as const },
-      { type: 'text.final' as const, messageId, text: '我先查找公开资料，再核对关键内容。', asReasoning: false },
     ] : []),
     { type: 'tool.call', messageId, callId, toolName: step.name, title: step.name === 'web_search' ? webSearchTool.title : webReadTool.title, args: step.args },
   ]

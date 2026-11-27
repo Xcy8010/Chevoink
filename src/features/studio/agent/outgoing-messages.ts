@@ -1,11 +1,11 @@
 import { create } from 'zustand'
 import type { AgentAttachmentMeta, AgentRunTiming, AgentUIMessage, AgentStreamEvent } from '../../../../shared/contracts/index'
-import { advanceRunTiming, settleRunTiming, timestamp, unknownRunTiming } from '../../../../shared/agent-timing'
+import { advanceRunTiming, settleRunTiming } from '../../../../shared/agent-timing'
 
 type OutgoingAnchor = { messageId: string | null; runId: string | null; previousOutgoingId?: string; previousClientRequestId?: string }
 export type OutgoingMessage = { clientRequestId: string; anchor: OutgoingAnchor; id: string; scope: string; novelId: string; sessionId: string | null; runId?: string; status: 'sending' | 'failed' | 'sent'; error?: string; message: AgentUIMessage }
 export type AuthorMessage = AgentUIMessage & { delivery?: Pick<OutgoingMessage, 'status' | 'error'>; requestTiming?: AgentRunTiming; presentationId?: string }
-type RequestClock = Pick<OutgoingMessage, 'id' | 'clientRequestId' | 'scope' | 'novelId' | 'sessionId' | 'runId'> & { responded: boolean; eventOffsetMs: number | null; retiredRunIds: string[]; timing: AgentRunTiming }
+type RequestClock = Pick<OutgoingMessage, 'id' | 'clientRequestId' | 'scope' | 'novelId' | 'sessionId' | 'runId'> & { retiredRunIds: string[]; timing: AgentRunTiming }
 type OutgoingState = {
   items: OutgoingMessage[]
   requestClocks: RequestClock[]
@@ -21,23 +21,25 @@ export const useOutgoingMessages = create<OutgoingState>((set, get) => ({
   items: [],
   requestClocks: [],
   observeEvent: event => set(state => {
-    const response = (event.type === 'text.delta' || event.type === 'reasoning.delta') && Boolean(event.delta.trim())
-      || event.type === 'reasoning.delta' && event.activity === true
-      || event.type === 'text.final' && Boolean(event.text.trim())
-      || event.type === 'tool.call' || event.type === 'tool.delta' && event.argsChars > 0
-    const stopped = event.type === 'run.paused' || event.type === 'run.finished' || event.type === 'error' && !event.recoverable
-    if (!response && !stopped && event.type !== 'run.started' && event.type !== 'run.question_wait') return state
-    const now = new Date().toISOString()
+    if (event.durableTiming === null && (event.type === 'run.started' || event.type === 'execution.progress')) return state
+    if (!event.durableTiming && event.type !== 'run.started' && event.type !== 'run.paused' && event.type !== 'run.finished'
+      && event.type !== 'run.question_wait' && (event.type !== 'error' || event.recoverable)) return state
     const requestClocks = state.requestClocks.map(clock => {
+      if (event.durableTiming) {
+        const incoming = event.durableTiming
+        const source = clock.timing.sourceRunId ?? clock.runId
+        if (!source || clock.retiredRunIds.includes(event.runId) || source !== event.runId && (!incoming.scopeId || incoming.scopeId !== clock.timing.scopeId)) return clock
+        return { ...clock, timing: incoming, retiredRunIds: source === event.runId ? clock.retiredRunIds : [...clock.retiredRunIds, source] }
+      }
       if ((clock.timing.sourceRunId ?? clock.runId) !== event.runId) return clock
-      let timing = clock.timing
-      if (response && !clock.responded && timing.status === 'running') timing = { ...timing, elapsedMs: 0, activeSince: now, status: 'running', lastSeq: event.seq }
-      else if (event.type === 'run.started' && timing.status !== 'running') timing = { ...timing, activeSince: clock.responded ? now : null, status: 'running', lastSeq: event.seq }
-      else if (event.type === 'run.question_wait') timing = advanceRunTiming(timing, { ...event, ts: now })
-      else if (stopped) timing = { ...settleRunTiming(timing, now, event.type === 'run.paused'), lastSeq: event.seq }
-      if (timing === clock.timing) return clock
-      return { ...clock, responded: clock.responded || response, timing,
-        eventOffsetMs: timestamp(event.ts) === null ? clock.eventOffsetMs : Date.now() - timestamp(event.ts)! }
+      const current = clock.timing
+      if (event.seq <= current.lastSeq || event.type === 'run.started' && current.activeSince) return clock
+      // A new durable attempt replays the original start. Its own start comes
+      // from history unless the stream carries the explicit continuation.
+      if (event.type === 'run.started' && clock.runId !== event.runId && current.scopeId?.startsWith('root:') && !event.authorContinue) return clock
+      const starting = event.type === 'run.started' && !current.lastSeq && current.elapsedMs === null
+      const timing = advanceRunTiming(starting ? { ...current, elapsedMs: 0 } : current, event)
+      return timing === current ? clock : { ...clock, timing }
     })
     return requestClocks.every((clock, index) => clock === state.requestClocks[index]) ? state : { requestClocks }
   }),
@@ -48,7 +50,7 @@ export const useOutgoingMessages = create<OutgoingState>((set, get) => ({
     ] }
     const previous = [...get().items].reverse().find(item => item.novelId === novelId && (item.scope === scope || Boolean(sessionId && item.sessionId === sessionId)))
     set(state => ({ items: [...state.items, { id, clientRequestId, scope, novelId, sessionId, message, status: 'sending', anchor: { ...anchor, previousOutgoingId: previous?.id, previousClientRequestId: previous?.clientRequestId } }],
-      requestClocks: [...state.requestClocks, { id, clientRequestId, scope, novelId, sessionId, responded: false, eventOffsetMs: null, retiredRunIds: [], timing: { elapsedMs: null, activeSince: null, status: 'running', lastSeq: 0 } }] }))
+      requestClocks: [...state.requestClocks, { id, clientRequestId, scope, novelId, sessionId, retiredRunIds: [], timing: { elapsedMs: null, activeSince: null, status: 'running', lastSeq: 0 } }] }))
     return id
   },
   update: (id, patch) => set(state => ({ items: state.items.map(item => item.id === id ? { ...item, ...patch } : item),
@@ -68,8 +70,8 @@ function inScope(item: Pick<OutgoingMessage, 'scope' | 'novelId' | 'sessionId'>,
   return item.novelId === novelId && (item.scope === scope || Boolean(sessionId && item.sessionId === sessionId))
 }
 
-/** Response time is a local display fact, never admission, usage or billing time.
- * History supplies identity/terminal evidence without replacing a live clock. */
+/** The display clock measures execution from its start witness, using the same
+ * server timestamps for the stream and for history restored after reconnect. */
 function observeRequestClock(clock: RequestClock, messages: AgentUIMessage[]): RequestClock {
   const user = messages.find(message => message.role === 'user' && (message.clientRequestId === clock.clientRequestId || message.id === clock.id))
   const runId = user?.runId ?? clock.runId
@@ -77,10 +79,6 @@ function observeRequestClock(clock: RequestClock, messages: AgentUIMessage[]): R
   const related = messages.filter(message => message.runId === runId || Boolean(clock.timing.scopeId && message.runTiming?.scopeId === clock.timing.scopeId))
   const latest = [...related].reverse().find(message => message.runTiming)
   const server = latest?.runTiming
-  const hasOutput = related.some(message => message.role === 'assistant' && message.parts.some(part =>
-    part.type === 'reasoning' ? Boolean(part.text.trim() || part.activity)
-      : part.type === 'text' ? Boolean(part.text.trim()) : part.type === 'tool-call'))
-  let responded = clock.responded
   let retiredRunIds = clock.retiredRunIds
   let timing = clock.timing
   if (server) {
@@ -93,35 +91,24 @@ function observeRequestClock(clock: RequestClock, messages: AgentUIMessage[]): R
       || !(server.scopeId === clock.timing.scopeId || !clock.timing.scopeId && latest!.runId === runId))) return clock
     if (changedSource) retiredRunIds = [...retiredRunIds, currentSource]
     timing = { ...timing, scopeId: server.scopeId ?? timing.scopeId, sourceRunId: source }
+    const sameFrame = server.lastSeq === clock.timing.lastSeq
     const fresh = changedSource || server.lastSeq > clock.timing.lastSeq
-      || server.lastSeq === clock.timing.lastSeq && !(server.status === 'running' && ['waiting', 'paused', 'finished'].includes(clock.timing.status))
-    if (fresh && !responded && hasOutput && server.status === 'running') {
-      // This is the first observed response to a local send, not evidence of
-      // its earlier token time. Never backfill the server's admission interval.
-      timing = { ...timing, elapsedMs: 0, activeSince: new Date().toISOString(), status: 'running', lastSeq: server.lastSeq }
-      responded = true
-    }
-    else {
-      if (fresh) {
-        if (server.status === 'waiting') {
-          // A saved wait can be discovered after an offline interval. Use its
-          // actual accumulated time and leave the clock frozen.
-          timing = { ...server, scopeId: timing.scopeId, sourceRunId: timing.sourceRunId }
-          responded ||= hasOutput
-        } else if (server.status === 'finished' || server.status === 'paused') {
-          const stoppedAt = timestamp(latest?.completedAt ?? server.completedAt)
-          const stop = stoppedAt === null ? Date.now() : Math.min(Date.now(), Math.max(timestamp(timing.activeSince) ?? 0, stoppedAt + (clock.eventOffsetMs ?? 0)))
-          timing = { ...settleRunTiming(timing, new Date(stop).toISOString(), server.status === 'paused'), lastSeq: server.lastSeq }
-        } else if (responded && timing.status !== 'running' && server.status === 'running') {
-          const startedAt = timestamp(server.activeSince)
-          timing = { ...timing, status: 'running', activeSince: startedAt === null ? null : new Date(Math.min(Date.now(), startedAt + (clock.eventOffsetMs ?? 0))).toISOString(), lastSeq: server.lastSeq }
-        }
-      }
+      || sameFrame && !(server.status === 'running' && ['waiting', 'paused', 'finished'].includes(clock.timing.status))
+    const keepLiveStart = sameFrame && !changedSource && timing.status === 'running' && server.status === 'running'
+      && timing.elapsedMs !== null && timing.activeSince !== null
+    if (fresh && !keepLiveStart && (changedSource || server.status !== 'unknown')) {
+      const scope = { scopeId: timing.scopeId, sourceRunId: timing.sourceRunId }
+      timing = server.elapsedMs === null && !changedSource && (server.status === 'finished' || server.status === 'paused')
+        ? { ...settleRunTiming(timing, latest?.completedAt ?? server.completedAt, server.status === 'paused'), ...scope, lastSeq: server.lastSeq }
+        : { ...server, ...scope }
     }
   }
-  else if (related.some(message => message.runId === (timing.sourceRunId ?? runId) && message.completedAt)) timing = { ...unknownRunTiming(), status: 'finished' }
-  if (clock.runId === runId && clock.responded === responded && retiredRunIds === clock.retiredRunIds && JSON.stringify(clock.timing) === JSON.stringify(timing)) return clock
-  return { ...clock, runId, responded, retiredRunIds, timing }
+  else {
+    const completed = related.find(message => message.runId === (timing.sourceRunId ?? runId) && message.completedAt)
+    if (completed) timing = settleRunTiming(timing, completed.completedAt)
+  }
+  if (clock.runId === runId && retiredRunIds === clock.retiredRunIds && JSON.stringify(clock.timing) === JSON.stringify(timing)) return clock
+  return { ...clock, runId, retiredRunIds, timing }
 }
 function matchesOutgoingMessage(message: AgentUIMessage, item: OutgoingMessage) {
   return message.role === 'user' && (message.clientRequestId === item.clientRequestId || message.id === item.id || Boolean(item.runId && message.runId === item.runId))
@@ -148,8 +135,9 @@ export function projectOutgoingMessages(messages: AgentUIMessage[], items: Outgo
     const clock = localClocks.find(item => message.role === 'user'
       ? message.id === item.id || message.clientRequestId === item.clientRequestId || message.runId === item.runId
       : message.runId === item.runId || Boolean(item.timing.scopeId && message.runTiming?.scopeId === item.timing.scopeId))
-    if (!clock) return message
-    return message.role === 'user' ? { ...message, requestTiming: clock.timing, presentationId: clock.id }
-      : { ...message, runTiming: { ...clock.timing, scopeId: clock.timing.scopeId ?? message.runTiming?.scopeId, sourceRunId: clock.timing.sourceRunId ?? message.runTiming?.sourceRunId } }
+    if (!clock) return message.role === 'user' && message.runTiming ? { ...message, requestTiming: message.runTiming } : message
+    const timing = clock.timing.lastSeq === 0 && clock.timing.elapsedMs === null ? message.runTiming ?? clock.timing : clock.timing
+    return message.role === 'user' ? { ...message, requestTiming: timing, presentationId: clock.id }
+      : { ...message, runTiming: { ...timing, scopeId: timing.scopeId ?? message.runTiming?.scopeId, sourceRunId: timing.sourceRunId ?? message.runTiming?.sourceRunId } }
   })
 }

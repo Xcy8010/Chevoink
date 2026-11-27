@@ -12,7 +12,7 @@ import { extractReaderNavigationHtml } from '../../api/lib/web-reader-quality.js
 import * as sources from '../../api/lib/agent/research-sources.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
-import { executeDurablePublicWeb, prepareDurablePublicWeb } from '../../api/lib/agent/runtime-public-web.js'
+import { executeDurablePublicWeb, prepareDurablePublicWeb, projectDurablePublicWeb } from '../../api/lib/agent/runtime-public-web.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
@@ -80,8 +80,11 @@ describe.runIf(available)('durable web identity, research budget and dispatch fe
         await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
         const period = getCreditWindow()
         await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 20000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
-        const operation = await prepareDurablePublicWeb(initial, (await loadExecutionState(f.userId, f.runId)).frame)
+        const previous = (await loadExecutionState(f.userId, f.runId)).frame
+        const operation = await prepareDurablePublicWeb(initial, previous)
         if (!operation) throw new Error('public search not prepared')
+        const admitted = (await loadExecutionState(f.userId, f.runId)).frame
+        expect(projectDurablePublicWeb(operation, previous, admitted).map(event => event.type)).toEqual(['message.start', 'tool.call'])
         if (scenario === 'revoked') {
           await prisma.agentSession.update({ where: { id: f.sessionId }, data: { toolPolicy: { network: 'ask' } } })
           const denied = await executeDurablePublicWeb(initial, operation, signal())

@@ -5,19 +5,25 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ProcessDuration } from '../../src/features/studio/agent/components/ProcessDuration'
 import { MessageTime, UserMessageActions } from '../../src/features/studio/agent/components/MessageActions'
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
-import type { AgentRunTiming } from '../../shared/contracts/agent-events.js'
-import { useOutgoingMessages } from '../../src/features/studio/agent/outgoing-messages'
+import type { AgentRunTiming, AgentStreamEvent } from '../../shared/contracts/agent-events.js'
+import { projectOutgoingMessages, useOutgoingMessages } from '../../src/features/studio/agent/outgoing-messages'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
+import { projectBlockTimings, projectMessages } from '../../src/features/studio/agent/lib/message-projection'
 
 const timing: AgentRunTiming = { elapsedMs: 2000, activeSince: '2026-10-18T00:00:00Z', status: 'running', lastSeq: 1 }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-18T00:00:03Z')) })
 afterEach(() => { cleanup(); useOutgoingMessages.setState({ items: [], requestClocks: [] }); useAgentStore.getState().resetRun(); vi.useRealTimers() })
 
-it('shows preparation immediately and ticks during response silence, then keeps the same reading on completion', () => {
+it('keeps one visible clock from run start through first output, history reconciliation and completion', () => {
   const id = useOutgoingMessages.getState().add('scope', 'novel', 'session', '合成请求', [])
   function Display() {
+    const canonical = useAgentStore(state => state.messages)
+    const items = useOutgoingMessages(state => state.items)
     const clocks = useOutgoingMessages(state => state.requestClocks)
-    return <ProcessDuration timing={clocks[0].timing} />
+    const messages = projectOutgoingMessages(canonical, items, 'scope', 'novel', 'session', clocks)
+    const { blockInfoById } = projectMessages(messages)
+    const blockTiming = projectBlockTimings(messages, blockInfoById, 'run').get('m')
+    return <ProcessDuration timing={blockTiming ?? messages[0].requestTiming!} />
   }
   render(<Display />)
   expect(screen.getByRole('status').textContent).toBe('正在准备中...')
@@ -26,18 +32,27 @@ it('shows preparation immediately and ticks during response silence, then keeps 
   useOutgoingMessages.getState().update(id, { runId: 'run', status: 'sent' })
   useAgentStore.getState().beginRun('run', '合成请求', 'session', [], null, id)
   const apply = useAgentStore.getState().applyEvent
-  act(() => apply({ type: 'run.started', runId: 'run', seq: 1, ts: new Date().toISOString(), mode: 'build', title: '任务', agent: { type: 'novelist', title: '助手', model: 'speed' } }))
-  expect(screen.getByRole('status').textContent).toBe('正在准备中...')
-  act(() => apply({ type: 'text.delta', runId: 'foreign', messageId: 'm', seq: 2, ts: new Date().toISOString(), delta: '别的任务' }))
-  expect(screen.getByRole('status').textContent).toBe('正在准备中...')
-  act(() => apply({ type: 'text.delta', runId: 'run', messageId: 'm', seq: 2, ts: new Date().toISOString(), delta: '响应' }))
+  const startedAt = new Date().toISOString()
+  const start = { type: 'run.started' as const, runId: 'run', seq: 1, ts: startedAt, mode: 'build' as const,
+    title: '任务', agent: { type: 'novelist' as const, title: '助手', model: 'speed' } }
+  act(() => apply(start))
   expect(screen.getByLabelText('0 秒')).toBeTruthy()
-  for (let second = 1; second <= 10; second++) {
-    act(() => vi.advanceTimersByTime(1000))
-    expect(screen.getByLabelText(`${second} 秒`)).toBeTruthy()
-  }
-  // Replayed admission and subsequent chunks must not restart the display.
-  act(() => apply({ type: 'run.started', runId: 'run', seq: 1, ts: new Date().toISOString(), mode: 'build', title: '任务', agent: { type: 'novelist', title: '助手', model: 'speed' } }))
+  act(() => vi.advanceTimersByTime(5000))
+  act(() => apply({ type: 'text.delta', runId: 'foreign', messageId: 'm', seq: 2, ts: new Date().toISOString(), delta: '别的任务' }))
+  expect(screen.getByLabelText('5 秒')).toBeTruthy()
+  act(() => apply({ type: 'text.delta', runId: 'run', messageId: 'm', seq: 2, ts: new Date().toISOString(), delta: '响应' }))
+  expect(screen.getByLabelText('5 秒')).toBeTruthy()
+  act(() => {
+    const store = useAgentStore.getState()
+    const history = store.messages.map(message => ({ ...message,
+      runTiming: { elapsedMs: 0, activeSince: startedAt, status: 'running' as const, lastSeq: 1, sourceRunId: 'run', scopeId: 'run' },
+    }))
+    store.reconcileRunTimings(history, 'session', 'run')
+    useOutgoingMessages.getState().reconcile(store.messages, 'scope', 'novel', 'session')
+  })
+  expect(screen.getByLabelText('5 秒')).toBeTruthy()
+  act(() => vi.advanceTimersByTime(5000))
+  act(() => apply(start))
   act(() => apply({ type: 'text.delta', runId: 'run', messageId: 'm', seq: 3, ts: new Date().toISOString(), delta: '续流' }))
   expect(screen.getByLabelText('10 秒')).toBeTruthy()
   act(() => apply({ type: 'run.finished', runId: 'run', seq: 4, ts: new Date().toISOString(), status: 'succeeded' }))
@@ -45,6 +60,37 @@ it('shows preparation immediately and ticks during response silence, then keeps 
   expect(vi.getTimerCount()).toBe(0)
   act(() => vi.advanceTimersByTime(30000))
   expect(screen.getByLabelText('10 秒')).toBeTruthy()
+})
+
+it('uses the durable timing snapshot through activation, pause and resumed replay', () => {
+  const local = useOutgoingMessages.getState()
+  const id = local.add('scope', 'novel', 'session', '合成请求', [])
+  local.update(id, { runId: 'run', status: 'sent' })
+  useAgentStore.getState().beginRun('run', '合成请求', 'session', [], null, id)
+  const apply = useAgentStore.getState().applyEvent
+  const model = { type: 'novelist' as const, title: '助手', model: 'speed' }
+  const queued: AgentRunTiming = { scopeId: 'root:original', sourceRunId: 'run', elapsedMs: 0, activeSince: null, status: 'unknown', lastSeq: 1 }
+  const start: AgentStreamEvent = { type: 'run.started', runId: 'run', seq: 1, ts: new Date().toISOString(),
+    mode: 'build', title: '任务', agent: model, durableTiming: queued }
+  const clocks = () => [useAgentStore.getState().messages[0]?.runTiming, useOutgoingMessages.getState().requestClocks[0].timing]
+  apply(start)
+  vi.advanceTimersByTime(5000)
+  expect(clocks()).toEqual([queued, queued])
+  const active: AgentRunTiming = { ...queued, activeSince: new Date().toISOString(), status: 'running' }
+  apply({ type: 'execution.progress', stage: 'model', revision: 1, runId: 'run', seq: 2, ts: start.ts, durableTiming: active })
+  expect(clocks()).toEqual([active, active])
+  vi.advanceTimersByTime(2000)
+  const paused: AgentRunTiming = { ...active, activeSince: null, status: 'paused', elapsedMs: 2000, lastSeq: 3 }
+  apply({ type: 'run.paused', runId: 'run', seq: 3, ts: new Date().toISOString(), reason: 'user_stop', durableTiming: paused })
+  expect(clocks()).toEqual([paused, paused])
+  vi.advanceTimersByTime(30000)
+  useAgentStore.getState().resumeRun('next-run', 'session', null, 0)
+  const resuming: AgentRunTiming = { ...paused, status: 'unknown', sourceRunId: 'next-run', lastSeq: 1 }
+  apply({ ...start, runId: 'next-run', durableTiming: resuming })
+  const resumed: AgentRunTiming = { ...resuming, status: 'running', activeSince: new Date().toISOString() }
+  apply({ type: 'execution.progress', stage: 'model', revision: 2, runId: 'next-run', seq: 2, ts: start.ts, durableTiming: resumed })
+  apply({ ...start, seq: 4 })
+  expect(clocks()).toEqual([resumed, resumed])
 })
 
 it('ticks from the real start, then freezes and releases the clock on termination', () => {
@@ -59,11 +105,12 @@ it('ticks from the real start, then freezes and releases the clock on terminatio
   expect(document.querySelector('[data-process-duration]')?.textContent).toBe('用时 1 分钟 5 秒')
 })
 
-it('freezes the locally observed response clock while a question is parked', () => {
+it('freezes accumulated execution time while a question is parked', () => {
   const outgoing = useOutgoingMessages.getState()
   const id = outgoing.add('scope', 'novel', 'session', '合成请求', [])
   outgoing.update(id, { runId: 'run', status: 'sent' })
-  outgoing.observeEvent({ type: 'text.delta', runId: 'run', messageId: 'm', seq: 1, ts: new Date().toISOString(), delta: '响应' })
+  outgoing.observeEvent({ type: 'run.started', runId: 'run', seq: 1, ts: new Date().toISOString(),
+    mode: 'build', title: '任务', agent: { type: 'novelist', title: '助手', model: 'speed' } })
   function Display() {
     const timing = useOutgoingMessages(state => state.requestClocks[0].timing)
     return <ProcessDuration timing={timing} active />

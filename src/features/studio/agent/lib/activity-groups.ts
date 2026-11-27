@@ -1,7 +1,7 @@
 import { joinAgentAuthorText, projectAgentAuthorParts } from '../../../../../shared/agent-author-view.js'
 import { activityAttemptKey, activityReviewVersion } from '../../../../../shared/agent-activity-receipts.js'
 import { visibleAgentActivityTitle } from '../../../../../shared/agent-activity-title.js'
-import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
+import { getAgentToolPresentation, sameAgentToolStage } from '../../../../../shared/agent-tool-presentation.js'
 import type { AgentMessagePart, AgentUIMessage } from '../../../../../shared/contracts/index.js'
 
 export type ActivityCall = Extract<AgentMessagePart, { type: 'tool-call' }>
@@ -14,6 +14,7 @@ export type ActivityGroup = {
   calls: ActivityCall[]
   callKeys: string[]
   receiptKeys: string[]
+  stageStart: number
   childrenByCall: Map<string, ActivityCall[]>
   reportsAfterCall: Map<string, ActivityReport[]>
   readLabel?: string
@@ -97,8 +98,6 @@ export function hasVisibleActivityText(parts: readonly AgentMessagePart[], visib
 export function activityChapterId(part: ActivityCall): string | undefined {
   const display = part.display
   if (display && 'chapterId' in display) return display.chapterId
-  if (display?.kind === 'storyCompiler' && display.chapterReview) return display.chapterReview.chapterId
-  if (part.reviewedChapter) return part.reviewedChapter.chapterId
   const args = part.args as { chapterId?: unknown; chapter_id?: unknown } | null
   const id = args?.chapterId ?? args?.chapter_id
   return typeof id === 'string' ? id : undefined
@@ -160,54 +159,21 @@ function findUnsettledCall(calls: ActivityCall[], stale: ReadonlySet<ActivityCal
 
 const activityFamilies = new Map([
   ['cover_prompt_set', 'cover'], ['cover_generate', 'cover'],
-  ['chapter_create', 'chapter-body'], ['chapter_write', 'chapter-body'], ['chapter_append', 'chapter-body'],
-  ['memory_save', 'archive'], ['memory_event_save', 'archive'], ['memory_relation_save', 'archive'],
+  ['chapter_write', 'chapter-body'], ['chapter_append', 'chapter-body'],
 ])
 const creationReadLabels = new Set(['核对前文', '查看创作设定', '查看创作资料', '查看作品结构'])
-const chapterActions = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range',
-  'story_compiler_prepare', 'scene_task_build', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit'])
-const planActions = new Set(['plan_save', 'plan_rename', 'plan_delete'])
 
-function activityTarget(part: ActivityCall): string | undefined {
-  const args = part.args as { planId?: unknown; targetOrderIndex?: unknown; position?: unknown; compilationId?: unknown;
-    target?: { kind?: unknown; chapterId?: unknown; targetOrderIndex?: unknown }; parentPlanId?: unknown } | null
-  if (chapterActions.has(part.toolName)) {
-    const id = activityChapterId(part)
-    if (id) return `chapter:${id}`
-    const order = args?.targetOrderIndex ?? args?.position
-    if (typeof order === 'number' && Number.isSafeInteger(order) && order > 0) return `order:${order}`
-    if (typeof args?.compilationId === 'string') return `compilation:${args.compilationId}`
-  }
-  if (planActions.has(part.toolName)) {
-    const id = part.display && 'artifactId' in part.display ? part.display.artifactId : args?.planId
-    if (typeof id === 'string' && id) return `plan:${id}`
-    const target = args?.target
-    const chapter = target?.kind === 'chapter' && typeof target.chapterId === 'string' ? target.chapterId
-      : target?.kind === 'future' && typeof target.targetOrderIndex === 'number' && target.targetOrderIndex > 0 ? target.targetOrderIndex : undefined
-    if (chapter !== undefined) return JSON.stringify(['plan-target', typeof args?.parentPlanId === 'string' ? args.parentPlanId : null, chapter])
-  }
-}
-
-function isReferenceRead(part: ActivityCall) {
-  return creationReadLabels.has(getAgentToolPresentation(part.toolName).label) || part.toolName === 'quality_report_get'
-}
-
-function canGroup(current: ActivityGroup, next: ActivityCall, afterText: boolean) {
-  const first = current.calls[0]
+function canGroup(current: ActivityGroup, next: ActivityCall, afterText: boolean): boolean {
+  const first = current.calls[current.stageStart]
   const family = activityFamilies.get(first.toolName)
-  const coverContinuation = family === 'cover' && first.toolName === 'cover_prompt_set' && next.toolName === 'cover_generate'
-  if (afterText && !current.title) return coverContinuation
-  if (isReferenceRead(first) && isReferenceRead(next)) return true
-  const sameTool = first.toolName === next.toolName
-  const sameFamily = family !== undefined && family === activityFamilies.get(next.toolName)
-  if (!sameTool && !sameFamily) return false
-  const target = activityTarget(next)
-  const currentTarget = current.calls.map(activityTarget).find(Boolean)
-  if (target && currentTarget && target !== currentTarget) return false
+  if (afterText) return family === 'cover' && first.toolName === 'cover_prompt_set' && next.toolName === 'cover_generate'
   if (family === 'chapter-body') {
-    return sameTool || Boolean(target && currentTarget)
+    const chapterId = activityChapterId(next)
+    return activityFamilies.get(next.toolName) === family && chapterId !== undefined && chapterId === activityChapterId(first)
   }
-  return true
+  if (creationReadLabels.has(getAgentToolPresentation(first.toolName).label)
+    && creationReadLabels.has(getAgentToolPresentation(next.toolName).label)) return true
+  return first.toolName === next.toolName || family !== undefined && family === activityFamilies.get(next.toolName)
 }
 
 /** Only presentation is grouped. Individual tool receipts retain their identity
@@ -248,7 +214,10 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
   let current: ActivityGroup | undefined
   let previousScope: string | undefined
   let publicTextSinceAction = false
-  let previousCall: { group: ActivityGroup; key: string; wasRead: boolean; reports: ActivityReport[] } | undefined
+  let hasPublicReport = false
+  let hasActivityTitle = false
+  let stageReports: ActivityReport[] = []
+  let previousCall: { messageId: string; group: ActivityGroup; key: string; wasRead: boolean; reports: ActivityReport[] } | undefined
   let proposedTitle: string | undefined
 
   for (const { message, scope, parts } of transcript) {
@@ -257,6 +226,9 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
     if (newAuthorMessage || scope !== previousScope) {
       current = undefined
       publicTextSinceAction = false
+      hasPublicReport = false
+      hasActivityTitle = false
+      stageReports = []
       previousCall = undefined
       proposedTitle = undefined
     }
@@ -279,10 +251,14 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
           current = undefined
           previousCall = undefined
           proposedTitle = undefined
+          stageReports = []
           publicTextSinceAction = false
+          hasPublicReport = false
+          hasActivityTitle = false
         }
         if (part.type === 'activity-title') {
           proposedTitle = visibleAgentActivityTitle(part.title)
+          if (proposedTitle) hasActivityTitle = true
         }
         else if (part.type === 'text') {
           if (current) {
@@ -293,10 +269,14 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
             reports.set(textIndex, report)
             reportsByMessage.set(message.id, reports)
             if (terminal) current.closed = true
-            else if (previousCall?.group === current) previousCall.reports.push(report)
+            else {
+              stageReports.push(report)
+              if (previousCall?.group === current) previousCall.reports.push(report)
+            }
           }
           textIndex++
           publicTextSinceAction ||= !part.afterTools
+          hasPublicReport = true
           authorSpokeByRun.add(sourceRunId)
         }
         continue
@@ -322,33 +302,42 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
         continue
       }
 
-      const isRead = getAgentToolPresentation(part.toolName).phase === 'read' || part.toolName === 'quality_report_get'
+      const nextStage = getAgentToolPresentation(part.toolName)
+      const changesStage = current && (publicTextSinceAction || previousCall?.messageId !== message.id && ['save', 'write', 'revise'].includes(nextStage.phase))
+        && !sameAgentToolStage(getAgentToolPresentation(current.calls[current.stageStart].toolName), nextStage)
       // A batch has a specific check and coverage headline. A neighboring
       // check or edit must not replace it, even under one authored activity title.
       const separatesReviewBatch = part.toolName === 'chapter_review_batch' || current?.calls.at(-1)?.toolName === 'chapter_review_batch'
-      const separate = !current || current.closed || separatesReviewBatch
-        || Boolean(proposedTitle && proposedTitle !== current.title) || !canGroup(current, part, publicTextSinceAction)
-      if (!part.preparing && current?.title && !separate && isRead
+      const title = proposedTitle ?? (changesStage || separatesReviewBatch ? undefined : current?.title)
+      const separate = title ? title !== current?.title : current && (changesStage || !canGroup(current, part, publicTextSinceAction))
+      if (!part.preparing && current?.title && !current.closed && !separate && nextStage.phase === 'read'
         && previousCall?.group === current && previousCall.wasRead && previousCall.reports.length) {
         for (const report of previousCall.reports) report.followingCallId = part.callId
         current.reportsAfterCall.set(previousCall.key, previousCall.reports)
       }
-      // A phase boundary stands even when the model did not publish a handoff.
-      if (!current || separate) {
+      // A new stage without a report changes the existing row. Earlier receipts
+      // stay in its details. Old untitled, silent transcripts keep their groups.
+      if (!current || current.closed || separatesReviewBatch || separate && (stageReports.some(report => !report.followingCallId) || !hasPublicReport && !hasActivityTitle)) {
         if (current) current.closed = true
         current = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id,
-          firstCallId: part.callId, calls: [], callKeys: [], receiptKeys: [], childrenByCall: new Map(), reportsAfterCall: new Map(), ...(proposedTitle ? { title: proposedTitle } : {}) }
+          firstCallId: part.callId, calls: [], callKeys: [], receiptKeys: [], stageStart: 0, childrenByCall: new Map(), reportsAfterCall: new Map(), ...(title ? { title } : {}) }
         groups.push({ group: current, scope })
+        stageReports = []
+      } else if (separate && (changesStage || proposedTitle)) {
+        current.title = title
+        current.stageStart = current.calls.length
+        current.readLabel = undefined
+        stageReports = []
       }
       proposedTitle = undefined
       publicTextSinceAction = false
       const group = current
-      const first = group.calls[0]
+      const first = group.calls[group.stageStart]
       if (!group.title && first) {
         const next = getAgentToolPresentation(part.toolName)
         const firstTool = getAgentToolPresentation(first.toolName)
         if (next.phase !== 'read') group.readLabel = undefined
-        else if (firstTool.label !== next.label && group.calls.every(call => getAgentToolPresentation(call.toolName).phase === 'read')) {
+        else if (firstTool.label !== next.label && group.calls.slice(group.stageStart).every(call => getAgentToolPresentation(call.toolName).phase === 'read')) {
           group.readLabel = '查看创作资料'
         }
       }
@@ -361,7 +350,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       group.calls.push(part)
       group.callKeys.push(identity)
       group.receiptKeys.push(JSON.stringify([message.id, null, part.callId]))
-      if (!part.preparing) previousCall = { group, key: identity, wasRead: isRead, reports: [] }
+      if (!part.preparing) previousCall = { messageId: message.id, group, key: identity, wasRead: nextStage.phase === 'read', reports: [] }
       messageGroups.set(part.callId, group)
     }
   }
@@ -390,8 +379,9 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       return activityReviewProblem(part) === 'stale' || review && (chapters?.get(review.chapterId) ?? review.revision) > review.revision
     }))
     group.staleReviewCalls = stale
-    group.unsettled = findUnsettledCall(group.calls, stale)
-    group.unfinished = Boolean(group.unsettled) || group.calls.some(part => !part.preparing && part.status === 'running') || group.calls.every(part => part.preparing)
+    const stageCalls = group.calls.slice(group.stageStart)
+    group.unsettled = findUnsettledCall(stageCalls, stale)
+    group.unfinished = Boolean(group.unsettled) || group.calls.some(part => !part.preparing && part.status === 'running') || stageCalls.every(part => part.preparing)
     group.completed = completedRuns.has(sourceRunId)
     if (group.title && !group.closed && !group.completed) activeByRun.set(sourceRunId, group)
     for (const part of group.calls) {

@@ -553,6 +553,8 @@ export type AgentStreamEvent = {
   seq: number
   runId: EntityId
   ts: string
+  /** Read-side timing from the running attempt, independent of replayed event timestamps. */
+  durableTiming?: AgentRunTiming | null
 } & AgentStreamEventBody
 
 export type AgentNextPrompt = { runId: EntityId; text: string }

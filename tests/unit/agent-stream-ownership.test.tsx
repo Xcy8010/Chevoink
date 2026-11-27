@@ -3,11 +3,12 @@ import { useRef } from 'react'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { useAgentStream } from '../../src/features/studio/agent/useAgentStream'
-import { useAgentStore } from '../../src/features/studio/agent/agentStore'
+import { restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 import { claimWorkspaceStreamEvent, isReviewStreamReplay, isStaleChapterReview, isWorkspaceStreamOwnerCurrent, type ChapterStreamOwner, type ReviewStreamCursor } from '../../src/features/studio/components/chapter-stream-handoff'
-import type { AgentStreamEvent } from '../../shared/contracts/index.js'
+import type { AgentStreamEvent, AgentUIMessage } from '../../shared/contracts/index.js'
 import type { ChapterPendingReview, PlanPendingReview } from '../../src/features/studio/types'
-import { readStoredPendingReviewList, writeStoredPendingReview } from '../../src/features/studio/lib/plan-review'
+import { buildServerPlanFile, mergeWorkspacePlanFiles, readStoredPendingReviewList, writeStoredPendingReview } from '../../src/features/studio/lib/plan-review'
+import { observePlanFolderWrites } from '../../src/features/studio/lib/plan-folder-writes'
 
 class Source {
   static opened: Source[] = []
@@ -26,9 +27,114 @@ const resultEvent = (seq = 3, runId = 'run-a'): Extract<AgentStreamEvent, { type
 beforeEach(() => {
   Source.opened = []
   vi.stubGlobal('EventSource', Source)
-  useAgentStore.setState({ runId: 'run-a', activeSessionId: 'session-a', phase: 'running', lastSeq: 0, messages: [] })
+  useAgentStore.setState({ runId: 'run-a', activeSessionId: 'session-a', phase: 'running', lastSeq: 0, messages: [], planFolderWriteReceipts: new Set() })
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear() })
+
+function savedPlanHistory(runId: string, orders: number[]): AgentUIMessage[] {
+  return [{ id: `${runId}-message`, runId, role: 'assistant', createdAt: '2026-11-27T02:05:00Z', parts: orders.map(order => ({
+    type: 'tool-call', toolName: 'plan_save', callId: `${runId}-save-${order}`, title: '写入计划', args: null,
+    status: 'success', display: { kind: 'planFile', artifactId: `${runId}-plan-${order}`, title: `第${order}章细纲`, content: '合成细纲。' },
+  })) }]
+}
+
+it.each(['already active', 'active', 'completed'] as const)('refreshes the plan folder once when %s history supplies both missed receipts', (phase) => {
+  const cloudFiles = Array.from({ length: 20 }, (_, index) => buildServerPlanFile({
+    id: `plan-${index + 1}`, runId: 'run-a', title: `第${index + 1}章细纲`, content: '合成细纲。',
+    createdAt: new Date(index).toISOString(), updatedAt: new Date(index).toISOString(),
+    orderIndex: null, planKind: 'detail', planHash: 'a'.repeat(64), parentPlanId: 'parent', parentPlanHash: 'b'.repeat(64),
+    target: { kind: 'future', targetOrderIndex: index + 1 }, reviewState: 'current',
+  }))
+  let sidebar = cloudFiles.slice(0, 18)
+  const refresh = vi.fn(() => { sidebar = mergeWorkspacePlanFiles([], cloudFiles) })
+  useAgentStore.setState({ workspaceActivities: [] })
+  const history = savedPlanHistory('run-a', [19, 20])
+  if (phase === 'already active') restoreActiveRunHistory(history, 'run-a', 'session-a', undefined, null, 10)
+  const unsubscribe = observePlanFolderWrites('session-a', refresh)
+  try {
+    if (phase === 'active') restoreActiveRunHistory(history, 'run-a', 'session-a', undefined, null, 10)
+    if (phase === 'completed') useAgentStore.getState().restoreMessages(history, 'session-a')
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(sidebar).toHaveLength(20)
+    expect(sidebar.slice(-2).map(file => file.backendArtifactId)).toEqual(['plan-19', 'plan-20'])
+    useAgentStore.getState().restoreMessages(history, 'session-a')
+    expect(refresh).toHaveBeenCalledOnce()
+    useAgentStore.getState().restoreMessages(savedPlanHistory('run-b', [1]), 'session-b')
+    expect(refresh).toHaveBeenCalledOnce()
+  } finally { unsubscribe() }
+})
+
+it('refreshes on a saved plan SSE witness and ignores streaming deltas and replayed history while the session stays open', () => {
+  const refresh = vi.fn()
+  useAgentStore.setState({ workspaceActivities: [], loadedSessionId: 'session-a' })
+  const unsubscribe = observePlanFolderWrites('session-a', refresh)
+  const hook = renderHook(() => useAgentStream())
+  try {
+    act(() => hook.result.current.connect('run-a'))
+    const source = Source.opened[0]
+    const history = savedPlanHistory('run-a', [19])
+    const part = history[0].parts[0]
+    if (part.type !== 'tool-call') throw Error('Missing fixture receipt')
+    const { id: messageId, createdAt: ts, runId } = history[0]
+    const { callId, toolName, display, title } = part
+    act(() => {
+      source.send({ type: 'tool.call', seq: 1, ts, runId, messageId, callId, toolName, title, args: null })
+      for (let seq = 2; seq < 10; seq++) source.send({ type: 'tool.delta', seq, ts, runId, messageId, callId, toolName, argsChars: seq * 50 })
+    })
+    expect(refresh).not.toHaveBeenCalled()
+    act(() => source.send({ type: 'tool.result', seq: 10, ts, runId, messageId, callId, toolName, ok: true, summary: '已保存', display }))
+    expect(refresh).toHaveBeenCalledOnce()
+    const savedReceipts = useAgentStore.getState().planFolderWriteReceipts
+    act(() => {
+      for (let seq = 11; seq < 20; seq++) {
+        useAgentStore.getState().applyEvent({ type: 'reasoning.delta', seq, ts, runId, messageId, delta: '合成流式推理' })
+      }
+    })
+    expect(useAgentStore.getState().planFolderWriteReceipts).toBe(savedReceipts)
+    expect(refresh).toHaveBeenCalledOnce()
+    act(() => useAgentStore.getState().restoreMessages(history, 'session-a'))
+    expect(refresh).toHaveBeenCalledOnce()
+  } finally { unsubscribe() }
+})
+
+it('observes two runs that reuse the same provider call ID for the same plan', () => {
+  const refresh = vi.fn()
+  useAgentStore.setState({ workspaceActivities: [], loadedSessionId: 'session-a' })
+  const unsubscribe = observePlanFolderWrites('session-a', refresh)
+  const planResult = (runId: string, messageId: string): AgentStreamEvent => ({
+    type: 'tool.result', runId, messageId, seq: 1, ts: '', callId: 'provider-call-0', toolName: 'plan_save',
+    ok: true, summary: '已保存', display: { kind: 'planDiff', artifactId: 'plan-19', title: '第十九章细纲', beforeTitle: '第十九章细纲', before: '', after: runId },
+  })
+  try {
+    useAgentStore.getState().applyEvent(planResult('run-a', 'message-a'))
+    useAgentStore.getState().resumeRun('run-b', 'session-a')
+    useAgentStore.getState().applyEvent(planResult('run-b', 'message-b'))
+    expect(refresh).toHaveBeenCalledTimes(2)
+    const { messages, workspaceActivities } = useAgentStore.getState()
+    expect(workspaceActivities).toHaveLength(1)
+    useAgentStore.getState().restoreMessages(messages, 'session-a')
+    expect(refresh).toHaveBeenCalledTimes(2)
+  } finally { unsubscribe() }
+})
+
+it('observes a restored child receipt whose call ID overlaps a top-level save, and consumes its SSE replay once', () => {
+  const refresh = vi.fn()
+  const [message] = savedPlanHistory('run-a', [19])
+  const saved = message.parts[0]
+  if (saved.type !== 'tool-call') throw Error('Missing fixture receipt')
+  const unsubscribe = observePlanFolderWrites('session-a', refresh)
+  try {
+    useAgentStore.getState().restoreMessages([message], 'session-a')
+    expect(refresh).toHaveBeenCalledOnce()
+    const restored = [{ ...message, parts: [...message.parts, { ...saved, subagentCallId: 'inline-writer' }] }]
+    restoreActiveRunHistory(restored, 'run-a', 'session-a', undefined, null, 1)
+    expect(refresh).toHaveBeenCalledTimes(2)
+    expect(useAgentStore.getState().workspaceActivities).toHaveLength(1)
+    useAgentStore.getState().applyEvent({ type: 'tool.result', runId: message.runId, messageId: message.id, seq: 2, ts: message.createdAt,
+      callId: saved.callId, toolName: saved.toolName, subagentCallId: 'inline-writer', ok: true, summary: '已保存', display: saved.display })
+    expect(refresh).toHaveBeenCalledTimes(2)
+  } finally { unsubscribe() }
+})
 
 it('rejects callbacks and errors from an old source even when a new connection resumes the same run', () => {
   const received = vi.fn(), error = vi.fn()
