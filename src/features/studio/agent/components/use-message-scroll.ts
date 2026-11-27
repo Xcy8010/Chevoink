@@ -19,6 +19,7 @@ export function useMessageScroll({
   // 自动跟随开关：用户上滑离开底部后暂停自动滚底（避免运行中回看历史被强制弹回），滚回底部附近自动恢复
   const pinnedToBottomRef = useRef(true)
   const lastScrollTopRef = useRef(0)
+  const returnFrameRef = useRef(0)
   const draggingRef = useRef(false)
   const scopeOwner = useRef({ key: scopeKey })
   const remoteViewport = useRef<{ node: HTMLDivElement; top: number; row?: HTMLElement; offset?: number } | null>(null)
@@ -201,7 +202,7 @@ export function useMessageScroll({
     }
     // 只在回到底部附近时恢复贴底；不在中途向下滚时置 false——自动滚底后底部内容真实布局撑高会让
     // 距底距离瞬间超阈值，若据此关贴底会把追底收敛循环自己打断
-    if (node.scrollTop > previousTop && distanceToBottom < 80) {
+    if (!returnFrameRef.current && node.scrollTop > previousTop && distanceToBottom < 80) {
       pinnedToBottomRef.current = true
     }
   }, [])
@@ -238,5 +239,5 @@ export function useMessageScroll({
   // 键盘弹起 / 底部导航隐藏使消息容器变矮时，像微信/QQ 一样把对话顶上去
   useKeyboardPushScroll(scrollRef)
 
-  return { scrollRef, scrollContentRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll, captureRemoteViewport }
+  return { scrollRef, scrollContentRef, returnFrameRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll, captureRemoteViewport }
 }

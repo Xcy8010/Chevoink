@@ -92,6 +92,8 @@ import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
 import { activityAnswerText, activityReportVisibility, hasVisibleActivityText, projectActivityGroups } from '../lib/activity-groups'
 import MobileConversationScrollbar from './MobileConversationScrollbar'
+import { AgentReturnOrb } from './AgentReturnOrb'
+import { useConversationDistance } from './use-conversation-distance'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -310,7 +312,7 @@ export function AgentPanel({
   const conversationLoading = !conversationReady && (sessionId
     ? storeLoadedSessionId !== sessionId && historyErrorSessionId !== sessionId
     : sessionResolving)
-  const { scrollRef, scrollContentRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll, captureRemoteViewport } = useMessageScroll({
+  const { scrollRef, scrollContentRef, returnFrameRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll, captureRemoteViewport } = useMessageScroll({
     scopeKey: sendScope, messages, pendingApproval, pendingQuestion, conversationLoading, collapsed: workConversation.collapsed,
     revealingText: settlingBlocks.size > 0,
   })
@@ -1630,6 +1632,12 @@ export function AgentPanel({
 
   const floatingFooterRef = useComposerInset(scrollRef, pinnedToBottomRef, lastScrollTopRef, workConversation.collapsed)
 
+  const { away, deepHistory, returnToLive } = useConversationDistance({
+    scrollRef, scrollContentRef, floatingFooterRef, pinnedToBottomRef, returnFrameRef, scopeKey: sendScope,
+    collapsed: workConversation.collapsed, messages,
+  })
+  const showReturnOrb = away && !workConversation.collapsed && Boolean(sessionId && storeLoadedSessionId === sessionId && active && runId)
+
   function openAgentOperations() {
     setTaskMenuOpen(false)
     setHistoryOpen(false)
@@ -1884,6 +1892,7 @@ export function AgentPanel({
                 return (
                 <div
                   key={message.presentationId ?? message.id}
+                  data-agent-author-turn=""
                   id={`agent-message-${message.id}`}
                   className={cn('flex min-w-0 max-w-full flex-col items-end gap-1.5', !message.delivery && message.id !== messages.filter(item => item.role === 'user').at(-1)?.id && 'agent-msg-cv')}
                 >
@@ -2027,9 +2036,12 @@ export function AgentPanel({
 
       <div ref={floatingFooterRef} data-agent-floating-footer className="agent-floating-footer">
       <div className="agent-conversation-width">
+      <AgentReturnOrb visible={showReturnOrb} onReturn={returnToLive} />
       {!dockExpanded && (workspaceActivities.length > 0 || todos.length > 0 || pendingReviewCount > 0) ? (
-        <div data-agent-activity className="px-4 pb-2">
-          <AgentActivityBar
+        <div data-agent-capsule-track data-hidden={deepHistory} aria-hidden={deepHistory || undefined}
+          {...(deepHistory ? { inert: '' as const } : {})}>
+          <div className="agent-capsule-clip"><div data-agent-activity className="px-4 pb-2">
+          <AgentActivityBar key={String(deepHistory)}
             activities={workspaceActivities}
             activitiesVersion={activitiesVersion}
             todos={todos}
@@ -2041,6 +2053,7 @@ export function AgentPanel({
             onApproveAllReviews={onApproveAllReviews}
             onRejectAllReviews={onRejectAllReviews}
           />
+          </div></div>
         </div>
       ) : null}
 

@@ -170,7 +170,7 @@ function AgentActivityCapsules({ activities, todos, runActive, pendingReviewCoun
   if (!changes.length && !todos.length && !pendingReviewCount && !expanded) return null
   return <div className="flex min-w-0 flex-col gap-2">
     <div data-agent-activity-capsules data-mobile-fused={paired} className="flex min-w-0 flex-wrap items-center justify-center gap-2 mobile:w-fit mobile:max-w-full mobile:flex-nowrap mobile:self-center mobile:gap-0 mobile:overflow-hidden mobile:rounded-2xl mobile:border mobile:border-[var(--border-subtle)] mobile:bg-[var(--surface-muted)]">
-      {todos.length > 0 ? <div ref={todoAnchor} className={cn('min-w-0 max-w-full', paired && 'mobile:max-w-[50%] mobile:flex-1')}>
+      {todos.length > 0 ? <div ref={todoAnchor} className="min-w-0 max-w-full">
         <button type="button" aria-label="待办进度" aria-haspopup="dialog" aria-expanded={expanded === 'todos'} onClick={() => { cancelClose(); setExpanded(value => value === 'todos' ? null : 'todos') }} className={cn(capsule, 'max-w-full gap-2 px-3 text-left mobile:gap-1.5 mobile:px-2.5')}>
           {current?.status === 'in_progress' && runActive ? <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--text-secondary)] motion-reduce:animate-none" aria-label="执行中" /> : <ListTodo className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] mobile:hidden" />}
           <span className="shrink-0 tabular-nums text-[var(--text-secondary)]">{completed}/{active}</span>
@@ -181,7 +181,7 @@ function AgentActivityCapsules({ activities, todos, runActive, pendingReviewCoun
           <ul className="p-2">{activeTodos.map((item, index) => <TodoRow key={todoKey(item, index)} item={item} runActive={runActive} />)}</ul>
         </ActivityPopover>
       </div> : null}
-      {changes.length > 0 || pendingReviewCount > 0 || expanded === 'changes' ? <div ref={changeAnchor} className={cn('min-w-0 max-w-full', paired && 'mobile:max-w-[50%] mobile:flex-1 mobile:border-l mobile:border-[var(--border-subtle)]')} onPointerEnter={event => { if (!event.pointerType || event.pointerType === 'mouse') { touchSummary.current = false; cancelClose(); setExpanded('changes') } }} onPointerLeave={event => { if (!event.pointerType || event.pointerType === 'mouse') closeSoon() }}>
+      {changes.length > 0 || pendingReviewCount > 0 || expanded === 'changes' ? <div ref={changeAnchor} className={cn('min-w-0 max-w-full', paired && 'mobile:shrink-0 mobile:border-l mobile:border-[var(--border-subtle)]')} onPointerEnter={event => { if (!event.pointerType || event.pointerType === 'mouse') { touchSummary.current = false; cancelClose(); setExpanded('changes') } }} onPointerLeave={event => { if (!event.pointerType || event.pointerType === 'mouse') closeSoon() }}>
         <div className={capsule}>
           <button type="button" title="悬停查看正文变更，点击打开最近一次变更（单位：字）" aria-haspopup="dialog" aria-expanded={expanded === 'changes'} onPointerDown={event => { touchSummary.current = event.pointerType === 'touch' }} onKeyDown={event => {
             if (event.key === 'ArrowDown') { event.preventDefault(); cancelClose(); setExpanded('changes') }

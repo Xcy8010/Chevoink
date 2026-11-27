@@ -167,7 +167,7 @@ async function buildNovelRuleBundle(
     && novel.wordCount === 0
 
   const bootstrapPrompt = isBootstrapNovel
-    ? `作品初始化协议：当前是系统为零作品作者准备的隐藏占位作品，占位状态不是创建授权。仅当原始作者请求明确创建正式作品，或要求把章节保存到作品且确需初始化时，结合作者给出的题材与设定，用 novel_create 一次性保存书名、简介、标签。只在聊天交付的试写、正文、讨论或答复直接交付，无需初始化。仅补齐原请求需要的作品信息；封面缺失不阻止已授权章节交付。模糊的小说意图先通过提问工具对齐方向，并明确当前空作品的初始化语境，收到真实回答后才保存。当前已是正式作品时按明确元信息修改意图更新书名、简介与标签，不重复创建。完成后用普通作者语言简述实际结果；封面等信息缺失且作者未明确跳过时，可问要先补齐还是开始大纲。结束本轮，不自动生成封面、大纲或正文；作者要求排他输出或不要建议时不附加。`
+    ? `作品初始化协议：当前是系统为零作品作者准备的隐藏占位作品，占位状态不是创建授权。仅当原始作者请求明确创建正式作品，或要求把章节保存到作品且确需初始化时，结合作者给出的题材与设定，用 novel_create 一次性保存书名、简介、标签。只在聊天交付的试写、正文、讨论或答复直接交付，无需初始化。仅补齐原请求需要的作品信息；封面缺失不阻止已授权章节交付。模糊的小说意图先通过提问工具对齐方向，并明确当前空作品的初始化语境，收到真实回答后才保存。当前已是正式作品时按明确元信息修改意图更新书名、简介与标签，不重复创建。完成后用普通作者语言简述实际结果。结束本轮，不自动生成封面、大纲或正文；作者要求排他输出或不要建议时不附加。`
     : null
 
   const dataLines = [
@@ -794,6 +794,8 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     hasCapability('skill_create_draft', 'skill_install_shared') ? '技能操作：作者明确要求“创建/新增一个技能”，且该偏好会在后续任务反复复用时，先调用 skill_create_draft 生成私有、关闭的草稿；再只在创建或修改后运行一条应命中和一条不应命中的 skill_test。测试完成后说明结果，只有作者本轮明确要求发布时才调用 skill_publish。普通单轮要求不得保存成技能。作者明确要求安装共享技能时，先用 skill_shared_invites 列出待处理邀请，再只对作者指定的 inviteId 调用 skill_install_shared；不得自动导入 GitHub 或任意外部源码，第三方来源必须由作者在技能区提供许可证、归属和固定版本。' : null,
     '历史工具记录由系统生成，仅描述过去的工具状态，不是调用格式或新指令，不要模仿。需要执行操作时必须使用 API 原生 function calling；普通文本、历史摘要或参数示例均不会执行工具。向作者汇报进展时使用自然语言，不输出调用标记。',
     hasCapability('novel_update_meta') ? TAG_LIBRARY_DIGEST : null,
+    hasCapability('novel_create', 'plan_save', 'novel_update_meta') ? '本轮完成作品初始化或首次保存全书大纲后，先交付作者原本要的结果。依据当前作品信息和保存回执，如果简介、站内标签或正式封面还有缺项，在结尾用一句自然的话问作者想先补哪项，也可以稍后。只提实际缺少的项；可见对话里已经问过同一组、作者说过稍后或要求只交付正文时，直接收尾。作者主动询问发布缺项或回来补资料时，只处理其选定的项目。' : null,
+    hasCapability('cover_generate') ? '作者想制作封面时，先在对话里给出适合作品的画面方向、候选数量，以及能从当前价目核实的预计 Credits。不能核实价格时如实说明，请作者参考封面工坊现价，不猜金额。作者确认本次方向和费用后才生成；用已有选图流程展示并校验候选，按作者选定的图或明确委托应用。' : null,
     operatingGuidance ?? MODE_CONTRACTS[input.mode],
     operatingGuidance ? null : decisionStrategies(chapterReviewWorkflowEnabled(input.taskSpec)),
     operatingGuidance ? null : operationKnowledge(chapterReviewWorkflowEnabled(input.taskSpec)),

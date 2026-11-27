@@ -432,7 +432,7 @@ function novelDirectionGuidance(spec: TaskSpec) {
     return '\n创作阶段：当前作品已有元信息或正文。先询问作者想要的方向，保留已有设置和正文，简述方向后结束本轮，不以缺少保存记录反复尝试。'
   }
   const purpose = spec.scope.novelInitializationProtocol === 2 ? '（purpose=novel_direction）' : '，并明确当前空作品的初始化'
-  return `\n创作阶段：先通过向作者提问工具${purpose}给出2–4个故事方向，收到真实回答后一次保存书名、简介和标签。保存后简述结果；有作者尚未明确跳过的封面等作品信息缺项时，在结束回复里问要先补缺项还是开始写大纲。作品信息已齐时可问「要不要开始写大纲？」。不用提问工具等待下一步，不自动制作封面、写大纲或正文。`
+  return `\n创作阶段：先通过向作者提问工具${purpose}给出2–4个故事方向，收到真实回答后一次保存书名、简介和标签。保存后简述结果，按当前缺项和已有对话决定是否顺带问一句。作品信息已齐时可问「要不要开始写大纲？」。不用提问工具等待下一步，不自动制作封面、写大纲或正文。`
 }
 
 export function renderTaskSpec(spec: TaskSpec): string {
