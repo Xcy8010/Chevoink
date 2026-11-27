@@ -1318,10 +1318,10 @@ describe.runIf(available)('既有章节独立检查', () => {
       expect(retried.part).toMatchObject({ status: 'success', display: { kind: 'reviewBatch', chapters: chapterIds.map(chapterId => ({ chapterId, status: 'complete' })) } })
       expect(model).toHaveBeenCalledTimes(5)
       const affected = { ...argsFor('custom'), focus: '断在结算之后的合成样本' }
-      const saveJournal = vi.spyOn(prisma.agentArtifact, 'create').mockRejectedValueOnce(new Error('已结算，原响应尚未写入'))
+      const saveJournal = vi.spyOn(batchReview, 'saveBatchReviewObservation').mockRejectedValueOnce(new Error('已结算，原响应尚未写入'))
       await expect(chapterReviewBatchTool.execute({ ...context, callId: 'legacy-journal-missing' }, affected))
         .rejects.toThrow('已结算，原响应尚未写入')
-      saveJournal.mockRestore()
+      expect(saveJournal).toHaveBeenCalledOnce()
       expect(model).toHaveBeenCalledTimes(6)
       expect(await chapterReviewBatchTool.execute({ ...context, callId: 'legacy-journal-recover' }, affected)).toMatchObject({
         display: { kind: 'reviewBatch', chapters: chapterIds.map(chapterId => ({

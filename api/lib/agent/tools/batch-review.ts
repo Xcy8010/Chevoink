@@ -1,9 +1,10 @@
 import { z } from 'zod'
+import type { Prisma } from '@prisma/client'
 import type { AgentToolDisplayPayload } from '../../../../shared/contracts/index.js'
 import { criticQualityFindingSchema } from '../../../../shared/contracts/humanity-quality-contracts.js'
 import { continuityFindingInputSchema } from '../../../../shared/contracts/story-compiler-contracts.js'
 import { activeChapterScope } from '../../data/internal.js'
-import { DataAccessError } from '../../prisma.js'
+import { DataAccessError, prisma } from '../../prisma.js'
 import { buildContinuitySnapshot } from '../continuity-review.js'
 import { analyzeDeterministicQuality, buildHumanityQualityContext, qualityReviewContextHash } from '../humanity-quality.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
@@ -290,6 +291,11 @@ export function projectBatchReview(work: Work, raw: string, current: Work, compl
   for (const chapterId of work.unavailable) chapters.push({ chapterId, title: '章节不可用', orderIndex: 0, revision: 0,
     status: 'incomplete', detail: '未找到当前作品中已保存的非空正文。' })
   return { kind: 'reviewBatch', reviewType: work.reviewType, chapters }
+}
+
+export function saveBatchReviewObservation(runId: string, raw: string, metadata: Prisma.InputJsonObject) {
+  return prisma.agentArtifact.create({ data: { runId, artifactType: 'continuityReview',
+    title: '批量审阅原响应', content: JSON.stringify(raw), metadata } })
 }
 
 export async function saveBatchReview(ctx: ToolContext, db: RuntimeTx, work: Work, display: BatchDisplay, cacheable: boolean): Promise<ToolResult> {

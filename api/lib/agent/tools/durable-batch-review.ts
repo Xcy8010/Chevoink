@@ -16,7 +16,7 @@ import { prepareToolCursorOperation, readAdmittedToolOperation } from '../runtim
 import { reduceExecutionReceipt, failedToolResultSchema } from '../runtime-reducer.js'
 import { isKnownRejectedTextRequestAttempt, isKnownTextRequestBilling } from '../text-request-billing.js'
 import { originalTaskRunIds, readOriginalTaskRequest } from '../original-request.js'
-import { batchReviewArgsSchema, batchReviewWorkSchema, checkBatchReviewGrant, prepareBatchReview, projectBatchReview, saveBatchReview,
+import { batchReviewArgsSchema, batchReviewWorkSchema, checkBatchReviewGrant, prepareBatchReview, projectBatchReview, saveBatchReview, saveBatchReviewObservation,
   type BatchReviewArgs } from './batch-review.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 
@@ -168,11 +168,10 @@ async function executeLegacyBatchReview(ctx: ToolContext, args: BatchReviewArgs)
       // the same input can then finish the projection without a model request.
       const received = trace.records.find(record => record.status === 'terminal' && record.billingKnown)
       if (received && (raw || paidResult)) {
-        await prisma.agentArtifact.create({ data: {
-          runId: ctx.runId, artifactType: 'continuityReview', title: '批量审阅原响应', content: JSON.stringify(raw),
-          metadata: { version: 1, batchResponseRequestHash: requestHash, batchResponse: { version: 1, usageId: received.usageId,
-            complete, rawHash: runtimeJson({ raw }).hash, ...(unavailableReason ? { unavailableReason } : {}) } },
-        } })
+        await saveBatchReviewObservation(ctx.runId, raw, {
+          version: 1, batchResponseRequestHash: requestHash, batchResponse: { version: 1, usageId: received.usageId,
+            complete, rawHash: runtimeJson({ raw }).hash, ...(unavailableReason ? { unavailableReason } : {}) },
+        })
         paidResult = true
       }
     }
