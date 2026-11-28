@@ -4,10 +4,67 @@ import { DataAccessError, prisma } from './prisma.js'
 import { readHumanAdmission } from './agent/goal-activation-authority.js'
 import { changeRestriction, governanceAvailableFor, issueRestrictions, lockGovernanceAccount } from './governance-restrictions.js'
 import { queueGovernanceMail } from './governance-mail.js'
-import type { z } from 'zod'
+import { z } from 'zod'
+import { env } from '../config/env.js'
+import { selectAppReleaseForUser } from './app-releases.js'
+import { effectiveRestrictionWhere } from './governance-access.js'
+import { parseBody } from './parse-body.js'
 import type { safetyReviewSchema } from '../../shared/contracts/governance-restrictions.js'
 
 type Tx = Prisma.TransactionClient
+
+const policyUpdateSchema = z.object({
+  mode: z.enum(['observe', 'enforce']),
+  windowDays: z.number().int().min(1).max(365),
+  banDays: z.number().int().min(1).max(365),
+  reason: z.string().trim().min(1).max(1000),
+  expectedUpdatedAt: z.string().datetime(),
+  confirmEnforcement: z.boolean().optional(),
+}).refine(input => input.mode !== 'enforce' || input.confirmEnforcement === true)
+
+export async function updateGovernanceSafetyPolicy(actorId: string, input: unknown) {
+  return prisma.$transaction(async tx => {
+    if (!actorId) throw new DataAccessError(403, 'SUPER_ADMIN_REQUIRED', '策略变更仅限超级管理员。')
+    await lockGovernanceAccount(tx, actorId)
+    const actor = await tx.user.findFirst({
+      where: {
+        id: actorId, role: 'admin', isSuperAdmin: true, bannedAt: null,
+        accountRestrictions: { none: { scope: 'platform', ...effectiveRestrictionWhere(new Date()) } },
+      },
+      select: { id: true },
+    })
+    if (!actor) throw new DataAccessError(403, 'SUPER_ADMIN_REQUIRED', '策略变更仅限超级管理员。')
+    // Keep the effective assignments fixed until the policy and its audit entry commit.
+    await tx.$queryRaw`SELECT channel FROM app_release_channels WHERE channel IN ('stable', 'test') ORDER BY channel FOR SHARE`
+    if (!await governanceAvailableFor(actor.id, tx)) {
+      throw new DataAccessError(403, 'APP_RELEASE_CAPABILITY_DISABLED', '当前账号尚未开放平台治理。')
+    }
+    const policy = parseBody(policyUpdateSchema, input, '请确认模式、期限和变更理由。')
+    if (policy.mode === 'enforce' && env.appEnv === 'production') {
+      const stable = await selectAppReleaseForUser(null, tx)
+      if (stable.mode !== 'artifact' || !stable.release?.capabilities.includes('platformGovernance')) {
+        throw new DataAccessError(409, 'GOVERNANCE_STABLE_REQUIRED', '匿名稳定版开放平台治理后才能启用自动处置。')
+      }
+    }
+
+    const previous = await tx.agentSafetyPolicy.findUniqueOrThrow({ where: { id: 'active' } })
+    const stale = () => new DataAccessError(409, 'POLICY_CHANGED', '策略已更新，请刷新后重试。')
+    if (previous.updatedAt.getTime() !== Date.parse(policy.expectedUpdatedAt)) throw stale()
+    const after = { mode: policy.mode, windowDays: policy.windowDays, banDays: policy.banDays }
+    const next = { ...after, updatedAt: new Date(Math.max(Date.now(), previous.updatedAt.getTime() + 1)) }
+    const updated = await tx.agentSafetyPolicy.updateMany({
+      where: { id: 'active', updatedAt: previous.updatedAt }, data: next,
+    })
+    if (!updated.count) throw stale()
+    const before = { mode: previous.mode, windowDays: previous.windowDays, banDays: previous.banDays }
+    await tx.adminAuditLog.create({ data: {
+      adminId: actor.id, action: 'governance.safety.policy', targetType: 'safety_policy', targetId: 'active',
+      detail: { before, after, reason: policy.reason },
+    } })
+    return next
+  })
+}
+
 type Reviewed = Pick<AgentSafetyEvent, 'id' | 'createdAt' | 'status' | 'evasion'>
 export function assessSafety(events: Reviewed[], windowDays: number, now: Date) {
   const cutoff = now.getTime() - windowDays * 86_400_000

@@ -5,11 +5,11 @@ import { requireAdmin } from '../lib/admin-auth.js'
 import { evictUserBanCache } from '../lib/auth-session.js'
 import { createRequestId, buildSuccess } from '../lib/http.js'
 import { parseBody } from '../lib/parse-body.js'
-import { prisma, DataAccessError } from '../lib/prisma.js'
+import { prisma } from '../lib/prisma.js'
 import { sendRouteError } from '../lib/route-error.js'
 import { requireAppReleaseCapability } from '../lib/app-releases.js'
 import { changeRestriction, governanceAvailableFor, issueRestrictions, stopRestrictedAgentWork } from '../lib/governance-restrictions.js'
-import { reviewSafetyEvent } from '../lib/governance-safety.js'
+import { reviewSafetyEvent, updateGovernanceSafetyPolicy } from '../lib/governance-safety.js'
 
 const router = Router()
 router.use(['/restrictions', '/safety-events'], async (req, res, next) => {
@@ -22,25 +22,12 @@ router.use(['/restrictions', '/safety-events'], async (req, res, next) => {
     next()
   } catch (error) { sendRouteError(res, createRequestId(), error) }
 })
-const policyUpdate = z.object({ mode:z.enum(['observe','enforce']), windowDays:z.number().int().min(1).max(365),
-  banDays:z.number().int().min(1).max(365), reason:z.string().trim().min(1).max(1000), expectedUpdatedAt:z.string().datetime(),
-  confirmEnforcement:z.boolean().optional() }).refine(v=>v.mode==='observe'||v.confirmEnforcement===true)
-router.post('/safety-events/policy',async(req,res)=>{
-  const requestId=createRequestId()
+router.post('/safety-events/policy', async (req, res) => {
+  const requestId = createRequestId()
   try {
-    if (!res.locals.governanceSuper) throw new DataAccessError(403,'SUPER_ADMIN_REQUIRED','策略变更仅限超级管理员。')
-    const input=parseBody(policyUpdate,req.body,'请确认模式、期限和变更理由。')
-    const policy=await prisma.$transaction(async tx=>{
-      const previous=await tx.agentSafetyPolicy.findUniqueOrThrow({where:{id:'active'}})
-      const next={mode:input.mode,windowDays:input.windowDays,banDays:input.banDays,updatedAt:new Date()}
-      const updated=await tx.agentSafetyPolicy.updateMany({where:{id:'active',updatedAt:new Date(input.expectedUpdatedAt)},data:next})
-      if(!updated.count) throw new DataAccessError(409,'POLICY_CHANGED','策略已更新，请刷新后重试。')
-      await tx.adminAuditLog.create({data:{adminId:res.locals.governanceActor,action:'governance.safety.policy',targetType:'safety_policy',targetId:'active',
-        detail:{before:{mode:previous.mode,windowDays:previous.windowDays,banDays:previous.banDays},after:{mode:next.mode,windowDays:next.windowDays,banDays:next.banDays},reason:input.reason}}})
-      return next
-    })
-    res.json(buildSuccess(requestId,policy))
-  } catch(error){sendRouteError(res,requestId,error)}
+    const policy = await updateGovernanceSafetyPolicy(res.locals.governanceActor, req.body)
+    res.json(buildSuccess(requestId, policy))
+  } catch (error) { sendRouteError(res, requestId, error) }
 })
 const filters = z.object({ userId: z.string().max(64).optional(), scope: z.enum(restrictionScopes).optional(),
   status: z.enum(['pending','confirmed','dismissed']).optional(), cursor: z.string().max(64).optional() })

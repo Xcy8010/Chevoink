@@ -65,7 +65,7 @@ export async function hasGenerativeContentPolicyCapability(userId:string,tx:Tran
  const {manifest}=await readVerifiedRelease(tx,selected.releaseId)
  return manifest.capabilities.includes('generativeContentPolicy')
 }
-export async function hasPlatformGovernanceCapability(userId: string, tx: Transaction = prisma): Promise<boolean | null> {
+export async function hasPlatformGovernanceCapability(userId: string | null, tx: Transaction = prisma): Promise<boolean | null> {
  const { selected } = await selectAccountAssignment(tx, userId)
  if (!selected) return null
  const { manifest } = await readVerifiedRelease(tx, selected.releaseId)

@@ -22,7 +22,9 @@ Agent 风险信号先进入待复核。普通拒绝、服务故障、自动重�
 
 处罚、提醒和申诉复核的通知意向与状态变化同事务写入。队列按事件、类别、接收人去重，使用经验证的邮箱。治理通知与运营活动的发送权限和模板独立。管理页区分模拟、待发送、已接受、送达、退信、抑制及结果待核。未知结果保留原记录。系统重启后不自动重发。抑制或发送失败时，应从本人申诉与允许的联系渠道告知。
 
-`GOVERNANCE_MAIL_MODE` 默认关闭。关闭期间登记的通知保留原状态。隔离测试用 `mock`。只有在另行授权、发件人、回复邮箱、模板审核及接收地址都核验后，才配置 `tencent-allowlist`。发件人为 notice@chevolink.com，地域为香港，使用独立的 `GOVERNANCE_SES_SECRET_ID`、`GOVERNANCE_SES_SECRET_KEY`、`GOVERNANCE_SES_REPLY_TO` 和 `GOVERNANCE_SES_ALLOWLIST`。
+`GOVERNANCE_MAIL_MODE` 默认关闭。隔离测试用 `mock`。受控试发使用 `tencent-allowlist`，并配置限定收件地址 `GOVERNANCE_SES_ALLOWLIST`。正式运行使用 `tencent`，只向有对应治理决定且邮箱已验证的当事人发送。正式通知要求匿名稳定通道已开放治理能力。开启前以退出登录的浏览器验收固定 `/appeal`，并核验发件地址、回复邮箱和模板审核。发件人为 notice@chevolink.com，地域为香港，凭据和回复地址分别通过受保护的 `GOVERNANCE_SES_SECRET_ID`、`GOVERNANCE_SES_SECRET_KEY`、`GOVERNANCE_SES_REPLY_TO` 配置。
+
+关闭期间和正式稳定通道就绪前登记的通知不会进入正式发送队列。正式投递也不会接手试发模式的待发通知。已有实发供应商回执会继续核对，并沿用投诉、硬退信和当前已验证邮箱的保护。
 
 | 用途 | 腾讯 SES 模板 ID | 变量 |
 | --- | --- | --- |
@@ -30,7 +32,7 @@ Agent 风险信号先进入待复核。普通拒绝、服务故障、自动重�
 | 账号使用限制通知 | 238308 | reason、measure |
 | 申诉处理结果通知 | 238309 | result、reason、measure |
 
-三个 ID 与原件固定绑定。保留的 `GOVERNANCE_SES_WARNING_TEMPLATE_ID`、`GOVERNANCE_SES_ENFORCEMENT_TEMPLATE_ID`、`GOVERNANCE_SES_APPEAL_RESULT_TEMPLATE_ID` 如有配置，须与对应 ID 一致。白名单发送前核对当前审核状态和完整模板，三种用途均逐项转义变量。申诉结案时保存该次决定及账号安排。请求补充材料和延期使用站内进展通知。历史申诉邮件缺少结果快照时保留为待配置。模板审批、DNS/CAM、试发、解除抑制须独立授权。
+三个 ID 与原件固定绑定。保留的 `GOVERNANCE_SES_WARNING_TEMPLATE_ID`、`GOVERNANCE_SES_ENFORCEMENT_TEMPLATE_ID`、`GOVERNANCE_SES_APPEAL_RESULT_TEMPLATE_ID` 如有配置，须与对应 ID 一致。投递前核对审核状态和完整模板。接受原件或腾讯云回读中已核对的格式改写，正文、链接和变量须与对应原件一致。三种用途均逐项转义变量。申诉结案时保存该次决定及账号安排。请求补充材料和延期使用站内进展通知。历史申诉邮件缺少结果快照时保留为待配置。模板审批、DNS/CAM、试发、解除抑制须独立授权。
 
 ## 数据迁移和撤回
 

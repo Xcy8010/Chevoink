@@ -1,10 +1,11 @@
 import { readFile } from 'node:fs/promises'
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
-import { prisma } from './prisma.js'
+import { DataAccessError, prisma } from './prisma.js'
 import { mockAdminEmailProvider, type AdminEmailProvider, type AdminEmailSendResult } from './admin-email-provider.js'
 import { createTencentAdminEmailDelivery } from './admin-email-tencent.js'
 import { requestTencentSes } from './tencent-ses-client.js'
+import { hasPlatformGovernanceCapability } from './app-releases.js'
 
 import { governanceMailTemplates as templates, type GovernanceMailKind as Kind } from '../../shared/contracts/governance-mail.js'
 
@@ -15,11 +16,23 @@ type Notice = { eventId: string; userId: string; reason: string } & (
 )
 const appealSnapshot = z.object({ version: z.literal(1), result: z.string().min(1), measure: z.string().min(1) })
 
+async function stableGovernanceAvailable(tx: Prisma.TransactionClient = prisma) {
+  try {
+    return await hasPlatformGovernanceCapability(null, tx)
+  } catch (error) {
+    if (error instanceof DataAccessError && error.code === 'APP_RELEASE_UNAVAILABLE') return false
+    throw error
+  }
+}
+
 export async function queueGovernanceMail(tx: Prisma.TransactionClient, input: Notice) {
   const user = await tx.user.findUniqueOrThrow({ where: { id: input.userId }, select: { email: true, emailVerifiedAt: true } })
   const recipient = user.emailVerifiedAt ? user.email?.toLowerCase() : null
   const delivery = governanceDelivery()
-  const state = !recipient ? 'unavailable' : delivery ? 'pending' : 'unconfigured'
+  let state = recipient ? 'unconfigured' : 'unavailable'
+  if (recipient && delivery && (delivery.mode !== 'tencent-verified' || await stableGovernanceAvailable(tx))) {
+    state = 'pending'
+  }
   const { eventId, userId, kind, reason } = input
   const measure = kind === 'appeal_result' ? JSON.stringify({ version: 1, result: input.result, measure: input.measure }) : input.measure
   await tx.governanceMail.createMany({ data: [{ eventId, userId, kind, reason, measure, recipient, mode: delivery?.mode ?? null, state }], skipDuplicates: true })
@@ -46,13 +59,27 @@ export async function governanceMailPreview(kind: Kind, reason: string, measure?
   return { subject, html: html.replace(/\{\{(reason|measure|result)\}\}/g, (_, key: string) => variables[key]) }
 }
 
-type Delivery = { mode: 'mock' | 'tencent'; from: string; replyTo: string; provider: AdminEmailProvider; ids: Partial<Record<Kind,number>>; verify(kind: Kind): Promise<void> }
+function matchesApprovedHtml(original: string, received: string) {
+  const clean = (value: string) => value.replace(/\r\n/g, '\n').trim()
+  if (clean(original) === clean(received)) return true
+
+  // SES returned this same transformation for all three independently approved
+  // templates. Apply it only to the local original so other edits still fail.
+  const sesHtml = original
+    .replace(/<!DOCTYPE html>|<meta name="viewport" content="width=device-width, initial-scale=1\.0">|<meta name="x-apple-disable-message-reformatting">|<!--\[if mso\]>[^\r\n]*?<!\[endif\]-->/g, '')
+    .replace(/'Segoe UI','Microsoft YaHei'/g, '&#39;Segoe UI&#39;,&#39;Microsoft YaHei&#39;')
+    .replace(/<a [^>]+target="_blank"[^>]*>/g, (link) => link.slice(0, -1) + ' rel="nofollow noopener">')
+  return clean(sesHtml) === clean(received)
+}
+
+type Delivery = { mode: 'mock' | 'tencent' | 'tencent-verified'; from: string; replyTo: string; provider: AdminEmailProvider; ids: Partial<Record<Kind,number>>; verify(kind: Kind): Promise<void> }
 export function governanceDelivery(config = process.env, fetcher: typeof fetch = fetch): Delivery | null {
   const from = 'notice@chevolink.com'
   if (config.GOVERNANCE_MAIL_MODE === 'mock') return {
     mode: 'mock', from, replyTo: 'mock@chevoink.invalid', provider: mockAdminEmailProvider, ids: { warning: templates.warning.id, enforcement: templates.enforcement.id, appeal_result: templates.appeal_result.id }, verify: async () => {},
   }
-  if (config.GOVERNANCE_MAIL_MODE !== 'tencent-allowlist') return null
+  const verifiedRecipients = config.GOVERNANCE_MAIL_MODE === 'tencent'
+  if (!verifiedRecipients && config.GOVERNANCE_MAIL_MODE !== 'tencent-allowlist') return null
   const { GOVERNANCE_SES_SECRET_ID: secretId, GOVERNANCE_SES_SECRET_KEY: secretKey, GOVERNANCE_SES_REPLY_TO: replyTo } = config
   if (!secretId || !secretKey || !replyTo || !z.string().email().safeParse(replyTo).success) return null
   const allowedRecipients = new Set((config.GOVERNANCE_SES_ALLOWLIST ?? '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean))
@@ -64,7 +91,7 @@ export function governanceDelivery(config = process.env, fetcher: typeof fetch =
   }
   const credentials = { secretId, secretKey, region: 'ap-hongkong' }
   const delivery = createTencentAdminEmailDelivery({ ...credentials, from, replyTo, allowedRecipients }, fetcher)
-  return { mode: 'tencent', from, replyTo, ids,
+  return { mode: verifiedRecipients ? 'tencent-verified' : 'tencent', from, replyTo, ids,
     async verify(kind) {
       const id = ids[kind]
       if (!id) throw Error('治理模板待配置')
@@ -72,14 +99,14 @@ export function governanceDelivery(config = process.env, fetcher: typeof fetch =
       const parsed = z.object({ RequestId: z.string().min(1), TemplateStatus: z.literal(0), TemplateContent: z.object({ Html: z.string().min(1), Text: z.string().nullish() }) }).safeParse(response.reply)
       if (!response.ok || !parsed.success || parsed.data.TemplateContent.Text?.trim()) throw Error('模板审核待核实')
       const html = await readFile(new URL('../templates/governance/' + templates[kind].file, import.meta.url), 'utf8')
-      const normalize = (v: string) => v.replace(/\r\n/g, '\n').trim()
-      if (normalize(Buffer.from(parsed.data.TemplateContent.Html,'base64').toString('utf8')) !== normalize(html)) throw Error('治理模板与批准原件不符')
+      if (!matchesApprovedHtml(html, Buffer.from(parsed.data.TemplateContent.Html, 'base64').toString('utf8'))) throw Error('治理模板与批准原件不符')
     },
     provider: { status: delivery.provider.status,
       async send(m): Promise<AdminEmailSendResult> {
         const kind = (Object.keys(ids) as Kind[]).find(key => ids[key] === m.providerTemplateId)
         const variables = kind === 'appeal_result' ? ['measure','reason','result'] : kind === 'enforcement' ? ['measure','reason'] : ['reason']
-        if (!kind || !m.providerTemplateId || !allowedRecipients.has(m.to) || m.from !== from || m.replyTo !== replyTo || m.subject !== templates[kind].subject || Object.keys(m.variables).sort().join(',') !== variables.join(',')) return { state: 'rejected', reason: 'outside_send_scope' }
+        const validRecipient = verifiedRecipients ? z.email().safeParse(m.to).success : allowedRecipients.has(m.to)
+        if (!kind || !m.providerTemplateId || !validRecipient || m.from !== from || m.replyTo !== replyTo || m.subject !== templates[kind].subject || Object.keys(m.variables).sort().join(',') !== variables.join(',')) return { state: 'rejected', reason: 'outside_send_scope' }
         try {
           const response = await requestTencentSes(credentials, 'SendEmail', { FromEmailAddress: from, ReplyToAddresses: replyTo, Destination: [m.to], Subject: m.subject,
             Template: { TemplateID: m.providerTemplateId, TemplateData: JSON.stringify(m.variables) }, TriggerType: 0, SmtpMessageId: '<governance-' + m.attemptId + '@chevolink.com>' }, fetcher)
@@ -94,8 +121,14 @@ export function governanceDelivery(config = process.env, fetcher: typeof fetch =
 }
 
 export async function processGovernanceMail(delivery: Delivery, now = new Date()) {
-  const due = { OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: now } }] }
-  const rows = await prisma.governanceMail.findMany({ where: { ...due, mode: delivery.mode, state: { in: ['pending','accepted','deferred'] } }, orderBy:{createdAt:'asc'}, take:20 })
+  const pendingEnabled = delivery.mode !== 'tencent-verified' || await stableGovernanceAvailable()
+  const receiptModes = delivery.mode === 'mock' ? ['mock'] : ['tencent', 'tencent-verified']
+  const states: Prisma.GovernanceMailWhereInput[] = [{ mode: { in: receiptModes }, state: { in: ['accepted', 'deferred'] } }]
+  if (pendingEnabled) states.push({ mode: delivery.mode, state: 'pending' })
+  const rows = await prisma.governanceMail.findMany({
+    where: { OR: states, AND: [{ OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: now } }] }] },
+    orderBy: { createdAt: 'asc' }, take: 20,
+  })
   for (const row of rows) {
     if (!row.recipient) continue
     const kind = row.kind as Kind
@@ -134,7 +167,7 @@ export async function processGovernanceMail(delivery: Delivery, now = new Date()
       const receipt = await delivery.provider.status({ messageId:row.messageId,to:row.recipient,from:delivery.from,attemptedAt:row.attemptedAt,now }).catch(() => null)
       if (receipt) await prisma.$transaction(async tx => {
         await tx.governanceMail.update({where:{id:row.id},data:{state:receipt.state,detail:receipt.reason}})
-        if (delivery.mode === 'tencent' && (receipt.suppression === 'hard_bounce' || receipt.suppression === 'complained')) await tx.adminEmailPermission.upsert({ where:{purpose_email:{purpose:'governance',email:row.recipient!}},create:{purpose:'governance',email:row.recipient!,suppression:receipt.suppression},update:{suppression:receipt.suppression} })
+        if (delivery.mode !== 'mock' && (receipt.suppression === 'hard_bounce' || receipt.suppression === 'complained')) await tx.adminEmailPermission.upsert({ where:{purpose_email:{purpose:'governance',email:row.recipient!}},create:{purpose:'governance',email:row.recipient!,suppression:receipt.suppression},update:{suppression:receipt.suppression} })
       })
     }
   }

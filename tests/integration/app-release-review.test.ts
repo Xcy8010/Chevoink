@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Response } from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Prisma } from '@prisma/client'
 import app from '../../api/app.js'
 import { env } from '../../api/config/env.js'
@@ -17,6 +17,7 @@ import { sealAppArtifact } from '../../scripts/app-release-artifact.mjs'
 import { verifyTestDatabase } from '../support/database-preflight.js'
 import { changeRestriction, issueRestrictions } from '../../api/lib/governance-restrictions.js'
 import { activeAgentRestriction } from '../../api/lib/governance-access.js'
+import { governanceDelivery, processGovernanceMail, queueGovernanceMail } from '../../api/lib/governance-mail.js'
 import { integrationLegalConsent } from '../support/legal-consent.js'
 import { readPublicSiteContent, verifyRegistrationConsent } from '../../api/lib/site-content.js'
 
@@ -64,6 +65,90 @@ afterAll(async()=>{
  await rm(root,{recursive:true,force:true});await prisma.$disconnect()
 })
 describe('actual release and admin routers on isolated PostgreSQL',()=>{
+ it('dispatches verified governance mail only after public rollout and preserves historical delivery scopes',async()=>{
+  const originalChannel=await prisma.appReleaseChannel.findUniqueOrThrow({where:{channel:'stable'}})
+  const accounts=Array.from({length:4},()=>({id:randomUUID(),email:randomUUID()+'@synthetic.invalid'}))
+  const [owner,changed,suppressed,unverified]=accounts
+  const notice=(userId:string)=>({eventId:randomUUID(),userId,kind:'warning' as const,reason:'Synthetic warning'})
+  const store=(eventId:string)=>prisma.governanceMail.findFirstOrThrow({where:{eventId}})
+  const beforeRollout=notice(owner.id), allowed=notice(owner.id), moved=notice(changed.id), muted=notice(suppressed.id), unbound=notice(unverified.id)
+  const oldPending=notice(owner.id), oldReceipt=notice(owner.id), mockReceipt=notice(owner.id)
+  const time=new Date()
+  const original=await readFile('api/templates/governance/chevoink-account-warning.html','base64')
+  const sent:string[]=[], receipts:string[]=[]
+  const fetcher=vi.fn<typeof fetch>(async (_url,options)=>{
+   const action=new Headers(options?.headers).get('X-TC-Action')
+   if(action==='GetEmailTemplate')return globalThis.Response.json({Response:{RequestId:'lookup',TemplateStatus:0,TemplateContent:{Html:original}}})
+   if(action==='SendEmail'){
+    sent.push(...JSON.parse(String(options?.body)).Destination)
+    return globalThis.Response.json({Response:{RequestId:'synthetic-request',MessageId:'synthetic-message'}})
+   }
+   if(action==='GetSendEmailStatus'){
+    const {MessageId,ToEmailAddress}=JSON.parse(String(options?.body))
+    receipts.push(MessageId)
+    return globalThis.Response.json({Response:{RequestId:'synthetic-status',EmailStatusList:[{MessageId,ToEmailAddress,FromEmailAddress:'notice@chevolink.com',SendStatus:0,DeliverStatus:1}]}})
+   }
+   throw Error('Unexpected synthetic action: '+action)
+  })
+  vi.stubEnv('GOVERNANCE_MAIL_MODE','tencent')
+  vi.stubEnv('GOVERNANCE_SES_SECRET_ID','synthetic')
+  vi.stubEnv('GOVERNANCE_SES_SECRET_KEY','synthetic')
+  vi.stubEnv('GOVERNANCE_SES_REPLY_TO','review@synthetic.invalid')
+  try{
+   await prisma.user.createMany({data:accounts.map(({id,email})=>({id,email,nickname:'Synthetic notice owner',passwordHash:'unused',emailVerifiedAt:id===unverified.id?null:time}))})
+   const worker=governanceDelivery(process.env,fetcher)!
+   expect(worker.mode).toBe('tencent-verified')
+   await prisma.$transaction(tx=>queueGovernanceMail(tx,beforeRollout))
+   expect((await store(beforeRollout.eventId)).state).toBe('unconfigured')
+
+   // These rows model persisted attempts across a deployment while public governance is still unavailable.
+   const historical={recipient:owner.email,attemptedAt:time}
+   await prisma.governanceMail.createMany({data:[
+    {...oldPending,recipient:owner.email,state:'pending',mode:'tencent'},
+    {...oldReceipt,...historical,state:'accepted',mode:'tencent',messageId:'prior-live'},
+    {...mockReceipt,...historical,state:'accepted',mode:'mock',messageId:'prior-mock'},
+   ]})
+   await processGovernanceMail(worker,time)
+   expect(receipts).toEqual(['prior-live'])
+   expect((await store(oldReceipt.eventId)).state).toBe('delivered')
+   expect((await store(mockReceipt.eventId)).state).toBe('accepted')
+   expect(fetcher).toHaveBeenCalledTimes(1)
+
+   await prisma.appReleaseChannel.update({where:{channel:'stable'},data:{releaseId:ids[1]}})
+   await prisma.$transaction(async tx=>{for(const event of [allowed,allowed,moved,muted,unbound])await queueGovernanceMail(tx,event)})
+   expect(await prisma.governanceMail.count({where:{eventId:allowed.eventId}})).toBe(1)
+   expect(await store(allowed.eventId)).toMatchObject({state:'pending',mode:'tencent-verified'})
+   expect((await store(unbound.eventId)).state).toBe('unavailable')
+   // Withdrawing public capability after enqueue must also pause a pending live send.
+   await prisma.appReleaseChannel.update({where:{channel:'stable'},data:{releaseId:originalChannel.releaseId}})
+   await processGovernanceMail(worker,time)
+   expect((await store(allowed.eventId)).state).toBe('pending')
+   expect(fetcher).toHaveBeenCalledTimes(1)
+   await prisma.user.update({where:{id:changed.id},data:{email:randomUUID()+'@synthetic.invalid'}})
+   await prisma.adminEmailPermission.create({data:{purpose:'governance',email:suppressed.email,suppression:'complained'}})
+   await prisma.appReleaseChannel.update({where:{channel:'stable'},data:{releaseId:ids[1]}})
+   await Promise.all([processGovernanceMail(worker,time),processGovernanceMail(worker,time)])
+   expect(sent).toEqual([owner.email])
+   expect(await store(allowed.eventId)).toMatchObject({state:'accepted',messageId:'synthetic-message'})
+   expect((await store(moved.eventId)).state).toBe('suppressed')
+   expect((await store(muted.eventId)).state).toBe('suppressed')
+   expect((await store(beforeRollout.eventId)).state).toBe('unconfigured')
+   expect((await store(oldPending.eventId)).state).toBe('pending')
+   const limited=governanceDelivery({...process.env,GOVERNANCE_MAIL_MODE:'tencent-allowlist',GOVERNANCE_SES_ALLOWLIST:'allowlisted@synthetic.invalid'},fetcher)!
+   await processGovernanceMail(limited,new Date(+time+60_001))
+   expect((await store(allowed.eventId)).state).toBe('delivered')
+   expect(receipts).toEqual(['prior-live','synthetic-message'])
+   expect((await store(mockReceipt.eventId)).state).toBe('accepted')
+   expect(sent).toEqual([owner.email])
+  }finally{
+   vi.unstubAllEnvs()
+   await prisma.appReleaseChannel.update({where:{channel:'stable'},data:{releaseId:originalChannel.releaseId}})
+   await prisma.adminEmailPermission.deleteMany({where:{email:suppressed.email,purpose:'governance'}})
+   const userIds=accounts.map(a=>a.id)
+   await prisma.governanceMail.deleteMany({where:{userId:{in:userIds}}})
+   await prisma.user.deleteMany({where:{id:{in:userIds}}})
+  }
+ })
  it('limits governance actions to eligible targets and leaves legacy bans out of the test-channel work sweep',async()=>{
   const rollback=Error('synthetic governance rollback')
   await expect(prisma.$transaction(async tx=>{
