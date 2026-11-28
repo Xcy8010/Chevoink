@@ -5,7 +5,7 @@ import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { z } from 'zod'
 import { runtimeError, runtimeJsonHash, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
-import { durableChatResultSchema } from './runtime-common.js'
+import { durableChatResultSchema, projectDurableAssistantResult } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionState, saveExecutionStateInTransaction, type executionSnapshotSchema } from './runtime-state.js'
 import { argumentNormalizationSchema, toolRejectionSchema } from './runtime-tool-cursor.js'
 import { readToolApprovalOutcome } from './runtime-approval.js'
@@ -16,7 +16,7 @@ import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { formatNovelSetupRecap, hasNovelDirectionDelivery, isNovelSetupAuthorityFailure, NOVEL_SETUP_BLOCKED_NOTICE, novelSetupNotice, novelSetupRecapSchema } from './novel-initialization.js'
 import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
-import { isNovelSetupPredictionTurn, modelNovelSetupNextPrompt } from './next-prompt.js'
+import { modelNovelSetupNextPrompt } from './next-prompt.js'
 export { formatDurableToolObservation } from './runtime-common.js'
 
 type Message = z.infer<typeof executionSnapshotSchema>['messages'][number]
@@ -75,14 +75,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
       const result = parsed.data.result
       emptyProviderReasoning = result.reasoning === ''
       if (result.toolCalls.some(call => !call.id || !call.name) || new Set(result.toolCalls.map(call => call.id)).size !== result.toolCalls.length) runtimeError('RUNTIME_RECEIPT_INVALID', '模型工具调用身份缺失或重复。')
-      const acceptsPrediction = result.finishReason === 'stop' && !result.toolCalls.length
-        || isNovelSetupPredictionTurn(result.finishReason, result.toolCalls)
-      appended = { role: 'assistant', content: result.content || null,
-        reasoning: result.reasoning,
-        ...(result.responsesContinuation ? { responsesContinuation: result.responsesContinuation } : {}),
-        ...(acceptsPrediction && result.nextPrompt ? { nextPrompt: result.nextPrompt } : {}),
-        ...(result.nextPromptSuppressed ? { nextPromptSuppressed: true as const } : {}),
-        ...(result.toolCalls.length ? { toolCalls: result.toolCalls } : {}) }
+      appended = projectDurableAssistantResult(result)
     } else if (operation.kind === 'tool') {
       const receipt = operation.effectReceipt, parsedInput = toolInput.safeParse(operation.inputSnapshot)
       const parsedResult = toolResult.safeParse(receipt?.result)

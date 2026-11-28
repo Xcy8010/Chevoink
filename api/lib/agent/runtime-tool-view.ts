@@ -2,7 +2,7 @@ import { z } from 'zod'
 import type { TaskSpec } from '../../../shared/contracts/index.js'
 import type { AgentTool } from './tools/types.js'
 import { retainedFindingSchema } from './tools/chapter-arguments.js'
-import { durableChatResultSchema, runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
+import { durableChatResultSchema, projectDurableAssistantResult, runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame } from './runtime-state.js'
 import { originalToolParameterSchemas, toOpenAIParameters, toOpenAIToolPresentation } from './tool-schema.js'
 import { novelImportArguments } from './tools/import-arguments.js'
@@ -198,9 +198,7 @@ export async function readAssistantModelSnapshot(tx: RuntimeTx, taskRootId: stri
     if (!event || event.taskRootId !== taskRootId || event.operationId !== operation.id || event.type !== 'provider.result.recorded'
       || runtimeJson(event.payload).hash !== runtimeJson({ attemptId: attempt.id, status: 'succeeded', resultHash: attempt.resultHash }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原助手模型结果缺少对应持久事件。')
     const result = parsed.data.result
-    const projected = { role: 'assistant', content: result.content || null, reasoning: result.reasoning,
-      ...(result.responsesContinuation ? { responsesContinuation: result.responsesContinuation } : {}),
-      ...(result.toolCalls.length ? { toolCalls: result.toolCalls } : {}) }
+    const projected = projectDurableAssistantResult(result)
     const legacyProjected = { ...projected } as Record<string, unknown>
     if (result.reasoning === '') delete legacyProjected.reasoning
     if (runtimeJson(projected).hash !== runtimeJson(assistant).hash

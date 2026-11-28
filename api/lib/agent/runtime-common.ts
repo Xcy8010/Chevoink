@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { setTimeout as contentionDelay } from 'node:timers/promises'
 import { z } from 'zod'
-import { NEXT_PROMPT_MAX_LENGTH } from './next-prompt.js'
+import { isNovelSetupPredictionTurn, NEXT_PROMPT_MAX_LENGTH } from './next-prompt.js'
 import { responsesContinuationSchema } from '../ai-responses-continuation.js'
 import { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../prisma.js'
@@ -177,6 +177,17 @@ export const durableChatResultSchema = z.object({
   toolCalls: z.array(z.object({ id: z.string(), name: z.string(), arguments: z.string(), incomplete: z.boolean().optional() })),
   usage: z.object({ promptTokens: count, completionTokens: count, totalTokens: count, promptCacheHitTokens: count.nullable(), promptCacheMissTokens: count.nullable() }),
 }).strict()
+
+/** Both the reducer and tool provenance checks bind this same assistant turn to the provider receipt. */
+export function projectDurableAssistantResult(result: z.infer<typeof durableChatResultSchema>) {
+  const acceptsPrediction = result.finishReason === 'stop' && !result.toolCalls.length
+    || isNovelSetupPredictionTurn(result.finishReason, result.toolCalls)
+  return { role: 'assistant' as const, content: result.content || null, reasoning: result.reasoning,
+    ...(result.responsesContinuation ? { responsesContinuation: result.responsesContinuation } : {}),
+    ...(acceptsPrediction && result.nextPrompt ? { nextPrompt: result.nextPrompt } : {}),
+    ...(result.nextPromptSuppressed ? { nextPromptSuppressed: true as const } : {}),
+    ...(result.toolCalls.length ? { toolCalls: result.toolCalls } : {}) }
+}
 
 /** Shared wire format. Kept independent of dispatch/reduction to avoid a cycle. */
 export const formatDurableToolObservation = (action: string, output: string) => `<tool_output tool="${action}">\n${output}\n</tool_output>`
