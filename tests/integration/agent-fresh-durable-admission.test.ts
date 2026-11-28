@@ -145,15 +145,16 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     const events = await loadDurableEvents(f.userId, run.runId, 0)
     expect(events.filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
     expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
-    expect(events.at(-1)).toMatchObject({ nextPrompt })
+    if (source === 'footer') expect(events.at(-1)).toMatchObject({ nextPrompt })
+    else expect(events.at(-1)).not.toHaveProperty('nextPrompt')
     const saved = await prisma.agentMessage.findFirstOrThrow({ where: { runId: run.runId, role: 'assistant' } })
     expect(saved.parts).toEqual([{ type: 'text', text: answer }])
-    expect(history.nextPrompt).toEqual({ runId: run.runId, text: nextPrompt })
+    expect(history.nextPrompt).toEqual(source === 'footer' ? { runId: run.runId, text: nextPrompt } : undefined)
     expect(history.messages.find(message => message.id === saved.id)?.parts).toEqual(saved.parts)
     expect(fetcher).toHaveBeenCalledExactlyOnceWith(terra ? 'https://yunshu.chevolink.com/v1/responses' : 'https://provider.invalid/v1/chat/completions', expect.any(Object))
   }))
 
-  it('suggests a concrete follow-up for a verified current plan when the model returns no footer', ({ onTestFinished }) => fixture(async f => {
+  it('saves a verified plan without adding a suggestion when the model returns no footer', ({ onTestFinished }) => fixture(async f => {
     await ready(f)
     // Admission and both model turns read this profile. Give the fixture the real
     // plan tool without persisting unrelated schemas on every durable step.
@@ -185,9 +186,10 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     const plan = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: run.runId, artifactType: 'chapterPlan' } })
     expect(plan).toMatchObject({ title, content: '渡桥发生在第一卷收尾。' })
     const history = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
-    const nextPrompt = '帮我核对计划《渡桥情节》与已有创作设定是否一致。'
-    expect(history.nextPrompt).toEqual({ runId: run.runId, text: nextPrompt })
-    expect((await loadDurableEvents(f.userId, run.runId, 0)).at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', nextPrompt })
+    expect(history.nextPrompt).toBeUndefined()
+    const finished = (await loadDurableEvents(f.userId, run.runId, 0)).at(-1)
+    expect(finished).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    expect(finished).not.toHaveProperty('nextPrompt')
     expect(fetcher).toHaveBeenCalledTimes(2)
   }))
 

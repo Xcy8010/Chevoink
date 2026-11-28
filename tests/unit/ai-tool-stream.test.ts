@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SseDataDecoder } from '../../api/lib/ai-sse.js'
 import { collapseEarlyToolRounds, releaseCompletedReasoning } from '../../api/lib/agent/context-budget.js'
 import { toolTurnHistory } from '../../api/lib/agent/tool-turn-history.js'
-import { addNextPromptInstruction } from '../../api/lib/agent/next-prompt.js'
+import { addNextPromptInstruction, modelNextPrompt, modelNovelSetupNextPrompt, splitNextPrompt } from '../../api/lib/agent/next-prompt.js'
 import type { ChatMessage } from '../../api/lib/ai-service.js'
 import { env } from '../../api/config/env.js'
 import { AGENT_CONTENT_POLICY, AGENT_PROVIDER_REFUSAL_MESSAGE } from '../../api/lib/generative-content-policy.js'
@@ -224,6 +224,46 @@ describe('next prompt from the current response', () => {
     expect(result.content).toBe(body)
     expect(result).not.toHaveProperty('nextPrompt')
     expect(visible.join('')).toBe(body)
+  })
+
+  it('keeps an inline marker visible when it begins a new transport chunk', async () => {
+    const prefix = '正文里的示例 '
+    response([prefix, marker + ' 后面的原文'], 'stop')
+    const visible: string[] = []
+    const result = await chatWithTools({ ...options, onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
+    expect(result.content).toBe(prefix + marker + ' 后面的原文')
+    expect(visible.join('')).toBe(result.content)
+    expect(result).not.toHaveProperty('nextPrompt')
+  })
+
+  it.each(['novel_create', 'novel_update_meta', 'plan_save'])('keeps the private setup prediction separate from %s arguments', async name => {
+    const nextPrompt = '帮我生成一张作品封面，并设为当前作品封面。'
+    const args = '{"title":"记忆销账师"}'
+    response(Array.from(marker + ' ' + JSON.stringify({ cover: 'missing', text: nextPrompt })), 'tool_calls', {
+      choices: [{ delta: { tool_calls: [{ index: 0, id: 'save', function: { name, arguments: args } }] } }],
+    })
+    const visible: string[] = []
+    const result = await chatWithTools({ ...options, onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
+    expect(result.content).toBe('')
+    expect(visible).toEqual([])
+    expect(result.toolCalls).toEqual([{ id: 'save', name, arguments: args }])
+    if (name === 'plan_save') expect(result).not.toHaveProperty('nextPrompt')
+    else expect(modelNovelSetupNextPrompt(result, { cover: 'missing' })).toBe(nextPrompt)
+    expect(modelNextPrompt(result)).toBeUndefined()
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('checks the prediction against the saved cover state and author preferences', () => {
+    const nextPrompt = '帮我生成一张封面并设为作品封面。'
+    const proposal = splitNextPrompt(marker + ' ' + JSON.stringify({ cover: 'missing', text: nextPrompt }), marker, false, true)
+    expect(modelNovelSetupNextPrompt(proposal, { cover: 'missing' })).toBe(nextPrompt)
+    expect(modelNovelSetupNextPrompt(proposal, { cover: 'candidate' })).toBeUndefined()
+    expect(modelNovelSetupNextPrompt(proposal, { cover: 'applied' })).toBeUndefined()
+    expect(modelNovelSetupNextPrompt(proposal, { cover: 'missing', skipCover: true })).toBeUndefined()
+    expect(modelNovelSetupNextPrompt(proposal, { cover: 'missing', skipFollowup: true })).toBeUndefined()
+    const outlinePrompt = '帮我整理第一卷的大纲。'
+    const outline = splitNextPrompt(marker + ' ' + JSON.stringify({ cover: 'general', text: outlinePrompt }), marker, false, true)
+    expect(modelNovelSetupNextPrompt(outline, { cover: 'missing', skipCover: true })).toBe(outlinePrompt)
   })
 
   it.each(['completed', 'indented CRLF', 'tool call', 'author opt-out', 'explicit skip'] as const)('handles a %s suggestion through Terra Responses', async scenario => {

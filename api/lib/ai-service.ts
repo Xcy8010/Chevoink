@@ -20,7 +20,7 @@ import { SseDataDecoder, readWithIdleTimeout } from './ai-sse.js'
 import { buildResponsesToolRequest, createResponsesToolFrameAdapter, responsesUsageToChat } from './ai-responses-tools.js'
 import { requiresResponsesToolProtocol, resolveResponsesEndpoint } from './ai-responses-route.js'
 import type { ResponsesContinuation } from './ai-responses-continuation.js'
-import { createNextPromptStream, splitNextPrompt } from './agent/next-prompt.js'
+import { createNextPromptStream, isNovelSetupPredictionTurn, splitNextPrompt } from './agent/next-prompt.js'
 import { recordYunshuResponse } from './yunshu-request-link.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
@@ -1544,7 +1544,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
   if (usage.totalTokens <= 0) usage.totalTokens = usage.promptTokens + usage.completionTokens
 
   const delivery = providerRefused ? { content: AGENT_PROVIDER_REFUSAL_MESSAGE } : params.nextPromptMarker
-    ? splitNextPrompt(content, params.nextPromptMarker, finishReason === 'stop' && toolCalls.length === 0)
+    ? splitNextPrompt(content, params.nextPromptMarker, finishReason === 'stop' && toolCalls.length === 0,
+      isNovelSetupPredictionTurn(finishReason, toolCalls))
     : { content }
   const reasoningItems = responsesFrame?.reasoningItems()
   const result: ChatCompletionResult = { ...delivery, reasoning, toolCalls, finishReason, usage,

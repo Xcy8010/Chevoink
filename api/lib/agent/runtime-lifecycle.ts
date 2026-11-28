@@ -18,7 +18,7 @@ import { humanizeAgentVisibleText } from './visible-text.js'
 import { assertLimitedWritingDelivery, limitedWritingDeliverySchema } from './writing-delivery-limitations.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { originalPrompt } from './original-request.js'
-import { allowsNextPrompt, LIMITED_COMPLETED_NEXT_PROMPT, selectInteractiveNextPrompt } from './next-prompt.js'
+import { allowsNextPrompt, modelNextPrompt } from './next-prompt.js'
 import { QUESTION_CLOSING_ROOT_STATUS, QUESTION_WAITING_ROOT_STATUS } from './run-slots.js'
 import { recordCompletedQuestionOffer } from './runtime-question-followup.js'
 import { getNovelSetupFollowup, novelSetupRecapSchema } from './novel-initialization.js'
@@ -90,23 +90,9 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     const questionFollowup = !goal && !parent && !limited && spec.data?.scope.agentQuestionProtocol === 2 ? setupFollowup : null
     let nextPrompt: string | undefined
     const offersNextPrompt = configuration.nextPromptOnCompletion || configuration.nextPromptMarker
-    if (offersNextPrompt && !facts.terminalReason && !goal && !parent && !setupRecap?.skipFollowup && allowsNextPrompt(originalPrompt(originalRequest))) {
-      if (spec.success) {
-        const saved = z.object({
-          deliverables: z.array(z.object({ kind: z.enum(['plan', 'chapter']), title: z.string(), status: z.string(), characters: z.number(), sourceOperationId: z.string() })),
-          effects: z.array(z.object({ operationId: z.string(), action: z.string(), outcome: z.string() })),
-        }).safeParse(evidence.snapshot)
-        const actions = new Map(saved.success ? saved.data.effects.filter(effect => effect.outcome === 'succeeded')
-          .map(effect => [effect.operationId, effect.action]) : [])
-        const deliverable = saved.success ? saved.data.deliverables.reverse().find(item => {
-          const action = actions.get(item.sourceOperationId)
-          return item.status === 'current' && item.characters > 0 && (item.kind === 'plan' ? action === 'plan_save'
-            : action === 'chapter_create' || action === 'chapter_write' || action === 'chapter_append' || action === 'chapter_edit_range')
-        }) : undefined
-        nextPrompt = setupFollowup?.options[0].label ?? (limited
-          ? LIMITED_COMPLETED_NEXT_PROMPT
-          : selectInteractiveNextPrompt(candidate.content, candidate, deliverable))
-      }
+    if (configuration.nextPromptMarker && spec.success && !limited && !facts.terminalReason && !goal && !parent
+      && !setupRecap?.skipFollowup && (!setup || setupRecap) && allowsNextPrompt(originalPrompt(originalRequest))) {
+      nextPrompt = modelNextPrompt(candidate)
     }
     const operation = await prepareOperationInTransaction(tx, lease, {
       key: `finalize:${frame.revision}`, kind: 'internal', action: 'completion_finalize',

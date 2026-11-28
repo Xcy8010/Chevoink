@@ -16,6 +16,7 @@ import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { formatNovelSetupRecap, hasNovelDirectionDelivery, isNovelSetupAuthorityFailure, NOVEL_SETUP_BLOCKED_NOTICE, novelSetupNotice, novelSetupRecapSchema } from './novel-initialization.js'
 import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
+import { isNovelSetupPredictionTurn, modelNovelSetupNextPrompt } from './next-prompt.js'
 export { formatDurableToolObservation } from './runtime-common.js'
 
 type Message = z.infer<typeof executionSnapshotSchema>['messages'][number]
@@ -74,10 +75,12 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
       const result = parsed.data.result
       emptyProviderReasoning = result.reasoning === ''
       if (result.toolCalls.some(call => !call.id || !call.name) || new Set(result.toolCalls.map(call => call.id)).size !== result.toolCalls.length) runtimeError('RUNTIME_RECEIPT_INVALID', '模型工具调用身份缺失或重复。')
+      const acceptsPrediction = result.finishReason === 'stop' && !result.toolCalls.length
+        || isNovelSetupPredictionTurn(result.finishReason, result.toolCalls)
       appended = { role: 'assistant', content: result.content || null,
         reasoning: result.reasoning,
         ...(result.responsesContinuation ? { responsesContinuation: result.responsesContinuation } : {}),
-        ...(result.nextPrompt && result.finishReason === 'stop' && !result.toolCalls.length ? { nextPrompt: result.nextPrompt } : {}),
+        ...(acceptsPrediction && result.nextPrompt ? { nextPrompt: result.nextPrompt } : {}),
         ...(result.nextPromptSuppressed ? { nextPromptSuppressed: true as const } : {}),
         ...(result.toolCalls.length ? { toolCalls: result.toolCalls } : {}) }
     } else if (operation.kind === 'tool') {
@@ -169,9 +172,11 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
                 ? '此调用在作者回答前拟定，未执行。请按作者实际选择重新拟定下一步。' : '本轮已结束，此调用未执行。' })
           }
         }
+        const setupSuggestion = setupTitle && tool.novelSetupRecap ? modelNovelSetupNextPrompt(assistant, tool.novelSetupRecap) : undefined
         if (cancelled || timeout || setupTitle) followup.push({ role: 'assistant',
           content: unanswered ? output : cancelled ? QUESTION_CANCELLED_NOTICE : timeout ? QUESTION_TIMEOUT_NOTICE
             : tool.novelSetupRecap ? formatNovelSetupRecap(tool.novelSetupRecap) : novelSetupNotice(setupTitle),
+          ...(setupSuggestion ? { nextPrompt: setupSuggestion } : {}),
           localCompletion: { kind: unanswered ? 'question_unanswered' : cancelled ? 'question_cancelled' : timeout ? 'question_timeout' : 'novel_setup', operationId: operation.id } })
         if (setupBlocked) followup.push({ role: 'assistant', content: NOVEL_SETUP_BLOCKED_NOTICE,
           localCompletion: { kind: 'novel_setup_blocked', operationId: operation.id } })

@@ -5,6 +5,7 @@ import * as credits from '../../api/lib/credits.js'
 import * as durableRollout from '../../api/lib/agent/fresh-durable-rollout.js'
 import { readSessionPendingQuestion, resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
 import { runReviewedDurableExecution } from '../../api/lib/agent/runtime-executor.js'
+import { splitNextPrompt } from '../../api/lib/agent/next-prompt.js'
 import { parkDurableQuestion, resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
@@ -23,8 +24,10 @@ vi.mock('../../api/lib/agent/runtime-bootstrap.js', async importOriginal => ({
 
 const prompt = '帮我创建一部末日生存类型的小说'
 const fields = { title: '漫长的停电', summary: '旧城区的幸存者互助求生。', tags: ['都市'] }
+const predictedCover = '帮我生成一张作品封面，选图交给你，设为当前封面。'
+const marker = '[[CHEVOINK_NEXT_PROMPT_91a5ed28]]'
 
-async function completeNovelSetup(f: Parameters<Parameters<typeof fixture>[0]>[0]) {
+async function completeNovelSetup(f: Parameters<Parameters<typeof fixture>[0]>[0], predictionState?: 'missing' | 'candidate') {
   // An older task in the same session cannot provide this root's metadata proof.
   await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
     mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', status: 'completed', createdAt: new Date(0) } })
@@ -35,7 +38,7 @@ async function completeNovelSetup(f: Parameters<Parameters<typeof fixture>[0]>[0
   const tools = [askUserTool, novelCreateTool]
   await initializeExecutionState(lease, { configuration: {
     version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
-    nextPromptMarker: '[[CHEVOINK_NEXT_PROMPT_91a5ed28]]',
+    nextPromptMarker: marker,
     model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
     tools: toOpenAITools(tools, f.spec.scope),
     toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })),
@@ -54,28 +57,33 @@ async function completeNovelSetup(f: Parameters<Parameters<typeof fixture>[0]>[0
   if (waiting.longWait) lease = await claim(f)
   await executeDurableToolStep(lease, signal)
   const { frame } = await loadExecutionState(f.userId, f.runId)
+  const nextPrompt = predictionState
+    ? splitNextPrompt(marker + ' ' + JSON.stringify({ cover: predictionState, text: predictedCover }), marker, false, true).nextPrompt
+    : undefined
   await saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
     snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: null,
+      ...(nextPrompt ? { nextPrompt } : {}),
       toolCalls: [{ id: 'confirmed-create', name: 'novel_create', arguments: JSON.stringify(fields) }] }] } })
   await expect(runReviewedDurableExecution(lease, signal)).resolves.toMatchObject({ kind: 'completed' })
 }
 
 describe.runIf(available)('completed durable question followup', () => {
-  it.each(['answer', 'cancel', 'historical'] as const)('preserves completion and usage after %s', async scenario => {
+  it.each(['answer', 'cancel', 'stale prediction', 'historical'] as const)('preserves completion and usage after %s', async scenario => {
     await fixture(async f => {
       vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('This fixture must never call a provider') }))
-      await completeNovelSetup(f)
+      await completeNovelSetup(f, scenario === 'answer' ? 'missing' : scenario === 'stale prediction' ? 'candidate' : undefined)
       const readQuestion = () => readSessionPendingQuestion(f.userId, f.sessionId).then(result => result.question)
       const question = await readQuestion()
+      const finished = (await publishDurableEvents(f.userId, f.runId, 200)).at(-1)
+      expect(finished).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+      if (scenario === 'answer') expect(finished).toMatchObject({ nextPrompt: predictedCover })
+      else expect(finished).not.toHaveProperty('nextPrompt')
       if (scenario === 'historical') {
         expect(question).toBeNull()
         return
       }
       expect(question).toMatchObject({ runId: f.runId, state: 'completed', question: '要不要先设置一下作品封面，还是直接开始写大纲？',
         options: [{ label: '先讨论并拟定作品封面方向' }, { label: '开始写大纲' }] })
-      expect((await publishDurableEvents(f.userId, f.runId, 200)).at(-1)).toMatchObject({
-        type: 'run.finished', status: 'succeeded', nextPrompt: '先讨论并拟定作品封面方向',
-      })
       if (!question) throw new Error('Expected completed followup question')
       const { requestId, callId } = question
       const offer = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: requestId } })

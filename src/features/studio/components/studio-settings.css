@@ -1,5 +1,5 @@
 .studio-settings-style {
-  color-scheme: light;
+  color-scheme: only light;
   --studio-settings-bg: var(--studio-canvas, var(--surface-default));
   --studio-settings-aside: var(--studio-sidebar-bg, var(--surface-muted));
   --studio-settings-card: var(--studio-card-bg, var(--surface-elevated));

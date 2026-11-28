@@ -24,6 +24,7 @@ async function appendModelResult(lease: RunLeaseToken, assistant: NonNullable<Re
   const identity = { userId: lease.userId, attemptId: attempt.id, requestHash: attempt.requestHash }
   await recordProviderUsage({ ...identity, revision: 1, usage: { source: 'reported', promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 } })
   await recordProviderResult({ ...identity, outcome: 'succeeded', result: { content: assistant.content ?? '', reasoning: assistant.reasoning ?? '',
+    ...(assistant.nextPrompt ? { nextPrompt: assistant.nextPrompt } : {}),
     finishReason: 'tool_calls', toolCalls: assistant.toolCalls ?? [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0,
       promptCacheHitTokens: 0, promptCacheMissTokens: 0 } } })
   await settleProviderOperation({ ...identity, lease })

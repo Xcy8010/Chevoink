@@ -43,7 +43,7 @@ html.dark .app-bottom-nav .app-bottom-link.is-selected { color: #fff; }
 @media (prefers-reduced-motion: reduce) { .app-bottom-nav .app-bottom-link, .app-bottom-nav .app-bottom-create { transition: none; } }
 
 :root {
-  color-scheme: light;
+  color-scheme: only light;
   /* 安全区统一变量：默认取浏览器上报的 env 值；部分安卓内置 WebView（如 QQ）
      沉浸式全屏时 env 恒为 0，由 lib/safe-area.ts 探测后注入状态栏高度兑底值 */
   --safe-top: env(safe-area-inset-top, 0px);

@@ -1,7 +1,7 @@
 import { chapterReviewWorkflowEnabled } from './chapter-review-rollout.js'
 import { sequentialWritingEnabled } from './sequential-writing-rollout.js'
 import { AGENT_TOOL_EXECUTION_POLICY, CHAPTER_MEMORY_GUIDANCE, CHAPTER_MEMORY_TOOLS } from './tool-execution-guidance.js'
-import { formatNovelSetupRecap, getNovelSetupFollowup, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
+import { formatNovelSetupRecap, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
 import { createAgentActivityTextStream, normalizeAgentFinalText, readAgentActivityTitle, visibleAgentActivityTitle } from '../../../shared/agent-activity-title.js'
 import { askUserTool, DIRECTION_PURPOSE_REQUIRED, formatUnansweredQuestionWrapUp, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
@@ -42,7 +42,7 @@ import { readPersonalizationRules } from './personalization.js'
 import { applyPersonalizationToolRules, hasPersonalizationSessionOverride } from './personalization-tool-policy.js'
 import { readPersonalizationWriteAdmission } from './personalization-authority.js'
 import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
-import { addNextPromptInstruction, allowsModelNextPrompt, allowsNextPrompt, DEFAULT_COMPLETED_NEXT_PROMPT, LIMITED_COMPLETED_NEXT_PROMPT, readTaskResponseNextPrompt, selectInteractiveNextPrompt } from './next-prompt.js'
+import { addNextPromptInstruction, allowsModelNextPrompt, allowsNextPrompt, isNovelSetupPredictionTurn, modelNextPrompt, modelNovelSetupNextPrompt, readTaskResponseNextPrompt } from './next-prompt.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { withGoalEffects, withGoalExecutionContext } from './goal-context.js'
 import { assertGoalFence, readGoalExecution } from './goal-fence.js'
@@ -1146,13 +1146,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   let initializationCompletionRequired = false
   let lastInitializationReminder: string | undefined
   let initializationAuthorityBlocked = false
-  let offerCompletedNextPrompt = false
   const finalizeRun = (...args: Parameters<typeof finalizeLegacyRun>) => {
     args[8] = checkpointSnapshot()
-    if (offerCompletedNextPrompt && args[2] === 'succeeded' && !args[9]
-      && !args[17] && !args[16] && !args[15]?.nextPrompt && !args[10]?.nextPrompt) {
-      args[16] = args[12] ? LIMITED_COMPLETED_NEXT_PROMPT : DEFAULT_COMPLETED_NEXT_PROMPT
-    }
     const explicitFence = args[14]
     args[14] = async tx => {
       await assertLegacyOwnerReceipt(tx, true)
@@ -1670,7 +1665,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     console.info('[agent-context-input]', assembledContext.inputEstimates ?? {})
     const messages: ChatMessage[] = assembledContext.messages
     const contentPolicyEnabled = usesAgentContentPolicy(messages)
-    offerCompletedNextPrompt = Boolean(params.predictNextPrompt && !ownedGoalExecution && (params.agentType ?? 'orchestrator') === 'orchestrator'
+    const offerCompletedNextPrompt = Boolean(params.predictNextPrompt && !ownedGoalExecution && (params.agentType ?? 'orchestrator') === 'orchestrator'
       && allowsNextPrompt(params.prompt))
     const nextPromptMarker = offerCompletedNextPrompt && !taskSpec.scope.writing?.titleAndBodyOnly && allowsModelNextPrompt(params.prompt)
       ? addNextPromptInstruction(messages) : undefined
@@ -2564,7 +2559,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const responseCall = effectiveToolCalls.length === 1 && result.toolCalls[0]?.name === 'task_respond' ? result.toolCalls[0] : undefined
       const responseSuggestion = responseCall ? readTaskResponseNextPrompt(responseCall.arguments) : undefined
       if (responseCall && responseSuggestion) effectiveToolCalls[0] = { ...responseCall, arguments: responseSuggestion.args }
-      const nextPromptReady = Boolean(nextPromptMarker && result.finishReason === 'stop' && !effectiveToolCalls.length)
+      const prediction = nextPromptMarker && result.finishReason === 'stop' && !effectiveToolCalls.length ? modelNextPrompt(result) : undefined
       const chapterMemoryBatch = chapterMemoryWrapUp && effectiveToolCalls.some(call => CHAPTER_MEMORY_TOOLS.includes(call.name))
       if (effectiveToolCalls.length) releaseWritingToolText()
       let ordinaryResponse: TaskResponse | undefined
@@ -2621,8 +2616,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
           liveTurn = null
         }, { messageId, text: authorContent, parts, expected: completedWritingWrapUp.value,
-          nextPrompt: offerCompletedNextPrompt ? selectInteractiveNextPrompt(authorContent, nextPromptReady ? result : {},
-            { kind: 'chapter', title: completedWritingWrapUp.value.chapters.at(-1)?.title ?? '' }) : undefined })) return
+          nextPrompt: prediction })) return
         // A newer manuscript/report is not the source of this model reply.
         // Do not publish its old summary or purchase another closing turn.
         forceWrapUpLocal = true
@@ -2713,7 +2707,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             undefined, undefined, undefined, false, undefined, 'user_stop', undefined, {
               subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
               expected: ordinaryResponse, signal: controller.signal, messageId, parts,
-              nextPrompt: offerCompletedNextPrompt ? selectInteractiveNextPrompt(ordinaryResponse.answer, nextPromptReady ? result : {}) : undefined,
+              nextPrompt: prediction,
               assertObligations: () => {
                 controller.signal.throwIfAborted()
                 if (pendingReviews.size || forceWrapUpReason
@@ -2855,10 +2849,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           : targetEvidenceMissing ? researchLimitation : creationIncomplete ? '本任务请求创建章节，但尚无本任务成功创建且仍属于作者的章节；说明已保存，任务未完成。' : undefined,
           true, undefined, undefined, savedCandidate ? { messageId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: savedCandidate,
             signal: controller.signal, parts, replaceCandidate: true, displayText: lastAssistantText } : undefined,
-          false, undefined, 'user_stop', undefined, undefined, offerCompletedNextPrompt && !savedCandidate?.titleAndBodyOnly
-            ? selectInteractiveNextPrompt(lastAssistantText, nextPromptReady ? result : {}, savedCandidate
-              ? { kind: 'chapter', title: savedCandidate.chapters.at(-1)?.title ?? '' }
-              : { kind: 'plan', title: [...savedPlanTitles.values()].at(-1) ?? '' }) : undefined)
+          false, undefined, 'user_stop', undefined, undefined, savedCandidate?.titleAndBodyOnly ? undefined : prediction)
         return
       }
 
@@ -3151,7 +3142,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
               expected: outcome.terminalResponse, signal: controller.signal, messageId, parts: responseParts,
               assertObligations: assertResponseObligations,
-              nextPrompt: offerCompletedNextPrompt ? selectInteractiveNextPrompt(outcome.terminalResponse.answer, nextPromptMarker ? responseSuggestion?.proposal ?? {} : {}) : undefined,
+              nextPrompt: nextPromptMarker ? modelNextPrompt(responseSuggestion?.proposal) : undefined,
             })
           liveTurn = null
           return
@@ -3279,7 +3270,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const saved = await readNovelInitializationCompletion(prisma, { userId: params.userId, novelId: params.novelId, runId }, { includeRecap: true })
         if (saved.status === 'complete' && saved.recap) {
           await finishWithNotice('novel_setup', formatNovelSetupRecap(saved.recap), 'succeeded',
-            offerCompletedNextPrompt ? getNovelSetupFollowup(saved.recap)?.options[0].label : undefined)
+            nextPromptMarker && isNovelSetupPredictionTurn(result.finishReason, result.toolCalls)
+              ? modelNovelSetupNextPrompt(result, saved.recap) : undefined)
           return
         }
       }
