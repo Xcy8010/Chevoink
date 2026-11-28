@@ -4785,8 +4785,12 @@ describe('author-directed task ending in the real execution loop', () => {
     { answer: '渡桥段落放在第一卷收尾。\n\n如果你愿意，我可以接着帮你核对伏笔。', suppressed: false },
     { answer: '渡桥段落放在第一卷收尾。\n下一步建议：把渡桥段落分成三个场景。', suppressed: true },
     { answer: '渡桥段落放在第一卷收尾。', suppressed: false },
-    { answer: '封面已保存。要不要开始搭全书主干，梳理第一卷的走向？', suppressed: false, offer: '帮我搭全书主干，梳理第一卷的走向。' },
+    { answer: '封面已保存。要不要开始搭全书主干，梳理第一卷的走向？', suppressed: false, offer: '帮我写个全书大纲，梳理第一卷的走向。' },
     { answer: '书名、简介、标签和封面都齐了。要不要先建立全书大纲？', suppressed: false, offer: '帮我建立全书大纲。' },
+    { answer: '资料齐了。要不要先列个大纲：故事怎么开头、第一卷怎么收尾？', suppressed: false, offer: '帮我列个大纲，按刚才提到的几个问题来写。' },
+    { answer: '资料齐了。要不要开始搭全书主干：主线怎么走、第一卷收在哪儿、前几章各自要完成什么？', suppressed: false, offer: '帮我写个全书大纲，按刚才提到的几个问题来写。' },
+    { answer: '要不要先写第一卷大纲，只列五章？', suppressed: false, offer: '帮我写第一卷大纲，只列五章。' },
+    { answer: '资料齐了。要不要先选一个方向：列大纲还是写正文？', suppressed: false },
     { answer: '封面已保存。要不要先调整背景，还是开始写大纲？', suppressed: false },
   ])('returns the explicit closing offer or a neutral question in the terminal event ($answer)', async ({ answer, suppressed, offer }) => {
     const prompt = '渡桥段落放在哪一卷合适？'
