@@ -87,6 +87,8 @@ const components: Components = {
   td: ({ children }) => <td className="min-w-24 border-b border-[var(--border-subtle)] px-3 py-2 align-top">{children}</td>,
 }
 
+export const REPLY_INK_SETTLE_MS = 180
+
 const plugins = [remarkGfm, removeProtocolText]
 
 // Studio and creation records are already lazy routes. Paint the real block
@@ -108,7 +110,7 @@ function Markdown({ text, replyInk }: { text: string; replyInk: boolean }) {
   }, [source, replyInk])
   useEffect(() => {
     if (inkFrom === null) return
-    const timer = window.setTimeout(() => setInkFrom(null), 180)
+    const timer = window.setTimeout(() => setInkFrom(null), REPLY_INK_SETTLE_MS)
     return () => window.clearTimeout(timer)
   }, [inkFrom, source])
   const from = inkFrom === null ? null : Math.max(inkFrom, source.length - 64)

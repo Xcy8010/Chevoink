@@ -249,19 +249,25 @@ describe('next prompt from the current response', () => {
     expect(result).not.toHaveProperty('nextPrompt')
   })
 
-  it.each(['novel_create', 'novel_update_meta', 'plan_save'])('keeps the private setup prediction separate from %s arguments', async name => {
+  it.each([
+    { names: ['novel_create'], eligible: true },
+    { names: ['novel_update_meta'], eligible: true },
+    { names: ['novel_rename', 'novel_update_meta'], eligible: true },
+    { names: ['novel_update_meta', 'plan_save'], eligible: false },
+    { names: ['plan_save'], eligible: false },
+  ])('separates private predictions from tool arguments for $names', async ({ names, eligible }) => {
     const nextPrompt = '帮我生成一张作品封面，并设为当前作品封面。'
-    const args = '{"title":"记忆销账师"}'
+    const calls = names.map((name, index) => ({ id: 'call' + index, name, arguments: '{"title":"合成作品"}' }))
     response(Array.from(marker + ' ' + JSON.stringify({ cover: 'missing', text: nextPrompt })), 'tool_calls', {
-      choices: [{ delta: { tool_calls: [{ index: 0, id: 'save', function: { name, arguments: args } }] } }],
+      choices: [{ delta: { tool_calls: calls.map(({ id, ...fn }, index) => ({ index, id, function: fn })) } }],
     })
     const visible: string[] = []
     const result = await chatWithTools({ ...options, onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
     expect(result.content).toBe('')
     expect(visible).toEqual([])
-    expect(result.toolCalls).toEqual([{ id: 'save', name, arguments: args }])
-    if (name === 'plan_save') expect(result).not.toHaveProperty('nextPrompt')
-    else expect(modelNovelSetupNextPrompt(result, { cover: 'missing' })).toBe(nextPrompt)
+    expect(result.toolCalls).toEqual(calls)
+    if (eligible) expect(modelNovelSetupNextPrompt(result, { cover: 'missing' })).toBe(nextPrompt)
+    else expect(result).not.toHaveProperty('nextPrompt')
     expect(modelNextPrompt(result)).toBeUndefined()
     expect(fetch).toHaveBeenCalledOnce()
   })
@@ -274,6 +280,8 @@ describe('next prompt from the current response', () => {
     expect(modelNovelSetupNextPrompt(proposal, { cover: 'applied' })).toBeUndefined()
     expect(modelNovelSetupNextPrompt(proposal, { cover: 'missing', skipCover: true })).toBeUndefined()
     expect(modelNovelSetupNextPrompt(proposal, { cover: 'missing', skipFollowup: true })).toBeUndefined()
+    const vague = splitNextPrompt(marker + ' ' + JSON.stringify({ cover: 'general', text: '接下来你建议怎么做？' }), marker, false, true)
+    expect(modelNovelSetupNextPrompt(vague, { cover: 'missing' })).toBeUndefined()
     const outlinePrompt = '帮我整理第一卷的大纲。'
     const outline = splitNextPrompt(marker + ' ' + JSON.stringify({ cover: 'general', text: outlinePrompt }), marker, false, true)
     expect(modelNovelSetupNextPrompt(outline, { cover: 'missing', skipCover: true })).toBe(outlinePrompt)

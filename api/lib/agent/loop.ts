@@ -42,7 +42,7 @@ import { readPersonalizationRules } from './personalization.js'
 import { applyPersonalizationToolRules, hasPersonalizationSessionOverride } from './personalization-tool-policy.js'
 import { readPersonalizationWriteAdmission } from './personalization-authority.js'
 import { STALE_PERSONALIZATION_REQUEST } from './runtime-personalization.js'
-import { addNextPromptInstruction, allowsModelNextPrompt, allowsNextPrompt, completedNextPrompt, GENERAL_NEXT_PROMPT, isNovelSetupPredictionTurn, modelNovelSetupNextPrompt, readTaskResponseNextPrompt } from './next-prompt.js'
+import { addNextPromptInstruction, allowsModelNextPrompt, allowsNextPrompt, modelNextPrompt, isNovelSetupPredictionTurn, modelNovelSetupNextPrompt, readTaskResponseNextPrompt } from './next-prompt.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { withGoalEffects, withGoalExecutionContext } from './goal-context.js'
 import { assertGoalFence, readGoalExecution } from './goal-fence.js'
@@ -2559,7 +2559,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const responseCall = effectiveToolCalls.length === 1 && result.toolCalls[0]?.name === 'task_respond' ? result.toolCalls[0] : undefined
       const responseSuggestion = responseCall ? readTaskResponseNextPrompt(responseCall.arguments) : undefined
       if (responseCall && responseSuggestion) effectiveToolCalls[0] = { ...responseCall, arguments: responseSuggestion.args }
-      const prediction = nextPromptMarker && result.finishReason === 'stop' && !effectiveToolCalls.length ? completedNextPrompt(result, modelText.text) : undefined
+      const prediction = nextPromptMarker && result.finishReason === 'stop' && !effectiveToolCalls.length ? modelNextPrompt(result) : undefined
       const chapterMemoryBatch = chapterMemoryWrapUp && effectiveToolCalls.some(call => CHAPTER_MEMORY_TOOLS.includes(call.name))
       if (effectiveToolCalls.length) releaseWritingToolText()
       let ordinaryResponse: TaskResponse | undefined
@@ -3142,7 +3142,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
               expected: outcome.terminalResponse, signal: controller.signal, messageId, parts: responseParts,
               assertObligations: assertResponseObligations,
-              nextPrompt: nextPromptMarker ? completedNextPrompt(responseSuggestion?.proposal, outcome.terminalResponse.answer) : undefined,
+              nextPrompt: nextPromptMarker ? modelNextPrompt(responseSuggestion?.proposal) : undefined,
             })
           liveTurn = null
           return
@@ -3270,8 +3270,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const saved = await readNovelInitializationCompletion(prisma, { userId: params.userId, novelId: params.novelId, runId }, { includeRecap: true })
         if (saved.status === 'complete' && saved.recap) {
           await finishWithNotice('novel_setup', formatNovelSetupRecap(saved.recap), 'succeeded',
-            nextPromptMarker && !saved.recap.skipFollowup
-              ? (isNovelSetupPredictionTurn(result.finishReason, result.toolCalls) && modelNovelSetupNextPrompt(result, saved.recap)) || GENERAL_NEXT_PROMPT
+            nextPromptMarker && isNovelSetupPredictionTurn(result.finishReason, result.toolCalls)
+              ? modelNovelSetupNextPrompt(result, saved.recap)
               : undefined)
           return
         }

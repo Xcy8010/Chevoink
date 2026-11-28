@@ -6,7 +6,7 @@ export const taskRespondTool = defineTool({
   title: '答复问题',
   description: '根据完整原始请求判断本次只需解释、讨论或答复时，完成必要读取后单独调用，answer 是直接交付给作者的完整答复。无需建立待办；不会再请求一次模型。已经准备、创建、修改章节或尚有未完成实际工作时不能使用；本工具不改变原任务权限。',
   parameters: z.object({ answer: z.string().min(1).refine(value => value.trim().length > 0, '答复不能为空'),
-    nextPrompt: z.string().optional().describe('仅在系统启用输入框建议时填入独立的下一步作者指令。不要将建议写入 answer。') }).strict(),
+    nextPrompt: z.string().optional().describe('系统启用输入框建议时，在此填入一句作者能直接发送的具体指令，承接本次 answer 和已确认的作品状态。建议与 answer 分开。') }).strict(),
   readOnly: true,
   permission: { plan: 'allow', build: 'allow', review: 'allow' },
   async execute(ctx, args) {

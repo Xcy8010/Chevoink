@@ -5,7 +5,7 @@ import * as credits from '../../api/lib/credits.js'
 import * as durableRollout from '../../api/lib/agent/fresh-durable-rollout.js'
 import { readSessionPendingQuestion, resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
 import { runReviewedDurableExecution } from '../../api/lib/agent/runtime-executor.js'
-import { GENERAL_NEXT_PROMPT, splitNextPrompt } from '../../api/lib/agent/next-prompt.js'
+import { splitNextPrompt } from '../../api/lib/agent/next-prompt.js'
 import { parkDurableQuestion, resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
@@ -77,13 +77,13 @@ describe.runIf(available)('completed durable question followup', () => {
       const finished = (await publishDurableEvents(f.userId, f.runId, 200)).at(-1)
       expect(finished).toMatchObject({ type: 'run.finished', status: 'succeeded' })
       if (scenario === 'answer') expect(finished).toMatchObject({ nextPrompt: predictedCover })
-      else expect(finished).toMatchObject({ nextPrompt: GENERAL_NEXT_PROMPT })
+      else expect(finished).not.toHaveProperty('nextPrompt')
       if (scenario === 'historical') {
         expect(question).toBeNull()
         return
       }
       expect(question).toMatchObject({ runId: f.runId, state: 'completed', question: '要不要先设置一下作品封面，还是直接开始写大纲？',
-        options: [{ label: '先讨论并拟定作品封面方向' }, { label: '开始写大纲' }] })
+        options: [{ label: '帮我设计一张封面，并设为作品封面。' }, { label: '开始写大纲' }] })
       if (!question) throw new Error('Expected completed followup question')
       const { requestId, callId } = question
       const offer = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: requestId } })

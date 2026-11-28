@@ -13,7 +13,7 @@ import { agentRunningToolLabel } from '../../../../../shared/agent-progress.js'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
 import type { AgentMessagePart, AgentToolDisplayPayload, ChapterListItem } from '../../../../../shared/contracts/index.js'
 import { plainChapterTitle } from '../../../../../shared/structure/chapter-title.js'
-import { AgentMarkdownText } from './AgentMarkdownText'
+import { AgentMarkdownText, REPLY_INK_SETTLE_MS } from './AgentMarkdownText'
 import { ToolDisplayRenderer } from './AgentMessageParts'
 import { AgentProcessRegion } from './AgentProcessRegion'
 import { ActivityScrollArea } from './ActivityScrollArea'
@@ -402,7 +402,7 @@ export function AuthorProgressText({ text, className }: { text: string; classNam
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, continuingGroupId, runActive, processOpen, collapseText = false, revealText, onTextRevealed, activityChapters, readOnly, awaitingApprovalCallId, reportVisibility, liveToolReceiptIds,
+  parts, messageId, groups, activeGroupId, continuingGroupId, runActive, processOpen, collapseText = false, revealText, onTextRevealed, onVisibleTextSettled, activityChapters, readOnly, awaitingApprovalCallId, reportVisibility, liveToolReceiptIds,
 }: {
   parts: AgentMessagePart[]
   messageId: string
@@ -413,6 +413,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   processOpen?: boolean
   collapseText?: boolean
   revealText?: string
+  onVisibleTextSettled?: (messageId: string, text: string) => void
   onTextRevealed?: (messageId: string, text: string) => void
   activityChapters?: ActivityChapters
   readOnly?: boolean
@@ -431,13 +432,21 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   const localGroups = useMemo(() => groups ?? projectActivityGroups([{ id: messageId, runId: '', role: 'assistant', parts }]).byMessage.get(messageId), [groups, messageId, parts])
   const receivedText = useMemo(() => authorParts.flatMap(part => part.type === 'text' ? [part.text] : []).join(''), [authorParts])
   const revealed = useStreamingTextState(receivedText, revealText !== undefined, messageId, true)
+  const fullText = useMemo(() => parts.flatMap(part => part.type === 'text' ? [part.text] : []).join(''), [parts])
   const deferred = reportVisibility?.deferred ?? false
   useEffect(() => {
-    if (revealText !== undefined && !deferred && !revealed.pending) {
-      const fullText = parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('')
-      onTextRevealed?.(messageId, fullText)
+    if (revealText === undefined || revealed.pending) return
+    const finish = () => {
+      onVisibleTextSettled?.(messageId, receivedText)
+      if (!deferred) onTextRevealed?.(messageId, fullText)
     }
-  }, [revealText, deferred, revealed.pending, messageId, parts, onTextRevealed])
+    if (!receivedText || document.visibilityState === 'hidden' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      finish()
+      return
+    }
+    const timer = window.setTimeout(finish, REPLY_INK_SETTLE_MS)
+    return () => window.clearTimeout(timer)
+  }, [revealText, deferred, revealed.pending, messageId, fullText, onTextRevealed, onVisibleTextSettled, receivedText])
   const lastToolIndex = authorParts.reduce((last, part, index) => part.type === 'tool-call' ? index : last, -1)
   let textOffset = 0
   let textOrdinal = 0

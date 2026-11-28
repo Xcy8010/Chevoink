@@ -92,7 +92,8 @@ import { useAgentGoalStream } from '../useAgentGoalStream'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
-import { activityAnswerText, activityReportVisibility, hasVisibleActivityText, projectActivityGroups } from '../lib/activity-groups'
+import { activityAnswerText, activityReportVisibility, hasVisibleActivityText } from '../lib/activity-groups'
+import { useActivityPresentation } from '../lib/use-activity-presentation'
 import MobileConversationScrollbar from './MobileConversationScrollbar'
 import { AgentReturnOrb } from './AgentReturnOrb'
 import { useConversationDistance } from './use-conversation-distance'
@@ -287,7 +288,6 @@ export function AgentPanel({
   const lastUserRequest = [...messages].reverse().find(message => message.role === 'user')
   const deliveryErrorRef = useRef<{ clientRequestId: string; scope: string; sessionId: string | null; message: string } | null>(null)
   const { recentConversationText, blockInfoById, blockByAuthorId, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
-  const activityGroups = useMemo(() => projectActivityGroups(messages), [messages])
   const textRevealTargets = useAgentStore(state => state.textRevealTargets)
   const settlingBlocks = useMemo(() => new Set(Object.keys(textRevealTargets).map(id => blockInfoById.get(id)?.firstId)), [textRevealTargets, blockInfoById])
   const liveToolReceiptIds = useAgentStore(state => state.liveToolReceiptIds)
@@ -732,6 +732,8 @@ export function AgentPanel({
   const panelPhase = selectAgentPanelPhase(goalView, phase)
   const waitingQuestion = pendingQuestion && 'runId' in pendingQuestion && pendingQuestion.state === 'waiting' ? pendingQuestion : null
   const active = isRunActive(panelPhase) || Boolean(waitingQuestion)
+  const presentation = useActivityPresentation(messages, textRevealTargets, active ? runId : null, pendingApproval?.callId)
+  const activityGroups = presentation.groups
   const nextPrompt = completedNextPrompt && sessionId && storeLoadedSessionId === sessionId
     && (panelPhase === 'idle' || panelPhase === 'succeeded' && runId === completedNextPrompt.runId)
     && (!lastUserRequest?.delivery || lastUserRequest.delivery.status === 'sent' && lastUserRequest.runId === completedNextPrompt.runId)
@@ -1875,7 +1877,7 @@ export function AgentPanel({
                 </button>
               </div>
             ) : null}
-            {messages.map((message) => {
+            {presentation.messages.map((message) => {
               if (message.role === 'user') {
                 // Expanding execution history must not turn internal goal
                 // continuation context into another author request.
@@ -1931,7 +1933,7 @@ export function AgentPanel({
               const messageActivities = activityGroups.byMessage.get(message.id)
               const hasActivity = message.parts.some(part => part.type === 'context-compaction') || messageActivities && [...messageActivities.values()].some(group => group.messageId === message.id)
               const hasProcess = Boolean(block?.ops)
-              const reportVisibility = activityReportVisibility(activityGroups.reportsByMessage.get(message.id), messageRunActive, pendingApproval?.callId)
+              const reportVisibility = activityReportVisibility(presentation.reports.get(message.id), messageRunActive, pendingApproval?.callId)
               const hasAuthorText = hasVisibleActivityText(message.parts, reportVisibility)
               const finalText = isBlockLast ? activityAnswerText(message.parts) : ''
               const receipt = isBlockLast && !blockRunActive && message.completedAt && !finalText
@@ -1953,6 +1955,7 @@ export function AgentPanel({
                 messageId={message.id}
                 revealText={revealText}
                 onTextRevealed={finishTextReveal}
+                onVisibleTextSettled={presentation.onVisibleTextSettled}
                 runActive={messageRunActive}
                 processOpen={hasProcess && !wholeMessageIsProcess ? processOpen : undefined}
                 collapseText={hasProcess && !isBlockLast && !wholeMessageIsProcess}

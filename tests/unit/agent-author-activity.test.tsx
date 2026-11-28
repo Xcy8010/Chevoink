@@ -7,6 +7,7 @@ import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/s
 
 import { getMessageText } from '../../src/features/studio/agent/lib/panel-helpers'
 import { activityAnswerText, activityReportVisibility, projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
+import { useActivityPresentation } from '../../src/features/studio/agent/lib/use-activity-presentation'
 import { isRunActive, restoreActiveRunHistory, useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 afterEach(() => { cleanup(); vi.useRealTimers() })
@@ -43,8 +44,9 @@ function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptI
   finishTextReveal?: (messageId: string, text: string) => void
   working?: boolean
 }) {
-  const projection = projectActivityGroups(messages)
-  return <>{messages.map(item => {
+  const presentation = useActivityPresentation(messages, textRevealTargets, active, awaitingApprovalCallId)
+  const projection = presentation.groups
+  return <>{presentation.messages.map(item => {
     const runActive = (item.runTiming?.sourceRunId ?? item.runId) === active
     return <AuthorActivityParts key={item.id} messageId={item.id}
       parts={item.parts} groups={projection.byMessage.get(item.id)} activeGroupId={active && working ? projection.activeByRun.get(active)?.id : undefined}
@@ -52,7 +54,8 @@ function Transcript({ messages, active, awaitingApprovalCallId, liveToolReceiptI
       runActive={runActive} activityChapters={chapters} awaitingApprovalCallId={awaitingApprovalCallId}
       liveToolReceiptIds={runActive ? liveToolReceiptIds : undefined}
       revealText={textRevealTargets?.[item.id]} onTextRevealed={finishTextReveal}
-      reportVisibility={activityReportVisibility(projection.reportsByMessage.get(item.id), runActive, awaitingApprovalCallId)} />
+      onVisibleTextSettled={presentation.onVisibleTextSettled}
+      reportVisibility={activityReportVisibility(presentation.reports.get(item.id), runActive, awaitingApprovalCallId)} />
   })}</>
 }
 
@@ -761,7 +764,7 @@ it('replays the ink when a different live tool uses the same author-facing label
   expect(step.querySelector('[data-activity-ink]')).toBe(second)
 })
 
-it('keeps a live opening visible and revealing when its tool arrives in the same paint', () => {
+it.each(['opening', 'following-turn'])('finishes the opening ink before showing the next tool in %s', toolMessageId => {
   vi.useFakeTimers()
   const store = useAgentStore.getState()
   store.resetRun()
@@ -778,27 +781,26 @@ it('keeps a live opening visible and revealing when its tool arrives in the same
     act(() => {
       store.applyEvent({ ...base, seq: 1, type: 'message.start', role: 'assistant' })
       store.applyEvent({ ...base, seq: 2, type: 'text.final', text: opening, asReasoning: false })
-      store.applyEvent({ ...base, seq: 3, type: 'tool.delta', callId: 'call_0', toolName: 'chapter_read', argsChars: 4 })
+      store.applyEvent({ ...base, messageId: toolMessageId, seq: 3, type: 'tool.delta', callId: 'call_0', toolName: 'chapter_read', argsChars: 4 })
     })
-    const row = screen.getByRole('button', { name: '正在准备 · 核对前文' })
+    expect(screen.queryByRole('button')).toBeNull()
     const paragraph = view.container.querySelector('p')!
     const firstFrame = paragraph.textContent!
     expect(firstFrame).toBe(opening.slice(0, 3))
-    expect(paragraph.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(row.querySelector('[data-activity-ink]')).toBeTruthy()
     act(() => vi.advanceTimersByTime(48))
     expect(paragraph.textContent!.length).toBeGreaterThan(firstFrame.length)
     expect(paragraph.textContent!.length).toBeLessThan(opening.length)
     act(() => {
-      store.applyEvent({ ...base, seq: 4, type: 'tool.call', callId: 'call_0', toolName: 'chapter_read', title: '读取', args: {} })
-      store.applyEvent({ ...base, seq: 5, type: 'tool.result', callId: 'call_0', toolName: 'chapter_read', ok: true, summary: '已读取' })
+      store.applyEvent({ ...base, messageId: toolMessageId, seq: 4, type: 'tool.call', callId: 'call_0', toolName: 'chapter_read', title: '读取', args: {} })
+      store.applyEvent({ ...base, messageId: toolMessageId, seq: 5, type: 'tool.result', callId: 'call_0', toolName: 'chapter_read', ok: true, summary: '已读取' })
     })
-    expect(screen.getByRole('button', { name: '核对前文' })).toBe(row)
-    expect(row.querySelector('[data-activity-continuing]')).toBeTruthy()
+    expect(screen.queryByRole('button')).toBeNull()
     expect(paragraph.textContent).not.toBe(opening)
     act(() => vi.advanceTimersByTime(600))
     expect(paragraph.textContent).toBe(opening)
+    expect(screen.queryByRole('button')).toBeNull()
     act(() => vi.advanceTimersByTime(200)) // Let the last visible glyphs settle.
+    expect(screen.getByRole('button', { name: '核对前文' })).toBeTruthy()
     expect(screen.getByText(opening)).toBe(paragraph)
     expect(useAgentStore.getState().textRevealTargets).toEqual({})
   } finally {
@@ -878,15 +880,18 @@ it('animates a held handoff as soon as the next real stage makes it visible', ()
 
   view.rerender(timeline([prose, call('plan', 'plan_save', { status: 'running' })]))
   const report = view.container.querySelector('p')!
-  const saving = screen.getByRole('button', { name: '正在写入创作计划' })
+  expect(screen.queryByRole('button', { name: '正在写入创作计划' })).toBeNull()
   expect(report.textContent).toBe(prose.text.slice(0, 3))
   expect(report.querySelector('.agent-reply-ink')).toBeTruthy()
-  expect(report.compareDocumentPosition(saving) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   act(() => vi.advanceTimersByTime(48))
   expect(report.textContent!.length).toBeGreaterThan(3)
   expect(report.textContent).not.toBe(prose.text)
   act(() => vi.advanceTimersByTime(600))
   expect(report.textContent).toBe(prose.text)
+  expect(screen.queryByRole('button', { name: '正在写入创作计划' })).toBeNull()
+  act(() => vi.advanceTimersByTime(200))
+  const saving = screen.getByRole('button', { name: '正在写入创作计划' })
+  expect(report.compareDocumentPosition(saving) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   expect(finishTextReveal).toHaveBeenCalledWith('next', prose.text)
 })
 

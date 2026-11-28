@@ -48,11 +48,11 @@ export function getNovelSetupFollowup(recap?: Pick<NovelSetupRecap, 'cover' | 's
   }
   if (!recap?.skipCover && recap?.cover === 'missing') return {
     question: '要不要先设置一下作品封面，还是直接开始写大纲？',
-    options: [{ label: '先讨论并拟定作品封面方向' }, { label: '开始写大纲' }],
+    options: [{ label: '帮我设计一张封面，并设为作品封面。' }, { label: '开始写大纲' }],
   }
   return {
     question: '要不要开始写大纲？',
-    options: [{ label: '开始写大纲' }, { label: '先讨论大纲方向' }],
+    options: [{ label: '帮我写个全书大纲。' }, { label: '先讨论大纲方向' }],
   }
 }
 

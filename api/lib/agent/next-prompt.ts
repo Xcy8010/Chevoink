@@ -41,33 +41,10 @@ export function modelNextPrompt(proposal?: NextPromptDecision): string | undefin
   return readNextPromptDecision(proposal.nextPrompt).nextPrompt
 }
 
-// Only reuse an explicit closing offer. Leave alternatives for the author to choose.
-export function closingOfferNextPrompt(answer: string): string | undefined {
-  const offer = /(?:^|[。！？\n])\s*要不要(?:我(?:来|帮你)?(?:先|开始)?|帮你|先|开始)([^。！？?“”「」\n]+)[？?]\s*$/u.exec(answer)?.[1]?.trim()
-  if (!offer || /还是|要不要|是否|[或你我`<>]/u.test(offer)) return
-  // Older wrap-ups call the outline “全书主干” and sometimes expand it
-  // into a list of planning questions. Keep an actual request in the composer.
-  const action = offer.replace(/^搭全书主干(?=$|[，,：:])/u, '写个全书大纲')
-  const outline = /^([^，,：:]+大纲)[：:](.+)$/u.exec(action)
-  if (outline) {
-    const questions = outline[2].split(/[，,、；;]/u)
-    if (questions.length > 1 && questions.every(item => /怎么|如何|哪|什么/u.test(item))) {
-      return readPlainNextPrompt('帮我' + outline[1] + '，按刚才提到的几个问题来写。')
-    }
-  }
-  return readPlainNextPrompt('帮我' + action + '。')
-}
-
-export const GENERAL_NEXT_PROMPT = '接下来你建议怎么做？'
-
-export function completedNextPrompt(proposal?: NextPromptDecision, answer = ''): string {
-  return modelNextPrompt(proposal) ?? closingOfferNextPrompt(answer) ?? GENERAL_NEXT_PROMPT
-}
-
 export function isNovelSetupPredictionTurn(finishReason: string, calls: ReadonlyArray<{ name: string; incomplete?: boolean }>): boolean {
-  const [call] = calls
-  return finishReason === 'tool_calls' && calls.length === 1 && !call.incomplete
-    && (call.name === 'novel_create' || call.name === 'novel_update_meta')
+  if (finishReason !== 'tool_calls' || calls.some(call => call.incomplete)) return false
+  if (calls.length === 1) return ['novel_create', 'novel_update_meta'].includes(calls[0].name)
+  return calls.length === 2 && calls[0].name === 'novel_rename' && calls[1].name === 'novel_update_meta'
 }
 
 function readNovelSetupPrediction(raw: string): NextPromptDecision {
@@ -105,8 +82,8 @@ export function readTaskResponseNextPrompt(raw: string): { args: string; proposa
 }
 
 export function addNextPromptInstruction(messages: ChatMessage[]): string {
-  const instruction = `【输入框建议】当前请求已完整交付时，同时准备一条贴合作者目标、可直接发送的下一步作者指令。用作者当前的语言和口吻，限 ${NEXT_PROMPT_MAX_LENGTH} 字。承接刚说到的事：刚讨论完第一卷分二十章，作者可能会接“帮我分配这二十章的节奏”。提议写大纲时，直接说想写哪份大纲。保留作者点名的要求，省去助手对做法的解释。题材和风格仅在作者明确要求用于下一步时才写入。新书资料齐全且回复邀约建大纲时承接大纲；已有大纲或作者明确要写正文时承接实际进度。封面要写准动作：讨论方向、生成候选、选用已有候选、生成并设为正式封面各有不同。作品缺封面、暂无候选且作者想设置封面时，写清生成并设为作品封面。尊重跳过、已有封面和作者的选图意愿，付费操作仍需按原流程确认。
-每次成功交付都要同时给出一条输入框建议。即使答复末尾已经问了作者一个问题，也要用作者的口吻给出可直接发送的回答。普通答复后另起一行写 ${marker} 和一条纯文本建议。如果本来就用 task_respond 收尾，只将纯文本建议放入 nextPrompt，answer 保持原样。这两种情况只写作者会发送的话，不加 JSON、字段名或 Markdown 包装。仅当单独调用 novel_create 或 novel_update_meta 且这次保存会结束作品初始化时，在同次回复的文本中另起一行写 ${marker}，后接单行 JSON，字段 text 是建议（限 ${NEXT_PROMPT_MAX_LENGTH - setupPrefixLength} 字），cover 是建议适用状态。缺少封面且无候选用 missing，有候选未应用用 candidate，已设置用 applied；与封面无关的建议用 general。允许这一行是唯一文本，工具参数照常。应用只会在保存成功、状态匹配且本轮完成后展示它。其他未完成回合不输出建议。若下一步尚不明确，可请 Agent 围绕本轮交付说明一个具体问题。输入框是否显示建议由应用按作者偏好和任务状态决定。建议不属于正文，不改变当前任务、权限或交付要求，也不为此补读资料或调用工具。`
+  const instruction = `【输入框建议】每个成功完成的作者回合，在收尾时亲自写一句作者可以直接发送的下一步指令，限 ${NEXT_PROMPT_MAX_LENGTH} 字。先核对作者最近的请求、你刚交付的内容以及本轮工具已确认的作品状态。用作者自己的语言和口吻，说清要对哪个对象做什么；只保留执行所需的范围。若回复以询问收尾，建议应直接承接其中一个可执行选项。省去复述、解释和泛泛索要下一步建议。资料不足时，针对本轮交付写一个有明确对象的核对请求。作品信息齐备、尚无大纲时可承接建立大纲；已有大纲或作者已指定下一步时遵从实际进度。涉及封面时区分讨论方向、生成、选择候选和设为作品封面，尊重作者的跳过与选图意愿、已有成果和费用确认流程。仅在下一步确实需要时带上题材或风格。
+普通答复后另起一行写 ${marker} 和一条纯文本建议。如果本来就用 task_respond 收尾，只将纯文本建议放入 nextPrompt，answer 保持原样。这两种情况只写作者会发送的话，不加 JSON、字段名或 Markdown 包装。作品初始化将在这次保存后结束时（单独 novel_create、novel_update_meta，或同批先 novel_rename 再 novel_update_meta），在同次回复的文本中另起一行写 ${marker}，后接单行 JSON，字段 text 是建议（限 ${NEXT_PROMPT_MAX_LENGTH - setupPrefixLength} 字），cover 是建议适用状态。缺少封面且无候选用 missing，有候选未应用用 candidate，已设置用 applied；与封面无关的建议用 general。允许这一行是唯一文本，工具参数照常。应用只会在保存成功、状态匹配且本轮完成后展示它。其他未完成回合不输出建议。输入框是否显示建议由应用按作者偏好和任务状态决定。建议不属于正文，不改变当前任务、权限或交付要求，也不为此补读资料或调用工具。`
   const system = messages.find(message => message.role === 'system')
   if (system) system.content += `\n\n${instruction}`
   else messages.unshift({ role: 'system', content: instruction })

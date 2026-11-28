@@ -12,7 +12,7 @@ export function readNovelSetupPredictionPayload(raw: string) {
 export function readPlainNextPrompt(value: unknown): string | undefined {
   if (typeof value !== 'string') return
   const text = value.trim()
-  if (text && text.length <= NEXT_PROMPT_MAX_LENGTH && !text.startsWith('{')
+  if (text && !/^接下来你建议怎么做[？?。！!]*$/u.test(text) && text.length <= NEXT_PROMPT_MAX_LENGTH && !text.startsWith('{')
     && !/[\r\n\p{Cc}]|\[\[(?:CHEVOINK_|NP:)/u.test(text)) return text
 }
 

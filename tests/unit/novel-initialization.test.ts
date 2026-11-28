@@ -85,7 +85,7 @@ it.each([
   mocks.original.mockResolvedValue({ prompt, spec: fresh(prompt), sourceRunId: 'r', taskId: 'task' })
   const result = await novelUpdateMetaTool.execute(context(answer), fields)
   expect(result.novelSetupRecap).toMatchObject({ cover: 'missing', skipCover: true })
-  expect(getNovelSetupFollowup(result.novelSetupRecap)?.options[0].label).toBe('开始写大纲')
+  expect(getNovelSetupFollowup(result.novelSetupRecap)?.options[0].label).toBe('帮我写个全书大纲。')
 })
 
 it('omits optional completed follow-up when the actual direction answer opts out', async () => {
