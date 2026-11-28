@@ -41,6 +41,19 @@ export function modelNextPrompt(proposal?: NextPromptDecision): string | undefin
   return readNextPromptDecision(proposal.nextPrompt).nextPrompt
 }
 
+// Only reuse an explicit closing offer. Leave alternatives for the author to choose.
+export function closingOfferNextPrompt(answer: string): string | undefined {
+  const offer = /(?:^|[。！？\n])\s*要不要(?:我(?:来|帮你)?(?:先|开始)?|帮你|先|开始)([^。！？?“”「」\n]+)[？?]\s*$/u.exec(answer)?.[1]?.trim()
+  if (!offer || /还是|要不要|是否|[或你我`<>]/u.test(offer)) return
+  return readPlainNextPrompt('帮我' + offer + '。')
+}
+
+export const GENERAL_NEXT_PROMPT = '根据刚才的结果，你建议我下一步先做什么？'
+
+export function completedNextPrompt(proposal?: NextPromptDecision, answer = ''): string {
+  return modelNextPrompt(proposal) ?? closingOfferNextPrompt(answer) ?? GENERAL_NEXT_PROMPT
+}
+
 export function isNovelSetupPredictionTurn(finishReason: string, calls: ReadonlyArray<{ name: string; incomplete?: boolean }>): boolean {
   const [call] = calls
   return finishReason === 'tool_calls' && calls.length === 1 && !call.incomplete
@@ -82,8 +95,8 @@ export function readTaskResponseNextPrompt(raw: string): { args: string; proposa
 }
 
 export function addNextPromptInstruction(messages: ChatMessage[]): string {
-  const instruction = `【输入框建议】预测作者最可能发出的下一条消息。依据作者原话、已交付内容和当前作品状态，用作者当前语言和第一人称写一条可直接发送的指令，限 ${NEXT_PROMPT_MAX_LENGTH} 字。说清动作、对象和期待的成果。把讨论方案、生成候选供作者预览、生成并应用区分开。作者更可能想设置缺失的正式封面且暂无候选时，写清生成封面并设为当前作品封面；只有顺着作者已表达的偏好时才写选图委托。有候选时可建议查看、选择或应用已有候选。风格、配色等细节仅在作者明确将它们指定为下一步产物的要求时写入建议。已有作品题材留给执行阶段参考。尊重作者的跳过意愿和当前能力，不默认替换已有封面，不把付费操作写成已获确认。对大纲、正文等也用同样原则，避免空泛的“继续”或“拟个下一步”。
-普通答复后另起一行写 ${marker} 和一条纯文本建议。如果本来就用 task_respond 收尾，只将纯文本建议放入 nextPrompt，answer 保持原样。这两种情况只写作者会发送的话，不加 JSON、字段名或 Markdown 包装。仅当单独调用 novel_create 或 novel_update_meta 且这次保存会结束作品初始化时，在同次回复的文本中另起一行写 ${marker}，后接单行 JSON，字段 text 是建议（限 ${NEXT_PROMPT_MAX_LENGTH - setupPrefixLength} 字），cover 是建议适用状态。缺少封面且无候选用 missing，有候选未应用用 candidate，已设置用 applied；与封面无关的建议用 general。允许这一行是唯一文本，工具参数照常。应用只会在保存成功、状态匹配且本轮完成后展示它。其他未完成回合不输出建议。没有合适的建议时填 ${skip}。输入框是否显示建议由应用按作者偏好和任务状态决定。建议不属于正文，不改变当前任务、权限或交付要求，也不为此补读资料或调用工具。`
+  const instruction = `【输入框建议】预测作者最可能发出的下一条消息。依据作者原话、已交付内容和当前作品状态，用作者当前语言和第一人称写一条可直接发送的指令，限 ${NEXT_PROMPT_MAX_LENGTH} 字。说清动作、对象和期待的成果。把讨论方案、生成候选供作者预览、生成并应用区分开。作者更可能想设置缺失的正式封面且暂无候选时，写清生成封面并设为当前作品封面；只有顺着作者已表达的偏好时才写选图委托。有候选时可建议查看、选择或应用已有候选。风格、配色等细节仅在作者明确将它们指定为下一步产物的要求时写入建议。已有作品题材留给执行阶段参考。尊重作者的跳过意愿和当前能力，不默认替换已有封面，不把付费操作写成已获确认。作品资料齐全且回复邀请作者先建立全书大纲时，可写“帮我先建立全书大纲，梳理故事主线和关键转折。”已有大纲则承接已有进度，作者明确要求写正文时尊重其选择。对大纲、正文等也用同样原则，避免空泛的“继续”或“拟个下一步”。
+每次成功交付都要同时给出一条输入框建议。即使答复末尾已经问了作者一个问题，也要用作者的口吻给出可直接发送的回答。普通答复后另起一行写 ${marker} 和一条纯文本建议。如果本来就用 task_respond 收尾，只将纯文本建议放入 nextPrompt，answer 保持原样。这两种情况只写作者会发送的话，不加 JSON、字段名或 Markdown 包装。仅当单独调用 novel_create 或 novel_update_meta 且这次保存会结束作品初始化时，在同次回复的文本中另起一行写 ${marker}，后接单行 JSON，字段 text 是建议（限 ${NEXT_PROMPT_MAX_LENGTH - setupPrefixLength} 字），cover 是建议适用状态。缺少封面且无候选用 missing，有候选未应用用 candidate，已设置用 applied；与封面无关的建议用 general。允许这一行是唯一文本，工具参数照常。应用只会在保存成功、状态匹配且本轮完成后展示它。其他未完成回合不输出建议。若下一步尚不明确，可请 Agent 围绕本轮交付说明一个具体问题。输入框是否显示建议由应用按作者偏好和任务状态决定。建议不属于正文，不改变当前任务、权限或交付要求，也不为此补读资料或调用工具。`
   const system = messages.find(message => message.role === 'system')
   if (system) system.content += `\n\n${instruction}`
   else messages.unshift({ role: 'system', content: instruction })

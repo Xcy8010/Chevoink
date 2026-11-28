@@ -175,6 +175,34 @@ it('reoffers only readable suggestion text after Tab acceptance and clearing', (
   expect(screen.queryByRole('button', { name: '补全建议：另一任务的建议' })).toBeNull()
 })
 
+it('offers the next instruction on the completion event without waiting for a history response', () => {
+  const sessionId = 'completion-session', runId = 'cover-turn', novelId = 'book'
+  const runStreams: EventTarget[] = []
+  vi.stubGlobal('EventSource', class extends EventTarget {
+    constructor(url: string) { super(); if (url.includes(runId)) runStreams.push(this) }
+    close() {}
+  })
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})))
+  const client = new QueryClient({ defaultOptions: { queries: { enabled: false } } })
+  client.setQueryData(['agent', 'model-assignments', 'novel:' + novelId], { effective: {} })
+  client.setQueryData(['agent', 'window-configuration', sessionId], { configuration: { creativeFreedom: 'balanced', model: null } })
+  restoreActiveRunHistory([], runId, sessionId)
+  render(<QueryClientProvider client={client}><ToastProvider>
+    <AgentPanel novelId={novelId} novelName="合成作品" sessionId={sessionId} voiceScopeKey={sessionId} ensureSession={async () => sessionId} />
+  </ToastProvider></QueryClientProvider>)
+  const nextPrompt = '帮我先建立全书大纲。'
+  const option = () => screen.queryByRole('button', { name: '补全建议：' + nextPrompt })
+  expect(option()).toBeNull()
+  expect(runStreams).toHaveLength(1)
+  act(() => { runStreams[0].dispatchEvent(new MessageEvent('run.finished', { data: JSON.stringify({
+    type: 'run.finished', runId, seq: 1, ts: new Date().toISOString(), status: 'succeeded',
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, artifacts: [], nextPrompt,
+  }) })) })
+  expect(useAgentStore.getState().nextPrompt).toEqual({ runId, text: nextPrompt })
+  expect(option()).toBeTruthy()
+})
+
 it('observes another device starting the open conversation once and preserves an unsent draft', async () => {
   const sessionId = 'remote-session', runId = 'remote-run', novelId = 'remote-book'
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })

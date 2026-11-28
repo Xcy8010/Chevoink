@@ -531,6 +531,9 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(system).toContain('作者只要结果、只要标题正文或明确不要建议时省略')
     expect(system).toContain('未完成、失败或结果未知时据实说明')
     expect(system).toContain('本轮对同一对象的最新成功工具回执优先于旧快照')
+    expect(system).toContain('要不要先建立全书大纲？')
+    expect(system).toContain('已有大纲就承接已有计划')
+    expect(system).toContain('作者明确要求直接写正文时遵从原请求')
     expect(system).not.toContain('正式封面：未设置')
     mockState()
     const covered = await assembleContext(input)
@@ -1108,6 +1111,13 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(String(messages[4].content)).toContain('[系统] 当前任务的待办清单')
     expect(String(messages[5].content)).toContain('本轮任务契约（taskSpecId=spec-1）')
     expect(String(messages[6].content)).toContain('把第三章开头改得更抓人')
+  })
+
+  it('reports an empty plan folder when the current work has no saved plans', async () => {
+    vi.mocked(prisma.agentArtifact.findMany).mockResolvedValue([])
+    const { messages } = await assembleContext(buildInput())
+    const snapshot = messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))
+    expect(snapshot?.content).toContain('尚无已保存的大纲或细纲')
   })
 
   it.each([

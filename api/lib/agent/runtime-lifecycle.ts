@@ -18,7 +18,7 @@ import { humanizeAgentVisibleText } from './visible-text.js'
 import { assertLimitedWritingDelivery, limitedWritingDeliverySchema } from './writing-delivery-limitations.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { originalPrompt } from './original-request.js'
-import { allowsNextPrompt, modelNextPrompt } from './next-prompt.js'
+import { allowsNextPrompt, completedNextPrompt } from './next-prompt.js'
 import { QUESTION_CLOSING_ROOT_STATUS, QUESTION_WAITING_ROOT_STATUS } from './run-slots.js'
 import { recordCompletedQuestionOffer } from './runtime-question-followup.js'
 import { getNovelSetupFollowup, novelSetupRecapSchema } from './novel-initialization.js'
@@ -92,7 +92,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     const offersNextPrompt = configuration.nextPromptOnCompletion || configuration.nextPromptMarker
     if (configuration.nextPromptMarker && spec.success && !limited && !facts.terminalReason && !goal && !parent
       && !setupRecap?.skipFollowup && (!setup || setupRecap) && allowsNextPrompt(originalPrompt(originalRequest))) {
-      nextPrompt = modelNextPrompt(candidate)
+      nextPrompt = completedNextPrompt(candidate, candidate.localCompletion ? '' : candidate.content)
     }
     const operation = await prepareOperationInTransaction(tx, lease, {
       key: `finalize:${frame.revision}`, kind: 'internal', action: 'completion_finalize',

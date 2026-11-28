@@ -901,7 +901,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       runGoalId: null,
       authorEnded: null,
       outcome: null,
-      nextPrompt: nextPrompt ?? null,
+      nextPrompt: nextPrompt ?? (sessionId && state.loadedSessionId === sessionId
+        && observedCompletedRunId && state.nextPrompt?.runId === observedCompletedRunId ? state.nextPrompt : null),
       resumeableRunId: null,
       activeSessionId: null,
       loadedSessionId: sessionId,

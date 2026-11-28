@@ -5,7 +5,7 @@ import * as credits from '../../api/lib/credits.js'
 import * as durableRollout from '../../api/lib/agent/fresh-durable-rollout.js'
 import { readSessionPendingQuestion, resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
 import { runReviewedDurableExecution } from '../../api/lib/agent/runtime-executor.js'
-import { splitNextPrompt } from '../../api/lib/agent/next-prompt.js'
+import { GENERAL_NEXT_PROMPT, splitNextPrompt } from '../../api/lib/agent/next-prompt.js'
 import { parkDurableQuestion, resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
@@ -77,7 +77,7 @@ describe.runIf(available)('completed durable question followup', () => {
       const finished = (await publishDurableEvents(f.userId, f.runId, 200)).at(-1)
       expect(finished).toMatchObject({ type: 'run.finished', status: 'succeeded' })
       if (scenario === 'answer') expect(finished).toMatchObject({ nextPrompt: predictedCover })
-      else expect(finished).not.toHaveProperty('nextPrompt')
+      else expect(finished).toMatchObject({ nextPrompt: GENERAL_NEXT_PROMPT })
       if (scenario === 'historical') {
         expect(question).toBeNull()
         return

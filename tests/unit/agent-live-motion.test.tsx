@@ -158,6 +158,17 @@ it.each([{ label: 'empty', text: '' }, { label: 'protocol-only', text: '<tool_ca
   },
 )
 
+it('keeps the live suggestion when a history read for that completed turn races its final event', () => {
+  start()
+  const text = '帮我看看封面的缩略图效果。'
+  event({ type: 'run.finished', status: 'succeeded', nextPrompt: text, artifacts: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } })
+  const { restoreMessages, messages } = useAgentStore.getState()
+  restoreMessages(messages, 'session', null, undefined, 'run')
+  expect(useAgentStore.getState().nextPrompt).toEqual({ runId: 'run', text })
+  restoreMessages([], 'session', null, undefined, 'another-run')
+  expect(useAgentStore.getState().nextPrompt).toBeNull()
+})
+
 it('keeps a prepared tool row stable through batched completion and exits without replay on history expand', async () => {
   vi.useFakeTimers(); start(); const view = render(<Harness />)
   act(() => event({ type: 'tool.delta', messageId: 'answer', callId: 'fast', toolName: 'chapter_read', argsChars: 4 }))

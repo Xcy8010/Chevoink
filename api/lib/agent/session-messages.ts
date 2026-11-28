@@ -25,6 +25,8 @@ import type { AgentHistoryHead } from '../../../shared/contracts/agent-queue.js'
 import { loadMessageTimings } from './message-timing.js'
 import { projectLegacyQualityBodyChanges } from './quality-body-change-history.js'
 import { QUESTION_CLOSING_ROOT_STATUS, QUESTION_WAITING_ROOT_STATUS } from './run-slots.js'
+import { readHumanAdmission } from './goal-activation-authority.js'
+import { allowsModelNextPrompt, allowsNextPrompt, closingOfferNextPrompt } from './next-prompt.js'
 
 const historyRunState = { select: { userId: true, startRequest: true, runtimeProtocolVersion: true, status: true, finishedAt: true, taskRoot: { select: { status: true } },
   goalExecution: { select: { goalId: true, trigger: true } },
@@ -133,7 +135,7 @@ async function getSessionRunState(sessionId: string, includeNextPrompt = false):
   const run = await prisma.agentRun.findFirst({
     where: { sessionId, ...MAIN_RUN_FILTER },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    select: { id: true, status: true, usage: true, runtimeProtocolVersion: true, taskRoot: { select: { status: true } }, goalExecution: { select: { goalId: true } } },
+    select: { id: true, status: true, usage: true, agentType: true, startRequest: true, runtimeProtocolVersion: true, taskRoot: { select: { status: true } }, goalExecution: { select: { goalId: true } } },
   })
   const durableActive = run?.runtimeProtocolVersion === 1 && ((run.taskRoot?.status === 'active' || run.taskRoot?.status === QUESTION_CLOSING_ROOT_STATUS)
     && ['queued', 'running', 'awaiting_approval'].includes(run.status)
@@ -143,8 +145,15 @@ async function getSessionRunState(sessionId: string, includeNextPrompt = false):
     ? await prisma.agentRunEvent.findFirst({ where: { runId: run.id, type: 'run.finished' }, orderBy: { seq: 'desc' }, select: { payload: true } })
     : null
   const payload = terminal?.payload
-  const nextPrompt = payload && typeof payload === 'object' && !Array.isArray(payload)
-    && payload.status === 'succeeded' && typeof payload.nextPrompt === 'string' && payload.nextPrompt
+  const succeeded = payload && typeof payload === 'object' && !Array.isArray(payload) && payload.status === 'succeeded' ? payload : null
+  let nextPrompt = typeof succeeded?.nextPrompt === 'string' ? succeeded.nextPrompt : undefined
+  // Older interactive runs retained their model's closing question in the terminal summary.
+  if (!nextPrompt && run?.runtimeProtocolVersion === 0 && run.agentType === 'writingOrchestrator' && !run.goalExecution && !ending.authorEnded
+    && !succeeded?.outcome && typeof succeeded?.outputSummary === 'string' && succeeded.outputSummary.length < 300) {
+    const offer = closingOfferNextPrompt(succeeded.outputSummary)
+    const request = offer ? readHumanAdmission(run.startRequest)?.request : null
+    if (request?.predictNextPrompt && allowsNextPrompt(request.prompt) && allowsModelNextPrompt(request.prompt)) nextPrompt = offer
+  }
   return { activeRunId: durableActive ? run.id : null, ...(durableActive ? { activeRunLastSeq: await activeRunLastSeq(run.id) } : {}), runGoalId: durableActive ? run.goalExecution?.goalId ?? null : null, ...ending, ...readRunOutcome(run?.usage),
     ...(run && nextPrompt ? { nextPrompt: { runId: run.id, text: nextPrompt } } : {}),
     resumeRunId: !ending.authorEnded && run && (run.status === 'failed' || run.status === 'paused') ? run.id : null }

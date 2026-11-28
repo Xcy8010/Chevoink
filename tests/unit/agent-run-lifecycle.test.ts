@@ -8,6 +8,7 @@
 
 import { beginTextRequest, createTextRequestTrace, recordTextRequestFailure, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { GENERAL_NEXT_PROMPT } from '../../api/lib/agent/next-prompt.js'
 import { z } from 'zod'
 import type { AgentMessagePart, AgentStreamEvent, AgentStreamEventBody, AgentTodoItem, TaskSpec } from '../../shared/contracts/index.js'
 import type { AgentTool, ToolContext, ToolResult } from '../../api/lib/agent/tools/types.js'
@@ -4774,6 +4775,7 @@ describe('author-directed task ending in the real execution loop', () => {
     expect(events().filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
     if (published) expect(events().at(-1)).toMatchObject({ nextPrompt })
+    else if (request.nextPromptMarker) expect(events().at(-1)).toMatchObject({ nextPrompt: GENERAL_NEXT_PROMPT })
     else expect(events().at(-1)).not.toHaveProperty('nextPrompt')
     expect(JSON.stringify(mocks.persist.mock.calls)).not.toContain('nextPrompt')
     expect(JSON.stringify(events().filter(event => event.type === 'tool.call' || event.type === 'tool.result'))).not.toContain('nextPrompt')
@@ -4783,7 +4785,10 @@ describe('author-directed task ending in the real execution loop', () => {
     { answer: '渡桥段落放在第一卷收尾。\n\n如果你愿意，我可以接着帮你核对伏笔。', suppressed: false },
     { answer: '渡桥段落放在第一卷收尾。\n下一步建议：把渡桥段落分成三个场景。', suppressed: true },
     { answer: '渡桥段落放在第一卷收尾。', suppressed: false },
-  ])('completes without fabricating an input suggestion ($suppressed, $answer)', async ({ answer, suppressed }) => {
+    { answer: '封面已保存。要不要开始搭全书主干，梳理第一卷的走向？', suppressed: false, offer: '帮我搭全书主干，梳理第一卷的走向。' },
+    { answer: '书名、简介、标签和封面都齐了。要不要先建立全书大纲？', suppressed: false, offer: '帮我建立全书大纲。' },
+    { answer: '封面已保存。要不要先调整背景，还是开始写大纲？', suppressed: false },
+  ])('returns the explicit closing offer or a neutral question in the terminal event ($answer)', async ({ answer, suppressed, offer }) => {
     const prompt = '渡桥段落放在哪一卷合适？'
     await responseTask(prompt)
     queue({ ...response(answer), ...(suppressed ? { nextPromptSuppressed: true as const } : {}) })
@@ -4791,9 +4796,9 @@ describe('author-directed task ending in the real execution loop', () => {
       prompt, predictNextPrompt: true })
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
-    expect(events().at(-1)).not.toHaveProperty('nextPrompt')
+    expect(events().at(-1)).toMatchObject({ nextPrompt: offer ?? GENERAL_NEXT_PROMPT })
   })
-  it('keeps a saved plan without substituting a suggestion if the wrap-up omits the footer', async () => {
+  it('offers a neutral follow-up without repeating a plan save or buying another wrap-up', async () => {
     const prompt = '保存渡桥计划。'
     mocks.tools = [tool('plan_save', async () => ({ output: '已保存',
       display: { kind: 'planFile', artifactId: 'saved-plan', title: '渡桥计划', content: '渡桥分成三个场景。' } }), false)]
@@ -4803,7 +4808,7 @@ describe('author-directed task ending in the real execution loop', () => {
     expect(mocks.tools[0].execute).toHaveBeenCalledOnce()
     expect(mocks.chat).toHaveBeenCalledTimes(2)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: '渡桥计划已保存。' })
-    expect(events().at(-1)).not.toHaveProperty('nextPrompt')
+    expect(events().at(-1)).toMatchObject({ nextPrompt: GENERAL_NEXT_PROMPT })
   })
   it.each(['第一卷要写多少章？', '第一卷要写多少章', '第一卷写多少章合适？', '第二卷应该怎么分章？', '这个大纲第一卷要写多少章？', '你好'])(
     'lets the main Agent deliver an exact native response after context reads: %s', async prompt => {

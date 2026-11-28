@@ -35,7 +35,7 @@ it('binds an explicit steering message to its own saved source id without leakin
   expect(historyClientRequest({ ...steering, id: 'another-author' }, 'owner')).toEqual({})
 })
 
-const db = vi.hoisted(() => ({ agentSession: { findFirst: vi.fn() }, agentRun: { findMany: vi.fn(), findFirst: vi.fn() }, agentMessage: { findMany: vi.fn(), findFirst: vi.fn() }, $transaction: vi.fn() }))
+const db = vi.hoisted(() => ({ agentRunEvent: { findFirst: vi.fn() }, agentSession: { findFirst: vi.fn() }, agentRun: { findMany: vi.fn(), findFirst: vi.fn() }, agentMessage: { findMany: vi.fn(), findFirst: vi.fn() }, $transaction: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({ prisma: db, DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } } }))
 vi.mock('../../api/lib/agent/events.js', () => ({ loadServerRunNotices: async () => new Set() }))
 vi.mock('../../api/lib/agent/message-timing.js', () => ({ loadMessageTimings: async () => new Map() }))
@@ -64,6 +64,15 @@ it.each([undefined, 20])('returns correlation only on the author in actual owned
   expect(query.include.run.select).toMatchObject({ startRequest: true, userId: true })
   expect(JSON.stringify(history)).not.toContain('startRequest')
 })
+it.each([true, false])('recovers a completed legacy closing offer only when prediction was requested (%s)', async predictNextPrompt => {
+  const startRequest = withHumanAdmission(startAgentLoopRunSchema.parse({ ...request, predictNextPrompt: predictNextPrompt || undefined }))
+  db.agentRun.findFirst.mockImplementation(async q => q.select?.startRequest && q.select.runtimeProtocolVersion
+    ? { id: 'run', status: 'completed', runtimeProtocolVersion: 0, agentType: 'writingOrchestrator', startRequest } : null)
+  db.agentRunEvent.findFirst.mockResolvedValue({ payload: { status: 'succeeded', outputSummary: '正式封面已保存。要不要先建立全书大纲？' } })
+  const history = await listLoopSessionMessages('owner', 'session', { runLimit: 1 })
+  expect(history.nextPrompt).toEqual(predictNextPrompt ? { runId: 'run', text: '帮我建立全书大纲。' } : undefined)
+})
+
 it('rejects a different owner before loading any run correlation or messages', async () => {
   db.agentSession.findFirst.mockResolvedValueOnce(null)
   await expect(listLoopSessionMessages('another-owner', 'session')).rejects.toMatchObject({ code: 'NOT_FOUND' })
