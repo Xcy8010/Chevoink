@@ -134,9 +134,10 @@ it('keeps the loaded timeline visible on the first render of a remote activity h
   await waitFor(() => expect(screen.getByText('我先核对细纲。')).toBeTruthy())
 })
 
-it('reoffers the current run suggestion after Tab acceptance and clearing the composer', () => {
+it('reoffers only readable suggestion text after Tab acceptance and clearing', () => {
   const sessionId = 'synthetic-session', novelId = 'synthetic-novel'
-  const nextPrompt = { runId: 'synthetic-completed-run', text: '沿用这个场景继续写一章' }
+  const suggestion = '帮我写一版《合成作品》的全书大纲和第一卷细纲。'
+  const nextPrompt = { runId: 'synthetic-completed-run', text: JSON.stringify({ text: suggestion, cover: 'applied' }) }
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response(JSON.stringify({ success: true, data: null })))
   vi.stubGlobal('fetch', fetch)
@@ -144,23 +145,27 @@ it('reoffers the current run suggestion after Tab acceptance and clearing the co
   queryClient.setQueryData(['agent', 'model-assignments', `novel:${novelId}`], { effective: {} })
   queryClient.setQueryData(['agent', 'window-configuration', sessionId], { configuration: { creativeFreedom: 'balanced', model: null } })
   useAgentStore.getState().restoreMessages([], sessionId, null, nextPrompt)
+  useAgentStore.setState({ currentTurn: 6, usage: { ...useAgentStore.getState().usage, totalTokens: 268_471 } })
 
   render(<QueryClientProvider client={queryClient}><ToastProvider>
     <AgentPanel novelId={novelId} novelName="合成作品" sessionId={sessionId} ensureSession={async () => sessionId} />
   </ToastProvider></QueryClientProvider>)
+  expect(screen.queryByText(/第 6 轮|268,471 tokens/u)).toBeNull()
+  expect(screen.getByRole('button', { name: '新建任务对话' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: '展开或收起历史任务对话' })).toBeTruthy()
   const editor = screen.getByRole('textbox', { name: 'Agent 提示词' })
-  const offer = () => screen.queryByRole('button', { name: '补全建议：' + nextPrompt.text })
+  const offer = () => screen.queryByRole('button', { name: '补全建议：' + suggestion })
   expect(offer()).toBeTruthy()
   editor.focus()
   expect(fireEvent.keyDown(editor, { key: 'Tab' })).toBe(false)
-  expect(editor.textContent).toBe(nextPrompt.text)
+  expect(editor.textContent).toBe(suggestion)
   expect(offer()).toBeNull()
 
   editor.replaceChildren(document.createElement('br'))
   fireEvent.input(editor)
   expect(offer()).toBeTruthy()
   expect(fireEvent.keyDown(editor, { key: 'Tab' })).toBe(false)
-  expect(editor.textContent).toBe(nextPrompt.text)
+  expect(editor.textContent).toBe(suggestion)
   expect(fetch.mock.calls.every(([, options]) => options?.method !== 'POST')).toBe(true)
 
   act(() => { useAgentStore.getState().restoreMessages([], 'another-session', null, { runId: 'another-run', text: '另一任务的建议' }) })

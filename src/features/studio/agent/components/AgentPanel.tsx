@@ -332,8 +332,6 @@ export function AgentPanel({
       previous?.question?.requestId === requestId ? { question: null } : previous)
     refreshPendingQuestion()
   }, [pendingQuestionKey, queryClient, refreshPendingQuestion])
-  const usage = useAgentStore((state) => state.usage)
-  const currentTurn = useAgentStore((state) => state.currentTurn)
   const errorMessage = useAgentStore((state) => state.errorMessage)
   const errorCode = useAgentStore((state) => state.errorCode)
   const workspaceActivities = useAgentStore((state) => state.workspaceActivities)
@@ -1655,7 +1653,7 @@ export function AgentPanel({
         setHistoryOpen(false)
         onNewSession?.()
       }}
-      className={cn('inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]', mobileIntegratedHeader && 'h-11 w-11 motion-reduce:transition-none')}
+      className={cn('inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]', mobileIntegratedHeader ? 'h-11 w-11 motion-reduce:transition-none' : 'ml-auto')}
       aria-label="新建任务对话"
       title="新建任务对话"
     >
@@ -1696,10 +1694,6 @@ export function AgentPanel({
             {outcome?.kind === 'delivered_with_limitations' && !active ? '未完成' : phaseLabel[panelPhase] ?? panelPhase}
           </span>
         ) : null}
-        <span className={cn('ml-auto shrink-0 text-[10px] tabular-nums text-[var(--text-secondary)]', mobileIntegratedHeader && 'hidden')}>
-          {currentTurn > 0 ? `第 ${currentTurn} 轮 · ` : ''}
-          {usage.totalTokens > 0 ? `${usage.totalTokens.toLocaleString()} tokens` : ''}
-        </span>
         {mobileIntegratedHeader ? <button
           type="button" onClick={openAgentOperations} aria-label="打开 Agent 操作中心" title="Agent 操作中心"
           className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] motion-reduce:transition-none"

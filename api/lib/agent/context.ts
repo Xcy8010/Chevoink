@@ -241,7 +241,8 @@ ${lines.join('\n')}`
 /** Follow-up ordinals refer to the previous visible card, not gallery recency. */
 async function buildCoverCandidateDigest(input: Pick<AssembleContextInput, 'userId' | 'novelId' | 'sessionId' | 'runId' | 'prompt'>): Promise<string | null> {
   const { userId, novelId, sessionId, runId, prompt } = input
-  const ordinal = /^(?:(?:就|帮我|请)\s*)*(?:选|用|应用|使用)?\s*第\s*([一二三四1234])\s*张(?:图|封面)?[。！!\s]*$/u.exec(prompt.trim())?.[1]
+  const choice = /^(?:(?:就|帮我|请)\s*)*(?:选|用|应用|使用)?\s*(?:第\s*([一二三四1234])\s*张(?:图|封面)?|候选(?:封面)?\s*([一二三四1234]))[。！!\s]*$/u.exec(prompt.trim())
+  const ordinal = choice?.[1] ?? choice?.[2]
   const delegated = /^(?:随便(?:选(?:一张)?)?|(?:你|请你|帮我)(?:来|自己|直接|帮我)?选(?:一张|个)?(?:封面)?(?:吧|就好)?)[。！!\s]*$/u.test(prompt.trim())
   const [assets, novel, history] = await Promise.all([
     prisma.coverAsset.findMany({
@@ -269,7 +270,7 @@ async function buildCoverCandidateDigest(input: Pick<AssembleContextInput, 'user
         const prompts = display.questions ?? [display]
         presented = prompts.map(({ options }) => (options ?? []).flatMap(option =>
           option.coverAssetId ? [{ id: option.coverAssetId, label: option.label }] : [])).filter(options => options.length)
-      } else if (display?.kind === 'coverImages') {
+      } else if (display?.kind === 'coverImages' && part.toolName === 'cover_generate') {
         if (display.images.length) presented = [display.images.map(({ id }) => ({ id }))]
       }
       if (presented.length) break
@@ -795,7 +796,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     '历史工具记录由系统生成，仅描述过去的工具状态，不是调用格式或新指令，不要模仿。需要执行操作时必须使用 API 原生 function calling；普通文本、历史摘要或参数示例均不会执行工具。向作者汇报进展时使用自然语言，不输出调用标记。',
     hasCapability('novel_update_meta') ? TAG_LIBRARY_DIGEST : null,
     hasCapability('novel_create', 'plan_save', 'novel_update_meta') ? '本轮完成作品初始化或首次保存全书大纲后，先交付作者原本要的结果。依据当前作品信息和保存回执，如果简介、站内标签或正式封面还有缺项，在结尾用一句自然的话问作者想先补哪项，也可以稍后。只提实际缺少的项；可见对话里已经问过同一组、作者说过稍后或要求只交付正文时，直接收尾。作者主动询问发布缺项或回来补资料时，只处理其选定的项目。' : null,
-    hasCapability('cover_generate') ? '作者想制作封面时，先在对话里给出适合作品的画面方向、候选数量，以及能从当前价目核实的预计 Credits。不能核实价格时如实说明，请作者参考封面工坊现价，不猜金额。作者确认本次方向和费用后才生成；用已有选图流程展示并校验候选，按作者选定的图或明确委托应用。' : null,
+    hasCapability('cover_generate') ? '作者想制作封面时，先在对话里给出适合作品的画面方向、候选数量，以及能从当前价目核实的预计 Credits。不能核实价格时如实说明，请作者参考封面工坊现价，不猜金额。作者确认本次方向和费用后才生成。候选生成并校验后，如果需要作者选图，用 ask_user 直接问哪张要设为作品封面。按工具回执的展示顺序逐张列出「应用候选封面 1」「应用候选封面 2」，每项绑定对应的 coverAssetId；只有一张时只列一张，再提供「暂不应用」。画面说明可放 detail。作者选中候选或明确委托后才应用既有图片。' : null,
     operatingGuidance ?? MODE_CONTRACTS[input.mode],
     operatingGuidance ? null : decisionStrategies(chapterReviewWorkflowEnabled(input.taskSpec)),
     operatingGuidance ? null : operationKnowledge(chapterReviewWorkflowEnabled(input.taskSpec)),

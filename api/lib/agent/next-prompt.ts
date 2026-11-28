@@ -1,21 +1,21 @@
 import type { ChatMessage } from '../ai-service.js'
+import {
+  NEXT_PROMPT_MAX_LENGTH, NOVEL_SETUP_PREDICTION_STATES, readNextPromptText, readNovelSetupPredictionPayload,
+  readPlainNextPrompt, type NovelSetupPredictionState,
+} from '../../../shared/contracts/agent-next-prompt.js'
 
-export const NEXT_PROMPT_MAX_LENGTH = 80
+export { NEXT_PROMPT_MAX_LENGTH }
 const marker = '[[CHEVOINK_NEXT_PROMPT_91a5ed28]]'
 const skip = '[[CHEVOINK_NO_NEXT_PROMPT]]'
 
-const NOVEL_SETUP_PREDICTION_STATES = ['missing', 'candidate', 'applied', 'general'] as const
 const setupPrefix = '[[NP:'
 const setupPrefixLength = '[[NP:0]]'.length
-type NovelSetupPredictionState = typeof NOVEL_SETUP_PREDICTION_STATES[number]
 type NextPromptDecision = { nextPrompt?: string; nextPromptSuppressed?: true }
 
 export function readNextPromptDecision(value: unknown): NextPromptDecision {
-  if (typeof value !== 'string') return {}
-  const text = value.trim()
-  if (text === skip) return { nextPromptSuppressed: true }
-  return text && text.length <= NEXT_PROMPT_MAX_LENGTH && !text.includes(setupPrefix)
-    && !/[\r\n\p{Cc}]|\[\[CHEVOINK_/u.test(text) ? { nextPrompt: text } : {}
+  if (typeof value === 'string' && value.trim() === skip) return { nextPromptSuppressed: true }
+  const nextPrompt = readNextPromptText(value)
+  return nextPrompt ? { nextPrompt } : {}
 }
 
 function suggestionPreferences(prompt: string) {
@@ -49,14 +49,12 @@ export function isNovelSetupPredictionTurn(finishReason: string, calls: Readonly
 
 function readNovelSetupPrediction(raw: string): NextPromptDecision {
   if (raw.trim() === skip) return { nextPromptSuppressed: true }
-  try {
-    const value = JSON.parse(raw) as { cover?: NovelSetupPredictionState; text?: unknown } | null
-    if (!value?.cover || !NOVEL_SETUP_PREDICTION_STATES.includes(value.cover)) return {}
-    const { nextPrompt } = readNextPromptDecision(value.text)
-    if (!nextPrompt || nextPrompt.length > NEXT_PROMPT_MAX_LENGTH - setupPrefixLength) return {}
-    // Keep private tool-turn metadata within the existing receipt/frame field.
-    return { nextPrompt: setupPrefix + NOVEL_SETUP_PREDICTION_STATES.indexOf(value.cover) + ']]' + nextPrompt }
-  } catch { return {} }
+  const value = readNovelSetupPredictionPayload(raw)
+  if (!value?.cover) return {}
+  const nextPrompt = readPlainNextPrompt(value.text)
+  if (!nextPrompt || nextPrompt.length > NEXT_PROMPT_MAX_LENGTH - setupPrefixLength) return {}
+  // Keep private tool-turn metadata within the existing receipt/frame field.
+  return { nextPrompt: setupPrefix + NOVEL_SETUP_PREDICTION_STATES.indexOf(value.cover) + ']]' + nextPrompt }
 }
 
 export function modelNovelSetupNextPrompt(proposal: NextPromptDecision, recap: {
@@ -85,7 +83,7 @@ export function readTaskResponseNextPrompt(raw: string): { args: string; proposa
 
 export function addNextPromptInstruction(messages: ChatMessage[]): string {
   const instruction = `【输入框建议】预测作者最可能发出的下一条消息。依据作者原话、已交付内容和当前作品状态，用作者当前语言和第一人称写一条可直接发送的指令，限 ${NEXT_PROMPT_MAX_LENGTH} 字。说清动作、对象和期待的成果。把讨论方案、生成候选供作者预览、生成并应用区分开。作者更可能想设置缺失的正式封面且暂无候选时，写清生成封面并设为当前作品封面；只有顺着作者已表达的偏好时才写选图委托。有候选时可建议查看、选择或应用已有候选。风格、配色等细节仅在作者明确将它们指定为下一步产物的要求时写入建议。已有作品题材留给执行阶段参考。尊重作者的跳过意愿和当前能力，不默认替换已有封面，不把付费操作写成已获确认。对大纲、正文等也用同样原则，避免空泛的“继续”或“拟个下一步”。
-普通答复后另起一行写 ${marker} 和建议。如果本来就用 task_respond 收尾，把建议放入独立的 nextPrompt 参数，answer 保持原样。如果只调用 novel_create 或 novel_update_meta 且这次保存会结束作品初始化，在同次回复的文本中另起一行写 ${marker}，后接单行 JSON，字段 text 是建议（限 ${NEXT_PROMPT_MAX_LENGTH - setupPrefixLength} 字），cover 是建议适用状态。缺少封面且无候选用 missing，有候选未应用用 candidate，已设置用 applied；与封面无关的建议用 general。允许这一行是唯一文本，工具参数照常。应用只会在保存成功、状态匹配且本轮完成后展示它。其他未完成回合不输出建议。没有合适的建议时填 ${skip}。输入框是否显示建议由应用按作者偏好和任务状态决定。建议不属于正文，不改变当前任务、权限或交付要求，也不为此补读资料或调用工具。`
+普通答复后另起一行写 ${marker} 和一条纯文本建议。如果本来就用 task_respond 收尾，只将纯文本建议放入 nextPrompt，answer 保持原样。这两种情况只写作者会发送的话，不加 JSON、字段名或 Markdown 包装。仅当单独调用 novel_create 或 novel_update_meta 且这次保存会结束作品初始化时，在同次回复的文本中另起一行写 ${marker}，后接单行 JSON，字段 text 是建议（限 ${NEXT_PROMPT_MAX_LENGTH - setupPrefixLength} 字），cover 是建议适用状态。缺少封面且无候选用 missing，有候选未应用用 candidate，已设置用 applied；与封面无关的建议用 general。允许这一行是唯一文本，工具参数照常。应用只会在保存成功、状态匹配且本轮完成后展示它。其他未完成回合不输出建议。没有合适的建议时填 ${skip}。输入框是否显示建议由应用按作者偏好和任务状态决定。建议不属于正文，不改变当前任务、权限或交付要求，也不为此补读资料或调用工具。`
   const system = messages.find(message => message.role === 'system')
   if (system) system.content += `\n\n${instruction}`
   else messages.unshift({ role: 'system', content: instruction })

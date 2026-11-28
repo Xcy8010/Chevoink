@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 import { AgentQuestionCard } from '../../src/features/studio/agent/components/AgentQuestionCard'
 import type { AgentQuestionDecision } from '../../shared/contracts/agent-events.js'
+import { buildCoverSelectionQuestion } from '../../shared/contracts/agent-cover-question.js'
 
 const question = {
   callId: 'question-1', requestId: 'request-1', question: '先从哪条路线开始？',
@@ -199,26 +200,24 @@ it('resets selection and text when a different question arrives', async () => {
   expect(onAnswer).not.toHaveBeenCalled()
 })
 
-it('shows two cover choices and custom, with zoom and selection operating independently', async () => {
+it('shows two explicit cover actions and a defer option, with zoom separate from selection', async () => {
   vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/["\\]/g, '\\$&') })
   const user = userEvent.setup()
   const onAnswer = vi.fn(async () => true)
   const covers = {
     ...question,
-    question: '采用哪张封面？',
-    options: [
-      { label: '封面 A', detail: '冷色调', coverAssetId: 'asset-a' },
-      { label: '封面 B', detail: '暖色调', coverAssetId: 'asset-b' },
-    ],
+    ...buildCoverSelectionQuestion([{ id: 'asset-a' }, { id: 'asset-b' }]),
   }
   render(<AgentQuestionCard question={covers} onAnswer={onAnswer}
     coverImages={new Map([['asset-a', '/fixtures/cover-a.png'], ['asset-b', '/fixtures/cover-b.png']])} />)
-  expect(screen.getAllByRole('radio')).toHaveLength(3)
+  expect(screen.getAllByRole('radio')).toHaveLength(4)
+  expect(screen.queryByText('推荐')).toBeNull()
+  expect(screen.getByRole('radio', { name: '暂不应用' })).toBeTruthy()
   expect(screen.getByRole('radio', { name: '自定义回答' })).toBeTruthy()
   expect(screen.getByPlaceholderText('输入自定义回答（如果你有其它想法...）')).toBeTruthy()
-  const first = screen.getByRole('radio', { name: '封面 A' }) as HTMLInputElement
-  const second = screen.getByRole('radio', { name: '封面 B' }) as HTMLInputElement
-  const zoom = screen.getByRole('button', { name: '放大查看封面「封面 A」' })
+  const first = screen.getByRole('radio', { name: '应用候选封面 1' }) as HTMLInputElement
+  const second = screen.getByRole('radio', { name: '应用候选封面 2' }) as HTMLInputElement
+  const zoom = screen.getByRole('button', { name: '放大查看封面「应用候选封面 1」' })
   await user.click(zoom)
   expect(screen.getByRole('dialog', { name: '图片预览' })).toBeTruthy()
   const close = screen.getByRole('button', { name: '关闭图片预览' })
@@ -235,14 +234,17 @@ it('shows two cover choices and custom, with zoom and selection operating indepe
   expect(thumbnail.getAttribute('src')).toBe('/fixtures/cover-a.png')
   await user.click(thumbnail)
   expect(first.checked).toBe(true)
-  await user.click(screen.getByText('封面 B'))
+  expect(second.closest('label')!.querySelector('img')?.getAttribute('src')).toBe('/fixtures/cover-b.png')
+  await user.click(screen.getByText('应用候选封面 2'))
   expect(second.checked).toBe(true)
   expect(first.checked).toBe(false)
   second.focus()
   await user.keyboard('{ArrowUp}')
   expect(first.checked).toBe(true)
+  await user.keyboard('{ArrowDown}')
+  expect(second.checked).toBe(true)
   await user.keyboard('{Enter}')
-  expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ answer: '封面 A（冷色调）' })
+  expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ answer: '应用候选封面 2' })
 })
 
 it('leaves unresolved cover IDs as text choices in their original order', async () => {
@@ -264,6 +266,17 @@ it('leaves unresolved cover IDs as text choices in their original order', async 
   await user.click(screen.getByText('封面已找不到'))
   await user.click(screen.getByRole('button', { name: '提交回答' }))
   expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ answer: '封面已找不到' })
+})
+
+it('shows the current cover label for a saved question and submits its original answer', async () => {
+  const user = userEvent.setup()
+  const onAnswer = vi.fn(async () => true)
+  render(<AgentQuestionCard question={{ ...question, options: [
+    { label: '应用候选 2', coverAssetId: 'asset-b' }, { label: '暂不应用' },
+  ] }} onAnswer={onAnswer} />)
+  await user.click(screen.getByRole('radio', { name: '应用候选封面 2' }))
+  await user.click(screen.getByRole('button', { name: '提交回答' }))
+  expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ answer: '应用候选 2' })
 })
 
 it('restores only the owning question draft across reload and clears it after an acknowledged submit', async () => {

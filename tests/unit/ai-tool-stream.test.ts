@@ -205,6 +205,19 @@ describe('next prompt from the current response', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('returns only the suggestion text when a completed ordinary reply uses the setup envelope', async () => {
+    const body = '作品封面已设置。'
+    const nextPrompt = '帮我写一版《合成作品》的全书大纲和第一卷细纲，确定主线走向和前三章的具体安排。'
+    const envelope = JSON.stringify({ text: nextPrompt, cover: 'applied' })
+    response(Array.from(`${body}\n${marker} ${envelope}`), 'stop')
+    const visible: string[] = []
+    const result = await chatWithTools({ ...options, onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
+    expect(visible.join('')).toBe(body)
+    expect(result).toMatchObject({ content: body, nextPrompt })
+    expect(splitNextPrompt(`${body}\n${marker} ${envelope.slice(0, -1)}`, marker, true)).toEqual({ content: body })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it.each(['length', 'tool_calls', 'stop'])('omits a %s suggestion without changing the answer', async reason => {
     response(['只交付正文。', '\n', reason === 'length' ? marker.slice(0, -4) : marker, ...(reason === 'stop' ? [' 多行\n不是一条'] : reason === 'tool_calls' ? [' 有工具时不展示'] : [])],
       reason, reason === 'tool_calls' ? delta('{}', true) : undefined)

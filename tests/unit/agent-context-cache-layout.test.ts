@@ -1112,6 +1112,11 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
 
   it.each([
     ['第二张', '作者本轮指定的候选为 coverAssetId=cover-9'],
+    ['应用候选 2', '作者本轮指定的候选为 coverAssetId=cover-9'],
+    ['应用候选封面 2', '作者本轮指定的候选为 coverAssetId=cover-9'],
+    ['暂不应用候选封面 1', undefined],
+    ['应用候选 1。', '作者本轮指定的候选为 coverAssetId=cover-1'],
+    ['先别应用候选 2', undefined],
     ['你自己选', '作者本轮明确委托你选'],
     ['随便', '作者本轮明确委托你选'],
     ['第二章', undefined],
@@ -1121,7 +1126,8 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
         { label: '雨夜车站', coverAssetId: 'cover-1' }, { label: '档案室', coverAssetId: 'cover-9' }, { label: '暂不应用' },
       ] } }
     vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([
-      { id: 'last-answer', runId: 'previous-run', role: 'assistant', parts: [coverQuestion] },
+      { id: 'last-answer', runId: 'previous-run', role: 'assistant', parts: [coverQuestion,
+        { type: 'tool-call', toolName: 'cover_apply', status: 'success', display: { kind: 'coverImages', images: [{ id: 'cover-9' }] } }] },
     ] as never)
     const { messages } = await assembleContext({ ...buildInput(), prompt })
     const snapshot = String(messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))?.content)

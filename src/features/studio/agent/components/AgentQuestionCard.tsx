@@ -164,8 +164,10 @@ function QuestionForm({ question, onAnswer, coverImages, draftStorageKey, draftE
   const submitting = phase === 'sending' || phase === 'cancelling'
   const activeDetail = openDetail ? prompt.options[openDetail.option]?.detail : undefined
   const tooltip = useStudioPresence(openDetail && activeDetail ? { ...openDetail, detail: activeDetail } : null)
-  const choices: QuestionChoice[] = prompt.options.map((option, index) => ({
-    ...option, value: index, image: option.coverAssetId ? coverImages?.get(option.coverAssetId) : undefined,
+  const choices: QuestionChoice[] = prompt.options.map(({ coverAssetId, label, detail }, index) => ({
+    value: index, detail,
+    label: coverAssetId ? label.replace(/^应用候选\s*(\d+)$/u, '应用候选封面 $1') : label,
+    image: coverAssetId ? coverImages?.get(coverAssetId) : undefined,
   }))
   if (choices.length) choices.push({ value: 'custom', label: '自定义回答' })
   const choiceRows: QuestionChoice[][] = []
@@ -274,7 +276,7 @@ function QuestionForm({ question, onAnswer, coverImages, draftStorageKey, draftE
     const { value, label, image } = option
     const active = draft.choice === value
     const custom = value === 'custom'
-    const recommended = value === 0
+    const recommended = value === 0 && !prompt.options.some(item => item.coverAssetId)
     const expanded = openDetail?.option === value
     const optionId = `${id}-${step}-option-${value}`
     const detailId = `${optionId}-detail`

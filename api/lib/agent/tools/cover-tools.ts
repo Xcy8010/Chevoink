@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 import { FIXED_NOVEL_COVER_SIZE } from '../../../../shared/contracts/index.js'
+import { buildCoverSelectionQuestion } from '../../../../shared/contracts/agent-cover-question.js'
 import { generateCoverImageData } from '../../ai-service.js'
 import { prisma } from '../../prisma.js'
 import { enforceCoverTitleInPrompt } from './cover-prompt.js'
@@ -56,7 +57,7 @@ export const coverGenerateTool = defineTool({
       .join('；')
 
     return {
-      output: `已生成 ${images.length} 张封面候选图：${candidates}。先用 view_image 校验构图和书名（实际提示词「${finalPrompt.slice(0, 120)}」）。作者明确委托选图时，选一张符合要求的已有候选并用 cover_apply 应用；否则用 ask_user，请作者选择，图片选项填写对应 coverAssetId，并留「暂不应用」。`,
+      output: `已生成 ${images.length} 张封面候选图：${candidates}。先用 view_image 校验构图和书名（实际提示词「${finalPrompt.slice(0, 120)}」）。作者明确委托选图时，可用 cover_apply 应用符合要求的已有候选。需要作者选图时，按以下参数调用 ask_user：${JSON.stringify(buildCoverSelectionQuestion(images))}。仅列出可用候选，保留对应图片 ID 和展示顺序。作者选「暂不应用」时保留候选。`,
       summary: `生成 ${images.length} 张封面候选`,
       display: {
         kind: 'coverImages',

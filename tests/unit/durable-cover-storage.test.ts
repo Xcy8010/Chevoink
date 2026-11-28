@@ -68,6 +68,22 @@ describe('private sealed original image response', () => {
 })
 
 describe('cover response and bounded projection', () => {
+  it.each([1, 2])('gives the model a selectable question tied to %i actual cover assets', count => {
+    const images = [
+      { id: 'cover-z', imageUrl: '/api/uploads/novel-covers/one.png' },
+      { id: 'cover-a', imageUrl: '/api/uploads/novel-covers/two.png' },
+    ].slice(0, count)
+    const result = coverProjection(images)
+    expect(result.output).toContain(JSON.stringify({
+      question: count === 1 ? '要将这张候选图设为作品封面吗？' : '要将哪张候选图设为作品封面？',
+      options: [
+        ...[{ label: '应用候选封面 1', coverAssetId: 'cover-z' }, { label: '应用候选封面 2', coverAssetId: 'cover-a' }].slice(0, count),
+        { label: '暂不应用' },
+      ],
+    }))
+    expect(result.display).toEqual({ kind: 'coverImages', images: images.map(({ id, imageUrl }) => ({ id, url: imageUrl })) })
+  })
+
   it('keeps ordered partial candidates, refuses empty/malformed responses and preserves a known HTTP rejection', () => {
     expect(parseCoverImageResponse(200, '{"data":[{"url":"https://images.invalid/one"},{}]}')).toEqual(['https://images.invalid/one'])
     expect(() => parseCoverImageResponse(200, '{"data":[]}')).toThrow(expect.objectContaining({ code: 'AI_PROVIDER_EMPTY_RESPONSE' }))

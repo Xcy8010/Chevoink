@@ -1,6 +1,7 @@
 import { StudioPresence } from '@/features/studio/components/StudioPresence'
 import { useStudioPresence } from '@/features/studio/components/use-studio-presence'
 import { CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../../shared/contracts/agent-window-configuration.js'
+import { readNextPromptText } from '../../../../../shared/contracts/agent-next-prompt.js'
 import { TIER_LABELS } from '../../../account/ledger-label'
 import { PUBLIC_WEB_QUESTION_LIMIT } from '../../../../../shared/contracts/public-web-research.js'
 import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../components/ModelPriceDetails'
@@ -464,7 +465,7 @@ export function AgentComposer({
   const showPlaceholder = !composing && (submitting || (isComposerBlank(prompt) && references.length === 0))
   const offeredNextPrompt = showPlaceholder && !running && !stopping && !disabled && !sending && !voiceActive &&
     !pendingVoice && !showContinue && !goalMode && !goalActive && uploading === 0 && attachments.length === 0
-    ? nextPrompt || undefined : undefined
+    ? readNextPromptText(nextPrompt) : undefined
   const sendLock = useRef(new Set<string>())
   const currentScope = useRef(scope)
   const focusAfterSend = useRef<string | null>(null)
